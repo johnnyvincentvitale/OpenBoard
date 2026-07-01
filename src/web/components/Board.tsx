@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { ReactNode } from "react";
 import {
   DndContext,
@@ -34,7 +34,13 @@ function SortableCard({ card, children }: { card: Card; children: ReactNode }) {
   };
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners} data-testid={`sortable-${card.sessionId}`}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      data-testid={`sortable-${card.sessionId}`}
+    >
       {children}
     </div>
   );
@@ -53,8 +59,11 @@ function groupByColumn(cards: Card[]): Record<ColumnId, Card[]> {
   return grouped;
 }
 
-/** Locates which column an id (card sessionId or column id) currently belongs to. */
-function findColumnForId(id: UniqueIdentifier, grouped: Record<ColumnId, Card[]>): ColumnId | undefined {
+/** Locates which column an id (card sessionId or column id) belongs to. */
+function findColumnForId(
+  id: UniqueIdentifier,
+  grouped: Record<ColumnId, Card[]>,
+): ColumnId | undefined {
   if ((COLUMNS as readonly string[]).includes(String(id))) {
     return id as ColumnId;
   }
@@ -68,92 +77,56 @@ function findColumnForId(id: UniqueIdentifier, grouped: Record<ColumnId, Card[]>
 
 export function Board({ cards, onMove, renderCard }: BoardProps) {
   const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   const grouped = useMemo(() => groupByColumn(cards), [cards]);
 
-  // Local optimistic ordering so keyboard/pointer drags can preview movement
-  // between columns before the parent's onMove round-trip updates props.cards.
-  const [override, setOverride] = useState<Record<ColumnId, Card[]> | null>(null);
-  const display = override ?? grouped;
-
+  // Resolve the move on drop only. dnd-kit already animates the card following the
+  // cursor; computing a cross-column preview during onDragOver caused an infinite
+  // render loop (override <-> reset oscillation), so the actual move is committed
+  // here and the board re-renders from the server's fresh state.
   function handleDragEnd(event: DragEndEvent) {
-    setOverride(null);
     const { active, over } = event;
     if (!over) return;
 
     const sourceColumn = findColumnForId(active.id, grouped);
-    if (!sourceColumn) return;
-
     const destColumn = findColumnForId(over.id, grouped);
-    if (!destColumn) return;
+    if (!sourceColumn || !destColumn) return;
 
     const destCards = grouped[destColumn].filter((card) => card.sessionId !== active.id);
     let targetIndex = destCards.findIndex((card) => card.sessionId === over.id);
-    if (targetIndex === -1) {
-      targetIndex = destCards.length;
-    }
+    if (targetIndex === -1) targetIndex = destCards.length;
+
+    // No-op if nothing actually changed (same column, same slot).
+    const current = grouped[sourceColumn].findIndex((card) => card.sessionId === active.id);
+    if (sourceColumn === destColumn && current === targetIndex) return;
 
     onMove(String(active.id), destColumn, targetIndex);
   }
 
-  function handleDragOver(event: { active: { id: UniqueIdentifier }; over: { id: UniqueIdentifier } | null }) {
-    const { active, over } = event;
-    if (!over) {
-      setOverride(null);
-      return;
-    }
-
-    const sourceColumn = findColumnForId(active.id, display);
-    const destColumn = findColumnForId(over.id, display);
-    if (!sourceColumn || !destColumn || sourceColumn === destColumn) {
-      setOverride(null);
-      return;
-    }
-
-    setOverride((prev) => {
-      const base = prev ?? grouped;
-      const movingCard = base[sourceColumn].find((card) => card.sessionId === active.id);
-      if (!movingCard) return prev;
-
-      const nextSource = base[sourceColumn].filter((card) => card.sessionId !== active.id);
-      const nextDest = base[destColumn].filter((card) => card.sessionId !== active.id);
-      let insertAt = nextDest.findIndex((card) => card.sessionId === over.id);
-      if (insertAt === -1) insertAt = nextDest.length;
-      nextDest.splice(insertAt, 0, movingCard);
-
-      return {
-        ...base,
-        [sourceColumn]: nextSource,
-        [destColumn]: nextDest,
-      };
-    });
-  }
-
   return (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={closestCorners}
-      onDragOver={handleDragOver}
-      onDragEnd={handleDragEnd}
-      onDragCancel={() => setOverride(null)}
-    >
-      <div data-testid="board" style={{ display: "grid", gridTemplateColumns: `repeat(${COLUMNS.length}, 1fr)`, gap: 16 }}>
+    <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
+      <div
+        data-testid="board"
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${COLUMNS.length}, 1fr)`,
+          gap: 16,
+        }}
+      >
         {COLUMNS.map((column) => (
           <SortableContext
             key={column}
             id={column}
-            items={display[column].map((card) => card.sessionId)}
+            items={grouped[column].map((card) => card.sessionId)}
             strategy={verticalListSortingStrategy}
           >
             <Column
               column={column}
               label={COLUMN_LABELS[column]}
-              cards={display[column]}
+              cards={grouped[column]}
               renderCard={(card) => <SortableCard card={card}>{renderCard(card)}</SortableCard>}
             />
           </SortableContext>
