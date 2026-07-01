@@ -1,0 +1,22 @@
+{
+  "name": "opencode-board",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Local Devin-style Kanban command center for OpenCode sessions",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "husky": "^9.1.7",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.17.13"
+  }
+}
