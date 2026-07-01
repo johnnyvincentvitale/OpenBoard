@@ -12,6 +12,7 @@ import {
   ERROR_STATUS,
   OPENCODE_DEFAULTS,
   BOARD_SERVER_DEFAULTS,
+  AdapterError,
 } from "../../src/shared/index";
 
 describe("frozen contracts", () => {
@@ -43,5 +44,16 @@ describe("frozen contracts", () => {
   it("server defaults are distinct ports", () => {
     expect(OPENCODE_DEFAULTS.port).toBe(4096);
     expect(BOARD_SERVER_DEFAULTS.port).toBe(4097);
+  });
+
+  it("AdapterError carries code -> status + envelope", () => {
+    const e = AdapterError.notFound("no session ses_x");
+    expect(e).toBeInstanceOf(Error);
+    expect(e.code).toBe("session_not_found");
+    expect(e.status).toBe(404);
+    expect(e.toEnvelope()).toEqual({
+      error: { code: "session_not_found", message: "no session ses_x" },
+    });
+    expect(AdapterError.unreachable().status).toBe(503);
   });
 });

@@ -21,3 +21,37 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   validation: 400,
   internal: 500,
 };
+
+/** Typed adapter error carrying a canonical code -> HTTP status + JSON envelope. */
+export class AdapterError extends Error {
+  readonly code: ErrorCode;
+  override readonly cause?: unknown;
+
+  constructor(code: ErrorCode, message: string, cause?: unknown) {
+    super(message);
+    this.name = "AdapterError";
+    this.code = code;
+    this.cause = cause;
+  }
+
+  get status(): number {
+    return ERROR_STATUS[this.code];
+  }
+
+  toEnvelope(): ErrorEnvelope {
+    return { error: { code: this.code, message: this.message } };
+  }
+
+  static unreachable(message = "OpenCode server is unreachable", cause?: unknown): AdapterError {
+    return new AdapterError("opencode_unreachable", message, cause);
+  }
+  static notFound(message = "Session not found"): AdapterError {
+    return new AdapterError("session_not_found", message);
+  }
+  static validation(message: string): AdapterError {
+    return new AdapterError("validation", message);
+  }
+  static internal(message = "Internal error", cause?: unknown): AdapterError {
+    return new AdapterError("internal", message, cause);
+  }
+}
