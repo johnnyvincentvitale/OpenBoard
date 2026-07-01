@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { CreateTaskInput } from "../../src/shared";
+import type { CreateTaskInput, ModelRef } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
 
 function assertDenseUnique(store: SqliteTaskStore, column: string): number[] {
@@ -79,6 +79,36 @@ describe("SqliteTaskStore", () => {
       const task = store.create(input());
       expect(task.id).toBe("task_1");
       expect(task.createdAt).toBe(55);
+    });
+
+    it("leaves agent/model undefined when not provided", () => {
+      const task = store.create(input());
+      expect(task.agent).toBeUndefined();
+      expect(task.model).toBeUndefined();
+    });
+
+    it("round-trips agent/model through create/list/get", () => {
+      const model: ModelRef = { id: "m", providerID: "p" };
+      const created = store.create(input({ agent: "build", model }));
+
+      expect(created.agent).toBe("build");
+      expect(created.model).toEqual(model);
+
+      const fetched = store.get(created.id);
+      expect(fetched?.agent).toBe("build");
+      expect(fetched?.model).toEqual(model);
+
+      const listed = store.list().find((t) => t.id === created.id);
+      expect(listed?.agent).toBe("build");
+      expect(listed?.model).toEqual(model);
+    });
+
+    it("round-trips a model with a variant", () => {
+      const model: ModelRef = { id: "m", providerID: "p", variant: "thinking" };
+      const created = store.create(input({ model }));
+
+      expect(created.model).toEqual(model);
+      expect(store.get(created.id)?.model).toEqual(model);
     });
   });
 
@@ -166,6 +196,34 @@ describe("SqliteTaskStore", () => {
 
     it("returns undefined for an unknown id", () => {
       expect(store.update("task_missing", { title: "x" })).toBeUndefined();
+    });
+
+    it("can set agent and model on an existing task", () => {
+      const task = store.create(input());
+      const model: ModelRef = { id: "m", providerID: "p" };
+
+      const updated = store.update(task.id, { agent: "plan", model });
+
+      expect(updated!.agent).toBe("plan");
+      expect(updated!.model).toEqual(model);
+
+      const fetched = store.get(task.id)!;
+      expect(fetched.agent).toBe("plan");
+      expect(fetched.model).toEqual(model);
+    });
+
+    it("can clear agent and model back to undefined", () => {
+      const model: ModelRef = { id: "m", providerID: "p" };
+      const task = store.create(input({ agent: "build", model }));
+
+      const cleared = store.update(task.id, { agent: undefined, model: undefined });
+
+      expect(cleared!.agent).toBeUndefined();
+      expect(cleared!.model).toBeUndefined();
+
+      const fetched = store.get(task.id)!;
+      expect(fetched.agent).toBeUndefined();
+      expect(fetched.model).toBeUndefined();
     });
   });
 

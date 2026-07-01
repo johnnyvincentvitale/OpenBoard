@@ -16,6 +16,13 @@ export type TaskRunState = (typeof TASK_RUN_STATES)[number];
  * executes `description` in `directory`, and the dispatcher auto-moves the card as
  * the session progresses.
  */
+/** A model reference, matching OpenCode's ModelRef (provider + model id). */
+export interface ModelRef {
+  id: string;
+  providerID: string;
+  variant?: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -23,6 +30,10 @@ export interface Task {
   description: string;
   /** Working directory the dispatched session runs in. */
   directory: string;
+  /** Which OpenCode agent (roster entry) executes this task. */
+  agent?: string;
+  /** Model the dispatched session runs on (overrides the agent's default). */
+  model?: ModelRef;
   column: Column;
   /** Dense integer, unique within a column. */
   position: number;
@@ -38,7 +49,22 @@ export interface CreateTaskInput {
   title: string;
   description: string;
   directory: string;
+  agent?: string;
+  model?: ModelRef;
 }
+
+/** A roster agent (OpenCode agent) the board can assign tasks to — from GET /api/agent. */
+export interface RosterAgent {
+  id: string;
+  mode: "primary" | "subagent" | "all";
+  description?: string;
+  model?: ModelRef;
+}
+
+/** The permission ruleset that lets a dispatched session run unattended. */
+export const UNATTENDED_PERMISSION = [
+  { permission: "*", pattern: "**", action: "allow" },
+] as const;
 
 /** SSE frames the task board pushes to the browser. */
 export type TaskFrame =

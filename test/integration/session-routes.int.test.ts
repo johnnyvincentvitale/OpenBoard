@@ -13,7 +13,9 @@ import type { Hono } from "hono";
 import { loadConfig } from "../../src/server/config";
 import { startOrConnect, type OpencodeHandle } from "../../src/server/opencode";
 import { SqliteColumnStore } from "../../src/db/board-store";
+import { SqliteTaskStore } from "../../src/db/task-store";
 import { EventBridge } from "../../src/server/event-bridge";
+import { TaskDispatcher } from "../../src/server/dispatcher";
 import { createApp } from "../../src/server/app";
 import type { Card } from "../../src/shared";
 import {
@@ -44,7 +46,17 @@ describe.skipIf(!available)("session routes (integration)", () => {
     bridge = new EventBridge({ client: handle.client, store });
     bridge.start();
 
-    app = createApp({ client: handle.client, store, bridge });
+    const taskStore = new SqliteTaskStore(":memory:");
+    const dispatcher = new TaskDispatcher({ client: handle.client, store: taskStore });
+
+    app = createApp({
+      client: handle.client,
+      store,
+      bridge,
+      taskStore,
+      dispatcher,
+      opencodeBaseUrl: handle.baseUrl,
+    });
   });
 
   afterAll(async () => {

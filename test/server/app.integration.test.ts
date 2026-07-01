@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SqliteColumnStore } from "../../src/db/board-store";
+import { SqliteTaskStore } from "../../src/db/task-store";
 import { EventBridge } from "../../src/server/event-bridge";
 import { createApp, type AppDeps } from "../../src/server/app";
 import type { Card } from "../../src/shared/index";
@@ -49,7 +50,26 @@ function makeApp(sessions: ReturnType<typeof session>[], calls: string[] = []) {
   const client = fakeClient(sessions, calls) as unknown as AppDeps["client"];
   const store = new SqliteColumnStore(":memory:");
   const bridge = new EventBridge({ client, store }); // not started — REST only
-  return { app: createApp({ client, store, bridge }), store, calls };
+  const taskStore = new SqliteTaskStore(":memory:");
+  const dispatcher = {
+    run: async () => ({}) as never,
+    retry: async () => ({}) as never,
+    abort: async () => {},
+    start() {},
+    shutdown() {},
+  } as unknown as AppDeps["dispatcher"];
+  return {
+    app: createApp({
+      client,
+      store,
+      bridge,
+      taskStore,
+      dispatcher,
+      opencodeBaseUrl: "http://127.0.0.1:0",
+    }),
+    store,
+    calls,
+  };
 }
 
 describe("app integration (faked deps)", () => {

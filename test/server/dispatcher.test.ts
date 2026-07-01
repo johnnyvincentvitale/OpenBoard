@@ -34,8 +34,8 @@ function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
  * (including reconnects) delivers.
  */
 class FakeOpencodeClient {
-  createCalls: Array<{ directory?: string; title?: string }> = [];
-  promptAsyncCalls: Array<{ sessionID: string; parts: unknown }> = [];
+  createCalls: Array<{ agent?: string; model?: unknown; permission?: unknown }> = [];
+  promptCalls: Array<{ sessionID: string; prompt: unknown }> = [];
   abortCalls: Array<{ sessionID: string }> = [];
 
   nextSessionId = "ses_x";
@@ -48,21 +48,28 @@ class FakeOpencodeClient {
     this.scripts.push(events);
   }
 
+  // The dispatcher uses the v2 durable session API (verified recipe).
+  v2 = {
+    session: {
+      create: async (params: { agent?: string; model?: unknown; permission?: unknown }) => {
+        this.createCalls.push(params);
+        if (this.createShouldError) {
+          return { data: undefined, error: this.createShouldError.error };
+        }
+        // Real v2 create is double-nested ({data:{data:session}}).
+        return {
+          data: { data: { id: this.nextSessionId, agent: params.agent, model: params.model } },
+          error: undefined,
+        };
+      },
+      prompt: async (params: { sessionID: string; prompt: unknown }) => {
+        this.promptCalls.push(params);
+        return { data: {}, error: undefined };
+      },
+    },
+  };
+
   session = {
-    create: async (params: { directory?: string; title?: string }) => {
-      this.createCalls.push(params);
-      if (this.createShouldError) {
-        return { data: undefined, error: this.createShouldError.error };
-      }
-      return {
-        data: { id: this.nextSessionId, directory: params.directory, title: params.title },
-        error: undefined,
-      };
-    },
-    promptAsync: async (params: { sessionID: string; parts: unknown }) => {
-      this.promptAsyncCalls.push(params);
-      return { data: {}, error: undefined };
-    },
     abort: async (params: { sessionID: string }) => {
       this.abortCalls.push(params);
       return { data: {}, error: undefined };
@@ -127,9 +134,10 @@ describe("TaskDispatcher", () => {
 
       const result = await dispatcher.run(task.id);
 
-      expect(client.createCalls).toEqual([{ directory: "/tmp/my-project", title: "Fix the bug" }]);
-      expect(client.promptAsyncCalls).toEqual([
-        { sessionID: "ses_abc123", parts: [{ type: "text", text: task.description }] },
+      expect(client.createCalls).toHaveLength(1);
+      expect(client.createCalls[0]?.permission).toBeTruthy();
+      expect(client.promptCalls).toEqual([
+        { sessionID: "ses_abc123", prompt: { text: task.description } },
       ]);
 
       expect(result.sessionId).toBe("ses_abc123");
@@ -343,9 +351,9 @@ describe("TaskDispatcher", () => {
 
       const result = await dispatcher.retry(task.id, "Please also fix the typo");
 
-      expect(client.promptAsyncCalls[client.promptAsyncCalls.length - 1]).toEqual({
+      expect(client.promptCalls[client.promptCalls.length - 1]).toEqual({
         sessionID: "ses_retry",
-        parts: [{ type: "text", text: "Please also fix the typo" }],
+        prompt: { text: "Please also fix the typo" },
       });
       expect(result.runState).toBe("running");
       expect(result.column).toBe("in_progress");
@@ -359,9 +367,9 @@ describe("TaskDispatcher", () => {
 
       await dispatcher.retry(task.id);
 
-      expect(client.promptAsyncCalls[client.promptAsyncCalls.length - 1]).toEqual({
+      expect(client.promptCalls[client.promptCalls.length - 1]).toEqual({
         sessionID: "ses_retry2",
-        parts: [{ type: "text", text: "Original description" }],
+        prompt: { text: "Original description" },
       });
     });
 

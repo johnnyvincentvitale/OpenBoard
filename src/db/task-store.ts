@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
-import type { Column, CreateTaskInput, Task, TaskRunState, TaskStore } from "../shared";
+import type { Column, CreateTaskInput, ModelRef, Task, TaskRunState, TaskStore } from "../shared";
 import { DEFAULT_COLUMN } from "../shared";
 import { bootstrap } from "./schema";
 
@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS task (
   session_id  TEXT,
   run_state   TEXT NOT NULL,
   error       TEXT,
+  agent       TEXT,
+  model       TEXT,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   UNIQUE(column, position)
@@ -34,6 +36,8 @@ interface TaskRowRecord {
   session_id: string | null;
   run_state: string;
   error: string | null;
+  agent: string | null;
+  model: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -49,6 +53,8 @@ function toTask(record: TaskRowRecord): Task {
     runState: record.run_state as TaskRunState,
     createdAt: record.created_at,
     updatedAt: record.updated_at,
+    agent: record.agent ?? undefined,
+    model: record.model ? (JSON.parse(record.model) as ModelRef) : undefined,
   };
   if (record.session_id !== null) task.sessionId = record.session_id;
   if (record.error !== null) task.error = record.error;
@@ -95,8 +101,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, error, created_at, updated_at)
-         VALUES (@id, @title, @description, @directory, @column, @position, @sessionId, @runState, @error, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, error, agent, model, created_at, updated_at)
+         VALUES (@id, @title, @description, @directory, @column, @position, @sessionId, @runState, @error, @agent, @model, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -108,6 +114,8 @@ export class SqliteTaskStore implements TaskStore {
            session_id = @sessionId,
            run_state = @runState,
            error = @error,
+           agent = @agent,
+           model = @model,
            updated_at = @updatedAt
          WHERE id = @id`,
       ),
@@ -160,6 +168,8 @@ export class SqliteTaskStore implements TaskStore {
         sessionId: null,
         runState: "unstarted",
         error: null,
+        agent: data.agent ?? null,
+        model: data.model ? JSON.stringify(data.model) : null,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -188,6 +198,8 @@ export class SqliteTaskStore implements TaskStore {
         sessionId: merged.sessionId ?? null,
         runState: merged.runState,
         error: merged.error ?? null,
+        agent: merged.agent ?? null,
+        model: merged.model ? JSON.stringify(merged.model) : null,
         updatedAt: this.now(),
       });
 

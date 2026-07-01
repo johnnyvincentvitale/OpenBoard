@@ -37,7 +37,7 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory } = body;
+      const { title, description, directory, agent, model } = body;
 
       if (typeof title !== "string" || title.trim().length === 0) {
         throw AdapterError.validation("title must be a non-empty string");
@@ -50,6 +50,8 @@ export function registerTaskRoutes(
         title,
         description: typeof description === "string" ? description : "",
         directory,
+        ...(typeof agent === "string" ? { agent } : {}),
+        ...(model && typeof model === "object" ? { model } : {}),
       });
 
       return c.json(task, 201);

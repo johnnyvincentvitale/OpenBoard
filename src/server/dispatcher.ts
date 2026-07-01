@@ -12,7 +12,7 @@
  * task's session. `shutdown()` stops consuming the event stream.
  */
 import type { OpencodeEvent, Task, TaskStore } from "../shared";
-import { AdapterError } from "../shared";
+import { AdapterError, UNATTENDED_PERMISSION } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import { eventLiveState, eventSessionId } from "./events/session-status";
@@ -28,6 +28,16 @@ const RECONNECT_MAX_DELAY_MS = 15000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The v2 session create response body is double-nested: the SDK's {data,error}
+ * wrapper wraps the endpoint's own {data: session}. Unwrap defensively.
+ */
+function extractSessionId(data: unknown): string | undefined {
+  const inner = (data as { data?: unknown })?.data ?? data;
+  const id = (inner as { id?: unknown })?.id;
+  return typeof id === "string" ? id : undefined;
 }
 
 /** Position value that always lands a move at the end of the target column. */
@@ -53,19 +63,32 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
 
-    const created = await this.client.session.create({
-      directory: task.directory,
-      title: task.title,
-    });
-    if (created.error || !created.data) {
-      throw AdapterError.unreachable("Failed to create OpenCode session", created.error);
+    // Verified recipe (empirically confirmed against opencode v1.17.13):
+    // v2 session.create binds the agent + model + an allow-all permission ruleset
+    // so the session runs UNATTENDED, then v2 session.prompt admits the input and
+    // schedules the autonomous agent loop. `session.wait` is a stub in this version,
+    // so completion is detected from the /event stream (see handleEvent). NB: v2
+    // create runs the session in the opencode server's working directory.
+    const created = await this.client.v2.session.create({
+      agent: task.agent,
+      model: task.model,
+      permission: UNATTENDED_PERMISSION as never,
+    } as never);
+    if ((created as { error?: unknown }).error) {
+      throw AdapterError.unreachable(
+        "Failed to create OpenCode session",
+        (created as { error?: unknown }).error,
+      );
     }
-    const sessionId = created.data.id;
+    const sessionId = extractSessionId((created as { data?: unknown }).data);
+    if (!sessionId) {
+      throw AdapterError.unreachable("OpenCode session create returned no id");
+    }
 
-    await this.client.session.promptAsync({
+    await this.client.v2.session.prompt({
       sessionID: sessionId,
-      parts: [{ type: "text", text: task.description }],
-    });
+      prompt: { text: task.description },
+    } as never);
 
     this.store.update(taskId, { sessionId, runState: "running" });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
@@ -86,10 +109,10 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
     }
 
-    await this.client.session.promptAsync({
+    await this.client.v2.session.prompt({
       sessionID: task.sessionId,
-      parts: [{ type: "text", text: feedback ?? task.description }],
-    });
+      prompt: { text: feedback ?? task.description },
+    } as never);
 
     this.store.update(taskId, { runState: "running" });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);

@@ -1,12 +1,14 @@
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { SqliteColumnStore } from "../db/board-store";
+import { SqliteTaskStore } from "../db/task-store";
 import { loadConfig } from "./config";
 import { startOrConnect } from "./opencode";
 import { EventBridge } from "./event-bridge";
+import { TaskDispatcher } from "./dispatcher";
 import { createApp } from "./app";
 
-/** Boot the board: connect/spawn opencode, open the sqlite sidecar, start the event bridge, serve the app. */
+/** Boot the board: connect/spawn opencode, open the sidecars, start the event bridge + dispatcher, serve. */
 export async function main(): Promise<void> {
   const config = loadConfig();
   const handle = await startOrConnect(config);
@@ -14,7 +16,19 @@ export async function main(): Promise<void> {
   const bridge = new EventBridge({ client: handle.client, store });
   bridge.start();
 
-  const app = createApp({ client: handle.client, store, bridge });
+  // Push layer: task store + dispatcher (auto-advances cards from the /event stream).
+  const taskStore = new SqliteTaskStore(process.env.BOARD_TASK_DB_PATH ?? "board-tasks.sqlite");
+  const dispatcher = new TaskDispatcher({ client: handle.client, store: taskStore });
+  dispatcher.start();
+
+  const app = createApp({
+    client: handle.client,
+    store,
+    bridge,
+    taskStore,
+    dispatcher,
+    opencodeBaseUrl: handle.baseUrl,
+  });
   const server = serve(
     { fetch: app.fetch, hostname: config.hostname, port: config.boardPort },
     (info) => {
@@ -27,8 +41,10 @@ export async function main(): Promise<void> {
 
   const shutdown = async () => {
     bridge.stop();
+    dispatcher.shutdown();
     await handle.shutdown();
     store.close();
+    taskStore.close();
     server.close();
     process.exit(0);
   };
