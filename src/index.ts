@@ -1,25 +1,21 @@
 /**
- * opencode-board — entry point.
+ * opencode-board — entry point / public surface.
  *
  * A local, Devin-style Kanban command center for OpenCode. Cards are OpenCode
  * sessions pulled live from the `opencode serve` HTTP API; columns are owned by
  * this app (OpenCode has no native column field) and stored in a SQLite sidecar.
  *
- * This file is a scaffold placeholder — the Hono adapter and board wiring land
- * on the `dev` branch as the first real features.
+ * Canonical contracts live in `src/shared/*` and are re-exported here.
  */
 
 export const APP_NAME = "opencode-board";
 
-/** OpenCode server defaults (verified against opencode v1.17.12, 2026-07-01). */
-export const OPENCODE_DEFAULTS = {
-  hostname: "127.0.0.1",
-  port: 4096,
-} as const;
-
-/** The workflow columns a session card can live in. */
-export const COLUMNS = ["todo", "in_progress", "review", "done"] as const;
-export type Column = (typeof COLUMNS)[number];
+// Canonical frozen contracts.
+export { COLUMNS, type Column } from "./shared/columns";
+export { OPENCODE_DEFAULTS } from "./shared/opencode-defaults";
+export type { Card } from "./shared/card";
+export type { LiveState } from "./shared/live-state";
+export type { ColumnStore, BoardRow } from "./shared/column-store";
 
 export function health(): { ok: true; name: string } {
   return { ok: true, name: APP_NAME };
