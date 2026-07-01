@@ -1,0 +1,93 @@
+import { describe, it, expect } from "vitest";
+import { Hono } from "hono";
+import { registerHealthRoutes } from "../../../src/server/routes/health";
+
+/**
+ * A hermetic, duck-typed fake of the OpenCode SDK client. Only implements
+ * global.health — the surface the health route actually calls.
+ */
+function makeFakeClient(opts: {
+  data?: { healthy: boolean; version: string };
+  error?: unknown;
+  throws?: unknown;
+}) {
+  return {
+    global: {
+      health: async () => {
+        if (opts.throws !== undefined) {
+          throw opts.throws;
+        }
+        if (opts.error !== undefined) {
+          return { data: undefined, error: opts.error };
+        }
+        return { data: opts.data, error: undefined };
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+}
+
+function buildApp(client: ReturnType<typeof makeFakeClient>) {
+  const app = new Hono();
+  registerHealthRoutes(app, { client });
+  return app;
+}
+
+describe("GET /api/health", () => {
+  it("responds 200 with adapter 'ok' and opencode 'ok' + version when health() succeeds", async () => {
+    const client = makeFakeClient({ data: { healthy: true, version: "1.x" } });
+    const app = buildApp(client);
+
+    const res = await app.request("/api/health");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      adapter: "ok",
+      opencode: { status: "ok", version: "1.x" },
+    });
+  });
+
+  it("responds 200 with opencode 'unreachable' when health() returns an {error} envelope", async () => {
+    const client = makeFakeClient({ error: { message: "connection refused" } });
+    const app = buildApp(client);
+
+    const res = await app.request("/api/health");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      adapter: "ok",
+      opencode: { status: "unreachable" },
+    });
+  });
+
+  it("responds 200 with opencode 'unreachable' when health() throws", async () => {
+    const client = makeFakeClient({ throws: new Error("network down") });
+    const app = buildApp(client);
+
+    const res = await app.request("/api/health");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      adapter: "ok",
+      opencode: { status: "unreachable" },
+    });
+  });
+
+  it("responds 200 with opencode 'unreachable' when health() returns data with healthy:false", async () => {
+    const client = makeFakeClient({ data: { healthy: false, version: "1.x" } });
+    const app = buildApp(client);
+
+    const res = await app.request("/api/health");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      adapter: "ok",
+      opencode: { status: "unreachable" },
+    });
+  });
+});
