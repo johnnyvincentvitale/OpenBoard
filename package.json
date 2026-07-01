@@ -7,6 +7,7 @@
   "scripts": {
     "test": "vitest run --exclude '**/test/integration/**'",
     "test:integration": "vitest run test/integration",
+    "test:coverage": "vitest run --exclude '**/test/integration/**' --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "dev": "vite",
