@@ -18,3 +18,20 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  integration:
+    # Integration tests need a real `opencode` binary. They self-skip (opencodeAvailable())
+    # when it can't be started, so this job stays green even if the install path changes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install opencode (best-effort)
+        run: |
+          curl -fsSL https://opencode.ai/install | bash || echo "opencode install failed — integration tests will self-skip"
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+      - run: npm ci
+      - run: npm run test:integration

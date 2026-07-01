@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Local Devin-style Kanban command center for OpenCode sessions",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --exclude '**/test/integration/**'",
+    "test:integration": "vitest run test/integration",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "dev": "vite",
