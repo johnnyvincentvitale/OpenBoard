@@ -7,3 +7,4 @@ export * from "./events";
 export * from "./routes";
 export * from "./errors";
 export * from "./opencode-defaults";
+export * from "./task";
