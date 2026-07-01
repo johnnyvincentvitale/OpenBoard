@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { extname, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { SqliteColumnStore } from "../db/board-store";
@@ -7,6 +9,18 @@ import { startOrConnect } from "./opencode";
 import { EventBridge } from "./event-bridge";
 import { TaskDispatcher } from "./dispatcher";
 import { createApp } from "./app";
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+};
 
 /** Boot the board: connect/spawn opencode, open the sidecars, start the event bridge + dispatcher, serve. */
 export async function main(): Promise<void> {
@@ -29,6 +43,23 @@ export async function main(): Promise<void> {
     dispatcher,
     opencodeBaseUrl: handle.baseUrl,
   });
+
+  // Serve the built frontend (dist/web) for the Electron shell / production. Absolute
+  // path so it's independent of the process cwd (which is the agent workspace). API
+  // routes are already registered above and match first; this catch-all serves the SPA.
+  const webDir =
+    process.env.BOARD_WEB_DIR ??
+    resolve(dirname(fileURLToPath(import.meta.url)), "../../dist/web");
+  if (existsSync(webDir)) {
+    app.get("/*", (c) => {
+      const urlPath = new URL(c.req.url).pathname;
+      const rel = urlPath === "/" ? "index.html" : urlPath.replace(/^\/+/, "");
+      let file = join(webDir, rel);
+      if (!existsSync(file) || !file.startsWith(webDir)) file = join(webDir, "index.html");
+      const body = readFileSync(file);
+      return c.body(body, 200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
+    });
+  }
   const server = serve(
     { fetch: app.fetch, hostname: config.hostname, port: config.boardPort },
     (info) => {

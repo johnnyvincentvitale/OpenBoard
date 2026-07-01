@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Local Devin-style Kanban command center for OpenCode sessions",
+  "main": "electron/main.cjs",
   "scripts": {
     "test": "vitest run --exclude '**/test/integration/**'",
     "test:integration": "vitest run test/integration",
@@ -14,7 +15,17 @@
     "dev:server": "tsx src/server/serve.ts",
     "build": "vite build",
     "start": "tsx src/server/serve.ts",
+    "build:web": "vite build",
+    "electron": "npm run build:web && electron .",
+    "electron:pack": "npm run build:web && electron-builder --dir",
     "prepare": "husky"
+  },
+  "build": {
+    "appId": "com.johnnyvitale.opencode-board",
+    "productName": "opencode-board",
+    "files": ["dist/web/**", "electron/**", "src/**", "package.json"],
+    "asarUnpack": ["node_modules/better-sqlite3/**"],
+    "mac": { "target": "dir", "identity": null }
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
@@ -26,12 +37,16 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "@vitest/coverage-v8": "^4.1.9",
+    "concurrently": "^10.0.3",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
     "husky": "^9.1.7",
     "jsdom": "^29.1.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vite": "^8.1.2",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "wait-on": "^9.0.10"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
