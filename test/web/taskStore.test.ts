@@ -39,7 +39,7 @@ function makeFakeClient(overrides: Partial<TaskClientLike> = {}): TaskClientLike
     abortTask: vi.fn(async () => makeTask({ id: "new", runState: "idle" })),
     moveTask: vi.fn(async () => []),
     removeTask: vi.fn(async () => {}),
-    getAgents: vi.fn(async () => []),
+    getAgents: vi.fn(async () => [{ id: "build", mode: "primary" as const }]),
     getHealth: vi.fn(async () => ({ opencode: "ok" as const })),
     initGitTask: vi.fn(async () => makeTask({ id: "new", runState: "running" })),
     syncTask: vi.fn(async () => ({
@@ -382,5 +382,105 @@ describe("createTaskStore — worktree actions + settings", () => {
     await store.setWorktreeDefault(true);
     expect(updateSettings).toHaveBeenCalledWith({ worktreeDefault: true });
     expect(store.getSnapshot().settings.worktreeDefault).toBe(true);
+  });
+});
+
+describe("createTaskStore — agent roster loading (retry on cold opencode)", () => {
+  it("retries the roster fetch while it comes back empty, then populates", async () => {
+    vi.useFakeTimers();
+    try {
+      const { connect } = makeFakeConnect();
+      const roster = [
+        { id: "build", mode: "primary" as const },
+        { id: "plan", mode: "primary" as const },
+      ];
+      const getAgents = vi
+        .fn()
+        .mockResolvedValueOnce([]) // opencode still booting
+        .mockResolvedValueOnce([]) // still booting
+        .mockResolvedValue(roster); // ready
+      const client = makeFakeClient({ getAgents });
+      const store = createTaskStore({
+        client,
+        connect,
+        healthPollMs: 1_000_000,
+        agentRetryMs: 100,
+      });
+      store.init();
+
+      await vi.advanceTimersByTimeAsync(0); // first fetch → []
+      expect(store.getSnapshot().agents).toEqual([]);
+      await vi.advanceTimersByTimeAsync(100); // retry → []
+      expect(store.getSnapshot().agents).toEqual([]);
+      await vi.advanceTimersByTimeAsync(100); // retry → roster
+      expect(store.getSnapshot().agents).toEqual(roster);
+      expect(getAgents).toHaveBeenCalledTimes(3);
+
+      // Once populated, it stops retrying.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(getAgents).toHaveBeenCalledTimes(3);
+      store.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up after agentMaxRetries (initial + N)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { connect } = makeFakeConnect();
+      const getAgents = vi.fn().mockResolvedValue([]);
+      const client = makeFakeClient({ getAgents });
+      const store = createTaskStore({
+        client,
+        connect,
+        healthPollMs: 1_000_000,
+        agentRetryMs: 50,
+        agentMaxRetries: 3,
+      });
+      store.init();
+
+      await vi.advanceTimersByTimeAsync(0); // initial
+      await vi.advanceTimersByTimeAsync(500); // burn through all retries
+      expect(getAgents).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
+      store.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refetches the roster when opencode recovers and the roster is still empty", async () => {
+    vi.useFakeTimers();
+    try {
+      const { connect } = makeFakeConnect();
+      const roster = [{ id: "build", mode: "primary" as const }];
+      const getAgents = vi.fn().mockResolvedValue([]);
+      let healthOk = false;
+      const getHealth = vi.fn(async () => ({
+        opencode: (healthOk ? "ok" : "unreachable") as "ok" | "unreachable",
+      }));
+      const client = makeFakeClient({ getAgents, getHealth });
+      const store = createTaskStore({
+        client,
+        connect,
+        healthPollMs: 100,
+        agentRetryMs: 1_000_000,
+        agentMaxRetries: 0, // no self-retry — only health recovery can refetch
+      });
+      store.init();
+
+      await vi.advanceTimersByTimeAsync(0); // initial fetch → [] , no retry (max 0)
+      expect(store.getSnapshot().agents).toEqual([]);
+
+      // opencode comes up; next health poll should trigger a roster refetch.
+      getAgents.mockResolvedValue(roster);
+      healthOk = true;
+      await vi.advanceTimersByTimeAsync(100); // health poll → recovered → loadAgents
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.getSnapshot().agents).toEqual(roster);
+      store.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

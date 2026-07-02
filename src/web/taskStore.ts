@@ -40,6 +40,10 @@ export interface TaskStoreDeps {
   connect?: ConnectFn;
   /** Health poll interval in ms. Defaults to 15000. Exposed for tests. */
   healthPollMs?: number;
+  /** Delay between agent-roster retries while it comes back empty. Defaults to 750. */
+  agentRetryMs?: number;
+  /** Max agent-roster retries before giving up (health recovery can still refetch). Defaults to 20. */
+  agentMaxRetries?: number;
 }
 
 export interface TaskStoreSnapshot {
@@ -82,6 +86,8 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
   const client: TaskClientLike = deps.client ?? taskClient;
   const connect: ConnectFn = deps.connect ?? connectTaskSse;
   const healthPollMs = deps.healthPollMs ?? 15000;
+  const agentRetryMs = deps.agentRetryMs ?? 750;
+  const agentMaxRetries = deps.agentMaxRetries ?? 20;
 
   const tasksById = new Map<string, Task>();
   let agents: RosterAgent[] = [];
@@ -92,6 +98,8 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
 
   let disconnectSse: (() => void) | undefined;
   let healthTimer: ReturnType<typeof setInterval> | undefined;
+  let agentRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let agentAttempts = 0;
   let disposed = false;
 
   function emit(): void {
@@ -133,10 +141,48 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
     }
   }
 
+  /**
+   * Load the agent roster, retrying while it comes back empty. The board spawns
+   * `opencode serve` and the UI loads immediately, so the first fetch often races
+   * the server's startup and returns `[]`; without a retry the roster would stay
+   * empty (only the hardcoded "default" option) until a manual reload.
+   */
+  function loadAgents(): void {
+    void client
+      .getAgents()
+      .then((roster) => {
+        if (roster.length > 0) {
+          agents = roster;
+          emit();
+          return;
+        }
+        scheduleAgentRetry();
+      })
+      .catch(() => scheduleAgentRetry());
+  }
+
+  function scheduleAgentRetry(): void {
+    if (disposed || agentRetryTimer || agentAttempts >= agentMaxRetries) return;
+    agentAttempts += 1;
+    agentRetryTimer = setTimeout(() => {
+      agentRetryTimer = undefined;
+      loadAgents();
+    }, agentRetryMs);
+  }
+
   async function pollHealth(): Promise<void> {
     try {
       const health = await client.getHealth();
+      // Only a genuine down→up transition counts as a recovery; the first-ever
+      // poll (unknown→ok) is left to init()'s loader so we don't double-fetch.
+      const recovered = health.opencode === "ok" && status.opencode === "unreachable";
       setStatus({ opencode: health.opencode });
+      // OpenCode came back after being unreachable — (re)load the roster if we
+      // still don't have it, resetting the retry budget.
+      if (recovered && agents.length === 0) {
+        agentAttempts = 0;
+        loadAgents();
+      }
     } catch {
       setStatus({ opencode: "unreachable" });
     }
@@ -150,15 +196,7 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
         // Leave existing state; SSE/health will surface reachability issues.
       });
 
-    void client
-      .getAgents()
-      .then((roster) => {
-        agents = roster;
-        emit();
-      })
-      .catch(() => {
-        // Leave existing roster; not critical to board function.
-      });
+    loadAgents();
 
     void client
       .getSettings()
@@ -259,6 +297,7 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
     disposed = true;
     disconnectSse?.();
     if (healthTimer) clearInterval(healthTimer);
+    if (agentRetryTimer) clearTimeout(agentRetryTimer);
     listeners.clear();
   }
 
