@@ -19,7 +19,7 @@
     "build:server": "esbuild src/server/serve.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server/serve.mjs --external:better-sqlite3 --external:electron --banner:js=\"import{createRequire as __ocbCreateRequire}from'module';const require=__ocbCreateRequire(import.meta.url);\"",
     "build:app": "npm run build:web && npm run build:server",
     "electron": "npm run build:web && electron .",
-    "electron:pack": "npm run build:app && electron-builder --dir && npm rebuild better-sqlite3",
+    "electron:pack": "npm run build:app && electron-rebuild -f -o better-sqlite3 && electron-builder --dir --config.npmRebuild=false && npm rebuild better-sqlite3",
     "prepare": "husky"
   },
   "build": {

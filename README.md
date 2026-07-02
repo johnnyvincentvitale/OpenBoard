@@ -66,11 +66,15 @@ Branches: `main` (trusted) / `dev` (work). Husky runs the unit+DOM suite before 
 npm run electron:pack     # → dist/mac-arm64/opencode-board.app (unsigned)
 ```
 This bundles the adapter to a single ESM file (`dist/server/serve.mjs`, via esbuild — the
-packaged app has no `tsx`), rebuilds `better-sqlite3` for Electron's ABI, and emits an
-unsigned `.app`. When packaged, `main.cjs` runs the bundled server with the Electron binary
-in Node mode (`ELECTRON_RUN_AS_NODE`); in dev it still runs the TS source via `tsx`. The
-script restores the Node-ABI `better-sqlite3` afterward so `npm test` keeps working.
-Code signing needs an Apple Developer ID cert (`mac.identity` is `null` = unsigned).
+packaged app has no `tsx`) and emits an unsigned `.app`. When packaged, `main.cjs` runs the
+bundled server with the Electron binary in Node mode (`ELECTRON_RUN_AS_NODE`); in dev it
+still runs the TS source via `tsx`.
+
+The `better-sqlite3` native module is ABI-sensitive, so the pack script is deliberate:
+`electron-rebuild -f` builds it for Electron's ABI, `electron-builder --config.npmRebuild=false`
+packs that exact binary (an independent copy in `app.asar.unpacked`), then `npm rebuild
+better-sqlite3` restores the Node ABI so `npm test` keeps working — the app's copy is
+untouched. Code signing needs an Apple Developer ID cert (`mac.identity` is `null` = unsigned).
 
 ### Structure
 ```
