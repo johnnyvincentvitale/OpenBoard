@@ -6,7 +6,7 @@
  * store instance.
  */
 import { useCallback, useSyncExternalStore } from "react";
-import type { Column, RosterAgent, Task, TaskFrame } from "../shared";
+import type { BoardSettings, Column, RosterAgent, Task, TaskFrame } from "../shared";
 import { COLUMNS } from "../shared";
 import * as taskClient from "./api/taskClient";
 import { connectTaskSse } from "./api/taskSse";
@@ -23,7 +23,14 @@ export interface TaskClientLike {
   removeTask: typeof taskClient.removeTask;
   getAgents: typeof taskClient.getAgents;
   getHealth: typeof taskClient.getHealth;
+  initGitTask: typeof taskClient.initGitTask;
+  syncTask: typeof taskClient.syncTask;
+  integrateTask: typeof taskClient.integrateTask;
+  getSettings: typeof taskClient.getSettings;
+  updateSettings: typeof taskClient.updateSettings;
 }
+
+const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
 
 /** Minimal surface of connectTaskSse the store depends on (for test injection). */
 export type ConnectFn = typeof connectTaskSse;
@@ -39,6 +46,7 @@ export interface TaskStoreSnapshot {
   tasks: Task[];
   agents: RosterAgent[];
   status: TaskBoardStatus;
+  settings: BoardSettings;
 }
 
 export interface TaskStore {
@@ -51,6 +59,10 @@ export interface TaskStore {
   abort(taskId: string): Promise<void>;
   remove(taskId: string): Promise<void>;
   move(taskId: string, column: Column, position: number): void;
+  initGit(taskId: string): Promise<void>;
+  sync(taskId: string): Promise<string>;
+  integrate(taskId: string): Promise<string>;
+  setWorktreeDefault(value: boolean): Promise<void>;
   dispose(): void;
 }
 
@@ -74,7 +86,8 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
   const tasksById = new Map<string, Task>();
   let agents: RosterAgent[] = [];
   let status: TaskBoardStatus = { opencode: "unknown", sse: "connecting" };
-  let snapshot: TaskStoreSnapshot = { tasks: [], agents, status };
+  let settings: BoardSettings = DEFAULT_SETTINGS;
+  let snapshot: TaskStoreSnapshot = { tasks: [], agents, status, settings };
   const listeners = new Set<() => void>();
 
   let disconnectSse: (() => void) | undefined;
@@ -82,7 +95,7 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
   let disposed = false;
 
   function emit(): void {
-    snapshot = { tasks: sortTasks(tasksById.values()), agents, status };
+    snapshot = { tasks: sortTasks(tasksById.values()), agents, status, settings };
     for (const listener of listeners) listener();
   }
 
@@ -147,6 +160,16 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
         // Leave existing roster; not critical to board function.
       });
 
+    void client
+      .getSettings()
+      .then((loaded) => {
+        settings = loaded;
+        emit();
+      })
+      .catch(() => {
+        // Keep defaults; settings aren't critical to board function.
+      });
+
     void pollHealth();
     healthTimer = setInterval(() => void pollHealth(), healthPollMs);
 
@@ -202,6 +225,35 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
       });
   }
 
+  async function initGit(taskId: string): Promise<void> {
+    const task = await client.initGitTask(taskId);
+    tasksById.set(task.id, task);
+    emit();
+  }
+
+  async function sync(taskId: string): Promise<string> {
+    const outcome = await client.syncTask(taskId);
+    if (outcome.task) {
+      tasksById.set(outcome.task.id, outcome.task);
+      emit();
+    }
+    return outcome.message;
+  }
+
+  async function integrate(taskId: string): Promise<string> {
+    const outcome = await client.integrateTask(taskId);
+    if (outcome.task) {
+      tasksById.set(outcome.task.id, outcome.task);
+      emit();
+    }
+    return outcome.message;
+  }
+
+  async function setWorktreeDefault(value: boolean): Promise<void> {
+    settings = await client.updateSettings({ worktreeDefault: value });
+    emit();
+  }
+
   function dispose(): void {
     if (disposed) return;
     disposed = true;
@@ -225,6 +277,10 @@ export function createTaskStore(deps: TaskStoreDeps = {}): TaskStore {
     abort,
     remove,
     move,
+    initGit,
+    sync,
+    integrate,
+    setWorktreeDefault,
     dispose,
   };
 }
@@ -251,11 +307,16 @@ export function useTaskStore(): UseTaskStoreResult {
     tasks: snapshot.tasks,
     agents: snapshot.agents,
     status: snapshot.status,
+    settings: snapshot.settings,
     create: store.create,
     run: store.run,
     retry: store.retry,
     abort: store.abort,
     remove: store.remove,
     move: store.move,
+    initGit: store.initGit,
+    sync: store.sync,
+    integrate: store.integrate,
+    setWorktreeDefault: store.setWorktreeDefault,
   };
 }

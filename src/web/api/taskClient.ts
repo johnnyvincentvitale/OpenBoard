@@ -4,7 +4,7 @@
  * whose message is `envelope.error.message` (falling back to statusText if
  * the body can't be parsed).
  */
-import type { Column, ErrorEnvelope, RosterAgent, Task } from "../../shared";
+import type { BoardSettings, Column, ErrorEnvelope, MergeOutcome, RosterAgent, Task } from "../../shared";
 import { buildPath, buildTaskPath } from "../../shared";
 import type { CreateTaskFields } from "../task-types";
 
@@ -67,6 +67,58 @@ export async function abortTask(id: string): Promise<Task> {
   const res = await fetch(buildTaskPath.abort(id), { method: "POST" });
   const body = await assertOk(res);
   return body as Task;
+}
+
+/** POST /api/tasks/:id/init-git -> Task (init the dir as a repo, then run) */
+export async function initGitTask(id: string): Promise<Task> {
+  const res = await fetch(buildTaskPath.initGit(id), { method: "POST" });
+  const body = await assertOk(res);
+  return body as Task;
+}
+
+/** POST /api/tasks/:id/sync -> MergeOutcome (merge base into the worktree branch) */
+export async function syncTask(id: string): Promise<MergeOutcome> {
+  const res = await fetch(buildTaskPath.sync(id), { method: "POST" });
+  // 409 on conflict still carries a MergeOutcome body — read it, don't throw.
+  const body = await readJson(res);
+  if (!res.ok && res.status !== 409) {
+    const message = (body as Partial<ErrorEnvelope>)?.error?.message ?? res.statusText;
+    throw new Error(message);
+  }
+  return body as MergeOutcome;
+}
+
+/** POST /api/tasks/:id/integrate -> MergeOutcome (merge worktree branch into base) */
+export async function integrateTask(id: string): Promise<MergeOutcome> {
+  const res = await fetch(buildTaskPath.integrate(id), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const body = await readJson(res);
+  if (!res.ok && res.status !== 409) {
+    const message = (body as Partial<ErrorEnvelope>)?.error?.message ?? res.statusText;
+    throw new Error(message);
+  }
+  return body as MergeOutcome;
+}
+
+/** GET /api/settings -> BoardSettings */
+export async function getSettings(): Promise<BoardSettings> {
+  const res = await fetch(buildTaskPath.settings());
+  const body = await assertOk(res);
+  return body as BoardSettings;
+}
+
+/** PUT /api/settings (body {worktreeDefault}) -> BoardSettings */
+export async function updateSettings(patch: Partial<BoardSettings>): Promise<BoardSettings> {
+  const res = await fetch(buildTaskPath.settings(), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const body = await assertOk(res);
+  return body as BoardSettings;
 }
 
 /** POST /api/tasks/:id/move (body {column, position}) -> Task[] (fresh board) */

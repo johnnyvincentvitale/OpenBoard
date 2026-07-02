@@ -82,16 +82,31 @@ electron/      Electron main process (main.cjs)
 test/          unit + DOM + integration
 ```
 
+## Worktree isolation
+Concurrent agents in one repo share a working tree and can clobber each other. Turn on
+**worktree isolation** and each run gets its own `git worktree`:
+
+- **Default + override.** A board-level *worktree default* toggle (header checkbox) sets the
+  default; each task can override it (worktree / in-place) in the new-task form.
+- **Isolated run.** A worktree run cuts `board/<taskId>` from the task's directory and dispatches
+  the session into that worktree — never the main working tree.
+- **Non-git dir.** Can't be isolated, so the run is blocked and the card offers **Make repo & run**
+  (`git init` + commit, then run). Decline = no run.
+- **Reclaim.** The worktree + branch persist after the run. **Sync** merges the upstream base
+  branch *into* the worktree (resolve drift there); **Integrate** merges the worktree branch *into*
+  the base branch, removes the worktree, and **keeps the branch**. Conflicts are reported, not
+  forced.
+
 ## Known constraints (verified)
 - `session.wait` is a stub in this OpenCode version → completion comes from the `/event` stream.
 - Push tasks pass `location.directory` to v2 `session.create`; `BOARD_WORKSPACE` is the
   adapter/OpenCode default workspace, not the per-task execution directory.
-- Concurrent agents in one repo have **no file locking** — assign non-overlapping work, or use
-  a git worktree per agent.
+- Without worktree isolation, concurrent agents in one repo have **no file locking** — assign
+  non-overlapping work, or enable worktree isolation (above).
 - Available models depend on your OpenCode auth/config (here: OpenCode Zen free + OpenAI GPT-5.x).
 
 ## Roadmap
 - Packaged `.app` — **done** (`npm run electron:pack`, unsigned). Signing awaits an Apple
   Developer ID cert.
-- Worktree-per-agent isolation for safe parallelism.
+- Worktree-per-agent isolation — **done** (board default + per-task override, sync/integrate).
 - Multi-CLI: back an agent with Codex or Claude instead of OpenCode (a provider seam / ACP host).

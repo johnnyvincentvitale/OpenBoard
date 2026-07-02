@@ -11,14 +11,47 @@ import { NewTaskForm } from "./components/NewTaskForm";
  * columns. Wires the task store to the board, the new-task form, and the card.
  */
 export function App() {
-  const { tasks, agents, status, create, run, retry, abort, remove, move } = useTaskStore();
+  const {
+    tasks,
+    agents,
+    status,
+    settings,
+    create,
+    run,
+    retry,
+    abort,
+    remove,
+    move,
+    initGit,
+    sync,
+    integrate,
+    setWorktreeDefault,
+  } = useTaskStore();
   const ocOk = status.opencode === "ok";
+
+  // sync/integrate resolve to a human-readable message (e.g. a merge conflict);
+  // surface it so the user sees the result of the git operation.
+  const notify = (message: string) => {
+    if (message && typeof window !== "undefined") window.alert(message);
+  };
+  const handleSync = (id: string) => void sync(id).then(notify).catch((e) => notify(String(e)));
+  const handleIntegrate = (id: string) =>
+    void integrate(id).then(notify).catch((e) => notify(String(e)));
 
   return (
     <div style={styles.app}>
       <header style={styles.header}>
         <h1 style={styles.title}>opencode-board</h1>
         <div style={styles.badges}>
+          <label style={styles.toggle} title="Isolate runs in a git worktree by default">
+            <input
+              type="checkbox"
+              checked={settings.worktreeDefault}
+              onChange={(event) => void setWorktreeDefault(event.target.checked)}
+              aria-label="Worktree isolation by default"
+            />
+            worktree default
+          </label>
           <span
             style={{
               ...styles.badge,
@@ -53,6 +86,9 @@ export function App() {
               onRetry={retry}
               onAbort={abort}
               onDelete={remove}
+              onInitGit={initGit}
+              onSync={handleSync}
+              onIntegrate={handleIntegrate}
             />
           )}
         />
@@ -85,6 +121,14 @@ const styles: Record<string, CSSProperties> = {
     border: "1px solid #232a33",
   },
   count: { fontSize: 12, color: "#8b949e" },
+  toggle: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 12,
+    color: "#8b949e",
+    cursor: "pointer",
+  },
   formWrap: { padding: "16px 20px 0" },
   main: { padding: 20 },
 };

@@ -45,12 +45,18 @@ function renderCard(overrides: Partial<Task> = {}, handlers: Partial<{
   onRetry: (id: string) => void;
   onAbort: (id: string) => void;
   onDelete: (id: string) => void;
+  onInitGit: (id: string) => void;
+  onSync: (id: string) => void;
+  onIntegrate: (id: string) => void;
 }> = {}) {
   const task = makeTask(overrides);
   const onRun = handlers.onRun ?? vi.fn();
   const onRetry = handlers.onRetry ?? vi.fn();
   const onAbort = handlers.onAbort ?? vi.fn();
   const onDelete = handlers.onDelete ?? vi.fn();
+  const onInitGit = handlers.onInitGit ?? vi.fn();
+  const onSync = handlers.onSync ?? vi.fn();
+  const onIntegrate = handlers.onIntegrate ?? vi.fn();
 
   render(
     <TaskCard
@@ -60,10 +66,13 @@ function renderCard(overrides: Partial<Task> = {}, handlers: Partial<{
       onRetry={onRetry}
       onAbort={onAbort}
       onDelete={onDelete}
+      onInitGit={onInitGit}
+      onSync={onSync}
+      onIntegrate={onIntegrate}
     />,
   );
 
-  return { task, onRun, onRetry, onAbort, onDelete };
+  return { task, onRun, onRetry, onAbort, onDelete, onInitGit, onSync, onIntegrate };
 }
 
 describe("TaskCard", () => {
@@ -112,6 +121,9 @@ describe("TaskCard", () => {
           onRetry={vi.fn()}
           onAbort={vi.fn()}
           onDelete={vi.fn()}
+          onInitGit={vi.fn()}
+          onSync={vi.fn()}
+          onIntegrate={vi.fn()}
         />,
       );
 
@@ -212,5 +224,56 @@ describe("TaskCard", () => {
   it("does not render an agent badge when the task has no agent", () => {
     renderCard({ agent: undefined });
     expect(screen.queryByTestId("agent-badge")).not.toBeInTheDocument();
+  });
+});
+
+describe("TaskCard — worktree isolation UI", () => {
+  it("shows the git-init prompt for a pending task and hides Run", async () => {
+    const { onInitGit } = renderCard({ pending: "git-init", runState: "unstarted", column: "todo" });
+    expect(screen.getByTestId("git-init-prompt")).toBeInTheDocument();
+    // Run is suppressed while awaiting the git-init decision.
+    expect(screen.queryByRole("button", { name: "Run" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Make repo/ }));
+    expect(onInitGit).toHaveBeenCalledWith("task-1");
+  });
+
+  it("shows the worktree branch and Sync; Integrate appears once not running", () => {
+    renderCard({
+      worktreeBranch: "board/task-1",
+      worktreePath: "/wt/task-1",
+      baseBranch: "main",
+      runState: "idle",
+      column: "review",
+    });
+    expect(screen.getByTestId("worktree-branch")).toHaveTextContent("board/task-1");
+    expect(screen.getByRole("button", { name: "Sync" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Integrate" })).toBeInTheDocument();
+  });
+
+  it("hides Integrate while the session is still running", () => {
+    renderCard({
+      worktreeBranch: "board/task-1",
+      worktreePath: "/wt/task-1",
+      baseBranch: "main",
+      runState: "running",
+      column: "in_progress",
+    });
+    expect(screen.getByRole("button", { name: "Sync" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Integrate" })).not.toBeInTheDocument();
+  });
+
+  it("wires Sync and Integrate to their handlers", async () => {
+    const { onSync, onIntegrate } = renderCard({
+      worktreeBranch: "board/task-1",
+      worktreePath: "/wt/task-1",
+      baseBranch: "main",
+      runState: "idle",
+      column: "review",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Sync" }));
+    await userEvent.click(screen.getByRole("button", { name: "Integrate" }));
+    expect(onSync).toHaveBeenCalledWith("task-1");
+    expect(onIntegrate).toHaveBeenCalledWith("task-1");
   });
 });

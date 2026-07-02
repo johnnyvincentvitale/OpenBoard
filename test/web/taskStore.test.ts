@@ -41,6 +41,21 @@ function makeFakeClient(overrides: Partial<TaskClientLike> = {}): TaskClientLike
     removeTask: vi.fn(async () => {}),
     getAgents: vi.fn(async () => []),
     getHealth: vi.fn(async () => ({ opencode: "ok" as const })),
+    initGitTask: vi.fn(async () => makeTask({ id: "new", runState: "running" })),
+    syncTask: vi.fn(async () => ({
+      task: makeTask({ id: "new" }),
+      ok: true,
+      conflict: false,
+      message: "merged",
+    })),
+    integrateTask: vi.fn(async () => ({
+      task: makeTask({ id: "new" }),
+      ok: true,
+      conflict: false,
+      message: "integrated",
+    })),
+    getSettings: vi.fn(async () => ({ worktreeDefault: false })),
+    updateSettings: vi.fn(async () => ({ worktreeDefault: true })),
     ...overrides,
   };
 }
@@ -318,5 +333,54 @@ describe("createTaskStore — subscribe/getSnapshot", () => {
 
     store.dispose();
     expect(handle.disconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createTaskStore — worktree actions + settings", () => {
+  it("loads board settings on init", async () => {
+    const { connect } = makeFakeConnect();
+    const client = makeFakeClient({ getSettings: vi.fn(async () => ({ worktreeDefault: true })) });
+    const store = createTaskStore({ client, connect, healthPollMs: 1_000_000 });
+    store.init();
+    await flush();
+    expect(store.getSnapshot().settings).toEqual({ worktreeDefault: true });
+  });
+
+  it("initGit folds the returned task into state", async () => {
+    const { connect } = makeFakeConnect();
+    const client = makeFakeClient({
+      initGitTask: vi.fn(async () => makeTask({ id: "g", runState: "running", column: "in_progress" })),
+    });
+    const store = createTaskStore({ client, connect, healthPollMs: 1_000_000 });
+    store.init();
+    await flush();
+    await store.initGit("g");
+    expect(store.getSnapshot().tasks.find((t) => t.id === "g")?.runState).toBe("running");
+  });
+
+  it("sync returns the merge message and folds the task", async () => {
+    const { connect } = makeFakeConnect();
+    const synced = makeTask({ id: "s" });
+    const client = makeFakeClient({
+      syncTask: vi.fn(async () => ({ task: synced, ok: false, conflict: true, message: "conflict!" })),
+    });
+    const store = createTaskStore({ client, connect, healthPollMs: 1_000_000 });
+    store.init();
+    await flush();
+    const message = await store.sync("s");
+    expect(message).toBe("conflict!");
+    expect(store.getSnapshot().tasks.find((t) => t.id === "s")).toBeTruthy();
+  });
+
+  it("setWorktreeDefault persists via the client and updates the snapshot", async () => {
+    const { connect } = makeFakeConnect();
+    const updateSettings = vi.fn(async () => ({ worktreeDefault: true }));
+    const client = makeFakeClient({ updateSettings });
+    const store = createTaskStore({ client, connect, healthPollMs: 1_000_000 });
+    store.init();
+    await flush();
+    await store.setWorktreeDefault(true);
+    expect(updateSettings).toHaveBeenCalledWith({ worktreeDefault: true });
+    expect(store.getSnapshot().settings.worktreeDefault).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Column, ModelRef, RosterAgent, Task } from "../shared";
+import type { BoardSettings, Column, ModelRef, RosterAgent, Task, TaskIsolationMode } from "../shared";
 
 /**
  * Pinned frontend contracts for the functional task board. TaskCard (agent C),
@@ -13,6 +13,8 @@ export interface CreateTaskFields {
   directory: string;
   agent?: string;
   model?: ModelRef;
+  /** Isolation override; unset → the board default applies. */
+  isolation?: TaskIsolationMode;
 }
 
 export interface TaskCardProps {
@@ -23,6 +25,12 @@ export interface TaskCardProps {
   onRetry: (taskId: string) => void;
   onAbort: (taskId: string) => void;
   onDelete: (taskId: string) => void;
+  /** Answer the git-init prompt for a non-repo dir (worktree mode), then run. */
+  onInitGit: (taskId: string) => void;
+  /** Merge the upstream base branch into the task's worktree branch. */
+  onSync: (taskId: string) => void;
+  /** Merge the worktree branch into base, remove the worktree, keep the branch. */
+  onIntegrate: (taskId: string) => void;
 }
 
 export interface TaskBoardProps {
@@ -47,10 +55,15 @@ export interface UseTaskStoreResult {
   tasks: Task[];
   agents: RosterAgent[];
   status: TaskBoardStatus;
+  settings: BoardSettings;
   create: (fields: CreateTaskFields) => Promise<void>;
   run: (taskId: string) => Promise<void>;
   retry: (taskId: string) => Promise<void>;
   abort: (taskId: string) => Promise<void>;
   remove: (taskId: string) => Promise<void>;
   move: (taskId: string, column: Column, position: number) => void;
+  initGit: (taskId: string) => Promise<void>;
+  sync: (taskId: string) => Promise<string>;
+  integrate: (taskId: string) => Promise<string>;
+  setWorktreeDefault: (value: boolean) => Promise<void>;
 }

@@ -143,6 +143,33 @@ const deleteButtonStyle: CSSProperties = {
 const actionRowStyle: CSSProperties = {
   display: "flex",
   gap: 8,
+  flexWrap: "wrap",
+};
+
+const worktreeBadgeStyle: CSSProperties = {
+  fontSize: 11,
+  padding: "1px 7px",
+  borderRadius: 999,
+  color: "#58a6ff",
+  background: "rgba(88, 166, 255, 0.12)",
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  maxWidth: "100%",
+};
+
+const promptStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  padding: "6px 8px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "#e3b341",
+  background: "rgba(227, 179, 65, 0.1)",
+  border: "1px solid rgba(227, 179, 65, 0.25)",
 };
 
 const PULSE_STYLE_ID = "task-card-pulse-keyframes";
@@ -191,12 +218,26 @@ function RunStatePill({ runState }: { runState: TaskRunState }) {
   );
 }
 
-export function TaskCard({ task, agents, onRun, onRetry, onAbort, onDelete }: TaskCardProps) {
+export function TaskCard({
+  task,
+  agents,
+  onRun,
+  onRetry,
+  onAbort,
+  onDelete,
+  onInitGit,
+  onSync,
+  onIntegrate,
+}: TaskCardProps) {
   ensurePulseKeyframes();
 
   const directory = task.directory.split("/").filter(Boolean).pop() ?? task.directory;
   const running = task.runState === "running";
-  const showRun = task.runState === "unstarted" || task.column === "todo";
+  const needsGitInit = task.pending === "git-init";
+  const hasWorktree = Boolean(task.worktreeBranch);
+  // Once the agent's turn is done (review/idle), the worktree is ready to integrate.
+  const canIntegrate = hasWorktree && Boolean(task.worktreePath) && !running;
+  const showRun = (task.runState === "unstarted" || task.column === "todo") && !needsGitInit;
   const showRetry = task.column === "review" || task.runState === "error";
   const rosterAgent = task.agent ? agents.find((agent) => agent.id === task.agent) : undefined;
   const agentLabel = rosterAgent?.id ?? task.agent;
@@ -236,7 +277,29 @@ export function TaskCard({ task, agents, onRun, onRetry, onAbort, onDelete }: Ta
             {task.model.id}
           </span>
         ) : null}
+        {hasWorktree ? (
+          <span
+            style={worktreeBadgeStyle}
+            data-testid="worktree-branch"
+            title={task.worktreePath ?? task.worktreeBranch}
+          >
+            ⑃ {task.worktreeBranch}
+          </span>
+        ) : null}
       </div>
+
+      {needsGitInit ? (
+        <div style={promptStyle} data-testid="git-init-prompt">
+          <span>Not a git repo — initialize it to isolate this run?</span>
+          <button
+            type="button"
+            style={{ ...baseButtonStyle, flex: "initial" }}
+            onClick={() => onInitGit(task.id)}
+          >
+            Make repo &amp; run
+          </button>
+        </div>
+      ) : null}
 
       <div style={footerStyle}>
         <RunStatePill runState={task.runState} />
@@ -254,6 +317,26 @@ export function TaskCard({ task, agents, onRun, onRetry, onAbort, onDelete }: Ta
           {showRetry ? (
             <button type="button" style={baseButtonStyle} onClick={() => onRetry(task.id)}>
               Retry
+            </button>
+          ) : null}
+          {hasWorktree ? (
+            <button
+              type="button"
+              style={baseButtonStyle}
+              onClick={() => onSync(task.id)}
+              title="Merge the upstream base branch into this worktree"
+            >
+              Sync
+            </button>
+          ) : null}
+          {canIntegrate ? (
+            <button
+              type="button"
+              style={baseButtonStyle}
+              onClick={() => onIntegrate(task.id)}
+              title="Merge this worktree's branch into the base branch and remove the worktree"
+            >
+              Integrate
             </button>
           ) : null}
           <button type="button" style={deleteButtonStyle} onClick={handleDelete}>

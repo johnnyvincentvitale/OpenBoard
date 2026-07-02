@@ -6,9 +6,11 @@
  */
 import { useState, type CSSProperties, type FormEvent } from "react";
 import type { NewTaskFormProps } from "../task-types";
-import type { ModelRef } from "../../shared";
+import type { ModelRef, TaskIsolationMode } from "../../shared";
 
 const DEFAULT_AGENT_VALUE = "";
+/** "" = inherit the board default; otherwise an explicit per-task override. */
+type IsolationChoice = "" | TaskIsolationMode;
 
 /** Parse "provider/model-id" into a ModelRef, splitting on the first '/'. */
 function parseModelInput(raw: string): ModelRef | undefined {
@@ -102,6 +104,7 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
   const [directory, setDirectory] = useState("");
   const [agent, setAgent] = useState(DEFAULT_AGENT_VALUE);
   const [modelInput, setModelInput] = useState("");
+  const [isolation, setIsolation] = useState<IsolationChoice>("");
 
   const isValid = title.trim().length > 0 && directory.trim().length > 0;
 
@@ -111,6 +114,7 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
     setDirectory("");
     setAgent(DEFAULT_AGENT_VALUE);
     setModelInput("");
+    setIsolation("");
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -123,6 +127,7 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
       directory: directory.trim(),
       agent: agent || undefined,
       model: parseModelInput(modelInput),
+      ...(isolation ? { isolation } : {}),
     });
 
     resetForm();
@@ -191,6 +196,16 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
           onChange={(event) => setModelInput(event.target.value)}
         />
       </div>
+      <select
+        style={inputStyle}
+        aria-label="Isolation"
+        value={isolation}
+        onChange={(event) => setIsolation(event.target.value as IsolationChoice)}
+      >
+        <option value="">Isolation: board default</option>
+        <option value="worktree">Isolation: worktree</option>
+        <option value="in-place">Isolation: in-place</option>
+      </select>
       <div style={actionsRowStyle}>
         <button
           type="button"

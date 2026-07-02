@@ -109,3 +109,29 @@ describe("NewTaskForm", () => {
     expect(onCreate).not.toHaveBeenCalled();
   });
 });
+
+describe("NewTaskForm — isolation override", () => {
+  it("submits an explicit isolation choice, and omits it when left on board default", async () => {
+    const user = userEvent.setup();
+    const onCreate = vi.fn();
+    render(<NewTaskForm agents={makeAgents()} onCreate={onCreate} />);
+    await user.click(screen.getByRole("button", { name: "+ New task" }));
+
+    await user.type(screen.getByLabelText("Title"), "Isolated task");
+    await user.type(screen.getByLabelText("Directory"), "/repo");
+    await user.selectOptions(screen.getByLabelText("Isolation"), "worktree");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onCreate.mock.calls[0][0]).toMatchObject({ title: "Isolated task", isolation: "worktree" });
+
+    // Reopen and submit with the default (board default) → no isolation key.
+    await user.click(screen.getByRole("button", { name: "+ New task" }));
+    await user.type(screen.getByLabelText("Title"), "Default task");
+    await user.type(screen.getByLabelText("Directory"), "/repo");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(onCreate).toHaveBeenCalledTimes(2);
+    expect(onCreate.mock.calls[1][0].isolation).toBeUndefined();
+  });
+});
