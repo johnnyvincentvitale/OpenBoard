@@ -1,27 +1,17 @@
 /**
  * NewTaskForm — a compact form for creating a new task. Fields: title
  * (required), description, directory (required, absolute path), agent
- * (picked from the roster), and an optional "provider/model-id" text input
- * parsed into a ModelRef on submit. Revealed via a "+ New task" button.
+ * (picked from the roster), and an isolation choice. There is no model/provider
+ * field: the model is resolved from the assigned agent's OpenCode config, not
+ * per task. Revealed via a "+ New task" button.
  */
 import { useState, type CSSProperties, type FormEvent } from "react";
 import type { NewTaskFormProps } from "../task-types";
-import type { ModelRef, TaskIsolationMode } from "../../shared";
+import type { TaskIsolationMode } from "../../shared";
 
 const DEFAULT_AGENT_VALUE = "";
 /** "" = inherit the board default; otherwise an explicit per-task override. */
 type IsolationChoice = "" | TaskIsolationMode;
-
-/** Parse "provider/model-id" into a ModelRef, splitting on the first '/'. */
-function parseModelInput(raw: string): ModelRef | undefined {
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const slashIndex = trimmed.indexOf("/");
-  if (slashIndex <= 0 || slashIndex === trimmed.length - 1) return undefined;
-  const providerID = trimmed.slice(0, slashIndex);
-  const id = trimmed.slice(slashIndex + 1);
-  return { providerID, id };
-}
 
 const toggleButtonStyle: CSSProperties = {
   padding: "8px 12px",
@@ -63,11 +53,6 @@ const textareaStyle: CSSProperties = {
   minHeight: 60,
 };
 
-const rowStyle: CSSProperties = {
-  display: "flex",
-  gap: 8,
-};
-
 const actionsRowStyle: CSSProperties = {
   display: "flex",
   gap: 8,
@@ -103,7 +88,6 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
   const [description, setDescription] = useState("");
   const [directory, setDirectory] = useState("");
   const [agent, setAgent] = useState(DEFAULT_AGENT_VALUE);
-  const [modelInput, setModelInput] = useState("");
   const [isolation, setIsolation] = useState<IsolationChoice>("");
 
   const isValid = title.trim().length > 0 && directory.trim().length > 0;
@@ -113,7 +97,6 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
     setDescription("");
     setDirectory("");
     setAgent(DEFAULT_AGENT_VALUE);
-    setModelInput("");
     setIsolation("");
   }
 
@@ -126,7 +109,6 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
       description,
       directory: directory.trim(),
       agent: agent || undefined,
-      model: parseModelInput(modelInput),
       ...(isolation ? { isolation } : {}),
     });
 
@@ -173,29 +155,19 @@ export function NewTaskForm({ agents, onCreate }: NewTaskFormProps) {
         onChange={(event) => setDirectory(event.target.value)}
         required
       />
-      <div style={rowStyle}>
-        <select
-          style={{ ...inputStyle, flex: 1 }}
-          aria-label="Agent"
-          value={agent}
-          onChange={(event) => setAgent(event.target.value)}
-        >
-          <option value={DEFAULT_AGENT_VALUE}>default</option>
-          {agents.map((rosterAgent) => (
-            <option key={rosterAgent.id} value={rosterAgent.id}>
-              {rosterAgent.id}
-            </option>
-          ))}
-        </select>
-        <input
-          style={{ ...inputStyle, flex: 1 }}
-          type="text"
-          placeholder="provider/model-id"
-          aria-label="Model"
-          value={modelInput}
-          onChange={(event) => setModelInput(event.target.value)}
-        />
-      </div>
+      <select
+        style={inputStyle}
+        aria-label="Agent"
+        value={agent}
+        onChange={(event) => setAgent(event.target.value)}
+      >
+        <option value={DEFAULT_AGENT_VALUE}>default</option>
+        {agents.map((rosterAgent) => (
+          <option key={rosterAgent.id} value={rosterAgent.id}>
+            {rosterAgent.id}
+          </option>
+        ))}
+      </select>
       <select
         style={inputStyle}
         aria-label="Isolation"

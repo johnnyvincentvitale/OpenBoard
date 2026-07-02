@@ -16,7 +16,7 @@ function makeAgents(): RosterAgent[] {
 }
 
 describe("NewTaskForm", () => {
-  it("fills fields, picks an agent, types a model, and submits with the right shape", async () => {
+  it("fills fields, picks an agent, and submits with the right shape (no model field)", async () => {
     const user = userEvent.setup();
     const onCreate = vi.fn();
     render(<NewTaskForm agents={makeAgents()} onCreate={onCreate} />);
@@ -33,10 +33,9 @@ describe("NewTaskForm", () => {
       "/Users/johnnyvitale/code/opencode-board",
     );
     await user.selectOptions(screen.getByLabelText("Agent"), "build");
-    await user.type(
-      screen.getByLabelText("Model"),
-      "opencode/north-mini-code-free",
-    );
+
+    // The model is resolved from the agent's config — no model input on the card.
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
@@ -46,7 +45,6 @@ describe("NewTaskForm", () => {
       description: "Clean up the login handler",
       directory: "/Users/johnnyvitale/code/opencode-board",
       agent: "build",
-      model: { providerID: "opencode", id: "north-mini-code-free" },
     });
 
     // Form clears and collapses after submit.
@@ -58,7 +56,7 @@ describe("NewTaskForm", () => {
     ).toBeInTheDocument();
   });
 
-  it("submits with agent undefined when left as default, and model undefined when blank", async () => {
+  it("submits with agent undefined when left as default", async () => {
     const user = userEvent.setup();
     const onCreate = vi.fn();
     render(<NewTaskForm agents={makeAgents()} onCreate={onCreate} />);
@@ -75,7 +73,6 @@ describe("NewTaskForm", () => {
       description: "",
       directory: "/tmp/project",
       agent: undefined,
-      model: undefined,
     });
   });
 
