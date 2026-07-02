@@ -11,15 +11,30 @@
  * existing session and moves the task back to `in_progress`. `abort()` stops the
  * task's session. `shutdown()` stops consuming the event stream.
  */
-import type { OpencodeEvent, Task, TaskStore } from "../shared";
+import { basename, dirname, join } from "node:path";
+import type { MergeOutcome, OpencodeEvent, Task, TaskStore } from "../shared";
 import { AdapterError, UNATTENDED_PERMISSION } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import { eventLiveState, eventSessionId } from "./events/session-status";
+import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 
 export interface TaskDispatcherDeps {
   client: OpencodeHandle["client"];
   store: TaskStore;
+  /** Git worktree engine for isolated runs. Defaults to a real GitWorktreeManager. */
+  worktrees?: WorktreeManager;
+  /**
+   * Where a repo's worktrees live. Default: a sibling `.opencode-board-worktrees/<repo>`
+   * dir next to the repo root, so worktrees never nest inside the main working tree.
+   */
+  worktreeBaseDir?: (repoRoot: string) => string;
+}
+
+/** Resolve the effective isolation for a task: its override, else the board default. */
+function wantsWorktree(task: Task, store: TaskStore): boolean {
+  if (task.isolation) return task.isolation === "worktree";
+  return store.getSettings().worktreeDefault;
 }
 
 /** Base/backoff tuning for reconnecting to the upstream OpenCode event stream. */
@@ -62,6 +77,8 @@ function errorMessage(error: unknown, fallback: string): string {
 export class TaskDispatcher implements Dispatcher {
   private readonly client: OpencodeHandle["client"];
   private readonly store: TaskStore;
+  private readonly worktrees: WorktreeManager;
+  private readonly worktreeBaseDir: (repoRoot: string) => string;
 
   private running = false;
   /** Bumped on every stop()/restart so a stale consume loop knows to exit. */
@@ -71,12 +88,34 @@ export class TaskDispatcher implements Dispatcher {
   constructor(deps: TaskDispatcherDeps) {
     this.client = deps.client;
     this.store = deps.store;
+    this.worktrees = deps.worktrees ?? new GitWorktreeManager();
+    this.worktreeBaseDir =
+      deps.worktreeBaseDir ??
+      ((repoRoot) => join(dirname(repoRoot), ".opencode-board-worktrees", basename(repoRoot)));
   }
 
   async run(taskId: string): Promise<Task> {
     const task = this.store.get(taskId);
     if (!task) {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
+    }
+
+    // Resolve where the session actually runs. In worktree isolation the session
+    // runs in a dedicated `git worktree`; a non-repo directory can't be isolated,
+    // so we block the run and surface the "make it a git repo?" decision instead.
+    let execDirectory = task.directory;
+    if (wantsWorktree(task, this.store)) {
+      if (!(await this.worktrees.isGitRepo(task.directory))) {
+        const blocked = this.store.update(taskId, {
+          pending: "git-init",
+          runState: "unstarted",
+          error: undefined,
+        });
+        if (!blocked) throw AdapterError.notFound(`Task not found: ${taskId}`);
+        return blocked;
+      }
+      const wt = await this.ensureWorktree(task);
+      execDirectory = wt.worktreePath;
     }
 
     // v2 session.create binds the agent + model + location, then v2
@@ -86,7 +125,7 @@ export class TaskDispatcher implements Dispatcher {
     const createInput = {
       agent: task.agent,
       model: task.model,
-      location: { directory: task.directory },
+      location: { directory: execDirectory },
       permission: UNATTENDED_PERMISSION,
     };
     const created = await this.client.v2.session.create(createInput);
@@ -114,7 +153,12 @@ export class TaskDispatcher implements Dispatcher {
       return updated;
     }
 
-    this.store.update(taskId, { sessionId, runState: "running", error: undefined });
+    this.store.update(taskId, {
+      sessionId,
+      runState: "running",
+      error: undefined,
+      pending: undefined,
+    });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
 
     const fresh = this.store.get(taskId);
@@ -122,6 +166,85 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
     return fresh;
+  }
+
+  /**
+   * Get (or lazily create) the git worktree for an isolated task. Reuses an
+   * already-created worktree so a re-run doesn't collide on the branch; otherwise
+   * cuts `board/<taskId>` from the task directory's current branch and records the
+   * worktree metadata on the task.
+   */
+  private async ensureWorktree(
+    task: Task,
+  ): Promise<{ worktreePath: string; branch: string; baseBranch: string }> {
+    if (task.worktreePath && task.worktreeBranch) {
+      return {
+        worktreePath: task.worktreePath,
+        branch: task.worktreeBranch,
+        baseBranch: task.baseBranch ?? (await this.worktrees.currentBranch(task.directory)),
+      };
+    }
+    const repoRoot = await this.worktrees.repoRoot(task.directory);
+    const branch = `board/${task.id}`;
+    const worktreePath = join(this.worktreeBaseDir(repoRoot), task.id);
+    const info = await this.worktrees.createWorktree(task.directory, branch, worktreePath);
+    this.store.update(task.id, {
+      worktreePath: info.worktreePath,
+      worktreeBranch: info.branch,
+      baseBranch: info.baseBranch,
+    });
+    return info;
+  }
+
+  async initGitAndRun(taskId: string): Promise<Task> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    try {
+      await this.worktrees.initRepo(task.directory);
+    } catch (err) {
+      const updated = this.store.update(taskId, {
+        runState: "error",
+        pending: undefined,
+        error: errorMessage(err, "Failed to initialize git repository"),
+      });
+      if (!updated) throw AdapterError.notFound(`Task not found: ${taskId}`);
+      return updated;
+    }
+    this.store.update(taskId, { pending: undefined });
+    return this.run(taskId);
+  }
+
+  async syncUpstream(taskId: string): Promise<MergeOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (!task.worktreePath || !task.baseBranch) {
+      throw AdapterError.validation("Task has no worktree to sync");
+    }
+    const result = await this.worktrees.syncUpstream(task.worktreePath, task.baseBranch);
+    return { task: this.store.get(taskId) ?? task, ...result };
+  }
+
+  async integrate(taskId: string, targetBranch?: string): Promise<MergeOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (!task.worktreePath || !task.worktreeBranch) {
+      throw AdapterError.validation("Task has no worktree to integrate");
+    }
+    const target = targetBranch ?? task.baseBranch;
+    if (!target) throw AdapterError.validation("No target branch to integrate into");
+
+    const repoRoot = await this.worktrees.repoRoot(task.directory);
+    const result = await this.worktrees.integrate(
+      repoRoot,
+      task.worktreeBranch,
+      target,
+      task.worktreePath,
+    );
+    // On success the worktree is gone (branch kept) — drop the stale path.
+    if (result.ok) {
+      this.store.update(taskId, { worktreePath: undefined });
+    }
+    return { task: this.store.get(taskId) ?? task, ...result };
   }
 
   private async prompt(sessionId: string, text: string): Promise<string | undefined> {

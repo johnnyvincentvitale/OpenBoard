@@ -5,9 +5,13 @@
  */
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { TASK_ROUTE_PATTERNS, isColumn } from "../../shared";
-import type { CreateTaskInput, Dispatcher, TaskStore } from "../../shared";
+import { TASK_ROUTE_PATTERNS, TASK_ISOLATION_MODES, isColumn } from "../../shared";
+import type { CreateTaskInput, Dispatcher, TaskIsolationMode, TaskStore } from "../../shared";
 import { AdapterError } from "../../shared/errors";
+
+function isIsolationMode(value: unknown): value is TaskIsolationMode {
+  return typeof value === "string" && (TASK_ISOLATION_MODES as readonly string[]).includes(value);
+}
 
 interface MoveTaskBody {
   column?: unknown;
@@ -37,13 +41,16 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model } = body;
+      const { title, description, directory, agent, model, isolation } = body;
 
       if (typeof title !== "string" || title.trim().length === 0) {
         throw AdapterError.validation("title must be a non-empty string");
       }
       if (typeof directory !== "string" || directory.trim().length === 0) {
         throw AdapterError.validation("directory must be a non-empty string");
+      }
+      if (isolation !== undefined && !isIsolationMode(isolation)) {
+        throw AdapterError.validation("isolation must be 'worktree' or 'in-place'");
       }
 
       const task = store.create({
@@ -52,6 +59,7 @@ export function registerTaskRoutes(
         directory,
         ...(typeof agent === "string" ? { agent } : {}),
         ...(model && typeof model === "object" ? { model } : {}),
+        ...(isIsolationMode(isolation) ? { isolation } : {}),
       });
 
       return c.json(task, 201);
@@ -151,6 +159,72 @@ export function registerTaskRoutes(
     try {
       store.remove(id);
       return c.json({ ok: true }, 200);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
+  // Answer the "make this directory a git repo?" prompt: init + commit, then run.
+  app.post(TASK_ROUTE_PATTERNS.initGit, async (c) => {
+    const id = c.req.param("id");
+    try {
+      const task = await dispatcher.initGitAndRun(id);
+      return c.json(task, 202);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
+  // Merge the upstream base branch into the task's worktree branch.
+  app.post(TASK_ROUTE_PATTERNS.sync, async (c) => {
+    const id = c.req.param("id");
+    try {
+      const outcome = await dispatcher.syncUpstream(id);
+      return c.json(outcome, outcome.ok ? 200 : 409);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
+  // Merge the worktree branch into the target (base) branch, remove the worktree, keep the branch.
+  app.post(TASK_ROUTE_PATTERNS.integrate, async (c) => {
+    const id = c.req.param("id");
+    try {
+      let target: string | undefined;
+      try {
+        const body = (await c.req.json()) as { targetBranch?: unknown };
+        if (typeof body?.targetBranch === "string") target = body.targetBranch;
+      } catch {
+        // Body optional — integrate falls back to the task's recorded base branch.
+      }
+      const outcome = await dispatcher.integrate(id, target);
+      return c.json(outcome, outcome.ok ? 200 : 409);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
+  app.get(TASK_ROUTE_PATTERNS.settings, (c) => {
+    try {
+      return c.json(store.getSettings(), 200);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
+  app.put(TASK_ROUTE_PATTERNS.settings, async (c) => {
+    try {
+      let body: { worktreeDefault?: unknown };
+      try {
+        body = await c.req.json();
+      } catch {
+        throw AdapterError.validation("Request body must be valid JSON");
+      }
+      if (typeof body.worktreeDefault !== "boolean") {
+        throw AdapterError.validation("worktreeDefault must be a boolean");
+      }
+      const settings = store.updateSettings({ worktreeDefault: body.worktreeDefault });
+      return c.json(settings, 200);
     } catch (err) {
       return respondWithError(c, err);
     }

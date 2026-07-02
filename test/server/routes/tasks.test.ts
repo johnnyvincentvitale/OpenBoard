@@ -14,6 +14,9 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
   run: ReturnType<typeof vi.fn>;
   retry: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
+  initGitAndRun: ReturnType<typeof vi.fn>;
+  syncUpstream: ReturnType<typeof vi.fn>;
+  integrate: ReturnType<typeof vi.fn>;
 } {
   return {
     run: vi.fn(async (taskId: string): Promise<Task> => {
@@ -28,6 +31,25 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
     }),
     abort: vi.fn(async (taskId: string): Promise<void> => {
       store.update(taskId, { runState: "idle" });
+    }),
+    initGitAndRun: vi.fn(async (taskId: string): Promise<Task> => {
+      const updated = store.update(taskId, {
+        runState: "running",
+        column: "in_progress",
+        pending: undefined,
+      });
+      if (!updated) throw new Error(`unknown task ${taskId}`);
+      return updated;
+    }),
+    syncUpstream: vi.fn(async (taskId: string) => {
+      const task = store.get(taskId);
+      if (!task) throw new Error(`unknown task ${taskId}`);
+      return { task, ok: true, conflict: false, message: "merged" };
+    }),
+    integrate: vi.fn(async (taskId: string, _targetBranch?: string) => {
+      const task = store.get(taskId);
+      if (!task) throw new Error(`unknown task ${taskId}`);
+      return { task, ok: true, conflict: false, message: "integrated" };
     }),
     start: vi.fn(),
     shutdown: vi.fn(),
@@ -379,5 +401,114 @@ describe("DELETE /api/tasks/:id", () => {
 
     expect(store.get(task.id)).toBeUndefined();
     expect(store.list()).toHaveLength(0);
+  });
+});
+
+// --- Worktree isolation endpoints -------------------------------------------
+
+describe("worktree isolation routes", () => {
+  let store: SqliteTaskStore;
+  let dispatcher: ReturnType<typeof makeFakeDispatcher>;
+
+  beforeEach(() => {
+    store = new SqliteTaskStore(":memory:");
+    dispatcher = makeFakeDispatcher(store);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it("accepts an isolation override on create", async () => {
+    const app = buildApp(store, dispatcher);
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "A", directory: "/repo", isolation: "worktree" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { isolation?: string };
+    expect(body.isolation).toBe("worktree");
+  });
+
+  it("rejects an invalid isolation value with 400", async () => {
+    const app = buildApp(store, dispatcher);
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "A", directory: "/repo", isolation: "nope" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /init-git delegates to the dispatcher and returns 202", async () => {
+    const task = store.create({ title: "A", description: "", directory: "/repo" });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/init-git`, { method: "POST" });
+    expect(res.status).toBe(202);
+    expect(dispatcher.initGitAndRun).toHaveBeenCalledWith(task.id);
+  });
+
+  it("POST /sync returns 200 on a clean merge", async () => {
+    const task = store.create({ title: "A", description: "", directory: "/repo" });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/sync`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean };
+    expect(body.ok).toBe(true);
+  });
+
+  it("POST /sync returns 409 when the merge conflicts", async () => {
+    const task = store.create({ title: "A", description: "", directory: "/repo" });
+    dispatcher.syncUpstream.mockResolvedValueOnce({
+      task: store.get(task.id),
+      ok: false,
+      conflict: true,
+      message: "conflict",
+    });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/sync`, { method: "POST" });
+    expect(res.status).toBe(409);
+  });
+
+  it("POST /integrate passes an explicit targetBranch through", async () => {
+    const task = store.create({ title: "A", description: "", directory: "/repo" });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/integrate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetBranch: "dev" }),
+    });
+    expect(res.status).toBe(200);
+    expect(dispatcher.integrate).toHaveBeenCalledWith(task.id, "dev");
+  });
+
+  it("GET /api/settings returns defaults; PUT updates them", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const get1 = await app.request("/api/settings");
+    expect(get1.status).toBe(200);
+    expect(await get1.json()).toEqual({ worktreeDefault: false });
+
+    const put = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ worktreeDefault: true }),
+    });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toEqual({ worktreeDefault: true });
+
+    const get2 = await app.request("/api/settings");
+    expect(await get2.json()).toEqual({ worktreeDefault: true });
+  });
+
+  it("PUT /api/settings rejects a non-boolean with 400", async () => {
+    const app = buildApp(store, dispatcher);
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ worktreeDefault: "yes" }),
+    });
+    expect(res.status).toBe(400);
   });
 });

@@ -1,6 +1,16 @@
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
-import type { Column, CreateTaskInput, ModelRef, Task, TaskRunState, TaskStore } from "../shared";
+import type {
+  BoardSettings,
+  Column,
+  CreateTaskInput,
+  ModelRef,
+  Task,
+  TaskIsolationMode,
+  TaskPending,
+  TaskRunState,
+  TaskStore,
+} from "../shared";
 import { DEFAULT_COLUMN } from "../shared";
 import { bootstrap } from "./schema";
 
@@ -17,6 +27,11 @@ CREATE TABLE IF NOT EXISTS task (
   error       TEXT,
   agent       TEXT,
   model       TEXT,
+  isolation       TEXT,
+  worktree_path   TEXT,
+  worktree_branch TEXT,
+  base_branch     TEXT,
+  pending         TEXT,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   UNIQUE(column, position)
@@ -24,7 +39,23 @@ CREATE TABLE IF NOT EXISTS task (
 
 CREATE INDEX IF NOT EXISTS idx_task_column ON task(column);
 CREATE INDEX IF NOT EXISTS idx_task_column_position ON task(column, position);
+
+CREATE TABLE IF NOT EXISTS board_setting (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
+
+/** Columns added after the initial task schema — ALTER-in for pre-existing DBs. */
+const TASK_ADDED_COLUMNS: Array<[string, string]> = [
+  ["isolation", "TEXT"],
+  ["worktree_path", "TEXT"],
+  ["worktree_branch", "TEXT"],
+  ["base_branch", "TEXT"],
+  ["pending", "TEXT"],
+];
+
+const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
 
 interface TaskRowRecord {
   id: string;
@@ -38,6 +69,11 @@ interface TaskRowRecord {
   error: string | null;
   agent: string | null;
   model: string | null;
+  isolation: string | null;
+  worktree_path: string | null;
+  worktree_branch: string | null;
+  base_branch: string | null;
+  pending: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -58,6 +94,11 @@ function toTask(record: TaskRowRecord): Task {
   };
   if (record.session_id !== null) task.sessionId = record.session_id;
   if (record.error !== null) task.error = record.error;
+  if (record.isolation !== null) task.isolation = record.isolation as TaskIsolationMode;
+  if (record.worktree_path !== null) task.worktreePath = record.worktree_path;
+  if (record.worktree_branch !== null) task.worktreeBranch = record.worktree_branch;
+  if (record.base_branch !== null) task.baseBranch = record.base_branch;
+  if (record.pending !== null) task.pending = record.pending as TaskPending;
   return task;
 }
 
@@ -92,6 +133,7 @@ export class SqliteTaskStore implements TaskStore {
     this.db.pragma("journal_mode = WAL");
     bootstrap(this.db);
     this.db.exec(TASK_SCHEMA_SQL);
+    this.migrateTaskColumns();
 
     this.stmts = {
       listTasks: this.db.prepare("SELECT * FROM task ORDER BY column, position"),
@@ -101,8 +143,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, error, agent, model, created_at, updated_at)
-         VALUES (@id, @title, @description, @directory, @column, @position, @sessionId, @runState, @error, @agent, @model, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, error, agent, model, isolation, worktree_path, worktree_branch, base_branch, pending, created_at, updated_at)
+         VALUES (@id, @title, @description, @directory, @column, @position, @sessionId, @runState, @error, @agent, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -116,6 +158,11 @@ export class SqliteTaskStore implements TaskStore {
            error = @error,
            agent = @agent,
            model = @model,
+           isolation = @isolation,
+           worktree_path = @worktreePath,
+           worktree_branch = @worktreeBranch,
+           base_branch = @baseBranch,
+           pending = @pending,
            updated_at = @updatedAt
          WHERE id = @id`,
       ),
@@ -124,7 +171,25 @@ export class SqliteTaskStore implements TaskStore {
       ),
       parkTask: this.db.prepare("UPDATE task SET position = @position WHERE id = @id"),
       deleteTask: this.db.prepare("DELETE FROM task WHERE id = ?"),
+      getSetting: this.db.prepare("SELECT value FROM board_setting WHERE key = ?"),
+      putSetting: this.db.prepare(
+        "INSERT INTO board_setting (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
+      ),
     };
+  }
+
+  /** Add columns introduced after the initial schema to a pre-existing task table. */
+  private migrateTaskColumns(): void {
+    const existing = new Set(
+      (this.db.prepare("PRAGMA table_info(task)").all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      ),
+    );
+    for (const [name, type] of TASK_ADDED_COLUMNS) {
+      if (!existing.has(name)) {
+        this.db.exec(`ALTER TABLE task ADD COLUMN ${name} ${type}`);
+      }
+    }
   }
 
   private readonly stmts: {
@@ -137,6 +202,8 @@ export class SqliteTaskStore implements TaskStore {
     updateTaskPlacement: Database.Statement;
     parkTask: Database.Statement;
     deleteTask: Database.Statement;
+    getSetting: Database.Statement;
+    putSetting: Database.Statement;
   };
 
   list(): Task[] {
@@ -170,6 +237,11 @@ export class SqliteTaskStore implements TaskStore {
         error: null,
         agent: data.agent ?? null,
         model: data.model ? JSON.stringify(data.model) : null,
+        isolation: data.isolation ?? null,
+        worktreePath: null,
+        worktreeBranch: null,
+        baseBranch: null,
+        pending: null,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -200,6 +272,11 @@ export class SqliteTaskStore implements TaskStore {
         error: merged.error ?? null,
         agent: merged.agent ?? null,
         model: merged.model ? JSON.stringify(merged.model) : null,
+        isolation: merged.isolation ?? null,
+        worktreePath: merged.worktreePath ?? null,
+        worktreeBranch: merged.worktreeBranch ?? null,
+        baseBranch: merged.baseBranch ?? null,
+        pending: merged.pending ?? null,
         updatedAt: this.now(),
       });
 
@@ -231,6 +308,19 @@ export class SqliteTaskStore implements TaskStore {
     });
 
     runTxn(id);
+  }
+
+  getSettings(): BoardSettings {
+    const row = this.stmts.getSetting.get("worktreeDefault") as { value: string } | undefined;
+    return {
+      worktreeDefault: row ? row.value === "true" : DEFAULT_SETTINGS.worktreeDefault,
+    };
+  }
+
+  updateSettings(patch: Partial<BoardSettings>): BoardSettings {
+    const next = { ...this.getSettings(), ...patch };
+    this.stmts.putSetting.run({ key: "worktreeDefault", value: next.worktreeDefault ? "true" : "false" });
+    return next;
   }
 
   /** Close the underlying connection. Only meaningful when this store opened it (path constructor). */
