@@ -34,12 +34,18 @@ function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
  * (including reconnects) delivers.
  */
 class FakeOpencodeClient {
-  createCalls: Array<{ agent?: string; model?: unknown; permission?: unknown }> = [];
+  createCalls: Array<{
+    agent?: string;
+    model?: unknown;
+    location?: { directory: string };
+    permission?: unknown;
+  }> = [];
   promptCalls: Array<{ sessionID: string; prompt: unknown }> = [];
   abortCalls: Array<{ sessionID: string }> = [];
 
   nextSessionId = "ses_x";
   createShouldError: { error: unknown } | null = null;
+  promptShouldError: { error: unknown } | null = null;
 
   private scripts: OpencodeEvent[][] = [];
   subscribeCallCount = 0;
@@ -51,7 +57,12 @@ class FakeOpencodeClient {
   // The dispatcher uses the v2 durable session API (verified recipe).
   v2 = {
     session: {
-      create: async (params: { agent?: string; model?: unknown; permission?: unknown }) => {
+      create: async (params: {
+        agent?: string;
+        model?: unknown;
+        location?: { directory: string };
+        permission?: unknown;
+      }) => {
         this.createCalls.push(params);
         if (this.createShouldError) {
           return { data: undefined, error: this.createShouldError.error };
@@ -64,6 +75,9 @@ class FakeOpencodeClient {
       },
       prompt: async (params: { sessionID: string; prompt: unknown }) => {
         this.promptCalls.push(params);
+        if (this.promptShouldError) {
+          return { data: undefined, error: this.promptShouldError.error };
+        }
         return { data: {}, error: undefined };
       },
     },
@@ -135,6 +149,7 @@ describe("TaskDispatcher", () => {
       const result = await dispatcher.run(task.id);
 
       expect(client.createCalls).toHaveLength(1);
+      expect(client.createCalls[0]?.location).toEqual({ directory: "/tmp/my-project" });
       expect(client.createCalls[0]?.permission).toBeTruthy();
       expect(client.promptCalls).toEqual([
         { sessionID: "ses_abc123", prompt: { text: task.description } },
@@ -164,6 +179,22 @@ describe("TaskDispatcher", () => {
       const inProgress = store.list().filter((t) => t.column === "in_progress");
       expect(inProgress.map((t) => t.id)).toEqual([other.id, task.id]);
       expect(result.position).toBe(1);
+    });
+
+    it("records prompt failures without moving the task to in_progress", async () => {
+      const task = createTask({ directory: "/tmp/my-project" });
+      client.nextSessionId = "ses_prompt_fail";
+      client.promptShouldError = { error: { message: "provider unavailable" } };
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.run(task.id);
+
+      expect(result.sessionId).toBe("ses_prompt_fail");
+      expect(result.runState).toBe("error");
+      expect(result.error).toBe("provider unavailable");
+      expect(result.column).toBe("todo");
+      expect(store.get(task.id)?.column).toBe("todo");
+      expect(store.get(task.id)?.runState).toBe("error");
     });
   });
 

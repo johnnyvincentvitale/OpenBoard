@@ -43,6 +43,22 @@ function extractSessionId(data: unknown): string | undefined {
 /** Position value that always lands a move at the end of the target column. */
 const END_OF_COLUMN = Number.POSITIVE_INFINITY;
 
+function errorMessage(error: unknown, fallback: string): string {
+  if (typeof error === "string") return error;
+  if (error !== null && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    const data = record.data;
+    if (data !== null && typeof data === "object") {
+      const message = (data as Record<string, unknown>).message;
+      if (typeof message === "string") return message;
+    }
+    if (typeof record._tag === "string") return record._tag;
+    if (typeof record.name === "string") return record.name;
+  }
+  return fallback;
+}
+
 export class TaskDispatcher implements Dispatcher {
   private readonly client: OpencodeHandle["client"];
   private readonly store: TaskStore;
@@ -63,17 +79,17 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
 
-    // Verified recipe (empirically confirmed against opencode v1.17.13):
-    // v2 session.create binds the agent + model + an allow-all permission ruleset
-    // so the session runs UNATTENDED, then v2 session.prompt admits the input and
-    // schedules the autonomous agent loop. `session.wait` is a stub in this version,
-    // so completion is detected from the /event stream (see handleEvent). NB: v2
-    // create runs the session in the opencode server's working directory.
-    const created = await this.client.v2.session.create({
+    // v2 session.create binds the agent + model + location, then v2
+    // session.prompt admits the input and schedules the autonomous agent loop.
+    // OpenCode 1.17.13 also accepts this permission field at runtime even
+    // though the generated v2 SDK type has not caught up.
+    const createInput = {
       agent: task.agent,
       model: task.model,
-      permission: UNATTENDED_PERMISSION as never,
-    } as never);
+      location: { directory: task.directory },
+      permission: UNATTENDED_PERMISSION,
+    };
+    const created = await this.client.v2.session.create(createInput);
     if ((created as { error?: unknown }).error) {
       throw AdapterError.unreachable(
         "Failed to create OpenCode session",
@@ -85,12 +101,20 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.unreachable("OpenCode session create returned no id");
     }
 
-    await this.client.v2.session.prompt({
-      sessionID: sessionId,
-      prompt: { text: task.description },
-    } as never);
+    const promptError = await this.prompt(sessionId, task.description);
+    if (promptError) {
+      const updated = this.store.update(taskId, {
+        sessionId,
+        runState: "error",
+        error: promptError,
+      });
+      if (!updated) {
+        throw AdapterError.notFound(`Task not found: ${taskId}`);
+      }
+      return updated;
+    }
 
-    this.store.update(taskId, { sessionId, runState: "running" });
+    this.store.update(taskId, { sessionId, runState: "running", error: undefined });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
 
     const fresh = this.store.get(taskId);
@@ -98,6 +122,19 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
     return fresh;
+  }
+
+  private async prompt(sessionId: string, text: string): Promise<string | undefined> {
+    try {
+      const prompted = await this.client.v2.session.prompt({
+        sessionID: sessionId,
+        prompt: { text },
+      });
+      const error = (prompted as { error?: unknown }).error;
+      return error ? errorMessage(error, "Failed to prompt OpenCode session") : undefined;
+    } catch (err) {
+      return errorMessage(err, "Failed to prompt OpenCode session");
+    }
   }
 
   async retry(taskId: string, feedback?: string): Promise<Task> {
@@ -109,12 +146,16 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
     }
 
-    await this.client.v2.session.prompt({
-      sessionID: task.sessionId,
-      prompt: { text: feedback ?? task.description },
-    } as never);
+    const promptError = await this.prompt(task.sessionId, feedback ?? task.description);
+    if (promptError) {
+      const updated = this.store.update(taskId, { runState: "error", error: promptError });
+      if (!updated) {
+        throw AdapterError.notFound(`Task not found: ${taskId}`);
+      }
+      return updated;
+    }
 
-    this.store.update(taskId, { runState: "running" });
+    this.store.update(taskId, { runState: "running", error: undefined });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
 
     const fresh = this.store.get(taskId);

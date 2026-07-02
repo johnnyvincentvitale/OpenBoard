@@ -45,7 +45,7 @@ export async function main(): Promise<void> {
   });
 
   // Serve the built frontend (dist/web) for the Electron shell / production. Absolute
-  // path so it's independent of the process cwd (which is the agent workspace). API
+  // path so it's independent of the process cwd (the adapter/OpenCode default workspace). API
   // routes are already registered above and match first; this catch-all serves the SPA.
   const webDir =
     process.env.BOARD_WEB_DIR ??

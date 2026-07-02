@@ -3,7 +3,8 @@
 A local, Devin/Hermes-style **multi-agent command center for [OpenCode](https://opencode.ai)**,
 delivered as an Electron desktop app. Post a task, assign it an OpenCode agent, hit **Run** —
 the board dispatches a real session that **autonomously does the work**, and the card
-**auto-advances To Do → In Progress → Review → Done** as the agent runs. It's the named-agent,
+**auto-advances To Do → In Progress → Review** as the agent runs. Moving to Done is manual
+until OpenCode exposes a stronger task-complete signal. It's the named-agent,
 multi-agent workflow OpenCode doesn't ship, and a free alternative to Devin Desktop's Kanban.
 
 ## What it does
@@ -15,7 +16,7 @@ multi-agent workflow OpenCode doesn't ship, and a free alternative to Devin Desk
   allow-all permission (so it runs unattended), prompts it with the task, and the agent
   autonomously reads/writes/runs to completion.
 - **Cards move themselves.** The dispatcher watches OpenCode's `/event` stream and advances
-  the card to Review when the session finishes; the UI updates live over SSE.
+  the card to Review when the session goes idle; the UI updates live over SSE.
 - **Per-card actions:** Run, Retry (re-prompt), Stop (abort), Delete.
 
 ## How it works
@@ -23,7 +24,7 @@ multi-agent workflow OpenCode doesn't ship, and a free alternative to Devin Desk
 Electron (electron/main.cjs)
   └─ spawns the adapter → opens a native window on the served board
         src/server (Hono adapter)
-          ├─ TaskDispatcher  Run → client.v2.session.create({agent,model,permission})
+          ├─ TaskDispatcher  Run → client.v2.session.create({agent,model,location,permission})
           │                       → client.v2.session.prompt({text}) → /event → auto-advance
           ├─ SqliteTaskStore  tasks + columns (better-sqlite3)
           ├─ routes  /api/tasks · /api/agents · /api/tasks/events (SSE)
@@ -39,7 +40,8 @@ npm install            # first time only
 npm run electron       # builds the UI + opens the native desktop window
 ```
 The app spawns `opencode` and the adapter itself — no other terminals. Dispatched agents
-work in the **workspace** (default: your home dir); point it at a repo with:
+work in each task's requested directory. The adapter/OpenCode default workspace is your home
+dir unless you point it at a repo with:
 ```sh
 BOARD_WORKSPACE=/path/to/your/repo npm run electron
 ```
@@ -71,7 +73,8 @@ test/          unit + DOM + integration
 
 ## Known constraints (verified)
 - `session.wait` is a stub in this OpenCode version → completion comes from the `/event` stream.
-- v2 `session.create` runs the session in the **server's working directory** (the workspace).
+- Push tasks pass `location.directory` to v2 `session.create`; `BOARD_WORKSPACE` is the
+  adapter/OpenCode default workspace, not the per-task execution directory.
 - Concurrent agents in one repo have **no file locking** — assign non-overlapping work, or use
   a git worktree per agent.
 - Available models depend on your OpenCode auth/config (here: OpenCode Zen free + OpenAI GPT-5.x).

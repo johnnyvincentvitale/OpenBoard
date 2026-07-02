@@ -106,7 +106,11 @@ export function registerTaskRoutes(
 
     try {
       await dispatcher.abort(id);
-      return c.json({ ok: true }, 200);
+      const task = store.get(id);
+      if (!task) {
+        throw AdapterError.notFound(`Task not found: ${id}`);
+      }
+      return c.json(task, 200);
     } catch (err) {
       return respondWithError(c, err);
     }

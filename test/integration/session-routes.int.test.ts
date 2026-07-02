@@ -5,9 +5,13 @@
  * process. No mocks. Self-skips if an ephemeral OpenCode server can't be
  * started in this environment (e.g. CI without the binary).
  *
- * Deliberately avoids invoking any model/prompt (cost/latency) — only
- * session lifecycle + board reads/moves.
+ * Most tests avoid invoking any model/prompt (cost/latency). The Push smoke
+ * test deliberately admits one minimal task prompt to verify task -> session
+ * dispatch against the real OpenCode server.
  */
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Hono } from "hono";
 import { loadConfig } from "../../src/server/config";
@@ -17,7 +21,7 @@ import { SqliteTaskStore } from "../../src/db/task-store";
 import { EventBridge } from "../../src/server/event-bridge";
 import { TaskDispatcher } from "../../src/server/dispatcher";
 import { createApp } from "../../src/server/app";
-import type { Card } from "../../src/shared";
+import type { Card, Task } from "../../src/shared";
 import {
   opencodeAvailable,
   startEphemeralOpencodeServer,
@@ -30,6 +34,8 @@ describe.skipIf(!available)("session routes (integration)", () => {
   let ephemeral: EphemeralOpencodeServer;
   let handle: OpencodeHandle;
   let store: SqliteColumnStore;
+  let taskStore: SqliteTaskStore;
+  let dispatcher: TaskDispatcher;
   let bridge: EventBridge;
   let app: Hono;
 
@@ -46,8 +52,8 @@ describe.skipIf(!available)("session routes (integration)", () => {
     bridge = new EventBridge({ client: handle.client, store });
     bridge.start();
 
-    const taskStore = new SqliteTaskStore(":memory:");
-    const dispatcher = new TaskDispatcher({ client: handle.client, store: taskStore });
+    taskStore = new SqliteTaskStore(":memory:");
+    dispatcher = new TaskDispatcher({ client: handle.client, store: taskStore });
 
     app = createApp({
       client: handle.client,
@@ -61,8 +67,10 @@ describe.skipIf(!available)("session routes (integration)", () => {
 
   afterAll(async () => {
     bridge?.stop();
+    dispatcher?.shutdown();
     await handle?.shutdown();
     store?.close();
+    taskStore?.close();
     await ephemeral?.close();
   });
 
@@ -115,4 +123,51 @@ describe.skipIf(!available)("session routes (integration)", () => {
     expect(movedCard).toBeTruthy();
     expect(movedCard?.column).toBe("review");
   });
+
+  it(
+    "runs a Push task in its requested directory",
+    async () => {
+      const taskDir = mkdtempSync(join(tmpdir(), "opencode-board-task-"));
+      let sessionId: string | undefined;
+
+      try {
+        const createRes = await app.request("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: "push integration location smoke",
+            description: "Reply OK only. Do not edit files.",
+            directory: taskDir,
+            agent: "build",
+          }),
+        });
+        expect(createRes.status).toBe(201);
+        const created = (await createRes.json()) as Task;
+
+        const runRes = await app.request(`/api/tasks/${created.id}/run`, { method: "POST" });
+        expect(runRes.status).toBe(202);
+        const ran = (await runRes.json()) as Task;
+        if (ran.runState === "error") {
+          throw new Error(`Push prompt failed: ${ran.error ?? "unknown error"}`);
+        }
+
+        expect(ran.column).toBe("in_progress");
+        expect(ran.runState).toBe("running");
+        expect(ran.sessionId).toBeTruthy();
+        sessionId = ran.sessionId;
+
+        const sessionResult = await handle.client.v2.session.get({ sessionID: sessionId! });
+        expect(sessionResult.error).toBeFalsy();
+        const session = (sessionResult.data as { data?: { location?: { directory?: string } } })
+          .data;
+        expect(realpathSync(session?.location?.directory ?? "")).toBe(realpathSync(taskDir));
+      } finally {
+        if (sessionId) {
+          await handle.client.v2.session.interrupt({ sessionID: sessionId }).catch(() => {});
+        }
+        rmSync(taskDir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 });

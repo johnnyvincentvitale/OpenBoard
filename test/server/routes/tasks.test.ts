@@ -268,7 +268,7 @@ describe("POST /api/tasks/:id/abort", () => {
     store.close();
   });
 
-  it("calls dispatcher.abort with the task id and responds 200 {ok:true}", async () => {
+  it("calls dispatcher.abort with the task id and responds 200 with the updated Task", async () => {
     const task = store.create({ title: "A", description: "do it", directory: "/repo" });
     const app = buildApp(store, dispatcher);
 
@@ -276,7 +276,8 @@ describe("POST /api/tasks/:id/abort", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ ok: true });
+    expect(body.id).toBe(task.id);
+    expect(body.runState).toBe("idle");
 
     expect(dispatcher.abort).toHaveBeenCalledTimes(1);
     expect(dispatcher.abort).toHaveBeenCalledWith(task.id);

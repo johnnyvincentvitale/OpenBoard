@@ -198,16 +198,24 @@ describe("createTaskStore — create/run/retry/abort/remove", () => {
     expect(client.retryTask).toHaveBeenCalledWith("a");
   });
 
-  it("abort() calls client.abortTask with the task id", async () => {
-    const { connect } = makeFakeConnect();
-    const client = makeFakeClient();
+  it("abort() calls client.abortTask with the task id and upserts the returned Task", async () => {
+    const { connect, handle } = makeFakeConnect();
+    const aborted = makeTask({ id: "a", runState: "idle", column: "in_progress" });
+    const client = makeFakeClient({ abortTask: vi.fn(async () => aborted) });
     const store = createTaskStore({ client, connect, healthPollMs: 1_000_000 });
 
     store.init();
     await flush();
+    handle.handlers?.onFrame({
+      kind: "snapshot",
+      seq: 1,
+      tasks: [makeTask({ id: "a", runState: "running", column: "in_progress" })],
+    });
 
     await store.abort("a");
+
     expect(client.abortTask).toHaveBeenCalledWith("a");
+    expect(store.getSnapshot().tasks).toEqual([aborted]);
   });
 
   it("remove() calls client.removeTask and drops the task from state", async () => {
