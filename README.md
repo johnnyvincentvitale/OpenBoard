@@ -1,107 +1,82 @@
 # opencode-board
 
-A local, Devin-style **Kanban command center for [OpenCode](https://opencode.ai)**.
-Cards are your OpenCode **sessions**, pulled live from `opencode serve`, arranged across
-**To Do / In Progress / Review / Done**, updating in real time. A free, self-hosted
-alternative to Devin Desktop's Kanban.
-
-<!-- screenshot: four-column board with live session cards -->
+A local, Devin/Hermes-style **multi-agent command center for [OpenCode](https://opencode.ai)**,
+delivered as an Electron desktop app. Post a task, assign it an OpenCode agent, hit **Run** —
+the board dispatches a real session that **autonomously does the work**, and the card
+**auto-advances To Do → In Progress → Review → Done** as the agent runs. It's the named-agent,
+multi-agent workflow OpenCode doesn't ship, and a free alternative to Devin Desktop's Kanban.
 
 ## What it does
-
-- **Every OpenCode session is a card** — title, working directory, agent/model, cost,
-  diff stats (`+adds −dels (files)`), and a live-state pill (running / idle / retrying /
-  error). Running sessions pulse.
-- **Drag cards across columns** — the column layout is yours (OpenCode has no column
-  concept); it's stored in a local SQLite sidecar.
-- **Act on a card** — send a prompt, stop (abort) a running session, or view its diff.
-- **Real-time** — a Server-Sent-Events stream from the adapter pushes session
-  create/update/delete and live-state changes with no polling.
+- **Tasks, not just sessions.** A card in To Do is a spec: title, description, working
+  directory, and an assigned **agent** + **model**.
+- **Agents = OpenCode's own agents** — `build`, `plan`, `general`, `explore`, plus any you
+  define. The roster comes live from OpenCode; assign a card to one.
+- **Run → it executes.** The dispatcher creates a session bound to that agent/model with an
+  allow-all permission (so it runs unattended), prompts it with the task, and the agent
+  autonomously reads/writes/runs to completion.
+- **Cards move themselves.** The dispatcher watches OpenCode's `/event` stream and advances
+  the card to Review when the session finishes; the UI updates live over SSE.
+- **Per-card actions:** Run, Retry (re-prompt), Stop (abort), Delete.
 
 ## How it works
-
 ```
-opencode serve :4096  ──┐  REST (sessions, status, diff)
-   /event SSE (flat)  ──┼──▶  src/server (Hono adapter)  ──▶  src/web (React + Vite + dnd-kit)
-                        │     · board-service: merge sessions + status + columns → Card DTO
-                        │     · SqliteColumnStore: the column/order sidecar
-                        │     · EventBridge: /event → snapshot + patch frames over SSE
-                        └──▶  GET /api/board · POST …/move · …/prompt · …/interrupt · …/diff
-                             GET /api/board/events (SSE) · GET /api/health
+Electron (electron/main.cjs)
+  └─ spawns the adapter → opens a native window on the served board
+        src/server (Hono adapter)
+          ├─ TaskDispatcher  Run → client.v2.session.create({agent,model,permission})
+          │                       → client.v2.session.prompt({text}) → /event → auto-advance
+          ├─ SqliteTaskStore  tasks + columns (better-sqlite3)
+          ├─ routes  /api/tasks · /api/agents · /api/tasks/events (SSE)
+          └─ spawns `opencode serve`  (the agents' backend)
+        src/web (React + Vite + dnd-kit)  task board · new-task form · agent-assigned cards
 ```
+Uses the OpenCode **v2 durable session API** (`client.v2.session.*`). Verified capability
+notes live in the vault: `~/Brain-Pro/projects/opencode-board/opencode-capabilities.md`.
 
-- **Cards = sessions** via `@opencode-ai/sdk` (`client.session.*`). Column state is the
-  only thing this app owns, in `better-sqlite3` (dense-integer positions, reindexed on move).
-- **Frontend** talks to the adapter same-origin through the Vite dev proxy — no CORS.
-
-## Quick start
-
-Two processes: the board server (which spawns/owns an `opencode serve`) and the Vite UI.
-
+## Run it
 ```sh
-npm install
-npm run dev:server      # spawns opencode + serves the adapter on http://127.0.0.1:4097
-npm run dev             # Vite UI on http://localhost:5173  (proxies /api → :4097)
+npm install            # first time only
+npm run electron       # builds the UI + opens the native desktop window
 ```
-
-Open http://localhost:5173. Already running `opencode serve` yourself? Point the adapter at
-it instead of spawning a new one:
-
+The app spawns `opencode` and the adapter itself — no other terminals. Dispatched agents
+work in the **workspace** (default: your home dir); point it at a repo with:
 ```sh
-OPENCODE_BASE_URL=http://127.0.0.1:4096 npm run dev:server
+BOARD_WORKSPACE=/path/to/your/repo npm run electron
 ```
 
-### Configuration
-
-| Env var | Default | Meaning |
-| --- | --- | --- |
-| `OPENCODE_BASE_URL` | — | Connect to an existing opencode server (skips spawning). |
-| `OPENCODE_MANAGE_PROCESS` | `true` when spawning | Whether the adapter owns the opencode process. |
-| `OPENCODE_HOSTNAME` / `OPENCODE_PORT` | `127.0.0.1` / `4096` | Where to spawn/reach opencode. |
-| `BOARD_PORT` | `4097` | The adapter's own port. |
-| `BOARD_DB_PATH` | `board.sqlite` | Column sidecar location. |
+Browser fallback (two terminals):
+```sh
+npm run dev:server     # spawns opencode + the API on :4097
+npm run dev            # Vite UI at http://localhost:5173
+```
 
 ## Develop
-
 ```sh
-npm test               # unit + DOM tests (fast, no opencode needed) — runs on pre-commit + CI
-npm run test:integration  # integration tests against a REAL ephemeral opencode (local)
-npm run test:coverage  # coverage report
-npm run typecheck      # tsc --noEmit
+npm test                  # unit + DOM (fast, no opencode) — runs on pre-commit + CI
+npm run test:integration  # integration vs a real ephemeral opencode (local)
+npm run typecheck
+npm run build:web         # build the frontend → dist/web
+```
+Branches: `main` (trusted) / `dev` (work). Husky runs the unit+DOM suite before every commit.
+
+### Structure
+```
+src/shared/    frozen contracts (Task, Column, ModelRef, RosterAgent, routes, events)
+src/server/    Hono adapter — opencode client, dispatcher, task store wiring, routes, SSE, serve
+src/db/        better-sqlite3 task store + session-column sidecar
+src/web/       React UI — task store, TaskBoard (dnd), TaskCard, NewTaskForm
+electron/      Electron main process (main.cjs)
+test/          unit + DOM + integration
 ```
 
-Branches: `main` (trusted, green) / `dev` (work). Husky runs the unit+DOM suite before every
-commit; CI re-runs it plus a best-effort integration job on every push.
-
-### Project structure
-
-```
-src/shared/    frozen contracts imported everywhere (Card, Column, events, ColumnStore, routes)
-src/server/    Hono adapter — opencode client, board-service, routes, event-bridge, app, serve
-src/db/        better-sqlite3 column/order sidecar
-src/web/       React UI — store (useSyncExternalStore), dnd-kit board, session card
-test/          unit + DOM + integration (test/integration/*.int.test.ts)
-```
-
-## Parallel dev with worktrunk (optional)
-
-This board is about running many agents at once — and [worktrunk](https://github.com/max-sixty/worktrunk)
-(`wt`) is a great companion for developing it that way. It makes git worktrees "as easy as
-branches," so you can run several OpenCode (or other) agents in parallel on isolated
-checkouts of this repo without them stepping on each other.
-
-```sh
-brew install worktrunk
-wt config shell install     # shell integration
-wt switch feature/my-change # create + enter a worktree by branch name
-wt list                     # see worktrees + status
-wt merge                    # merge back and clean up
-```
-
-It's a convenience for your own workflow — the board itself doesn't depend on it.
+## Known constraints (verified)
+- `session.wait` is a stub in this OpenCode version → completion comes from the `/event` stream.
+- v2 `session.create` runs the session in the **server's working directory** (the workspace).
+- Concurrent agents in one repo have **no file locking** — assign non-overlapping work, or use
+  a git worktree per agent.
+- Available models depend on your OpenCode auth/config (here: OpenCode Zen free + OpenAI GPT-5.x).
 
 ## Roadmap
-
-v1 is **OpenCode-only**. Multi-CLI (Codex, Claude Code) is a future direction: a
-`SessionProvider` seam or an ACP-host rebuild (the Devin Desktop model). Only OpenCode
-currently exposes a full query+drive server, so it's the natural first (and only) provider.
+- Packaged/signed `.app` (electron-builder config is in place; native-module bundling is a follow-up).
+- Worktree-per-agent isolation for safe parallelism.
+- Multi-CLI: back an agent with Codex or Claude instead of OpenCode (a provider seam / ACP host).
