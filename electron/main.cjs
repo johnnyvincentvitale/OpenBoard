@@ -12,19 +12,33 @@ const WORKSPACE = process.env.BOARD_WORKSPACE || app.getPath("home");
 let adapter = null;
 
 function startAdapter() {
-  const tsx = path.join(REPO, "node_modules", ".bin", "tsx");
-  adapter = spawn(tsx, [path.join(REPO, "src", "server", "serve.ts")], {
-    cwd: WORKSPACE,
-    env: {
-      ...process.env,
-      BOARD_PORT,
-      OPENCODE_PORT,
-      BOARD_WEB_DIR: path.join(REPO, "dist", "web"),
-      BOARD_DB_PATH: path.join(app.getPath("userData"), "board.sqlite"),
-      BOARD_TASK_DB_PATH: path.join(app.getPath("userData"), "board-tasks.sqlite"),
-    },
-    stdio: "inherit",
-  });
+  // Dev: run the TypeScript source via tsx. Packaged: run the esbuild-bundled
+  // server (dist/server/serve.cjs) with the Electron binary in Node mode —
+  // tsx is a devDependency and isn't shipped in the packaged app.
+  const env = {
+    ...process.env,
+    BOARD_PORT,
+    OPENCODE_PORT,
+    BOARD_WEB_DIR: path.join(REPO, "dist", "web"),
+    BOARD_DB_PATH: path.join(app.getPath("userData"), "board.sqlite"),
+    BOARD_TASK_DB_PATH: path.join(app.getPath("userData"), "board-tasks.sqlite"),
+  };
+
+  if (app.isPackaged) {
+    adapter = spawn(process.execPath, [path.join(REPO, "dist", "server", "serve.mjs")], {
+      cwd: WORKSPACE,
+      env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
+      stdio: "inherit",
+    });
+  } else {
+    const tsx = path.join(REPO, "node_modules", ".bin", "tsx");
+    adapter = spawn(tsx, [path.join(REPO, "src", "server", "serve.ts")], {
+      cwd: WORKSPACE,
+      env,
+      stdio: "inherit",
+    });
+  }
+
   adapter.on("exit", (code) => {
     // eslint-disable-next-line no-console
     console.log(`adapter exited (${code})`);

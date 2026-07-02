@@ -61,6 +61,17 @@ npm run build:web         # build the frontend → dist/web
 ```
 Branches: `main` (trusted) / `dev` (work). Husky runs the unit+DOM suite before every commit.
 
+### Package the desktop app
+```sh
+npm run electron:pack     # → dist/mac-arm64/opencode-board.app (unsigned)
+```
+This bundles the adapter to a single ESM file (`dist/server/serve.mjs`, via esbuild — the
+packaged app has no `tsx`), rebuilds `better-sqlite3` for Electron's ABI, and emits an
+unsigned `.app`. When packaged, `main.cjs` runs the bundled server with the Electron binary
+in Node mode (`ELECTRON_RUN_AS_NODE`); in dev it still runs the TS source via `tsx`. The
+script restores the Node-ABI `better-sqlite3` afterward so `npm test` keeps working.
+Code signing needs an Apple Developer ID cert (`mac.identity` is `null` = unsigned).
+
 ### Structure
 ```
 src/shared/    frozen contracts (Task, Column, ModelRef, RosterAgent, routes, events)
@@ -80,6 +91,7 @@ test/          unit + DOM + integration
 - Available models depend on your OpenCode auth/config (here: OpenCode Zen free + OpenAI GPT-5.x).
 
 ## Roadmap
-- Packaged/signed `.app` (electron-builder config is in place; native-module bundling is a follow-up).
+- Packaged `.app` — **done** (`npm run electron:pack`, unsigned). Signing awaits an Apple
+  Developer ID cert.
 - Worktree-per-agent isolation for safe parallelism.
 - Multi-CLI: back an agent with Codex or Claude instead of OpenCode (a provider seam / ACP host).

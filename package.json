@@ -16,16 +16,27 @@
     "build": "vite build",
     "start": "tsx src/server/serve.ts",
     "build:web": "vite build",
+    "build:server": "esbuild src/server/serve.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server/serve.mjs --external:better-sqlite3 --external:electron --banner:js=\"import{createRequire as __ocbCreateRequire}from'module';const require=__ocbCreateRequire(import.meta.url);\"",
+    "build:app": "npm run build:web && npm run build:server",
     "electron": "npm run build:web && electron .",
-    "electron:pack": "npm run build:web && electron-builder --dir",
+    "electron:pack": "npm run build:app && electron-builder --dir && npm rebuild better-sqlite3",
     "prepare": "husky"
   },
   "build": {
     "appId": "com.johnnyvitale.opencode-board",
     "productName": "opencode-board",
-    "files": ["dist/web/**", "electron/**", "src/**", "package.json"],
-    "asarUnpack": ["node_modules/better-sqlite3/**"],
-    "mac": { "target": "dir", "identity": null }
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**"
+    ],
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "mac": {
+      "target": "dir",
+      "identity": null
+    }
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
@@ -40,6 +51,7 @@
     "concurrently": "^10.0.3",
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
     "husky": "^9.1.7",
     "jsdom": "^29.1.1",
     "tsx": "^4.22.4",
