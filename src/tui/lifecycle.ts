@@ -57,6 +57,10 @@ function normalizeOutcome(outcome: string | undefined): string {
   return (outcome ?? "").toUpperCase();
 }
 
+function normalizeDetail(value: string | undefined): string {
+  return (value ?? "").toUpperCase();
+}
+
 /**
  * Resolve the lifecycle phase plus a human-readable status + detail pair.
  *
@@ -80,7 +84,7 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
     return {
       phase: task.column === "review" ? "review-error" : "error",
       ...base,
-      detail: task.error ?? "",
+      detail: normalizeDetail(task.error),
     };
   }
 
@@ -96,12 +100,12 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
         return { phase: "review-blocked", ...base, detail: normalizeOutcome(outcome) };
       }
       if (source === "idle-fallback") {
-        return { phase: "review-idle-fallback", ...base, detail: "COMPLETE?" };
+        return { phase: "review-idle-fallback", ...base, detail: "UNCONFIRMED" };
       }
       return { phase: "review-reported-complete", ...base, detail: normalizeOutcome(outcome) };
     }
     if (task.runState === "idle") {
-      return { phase: "review-unassigned", ...base, detail: "READY" };
+      return { phase: "review-unassigned", ...base, detail: "NO REPORT" };
     }
     return { phase: "review-error", ...base, detail: base.label === "REVIEW" ? "ERROR" : base.label };
   }
@@ -126,7 +130,7 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
  * Examples:
  *   "● RUNNING · 4m 12s"
  *   "▲ REVIEW · COMPLETE"
- *   "▲ REVIEW · COMPLETE?"
+ *   "▲ REVIEW · UNCONFIRMED"
  *   "▲ REVIEW · BLOCKED"
  *   "! ERROR"
  *   "○ DONE · User"
@@ -165,7 +169,7 @@ export function taskLifecycleDetailRows(task: TaskLifecycleInput, now = Date.now
         role: "source",
       });
     } else if (status.phase === "review-unassigned") {
-      rows.push({ label: "OUTCOME", value: "READY", role: "outcome" });
+      rows.push({ label: "OUTCOME", value: "NO REPORT", role: "outcome" });
     }
   }
 

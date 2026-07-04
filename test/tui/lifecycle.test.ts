@@ -144,11 +144,11 @@ describe("task lifecycle helpers", () => {
       expect(status.phase).toBe("review-error");
       expect(status.label).toBe("ERROR");
       expect(status.glyph).toBe("!");
-      expect(status.detail).toBe("build failed");
+      expect(status.detail).toBe("BUILD FAILED");
     });
 
     it("renders a compact board label with the error", () => {
-      expect(compactTaskBoardLabel(task)).toBe("! ERROR · build failed");
+      expect(compactTaskBoardLabel(task)).toBe("! ERROR · BUILD FAILED");
     });
 
     it("returns state and error rows", () => {
@@ -178,11 +178,11 @@ describe("task lifecycle helpers", () => {
       const status = taskLifecycleStatus(task);
       expect(status.phase).toBe("review-idle-fallback");
       expect(status.label).toBe("REVIEW");
-      expect(status.detail).toBe("COMPLETE?");
+      expect(status.detail).toBe("UNCONFIRMED");
     });
 
     it("renders a compact board label flagged as unconfirmed", () => {
-      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · COMPLETE?");
+      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · UNCONFIRMED");
     });
 
     it("returns state, outcome, and idle-fallback source rows", () => {
@@ -240,7 +240,7 @@ describe("task lifecycle helpers", () => {
 
     it("reports review-unassigned phase", () => {
       expect(taskLifecycleStatus(task).phase).toBe("review-unassigned");
-      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · READY");
+      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · NO REPORT");
     });
   });
 
