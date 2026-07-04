@@ -36,6 +36,8 @@ export function instancesFilePath(homeDir: string): string {
 export interface InstanceDefinition extends InstanceConfig {
   /** Unique, kebab-case identifier (e.g. "my-repo", "side-project"). */
   name: string;
+  /** Private bearer token shared by the named daemon and local TUI attach. */
+  boardToken?: string;
 }
 
 /**
@@ -376,6 +378,7 @@ export type InstancesFileResult = InstancesFileOk | InstancesFileErr;
  * - `workspace` is a non-empty string.
  * - `dbPath` is a non-empty string.
  * - `opencodePort` (if present) is a valid port.
+ * - `boardToken` (if present) is a non-empty string.
  *
  * This is a pure function — no I/O.
  */
@@ -491,6 +494,14 @@ export function validateInstancesFile(raw: unknown): InstancesFileResult {
           message: ocPortResult.error,
         });
       }
+    }
+
+    // --- boardToken (optional) ---
+    if (inst.boardToken !== undefined && (typeof inst.boardToken !== "string" || inst.boardToken.trim() === "")) {
+      errors.push({
+        path: `instances[${i}].boardToken`,
+        message: "boardToken must be a non-empty string if set",
+      });
     }
   }
 

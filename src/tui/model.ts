@@ -12,6 +12,7 @@ import {
   type InstanceStatus,
   type InstancesFile,
 } from "../shared/instances";
+import { resolveBoardToken } from "../server/auth";
 
 // ── Instance lifecycle provider interface (frozen for parallel lanes) ─────────────
 
@@ -39,6 +40,20 @@ export function createRealInstanceProvider(homeDir = homedir()): InstanceLifecyc
     return definition;
   };
 
+  const createBoardToken = (): string =>
+    resolveBoardToken({ OPENBOARD_API_TOKEN: process.env.OPENBOARD_API_TOKEN } as NodeJS.ProcessEnv);
+
+  const ensureBoardToken = (definition: InstanceDefinition): InstanceDefinition => {
+    if (definition.boardToken?.trim()) return definition;
+    const updated: InstanceDefinition = { ...definition, boardToken: createBoardToken() };
+    const file = registry.getFile();
+    registry.save({
+      ...file,
+      instances: file.instances.map((item) => item.name === updated.name ? updated : item),
+    });
+    return updated;
+  };
+
   return {
     async list() {
       return Promise.all(
@@ -49,7 +64,7 @@ export function createRealInstanceProvider(homeDir = homedir()): InstanceLifecyc
       );
     },
     async start(name) {
-      const definition = resolveDefinition(name);
+      const definition = ensureBoardToken(resolveDefinition(name));
       const runtime = await daemon.status(definition);
       if (runtime.status !== "running") await daemon.start(definition);
     },
@@ -75,6 +90,7 @@ export function createRealInstanceProvider(homeDir = homedir()): InstanceLifecyc
         port,
         workspace,
         dbPath: `${dirs.dataDir}/board.sqlite`,
+        boardToken: createBoardToken(),
       };
       registry.add(definition);
       return definition;

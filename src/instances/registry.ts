@@ -51,6 +51,9 @@ function canonicalFile(file: InstancesFile): unknown {
     if (i.opencodePort !== undefined) {
       inst.opencodePort = i.opencodePort;
     }
+    if (i.boardToken !== undefined) {
+      inst.boardToken = i.boardToken;
+    }
     return inst;
   });
 
@@ -325,6 +328,9 @@ export function createInstanceRegistry(homeDir: string): InstanceRegistry {
         dbPath: newDbPath,
         ...(oldDef.opencodePort !== undefined
           ? { opencodePort: oldDef.opencodePort }
+          : {}),
+        ...(oldDef.boardToken !== undefined
+          ? { boardToken: oldDef.boardToken }
           : {}),
       };
 

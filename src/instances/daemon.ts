@@ -84,6 +84,9 @@ export function buildAdapterEnv(def: InstanceDefinition): Record<string, string>
   if (def.opencodePort !== undefined) {
     env.OPENBOARD_OPENCODE_PORT = String(def.opencodePort);
   }
+  if (def.boardToken !== undefined) {
+    env.OPENBOARD_API_TOKEN = def.boardToken;
+  }
   return env;
 }
 

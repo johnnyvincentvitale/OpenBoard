@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient } from "../client/board-client";
@@ -63,6 +64,78 @@ const SAFE_COLOR_MODE = process.env.OPENBOARD_TUI_SAFE === "1";
 // Screen handling is a separate, tmux-only guard against an alternate-buffer black-screen
 // bug — independent of the color path, so it stays keyed to tmux.
 const SCREEN_MODE = IS_TMUX ? "main-screen" : "alternate-screen";
+const ARCHIVE_READER_MAX_BUFFER = 16 * 1024 * 1024;
+
+export function boardApiFetchInit(init: RequestInit = {}, boardToken = process.env.OPENBOARD_API_TOKEN): RequestInit {
+  const token = boardToken?.trim();
+  if (!token) return init;
+
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  return { ...init, headers };
+}
+
+export async function readGlobalArchiveWithoutBoard(options: ArchiveReaderOptions = {}): Promise<GlobalArchiveRecord[]> {
+  const env = options.env ?? process.env;
+  const nodeExec = options.nodeExec ?? env.OPENBOARD_NODE_EXEC?.trim() ?? process.execPath;
+  const script = `
+const fs = require("node:fs");
+const os = require("node:os");
+const Database = require("better-sqlite3");
+
+const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+const dbPath = (process.env.OPENBOARD_ARCHIVE_DB || "").trim() || home + "/.local/share/openboard/archive.sqlite";
+
+if (!fs.existsSync(dbPath)) {
+  process.stdout.write("[]");
+  process.exit(0);
+}
+
+let db;
+try {
+  db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  const rows = db.prepare("SELECT * FROM global_archive ORDER BY archived_at DESC").all();
+  process.stdout.write(JSON.stringify(rows));
+} catch (error) {
+  if (String(error && error.message || error).includes("no such table: global_archive")) {
+    process.stdout.write("[]");
+  } else {
+    throw error;
+  }
+} finally {
+  if (db) db.close();
+}
+`;
+
+  const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(
+      nodeExec,
+      ["-e", script],
+      {
+        cwd: options.cwd ?? process.cwd(),
+        env,
+        maxBuffer: ARCHIVE_READER_MAX_BUFFER,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(stderr.trim() || error.message));
+          return;
+        }
+        resolve({ stdout, stderr });
+      },
+    );
+  });
+
+  const records = JSON.parse(stdout || "[]") as unknown;
+  if (!Array.isArray(records)) throw new Error("archive reader returned invalid data");
+  return records as GlobalArchiveRecord[];
+}
+
+async function fetchArchiveRecords(boardUrl: string, boardToken?: string): Promise<GlobalArchiveRecord[]> {
+  const response = await fetch(`${boardUrl}/api/archive`, boardApiFetchInit({}, boardToken));
+  if (!response.ok) throw new Error(`archive fetch failed (${response.status})`);
+  return (await response.json()) as GlobalArchiveRecord[];
+}
 
 interface TuiColors {
   bg: TuiColor;
@@ -187,6 +260,12 @@ interface GlobalArchiveRecord {
   task_created_at: number;
   task_updated_at: number;
   mirrored_at: number;
+}
+
+interface ArchiveReaderOptions {
+  env?: NodeJS.ProcessEnv;
+  nodeExec?: string;
+  cwd?: string;
 }
 
 interface NewTaskDraft {
@@ -322,6 +401,7 @@ export async function runOpenBoardTui(
   let refreshTimer: NodeJS.Timeout | undefined;
   let shuttingDown = false;
   let currentClient = client;
+  let currentBoardToken = process.env.OPENBOARD_API_TOKEN?.trim() || undefined;
 
   const setError = (error: unknown, status = "TUI error") => {
     state.error = errorMessage(error);
@@ -441,9 +521,15 @@ export async function runOpenBoardTui(
         await refreshInstanceList();
         item = state.instanceList.find((candidate) => candidate.definition.name === item.definition.name) ?? item;
       }
-      const newClient = createBoardClient({ boardUrl: item.runtime.boardUrl, cwd: item.definition.workspace });
+      const boardToken = item.definition.boardToken?.trim() || process.env.OPENBOARD_API_TOKEN?.trim() || undefined;
+      const newClient = createBoardClient({
+        boardUrl: item.runtime.boardUrl,
+        cwd: item.definition.workspace,
+        env: { OPENBOARD_API_TOKEN: boardToken },
+      });
       await newClient.listTasks();
       currentClient = newClient;
+      currentBoardToken = boardToken;
       state.boardUrl = item.runtime.boardUrl;
       state.cwd = item.definition.workspace;
       state.tasks = [];
@@ -584,7 +670,7 @@ export async function runOpenBoardTui(
     const timeout = setTimeout(() => controller.abort(), 3000);
 
     try {
-      const response = await fetch(`${item.runtime.boardUrl}/api/tasks`, { signal: controller.signal });
+      const response = await fetch(`${item.runtime.boardUrl}/api/tasks`, boardApiFetchInit({ signal: controller.signal }, item.definition.boardToken));
       clearTimeout(timeout);
       if (response.ok) {
         const tasks = await response.json();
@@ -602,17 +688,17 @@ export async function runOpenBoardTui(
   };
 
   const archiveTask = async (taskId: string) => {
-    await archiveTaskShortcut(state, currentClient.boardUrl, taskId, render, () => refresh(true));
+    await archiveTaskShortcut(state, currentClient.boardUrl, taskId, render, () => refresh(true), fetch, currentBoardToken);
   };
 
   const openArchive = async () => {
     state.status = "loading archive...";
     render();
     try {
-      const response = await fetch(`${currentClient.boardUrl}/api/archive`);
-      if (!response.ok) throw new Error(`archive fetch failed (${response.status})`);
-      const records = (await response.json()) as GlobalArchiveRecord[];
-      state.archiveBoardUrl = currentClient.boardUrl;
+      const records = state.viewState.view === "launch"
+        ? await readGlobalArchiveWithoutBoard()
+        : await fetchArchiveRecords(currentClient.boardUrl, currentBoardToken);
+      state.archiveBoardUrl = state.viewState.view === "launch" ? undefined : currentClient.boardUrl;
       state.archive = {
         records,
         selectedIndex: 0,
@@ -640,13 +726,13 @@ export async function runOpenBoardTui(
   };
 
   const refreshArchive = async () => {
-    if (!state.archiveBoardUrl || !state.archive) return;
+    if (!state.archive) return;
     state.archive.refreshing = true;
     render();
     try {
-      const response = await fetch(`${state.archiveBoardUrl}/api/archive`);
-      if (!response.ok) throw new Error(`archive fetch failed (${response.status})`);
-      state.archive.records = (await response.json()) as GlobalArchiveRecord[];
+      state.archive.records = state.archiveBoardUrl
+        ? await fetchArchiveRecords(state.archiveBoardUrl, currentBoardToken)
+        : await readGlobalArchiveWithoutBoard();
       const records = filteredArchiveRecords(state.archive);
       state.archive.selectedIndex = clampIndex(state.archive.selectedIndex, records.length);
       state.status = `${state.archive.records.length} archived task${state.archive.records.length === 1 ? "" : "s"}`;
@@ -725,6 +811,7 @@ export async function archiveTaskShortcut(
   render: () => void,
   refresh: () => Promise<void>,
   fetchImpl: typeof fetch = fetch,
+  boardToken?: string,
 ): Promise<void> {
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) {
@@ -746,9 +833,9 @@ export async function archiveTaskShortcut(
   render();
 
   try {
-    const response = await fetchImpl(`${boardUrl}/api/tasks/${encodeURIComponent(taskId)}/archive`, {
+    const response = await fetchImpl(`${boardUrl}/api/tasks/${encodeURIComponent(taskId)}/archive`, boardApiFetchInit({
       method: "POST",
-    });
+    }, boardToken));
     if (!response.ok) {
       const detail = await safeResponseText(response);
       throw new Error(`archive failed (${response.status}): ${detail}`);

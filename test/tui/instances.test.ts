@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { archiveTaskShortcut, handleKeypress, renderApp } from "../../src/tui/index";
+import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, renderApp } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
 
@@ -258,15 +258,39 @@ describe("TUI label cleanup", () => {
 
 describe("TUI archive shortcut", () => {
   it("posts archive for a selected Done card", async () => {
+    const previousToken = process.env.OPENBOARD_API_TOKEN;
+    delete process.env.OPENBOARD_API_TOKEN;
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
     const refresh = vi.fn(async () => undefined);
     const s = state({ tasks: [task("done-card", "done")], status: "ready" });
 
-    await archiveTaskShortcut(s, "http://127.0.0.1:4097", "done-card", vi.fn(), refresh, fetchImpl as any);
+    try {
+      await archiveTaskShortcut(s, "http://127.0.0.1:4097", "done-card", vi.fn(), refresh, fetchImpl as any);
+    } finally {
+      if (previousToken === undefined) delete process.env.OPENBOARD_API_TOKEN;
+      else process.env.OPENBOARD_API_TOKEN = previousToken;
+    }
 
     expect(fetchImpl).toHaveBeenCalledWith("http://127.0.0.1:4097/api/tasks/done-card/archive", { method: "POST" });
     expect(refresh).toHaveBeenCalled();
     expect(s.status).toBe("archived: done-card");
+  });
+
+  it("sends the board API token on raw TUI fetches", () => {
+    const previousToken = process.env.OPENBOARD_API_TOKEN;
+    process.env.OPENBOARD_API_TOKEN = "test-token";
+
+    try {
+      const init = boardApiFetchInit({ method: "POST" });
+      const headers = init.headers;
+
+      expect(init.method).toBe("POST");
+      expect(headers).toBeInstanceOf(Headers);
+      expect((headers as Headers).get("Authorization")).toBe("Bearer test-token");
+    } finally {
+      if (previousToken === undefined) delete process.env.OPENBOARD_API_TOKEN;
+      else process.env.OPENBOARD_API_TOKEN = previousToken;
+    }
   });
 
   it("does not request archive for non-Done cards", async () => {

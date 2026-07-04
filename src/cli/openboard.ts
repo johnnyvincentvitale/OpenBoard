@@ -348,6 +348,9 @@ export async function defaultAttach(ctx: AttachContext): Promise<number> {
   if (definition.opencodePort !== undefined) {
     env.OPENBOARD_OPENCODE_PORT = String(definition.opencodePort);
   }
+  if (definition.boardToken !== undefined) {
+    env.OPENBOARD_API_TOKEN = definition.boardToken;
+  }
 
   const child = spawn(process.execPath, [launcherPath], {
     cwd: repoRoot,

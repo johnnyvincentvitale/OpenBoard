@@ -12,6 +12,7 @@ import type {
   InstanceDefinition,
   InstanceRuntimeState,
 } from "../shared/instances";
+import { resolveBoardToken } from "../server/auth";
 import type { InstanceLifecycleProvider } from "./provider";
 
 /**
@@ -30,6 +31,20 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
     const def = registry.get(name);
     if (!def) throw new InstanceUnknownError(name);
     return def;
+  };
+
+  const createBoardToken = (): string =>
+    resolveBoardToken({ OPENBOARD_API_TOKEN: process.env.OPENBOARD_API_TOKEN } as NodeJS.ProcessEnv);
+
+  const ensureBoardToken = (definition: InstanceDefinition): InstanceDefinition => {
+    if (definition.boardToken?.trim()) return definition;
+    const updated: InstanceDefinition = { ...definition, boardToken: createBoardToken() };
+    const file = registry.getFile();
+    registry.save({
+      ...file,
+      instances: file.instances.map((item) => item.name === updated.name ? updated : item),
+    });
+    return updated;
   };
 
   return {
@@ -60,6 +75,7 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
         port: input.port,
         workspace: input.workspace,
         dbPath: input.dbPath ?? `${dirs.dataDir}/board.sqlite`,
+        boardToken: createBoardToken(),
         ...(input.opencodePort !== undefined
           ? { opencodePort: input.opencodePort }
           : {}),
@@ -73,7 +89,7 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
     },
 
     async start(name) {
-      const definition = getDefinition(name);
+      const definition = ensureBoardToken(getDefinition(name));
       const before = await daemon.status(definition);
       if (before.status === "running") {
         return before;
@@ -119,7 +135,7 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
       if (wasRunning) {
         const newDef = registry.get(newName);
         if (newDef) {
-          await daemon.start(newDef);
+          await daemon.start(ensureBoardToken(newDef));
         }
       }
 
