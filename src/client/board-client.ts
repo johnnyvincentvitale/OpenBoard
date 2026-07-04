@@ -50,6 +50,12 @@ export interface CreateBoardTaskInput {
   isolation?: string;
 }
 
+/** GET /api/health response — adapter + OpenCode reachability and version. */
+export interface BoardHealth {
+  adapter: "ok";
+  opencode: { status: "ok"; version: string } | { status: "unreachable" };
+}
+
 export interface BoardClient {
   readonly boardUrl: string;
   readonly cwd: string;
@@ -68,6 +74,7 @@ export interface BoardClient {
   integrateTask(id: string, targetBranch?: string): Promise<MergeOutcome>;
   getSettings(): Promise<BoardSettings>;
   updateSettings(patch: Pick<BoardSettings, "worktreeDefault">): Promise<BoardSettings>;
+  getHealth(): Promise<BoardHealth>;
 }
 
 interface ResolvedOptions {
@@ -135,6 +142,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
         headers: { "content-type": "application/json" },
         body: JSON.stringify(patch),
       }),
+    getHealth: () => requestJson<BoardHealth>(resolved, "/api/health", { method: "GET" }),
   };
 }
 

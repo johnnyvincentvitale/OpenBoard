@@ -6,7 +6,7 @@ import {
   createBoardClient,
   resolveBoardUrl,
 } from "../../src/client/board-client";
-import type { BoardClientOptions } from "../../src/client/board-client";
+import type { BoardClientOptions, BoardHealth } from "../../src/client/board-client";
 import type { BoardSettings, MergeOutcome, RosterAgent, Task } from "../../src/shared";
 
 const CWD = "/tmp/openboard-project";
@@ -220,5 +220,38 @@ describe("board client", () => {
     expect(resolveBoardUrl({ requireExplicitBoardUrl: true, boardUrl: "http://localhost:5001/" })).toBe(
       "http://localhost:5001",
     );
+  });
+
+  it("returns adapter and opencode health via GET /api/health", async () => {
+    const healthy: BoardHealth = {
+      adapter: "ok",
+      opencode: { status: "ok", version: "0.17.0" },
+    };
+    const unreachable: BoardHealth = {
+      adapter: "ok",
+      opencode: { status: "unreachable" },
+    };
+
+    let callCount = 0;
+    const fetchMock = vi.fn(async (_url: string | URL) => {
+      callCount++;
+      return jsonResponse(callCount === 1 ? healthy : unreachable);
+    });
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result1 = await client.getHealth();
+    expect(result1).toEqual(healthy);
+    expect(result1.opencode.status).toBe("ok");
+    expect(result1.adapter).toBe("ok");
+
+    const result2 = await client.getHealth();
+    expect(result2).toEqual(unreachable);
+    expect(result2.opencode.status).toBe("unreachable");
+    expect(result2.adapter).toBe("ok");
+
+    expect(fetchMock.mock.calls.map((call: unknown[]) => String(call[0]))).toEqual([
+      `${DEFAULT_BOARD_URL}/api/health`,
+      `${DEFAULT_BOARD_URL}/api/health`,
+    ]);
   });
 });
