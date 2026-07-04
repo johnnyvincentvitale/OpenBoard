@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime logs
+*.log
+
+# Generated SQLite databases and WAL/SHM sidecar files
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Runtime data dir placeholder
+data/
+
+# macOS
+.DS_Store
+
+# Ephemeral worktree artifacts created by git-worktree isolation runs.
+.opencode-board-worktrees/

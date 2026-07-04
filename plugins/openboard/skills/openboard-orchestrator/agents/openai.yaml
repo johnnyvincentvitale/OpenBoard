@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenBoard Orchestrator"
+  short_description: "Coordinate OpenBoard agents"
+  default_prompt: "Coordinate this work in OpenBoard."

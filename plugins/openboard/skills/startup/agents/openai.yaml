@@ -1,0 +1,4 @@
+interface:
+  display_name: "Startup"
+  short_description: "Connect to the OpenBoard app"
+  default_prompt: "Connect to my OpenBoard app."

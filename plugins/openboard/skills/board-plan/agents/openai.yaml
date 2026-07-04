@@ -1,0 +1,4 @@
+interface:
+  display_name: "Board Plan"
+  short_description: "Plan a multi-agent run and models"
+  default_prompt: "Help me plan how to run agents in this repo with OpenBoard."

@@ -1,0 +1,141 @@
+/* ===========================================================================
+   OpenBoard — Nightshade Sound design language (per design handoff 2026-07-01)
+   Dark-first · single teal accent · status by brightness, not hue.
+   Fonts: Domaine Display is a PAID Klim license (order 26051046) — do not
+   redistribute. General Sans + Ioskeley Mono are free (OFL). Only the shipped
+   weights are declared; other weights fall back to synthesized bold.
+   =========================================================================== */
+
+@font-face {
+  font-family: "Domaine Display";
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/DomaineDisplay-Extrabold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Domaine Display";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/DomaineDisplay-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Domaine Display";
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+  src: url("/fonts/DomaineDisplay-RegularItalic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "General Sans";
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/GeneralSans-Light.woff2") format("woff2");
+}
+@font-face {
+  font-family: "General Sans";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/GeneralSans-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "General Sans";
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/GeneralSans-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Ioskeley Mono";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/IoskeleyMono-Regular.woff2") format("woff2");
+}
+/* Jersey 15 (OFL, Google Fonts) — the pixel/blocky logo + New Task header face. */
+@font-face {
+  font-family: "Jersey 15";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/Jersey15-Regular.woff2") format("woff2");
+}
+
+/* ---- Tokens (nightshade.css, locked) ------------------------------------- */
+:root {
+  --ground: #0c0c0b;
+  --surface: #191918;
+  --border: #262624;
+  --text: #d0ccca;
+  --muted: #6e6c6c;
+  --dim: #383836;
+  --accent: #3f5e52;
+  --accent-hover: #4a6e60;
+
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  --elevation-2: 0 2px 8px rgba(0, 0, 0, 0.45);
+
+  --font-display: "Domaine Display", Georgia, "Times New Roman", serif;
+  --font-sans: "General Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Ioskeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-logo: "Jersey 15", "Ioskeley Mono", ui-monospace, monospace;
+
+  /* Column color system (project-specific, extends Nightshade) */
+  --col-todo: #4d6486;
+  --col-in-progress: #837d6e;
+  --col-review: #695c86;
+  --col-done: #3f5e52;
+  --col-error: #723b3a;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100vh;
+}
+
+body {
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button {
+  font-family: inherit;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+}
+
+/* Running pulse — glyph only, never the card. */
+@keyframes ob-pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+  100% {
+    opacity: 1;
+  }
+}

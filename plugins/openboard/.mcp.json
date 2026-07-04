@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "openboard": {
+      "command": "node",
+      "args": ["mcp-server.mjs"]
+    }
+  }
+}

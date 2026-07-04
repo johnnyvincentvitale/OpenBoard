@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Profile"
+  short_description: "Create safe OpenCode agent profiles"
+  default_prompt: "Use $create-profile to create validated OpenCode agent profiles for an OpenBoard run."

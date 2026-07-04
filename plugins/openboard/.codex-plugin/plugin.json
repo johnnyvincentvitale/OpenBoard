@@ -1,0 +1,23 @@
+{
+  "name": "openboard",
+  "version": "0.1.0",
+  "description": "OpenBoard skills to connect to the board, assess repository readiness, plan multi-agent runs, validate OpenCode profiles, and dispatch and verify agent work.",
+  "author": {
+    "name": "OpenBoard"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "OpenBoard",
+    "shortDescription": "Assess, plan, and run multi-agent work on OpenBoard.",
+    "longDescription": "OpenBoard provides skills for connecting to a running OpenBoard app, assessing whether a repository is ready for autonomous agents, planning a multi-agent run (workflow shape, agent profiles, models), validating OpenCode profile config before use, dispatching scoped cards into worktrees, reviewing and integrating results, and reporting verified multi-agent work honestly.",
+    "developerName": "OpenBoard",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Use $startup first and make this session my OpenBoard orchestrator.",
+      "Use $startup first, then assess this repo's readiness for agentic development.",
+      "Use $startup first, then plan and run a multi-agent workflow in this repo."
+    ]
+  }
+}

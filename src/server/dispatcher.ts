@@ -1,0 +1,774 @@
+/**
+ * The Push dispatcher — turns Tasks into running OpenCode sessions and auto-moves
+ * cards as those sessions progress.
+ *
+ * `run()` creates a session in the task's directory, kicks off an async prompt with
+ * the task's description, links the session id onto the task, and moves it to
+ * `in_progress`. `start()` consumes the global `/event` stream and reacts to
+ * live-state changes on any session linked to a task: `running` keeps the task in
+ * sync, `idle` triggers a message-based completion check, and `error` records the
+ * failure without moving the card. `retry()` re-prompts an existing session and
+ * moves the task back to `in_progress`. `abort()` stops the task's session.
+ * `shutdown()` stops consuming the event stream.
+ */
+import { basename, dirname, join, resolve } from "node:path";
+import type { MergeOutcome, OpencodeEvent, Task, TaskStore } from "../shared";
+import { AdapterError, UNATTENDED_PERMISSION } from "../shared";
+import type { Dispatcher } from "../shared";
+import type { OpencodeHandle } from "./opencode";
+import { eventLiveState, eventSessionId } from "./events/session-status";
+import { GitWorktreeManager, type WorktreeManager } from "./worktree";
+import {
+  isExternalDirectoriesAllowed,
+  isUnderWorkspace,
+  resolveBoardWorkspace,
+  resolveTaskDirectory,
+  type ResolveTaskDirectoryOptions,
+} from "./workspace";
+
+export interface UnmetParentDependency {
+  id: string;
+  title: string;
+  why: string;
+}
+
+export class DependencyGateError extends Error {
+  readonly status = 409;
+  readonly unmetParents: UnmetParentDependency[];
+
+  constructor(unmetParents: UnmetParentDependency[]) {
+    super(`Task has unmet parent dependencies: ${unmetParents.map((p) => p.title).join(", ")}`);
+    this.name = "DependencyGateError";
+    this.unmetParents = unmetParents;
+  }
+}
+
+export class ArchivedTaskActionError extends AdapterError {
+  constructor(action: "run" | "retry") {
+    super("validation", `Cannot ${action} an archived task`);
+    this.name = "ArchivedTaskActionError";
+  }
+
+  override get status(): number {
+    return 409;
+  }
+}
+
+export interface TaskDispatcherDeps {
+  client: OpencodeHandle["client"];
+  store: TaskStore;
+  /** Base URL for this adapter, used in dispatched completion-report instructions. */
+  adapterBaseUrl?: string;
+  /** Board API token, used in dispatched completion-report instructions. */
+  boardToken?: string;
+  /** Git worktree engine for isolated runs. Defaults to a real GitWorktreeManager. */
+  worktrees?: WorktreeManager;
+  /**
+   * Where a repo's worktrees live. Default: a sibling `.opencode-board-worktrees/<repo>`
+   * dir next to the repo root, so worktrees never nest inside the main working tree.
+   */
+  worktreeBaseDir?: (repoRoot: string) => string;
+  /**
+   * The board instance's workspace root. Defaults to `BOARD_WORKSPACE` then the
+   * user's home directory.
+   */
+  workspace?: string;
+  /**
+   * When true, directories outside the workspace are accepted. Unsafe for
+   * shared instances; opt-in only.
+   */
+  allowExternalDirectories?: boolean;
+  /**
+   * Override directory canonicalization (tests). Receives the raw stored task
+   * directory and must return an absolute, validated path.
+   */
+  resolveDirectory?: (raw: string) => string;
+}
+
+/** Resolve the effective isolation for a task: its override, else the board default. */
+function wantsWorktree(task: Task, store: TaskStore): boolean {
+  if (task.isolation) return task.isolation === "worktree";
+  return store.getSettings().worktreeDefault;
+}
+
+function unmetReason(parent: Task): string | null {
+  if (parent.column === "done") return null;
+  if (parent.completion?.outcome === "complete" && parent.completionSource === "reported") return null;
+  if (parent.completion?.outcome === "blocked") return "parent reported blocked";
+  if (parent.completionSource === "idle-fallback") return "parent went idle without a completion report";
+  if (parent.column === "review") return "parent is in review, not done";
+  if (parent.runState === "running") return "parent is still running";
+  if (parent.runState === "error") return parent.error ? `parent is in error: ${parent.error}` : "parent is in error";
+  return `parent is in ${parent.column}`;
+}
+
+/** Base/backoff tuning for reconnecting to the upstream OpenCode event stream. */
+const RECONNECT_BASE_DELAY_MS = 500;
+const RECONNECT_MAX_DELAY_MS = 15000;
+const COMPLETION_POLL_INTERVAL_MS = 1000;
+const COMPLETION_WATCH_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+/** The session create response shape differs across OpenCode SDK surfaces. Unwrap defensively. */
+function extractSessionId(data: unknown): string | undefined {
+  const inner = (data as { data?: unknown })?.data ?? data;
+  const id = (inner as { id?: unknown })?.id;
+  return typeof id === "string" ? id : undefined;
+}
+
+/**
+ * The non-v2 message endpoints use `modelID`, while the board stores OpenCode's
+ * roster-shaped `ModelRef` as `{ providerID, id }`.
+ */
+function toPromptModel(
+  model: Task["model"],
+): { providerID: string; modelID: string } | undefined {
+  if (!model) return undefined;
+  return {
+    providerID: model.providerID,
+    modelID: model.id,
+  };
+}
+
+function hasAssistantTurnFinished(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false;
+
+  const latest = messages[messages.length - 1];
+  if (latest === null || typeof latest !== "object") return false;
+
+  const info = (latest as { info?: unknown }).info;
+  const role =
+    info !== null && typeof info === "object"
+      ? (info as Record<string, unknown>).role
+      : undefined;
+  if (role !== "assistant") return false;
+
+  const parts = (latest as { parts?: unknown }).parts;
+  if (!Array.isArray(parts)) return false;
+
+  const hasActiveTool = parts.some((part) => {
+    if (part === null || typeof part !== "object") return false;
+    const record = part as Record<string, unknown>;
+    if (record.type !== "tool") return false;
+    const state = record.state;
+    if (state === null || typeof state !== "object") return false;
+    const status = (state as Record<string, unknown>).status;
+    return status === "pending" || status === "running";
+  });
+  if (hasActiveTool) return false;
+
+  return parts.some((part) => {
+    if (part === null || typeof part !== "object") return false;
+    const record = part as Record<string, unknown>;
+    return record.type === "step-finish" && record.reason !== "tool-calls";
+  });
+}
+
+/** Position value that always lands a move at the end of the target column. */
+const END_OF_COLUMN = Number.POSITIVE_INFINITY;
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (typeof error === "string") return error;
+  if (error !== null && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    const data = record.data;
+    if (data !== null && typeof data === "object") {
+      const message = (data as Record<string, unknown>).message;
+      if (typeof message === "string") return message;
+    }
+    if (typeof record._tag === "string") return record._tag;
+    if (typeof record.name === "string") return record.name;
+  }
+  return fallback;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export class TaskDispatcher implements Dispatcher {
+  private readonly client: OpencodeHandle["client"];
+  private readonly store: TaskStore;
+  private readonly worktrees: WorktreeManager;
+  private readonly worktreeBaseDir: (repoRoot: string) => string;
+  private readonly adapterBaseUrl: string;
+  private readonly boardToken?: string;
+  private readonly workspace: string;
+  private readonly allowExternalDirectories: boolean;
+  private readonly resolveDirectory: (raw: string) => string;
+
+  private running = false;
+  /** Bumped on every stop()/restart so a stale consume loop knows to exit. */
+  private generation = 0;
+  private consumeLoopPromise: Promise<void> | null = null;
+  private readonly completionWatchers = new Map<string, { cancelled: boolean }>();
+
+  constructor(deps: TaskDispatcherDeps) {
+    this.client = deps.client;
+    this.store = deps.store;
+    this.worktrees = deps.worktrees ?? new GitWorktreeManager();
+    this.adapterBaseUrl = deps.adapterBaseUrl ?? "http://127.0.0.1:0";
+    this.boardToken = deps.boardToken;
+    this.workspace = deps.workspace ?? resolveBoardWorkspace();
+    this.allowExternalDirectories = deps.allowExternalDirectories ?? isExternalDirectoriesAllowed();
+    this.worktreeBaseDir =
+      deps.worktreeBaseDir ??
+      ((repoRoot) => {
+        const sibling = join(dirname(repoRoot), ".opencode-board-worktrees", basename(repoRoot));
+        // Keep isolated worktrees inside the configured workspace unless the
+        // user explicitly opted in to external directories.
+        if (
+          this.allowExternalDirectories ||
+          isUnderWorkspace(resolve(sibling), this.workspace)
+        ) {
+          return sibling;
+        }
+        return join(this.workspace, ".opencode-board-worktrees", basename(repoRoot));
+      });
+    this.resolveDirectory =
+      deps.resolveDirectory ??
+      ((raw) =>
+        resolveTaskDirectory(raw, this.workspace, {
+          allowExternal: this.allowExternalDirectories,
+        }));
+  }
+
+  async run(taskId: string): Promise<Task> {
+    const task = this.store.get(taskId);
+    if (!task) {
+      throw AdapterError.notFound(`Task not found: ${taskId}`);
+    }
+    this.assertNotArchived(task, "run");
+    this.assertParentsSatisfied(task);
+    this.store.update(taskId, { completion: null, completionSource: null });
+
+    // Resolve and contain the execution directory before doing any git or
+    // session work. This canonicalizes symlinks and rejects escapes from the
+    // configured board workspace unless the user has explicitly opted in.
+    let execDirectory = this.resolveDirectory(task.directory);
+
+    // Resolve where the session actually runs. In worktree isolation the session
+    // runs in a dedicated `git worktree`; a non-repo directory can't be isolated,
+    // so we block the run and surface the "make it a git repo?" decision instead.
+    if (wantsWorktree(task, this.store)) {
+      if (!(await this.worktrees.isGitRepo(execDirectory))) {
+        const blocked = this.store.update(taskId, {
+          pending: "git-init",
+          runState: "unstarted",
+          error: undefined,
+        });
+        if (!blocked) throw AdapterError.notFound(`Task not found: ${taskId}`);
+        return blocked;
+      }
+      const wt = await this.ensureWorktree(task, execDirectory);
+      execDirectory = this.resolveDirectory(wt.worktreePath);
+    }
+
+    // The legacy session/message surface is the one that actually wakes the
+    // agent in OpenCode 1.17.13. It also honors an agent's configured default
+    // model when task.model is unset; the v2 prompt route can admit input
+    // without producing a message turn.
+    const createInput = {
+      agent: task.agent,
+      model: task.model,
+      directory: execDirectory,
+      permission: UNATTENDED_PERMISSION.map((rule) => ({ ...rule })),
+    };
+    const created = await this.client.session.create(createInput);
+    if ((created as { error?: unknown }).error) {
+      throw AdapterError.unreachable(
+        "Failed to create OpenCode session",
+        (created as { error?: unknown }).error,
+      );
+    }
+    const sessionId = extractSessionId((created as { data?: unknown }).data);
+    if (!sessionId) {
+      throw AdapterError.unreachable("OpenCode session create returned no id");
+    }
+
+    const runStartedAt = Date.now();
+    const promptError = await this.prompt(
+      sessionId,
+      this.withCompletionContract(task.id, this.withParentHandoffs(task, task.description), runStartedAt),
+      task.agent,
+      task.model,
+    );
+    if (promptError) {
+      const updated = this.store.update(taskId, {
+        sessionId,
+        runState: "error",
+        error: promptError,
+      });
+      if (!updated) {
+        throw AdapterError.notFound(`Task not found: ${taskId}`);
+      }
+      return updated;
+    }
+
+    this.store.update(taskId, {
+      sessionId,
+      runState: "running",
+      runStartedAt,
+      error: undefined,
+      pending: undefined,
+    });
+    this.store.move(taskId, "in_progress", END_OF_COLUMN);
+    this.startCompletionWatcher(taskId, sessionId);
+
+    const fresh = this.store.get(taskId);
+    if (!fresh) {
+      throw AdapterError.notFound(`Task not found: ${taskId}`);
+    }
+    return fresh;
+  }
+
+  /**
+   * Get (or lazily create) the git worktree for an isolated task. Reuses an
+   * already-created worktree so a re-run doesn't collide on the branch; otherwise
+   * cuts `board/<taskId>` from the task directory's current branch and records the
+   * worktree metadata on the task.
+   */
+  private async ensureWorktree(
+    task: Task,
+    repoDir: string,
+  ): Promise<{ worktreePath: string; branch: string; baseBranch: string }> {
+    if (task.worktreePath && task.worktreeBranch) {
+      return {
+        worktreePath: task.worktreePath,
+        branch: task.worktreeBranch,
+        baseBranch: task.baseBranch ?? (await this.worktrees.currentBranch(repoDir)),
+      };
+    }
+    const repoRoot = await this.worktrees.repoRoot(repoDir);
+    const branch = `board/${task.id}`;
+    const worktreePath = join(this.worktreeBaseDir(repoRoot), task.id);
+    const info = await this.worktrees.createWorktree(repoDir, branch, worktreePath);
+    this.store.update(task.id, {
+      worktreePath: info.worktreePath,
+      worktreeBranch: info.branch,
+      baseBranch: info.baseBranch,
+    });
+    return info;
+  }
+
+  async initGitAndRun(taskId: string): Promise<Task> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    const repoDir = this.resolveDirectory(task.directory);
+    try {
+      await this.worktrees.initRepo(repoDir);
+    } catch (err) {
+      const updated = this.store.update(taskId, {
+        runState: "error",
+        pending: undefined,
+        error: errorMessage(err, "Failed to initialize git repository"),
+      });
+      if (!updated) throw AdapterError.notFound(`Task not found: ${taskId}`);
+      return updated;
+    }
+    this.store.update(taskId, { pending: undefined });
+    return this.run(taskId);
+  }
+
+  async syncUpstream(taskId: string): Promise<MergeOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (!task.worktreePath || !task.baseBranch) {
+      throw AdapterError.validation("Task has no worktree to sync");
+    }
+    const result = await this.worktrees.syncUpstream(task.worktreePath, task.baseBranch);
+    return { task: this.store.get(taskId) ?? task, ...result };
+  }
+
+  async integrate(taskId: string, targetBranch?: string): Promise<MergeOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (!task.worktreePath || !task.worktreeBranch) {
+      throw AdapterError.validation("Task has no worktree to integrate");
+    }
+    const target = targetBranch ?? task.baseBranch;
+    if (!target) throw AdapterError.validation("No target branch to integrate into");
+
+    // Re-resolve the task directory to stay inside the workspace boundary even
+    // after the worktree has been removed.
+    const repoDir = this.resolveDirectory(task.directory);
+    const result = await this.worktrees.integrate(
+      repoDir,
+      task.worktreeBranch,
+      target,
+      task.worktreePath,
+    );
+    // On success the worktree is gone (branch kept) — drop the stale path.
+    if (result.ok) {
+      this.store.update(taskId, { worktreePath: undefined });
+    }
+    return { task: this.store.get(taskId) ?? task, ...result };
+  }
+
+  private async prompt(
+    sessionId: string,
+    text: string,
+    agent?: string,
+    model?: Task["model"],
+  ): Promise<string | undefined> {
+    try {
+      const promptModel = toPromptModel(model);
+      const prompted = await this.client.session.promptAsync({
+        sessionID: sessionId,
+        ...(agent ? { agent } : {}),
+        ...(promptModel ? { model: promptModel } : {}),
+        ...(model?.variant ? { variant: model.variant } : {}),
+        parts: [{ type: "text", text }],
+      });
+      const error = (prompted as { error?: unknown }).error;
+      return error ? errorMessage(error, "Failed to prompt OpenCode session") : undefined;
+    } catch (err) {
+      return errorMessage(err, "Failed to prompt OpenCode session");
+    }
+  }
+
+  private withCompletionContract(taskId: string, prompt: string, runStartedAt?: number): string {
+    const taskPath = `/api/tasks/${encodeURIComponent(taskId)}`;
+    const runQuery = runStartedAt === undefined ? "" : `?runStartedAt=${encodeURIComponent(String(runStartedAt))}`;
+    const completeUrl = `${this.adapterBaseUrl}${taskPath}/complete${runQuery}`;
+    const blockUrl = `${this.adapterBaseUrl}${taskPath}/block${runQuery}`;
+    const authHeader = this.boardToken ? ` -H ${shellQuote(`Authorization: Bearer ${this.boardToken}`)}` : "";
+    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\nWhen all work and verification are complete, call exactly one of these commands as your final action (replace JSON values with your actual report):\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
+  }
+
+  private withParentHandoffs(task: Task, prompt: string): string {
+    const parentIds = task.parentIds ?? this.store.getParentIds(task.id);
+    if (parentIds.length === 0) return prompt;
+
+    const lines = [prompt, "", "---", "PARENT HANDOFFS"];
+    for (const parentId of parentIds) {
+      const parent = this.store.get(parentId);
+      if (!parent) continue;
+      lines.push(`Parent: ${parent.title} (${parent.id})`);
+      if (parent.completion) {
+        lines.push(`Summary: ${parent.completion.summary}`);
+        lines.push(
+          `Changed files: ${parent.completion.changedFiles.length > 0 ? parent.completion.changedFiles.join(", ") : "none"}`,
+        );
+        lines.push("Verification:");
+        if (parent.completion.verification.length > 0) {
+          for (const check of parent.completion.verification) {
+            lines.push(`- ${check.command}: ${check.result}`);
+          }
+        } else {
+          lines.push("- none reported");
+        }
+        lines.push(`Residual risk: ${parent.completion.residualRisk}`);
+      } else {
+        lines.push("No structured handoff exists; parent is manually marked Done.");
+      }
+      lines.push("");
+    }
+
+    return lines.join("\n").trimEnd();
+  }
+
+  async retry(taskId: string, feedback?: string): Promise<Task> {
+    const task = this.store.get(taskId);
+    if (!task) {
+      throw AdapterError.notFound(`Task not found: ${taskId}`);
+    }
+    this.assertNotArchived(task, "retry");
+    if (!task.sessionId) {
+      throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
+    }
+    this.assertParentsSatisfied(task);
+    this.store.update(taskId, { completion: null, completionSource: null });
+
+    const runStartedAt = Date.now();
+    const promptError = await this.prompt(
+      task.sessionId,
+      this.withCompletionContract(task.id, this.withParentHandoffs(task, feedback ?? task.description), runStartedAt),
+      task.agent,
+      task.model,
+    );
+    if (promptError) {
+      const updated = this.store.update(taskId, { runState: "error", error: promptError });
+      if (!updated) {
+        throw AdapterError.notFound(`Task not found: ${taskId}`);
+      }
+      return updated;
+    }
+
+    this.store.update(taskId, { runState: "running", runStartedAt, error: undefined });
+    this.store.move(taskId, "in_progress", END_OF_COLUMN);
+    this.startCompletionWatcher(taskId, task.sessionId);
+
+    const fresh = this.store.get(taskId);
+    if (!fresh) {
+      throw AdapterError.notFound(`Task not found: ${taskId}`);
+    }
+    return fresh;
+  }
+
+  private assertNotArchived(task: Task, action: "run" | "retry"): void {
+    if (task.archived) throw new ArchivedTaskActionError(action);
+  }
+
+  private assertParentsSatisfied(task: Task): void {
+    const parentIds = task.parentIds ?? this.store.getParentIds(task.id);
+    if (parentIds.length === 0) return;
+
+    const unmetParents = parentIds
+      .map((parentId): UnmetParentDependency | null => {
+        const parent = this.store.get(parentId);
+        if (!parent) return { id: parentId, title: "Unknown parent", why: "parent task no longer exists" };
+        const why = unmetReason(parent);
+        return why ? { id: parent.id, title: parent.title, why } : null;
+      })
+      .filter((parent): parent is UnmetParentDependency => parent !== null);
+
+    if (unmetParents.length > 0) {
+      throw new DependencyGateError(unmetParents);
+    }
+  }
+
+  async abort(taskId: string): Promise<void> {
+    const task = this.store.get(taskId);
+    if (!task || !task.sessionId) {
+      return;
+    }
+    await this.client.session.abort({ sessionID: task.sessionId });
+    this.cancelCompletionWatcher(task.sessionId);
+    this.store.update(taskId, { runState: "idle" });
+  }
+
+  /**
+   * Begin consuming `client.event.subscribe()`. Safe to call once; a second call
+   * while already running is a no-op. Auto-reconnects with backoff if the upstream
+   * stream ends or errors, until `shutdown()` is called.
+   */
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    const myGeneration = ++this.generation;
+    this.consumeLoopPromise = this.runConsumeLoop(myGeneration);
+  }
+
+  /** Stop consuming the upstream event stream. Idempotent. */
+  shutdown(): void {
+    this.running = false;
+    this.generation++;
+    for (const watcher of this.completionWatchers.values()) {
+      watcher.cancelled = true;
+    }
+    this.completionWatchers.clear();
+  }
+
+  // ---- internals ----
+
+  private startCompletionWatcher(taskId: string, sessionId: string): void {
+    this.cancelCompletionWatcher(sessionId);
+    const watcher = { cancelled: false };
+    this.completionWatchers.set(sessionId, watcher);
+    void this.watchCompletion(taskId, sessionId, watcher);
+  }
+
+  private cancelCompletionWatcher(sessionId: string): void {
+    const watcher = this.completionWatchers.get(sessionId);
+    if (watcher) {
+      watcher.cancelled = true;
+      this.completionWatchers.delete(sessionId);
+    }
+  }
+
+  private async watchCompletion(
+    taskId: string,
+    sessionId: string,
+    watcher: { cancelled: boolean },
+  ): Promise<void> {
+    const startedAt = Date.now();
+
+    try {
+      while (!watcher.cancelled) {
+        await sleep(COMPLETION_POLL_INTERVAL_MS);
+        if (watcher.cancelled) return;
+
+        const task = this.getTaskForWatcher(taskId);
+        if (!task || task.sessionId !== sessionId || task.runState !== "running") return;
+
+        if (Date.now() - startedAt > COMPLETION_WATCH_TIMEOUT_MS) {
+          this.updateTaskForWatcher(taskId, {
+            runState: "error",
+            error: "Timed out waiting for OpenCode session completion",
+          });
+          return;
+        }
+
+        let messages: unknown;
+        try {
+          const result = await this.client.session.messages({ sessionID: sessionId });
+          if ((result as { error?: unknown }).error) continue;
+          messages = (result as { data?: unknown }).data;
+        } catch {
+          continue;
+        }
+
+        if (!hasAssistantTurnFinished(messages)) continue;
+
+        const beforeFallback = this.getTaskForWatcher(taskId);
+        if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
+          return;
+        }
+        if (
+          !this.updateTaskForWatcher(taskId, {
+            runState: "idle",
+            error: undefined,
+            completion: null,
+            completionSource: "idle-fallback",
+          })
+        ) {
+          return;
+        }
+        const fresh = this.getTaskForWatcher(taskId);
+        if (fresh && (fresh.column === "todo" || fresh.column === "in_progress")) {
+          const endOfReview = this.listTasksForWatcher().filter((t) => t.column === "review")
+            .length;
+          this.moveTaskForWatcher(taskId, "review", endOfReview);
+        }
+        return;
+      }
+    } finally {
+      if (this.completionWatchers.get(sessionId) === watcher) {
+        this.completionWatchers.delete(sessionId);
+      }
+    }
+  }
+
+  private getTaskForWatcher(taskId: string): Task | undefined {
+    try {
+      return this.store.get(taskId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private listTasksForWatcher(): Task[] {
+    try {
+      return this.store.list();
+    } catch {
+      return [];
+    }
+  }
+
+  private updateTaskForWatcher(
+    taskId: string,
+    patch: Partial<Omit<Task, "id" | "createdAt">>,
+  ): Task | undefined {
+    try {
+      return this.store.update(taskId, patch);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private moveTaskForWatcher(taskId: string, column: Task["column"], position: number): void {
+    try {
+      this.store.move(taskId, column, position);
+    } catch {
+      // Store lifecycle races should end the watcher silently; foreground route
+      // calls still surface their own errors.
+    }
+  }
+
+  private handleEvent(event: OpencodeEvent): void {
+    const sessionId = eventSessionId(event);
+    if (!sessionId) return;
+
+    const task = this.store.list().find((t) => t.sessionId === sessionId);
+    if (!task) return;
+
+    const liveState = eventLiveState(event);
+    if (liveState === null) return;
+
+    switch (liveState) {
+      case "running":
+        // Only stamp the clock when actually transitioning into running —
+        // live events re-assert "running" mid-run and must not reset it.
+        this.store.update(
+          task.id,
+          task.runState === "running"
+            ? { runState: "running" }
+            : { runState: "running", runStartedAt: Date.now() },
+        );
+        break;
+
+      case "idle":
+        // OpenCode can report idle between tool-call steps. Keep the card
+        // running until session.messages() shows a final assistant step.
+        this.startCompletionWatcher(task.id, sessionId);
+        break;
+
+      case "error": {
+        const message = this.extractErrorMessage(event);
+        this.store.update(task.id, { runState: "error", error: message });
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  private extractErrorMessage(event: OpencodeEvent): string {
+    const properties = (event as { properties?: unknown }).properties;
+    if (properties !== null && typeof properties === "object") {
+      const props = properties as Record<string, unknown>;
+      const error = props.error;
+      if (typeof error === "string") return error;
+      if (error !== null && typeof error === "object") {
+        const message = (error as Record<string, unknown>).message;
+        if (typeof message === "string") return message;
+      }
+      const message = props.message;
+      if (typeof message === "string") return message;
+    }
+    return "Session reported an error";
+  }
+
+  /**
+   * Owns the lifetime of one upstream subscription attempt + its retry loop.
+   * Exits cleanly once `generation` no longer matches (i.e. `shutdown()` was
+   * called, or a newer `start()` superseded this loop).
+   */
+  private async runConsumeLoop(generation: number): Promise<void> {
+    let attempt = 0;
+
+    while (this.running && this.generation === generation) {
+      try {
+        const result = await this.client.event.subscribe();
+        attempt = 0; // reset backoff once a connection succeeds
+
+        for await (const event of result.stream) {
+          if (!this.running || this.generation !== generation) return;
+          try {
+            this.handleEvent(event as OpencodeEvent);
+          } catch {
+            // A single bad event/store failure shouldn't kill the stream.
+          }
+        }
+        // Stream ended normally (server closed it) — fall through to reconnect.
+      } catch {
+        // Stream errored — fall through to reconnect.
+      }
+
+      if (!this.running || this.generation !== generation) return;
+
+      attempt += 1;
+      const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
+      await sleep(delay);
+    }
+  }
+}
