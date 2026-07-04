@@ -71,11 +71,14 @@ variable:
 OPENBOARD_API_TOKEN=<token> OPENCODE_BOARD_URL=http://127.0.0.1:4097 your-mcp-client
 ```
 
-By default the server generates a fresh random token on each startup and prints
-it to stdout. Set `OPENBOARD_API_TOKEN` to a fixed value for deterministic
-tokens (CI, pre-shared setups). To rotate a token, restart the server — a new
-random token is generated if `OPENBOARD_API_TOKEN` is unset, or change the env
-var value and restart if it is set. There is no token file on disk to manage.
+Named instances persist their `boardToken` in
+`~/.config/openboard/instances.json` so `openboard start`, `openboard attach`,
+and the TUI can reconnect without manual token copy/paste. Direct/dev server
+launches resolve the token from `OPENBOARD_API_TOKEN`; if it is unset, the
+server generates a random token for that process and prints it to stdout. Set
+`OPENBOARD_API_TOKEN` only when you intentionally want a deterministic token
+(CI, pre-shared setups, or multiple boards sharing one token). See
+`SECURITY.md` for rotation details.
 
 See `SECURITY.md` for the full threat model, workspace scoping, and data
 retention details.

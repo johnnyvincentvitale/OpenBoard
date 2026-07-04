@@ -48,21 +48,26 @@ routes. The `/api/health` endpoint is deliberately unauthenticated; all other
 
 ### Where the token lives
 
-The board API token is generated fresh every time the server starts. There is
-**no token file on disk** — the token is purely in-memory for the lifetime of
-the process.
+Named instances store their board API token in the machine-managed instance
+registry at `~/.config/openboard/instances.json`. That lets `openboard start`,
+`openboard attach`, and the TUI restart or reconnect to the same daemon without
+manual token copy/paste. Treat this registry as local sensitive config, like
+other per-user development credentials.
 
-By default, the server generates a random 64-character hex token on startup and
-prints it to stdout:
+Direct server/dev launches that do not come from the named-instance registry
+resolve the token from `OPENBOARD_API_TOKEN`; if that env var is unset, the
+server generates a random 64-character hex token for that process and prints it
+to stdout:
 
 ```
 board API token: a1b2c3d4...e9f0
 ```
 
-You can override the random token with a fixed value by setting the
-`OPENBOARD_API_TOKEN` environment variable before starting the server. This is
-useful in CI environments or when you need a deterministic token for external
-scripts.
+You can override token generation with a fixed value by setting the
+`OPENBOARD_API_TOKEN` environment variable before creating or starting a board.
+This is useful in CI environments or when you need a deterministic token for
+external scripts, but it also means multiple boards can intentionally share the
+same token.
 
 ### How clients provide the token
 
@@ -93,15 +98,15 @@ OPENBOARD_API_TOKEN=<token> OPENCODE_BOARD_URL=http://127.0.0.1:4097 your-mcp-cl
 
 ### Rotating or resetting the token
 
-Since the token is not persisted to disk, rotation is simple:
-
-- **Default (random) token:** Stop the server and restart it. A new random
-  token is generated automatically. Any clients that relied on the old token
-  (external scripts, MCP harnesses) must be updated with the new one. The local
-  UI and TUI are unaffected because they receive the new token directly from
-  the restarted server.
-- **Fixed token (`OPENBOARD_API_TOKEN`):** Change the value of the environment
-  variable and restart. There is no token file to delete or manage.
+- **Named instances:** The token is persisted in `instances.json`, so a normal
+  restart reuses it. Rotate by recreating the instance or replacing the stored
+  `boardToken` while the instance is stopped, then start/attach again so local
+  clients receive the new value.
+- **Direct/dev server with generated token:** Stop the server and restart it. A
+  new random token is generated automatically.
+- **Fixed token (`OPENBOARD_API_TOKEN`):** Change the environment variable and
+  restart. Any external scripts, MCP harnesses, or copied clients that relied on
+  the old token must be updated.
 
 ## Workspace Scoping
 

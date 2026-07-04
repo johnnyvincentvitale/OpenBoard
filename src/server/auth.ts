@@ -1,11 +1,15 @@
 /**
- * Board API token auth — generates a per-instance random token at startup
- * and provides Hono middleware that rejects requests without a matching
- * Authorization: Bearer <token> header or ?token=<token> query parameter.
+ * Board API token auth — resolves the token for this server process and
+ * provides Hono middleware that rejects requests without a matching
+ * Authorization: Bearer <token> header or ?board_token=<token> query parameter.
  *
- * The token is always a 64-char hex string (32 random bytes). Set
- * OPENBOARD_API_TOKEN to a fixed value in env if deterministic tokens are
- * needed (CI, pre-shared setups).
+ * Named-instance launches pass a persisted per-instance token through
+ * OPENBOARD_API_TOKEN; direct/dev launches generate a random process-local
+ * token when the env var is unset.
+ *
+ * Generated tokens are 64-char hex strings (32 random bytes). Set
+ * OPENBOARD_API_TOKEN to a fixed value in env only if deterministic tokens are
+ * needed (CI, pre-shared setups, or intentional token sharing).
  */
 import { randomFillSync, timingSafeEqual } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
