@@ -11,11 +11,10 @@
  * README's "Running multiple instances" section for a worked example.
  */
 import { createServer } from "node:net";
-import { homedir } from "node:os";
 import { format, parse } from "node:path";
 import { OPENCODE_DEFAULTS, BOARD_SERVER_DEFAULTS } from "../shared/opencode-defaults";
 import type { InstanceConfig } from "../shared/task";
-import { isExternalDirectoriesAllowed } from "./workspace";
+import { isExternalDirectoriesAllowed, resolveBoardWorkspace } from "./workspace";
 
 /** Resolved adapter configuration. */
 export interface AdapterConfig {
@@ -129,8 +128,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdapterConfig 
  *   Callers should derive both the column-store and task-store file paths
  *   from this single value via {@link deriveStorePaths} — see that function
  *   for the legacy `BOARD_DB_PATH` / `BOARD_TASK_DB_PATH` escape hatches.
- * - `workspace`: `BOARD_WORKSPACE` (unchanged, existing env) > the caller's
- *   home directory (resolved by consumers, e.g. `resolveBoardWorkspace`).
+ * - `workspace`: `BOARD_WORKSPACE` (unchanged, existing env). A missing, empty,
+ *   non-existent, or non-directory value throws so the instance cannot start
+ *   without an explicit, valid workspace.
  * - `opencodePort`: `OPENBOARD_OPENCODE_PORT` > `OPENCODE_PORT` > `undefined`
  *   (undefined means "auto-select a free port" — see `findFreePort` — rather
  *   than hardcoding 4096, so a second instance never silently fights the
@@ -151,7 +151,7 @@ export function resolveInstanceConfig(env: NodeJS.ProcessEnv = process.env): Ins
   }
   const dbPath = env.OPENBOARD_DB?.trim() || "board.sqlite";
 
-  const workspace = env.BOARD_WORKSPACE?.trim() || homedir();
+  const workspace = resolveBoardWorkspace(env);
   const allowExternalDirectories = isExternalDirectoriesAllowed(env);
 
   const opencodePort =

@@ -7,9 +7,12 @@ import {
   createAdapterEnv,
   defaultOpenBoardDataDir,
   formatRendererExit,
+  hasAttachTarget,
+  hasConfiguredWorkspace,
   isLocalBoardUrl,
   resolveRendererCommand,
   rendererExitCode,
+  startAdapter,
 } from "../../src/tui/launcher";
 
 let tempDirs: string[] = [];
@@ -62,6 +65,19 @@ describe("TUI launcher", () => {
     expect(env.BOARD_WEB_DIR).toBe("/repo/dist/web");
     expect(env.BOARD_DB_PATH).toBe(join(dataDir, "board.sqlite"));
     expect(env.BOARD_TASK_DB_PATH).toBe(join(dataDir, "board-tasks.sqlite"));
+  });
+
+  it("does not treat a bare launch without BOARD_WORKSPACE as attachable/spawnable", () => {
+    expect(hasAttachTarget({})).toBe(false);
+    expect(hasConfiguredWorkspace({})).toBe(false);
+    expect(hasAttachTarget({ OPENCODE_BOARD_URL: "http://127.0.0.1:4097" })).toBe(true);
+    expect(hasConfiguredWorkspace({ BOARD_WORKSPACE: "/repo" })).toBe(true);
+  });
+
+  it("refuses to spawn the adapter without BOARD_WORKSPACE so the renderer can show setup instead", () => {
+    expect(() => startAdapter({ boardUrl: "http://127.0.0.1:5010", repoRoot: "/repo", env: {} })).toThrow(
+      /BOARD_WORKSPACE must be set/,
+    );
   });
 
   it("uses current Node 26 when available", () => {

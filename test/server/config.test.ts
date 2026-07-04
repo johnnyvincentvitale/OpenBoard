@@ -1,5 +1,7 @@
 import { createServer } from "node:net";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
 import {
   assertPortFree,
@@ -11,6 +13,20 @@ import {
   resolveInstanceConfig,
 } from "../../src/server/config";
 import { OPENCODE_DEFAULTS, BOARD_SERVER_DEFAULTS } from "../../src/shared/opencode-defaults";
+
+let workspaceCleanup: string[] = [];
+
+function makeWorkspace(): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "ocb-cfg-")));
+  mkdirSync(dir, { recursive: true });
+  workspaceCleanup.push(dir);
+  return dir;
+}
+
+afterEach(() => {
+  for (const dir of workspaceCleanup) rmSync(dir, { recursive: true, force: true });
+  workspaceCleanup = [];
+});
 
 describe("loadConfig", () => {
   it("defaults to spawn mode with OPENCODE_DEFAULTS and BOARD_SERVER_DEFAULTS when env is empty", () => {
@@ -116,50 +132,58 @@ describe("loadConfig", () => {
 });
 
 describe("resolveInstanceConfig", () => {
-  it("defaults to the board port, board.sqlite, the home dir, and no explicit opencode port", () => {
-    const instance = resolveInstanceConfig({});
+  it("requires BOARD_WORKSPACE and fails closed when it is unset", () => {
+    expect(() => resolveInstanceConfig({})).toThrow(/BOARD_WORKSPACE must be set to an existing directory/);
+  });
+
+  it("defaults to the board port, board.sqlite, and no explicit opencode port when workspace is set", () => {
+    const workspace = makeWorkspace();
+    const instance = resolveInstanceConfig({ BOARD_WORKSPACE: workspace });
     expect(instance.port).toBe(BOARD_SERVER_DEFAULTS.port);
     expect(instance.dbPath).toBe("board.sqlite");
-    expect(instance.workspace).toBe(homedir());
+    expect(instance.workspace).toBe(workspace);
     expect(instance.opencodePort).toBeUndefined();
     expect(instance.allowExternalDirectories).toBe(false);
   });
 
   it("honors OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES", () => {
-    expect(resolveInstanceConfig({ OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES: "true" }).allowExternalDirectories).toBe(true);
-    expect(resolveInstanceConfig({ OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES: "1" }).allowExternalDirectories).toBe(true);
-    expect(resolveInstanceConfig({ OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES: "false" }).allowExternalDirectories).toBe(false);
-    expect(resolveInstanceConfig({}).allowExternalDirectories).toBe(false);
+    const workspace = makeWorkspace();
+    expect(resolveInstanceConfig({ BOARD_WORKSPACE: workspace, OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES: "true" }).allowExternalDirectories).toBe(true);
+    expect(resolveInstanceConfig({ BOARD_WORKSPACE: workspace, OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES: "1" }).allowExternalDirectories).toBe(true);
+    expect(resolveInstanceConfig({ BOARD_WORKSPACE: workspace, OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES: "false" }).allowExternalDirectories).toBe(false);
+    expect(resolveInstanceConfig({ BOARD_WORKSPACE: workspace }).allowExternalDirectories).toBe(false);
   });
 
   it("full env override: OPENBOARD_PORT, OPENBOARD_DB, BOARD_WORKSPACE, OPENBOARD_OPENCODE_PORT all honored", () => {
+    const workspace = makeWorkspace();
     const instance = resolveInstanceConfig({
       OPENBOARD_PORT: "5200",
       OPENBOARD_DB: "/tmp/instance-a/board.sqlite",
-      BOARD_WORKSPACE: "/tmp/instance-a/workspace",
+      BOARD_WORKSPACE: workspace,
       OPENBOARD_OPENCODE_PORT: "5300",
     });
     expect(instance).toEqual({
       port: 5200,
       dbPath: "/tmp/instance-a/board.sqlite",
-      workspace: "/tmp/instance-a/workspace",
+      workspace,
       allowExternalDirectories: false,
       opencodePort: 5300,
     });
   });
 
   it("OPENBOARD_PORT takes precedence over the legacy BOARD_PORT", () => {
-    const instance = resolveInstanceConfig({ OPENBOARD_PORT: "5200", BOARD_PORT: "6100" });
+    const instance = resolveInstanceConfig({ BOARD_WORKSPACE: makeWorkspace(), OPENBOARD_PORT: "5200", BOARD_PORT: "6100" });
     expect(instance.port).toBe(5200);
   });
 
   it("falls back to the legacy BOARD_PORT when OPENBOARD_PORT is unset", () => {
-    const instance = resolveInstanceConfig({ BOARD_PORT: "6100" });
+    const instance = resolveInstanceConfig({ BOARD_WORKSPACE: makeWorkspace(), BOARD_PORT: "6100" });
     expect(instance.port).toBe(6100);
   });
 
   it("OPENBOARD_OPENCODE_PORT takes precedence over the legacy OPENCODE_PORT", () => {
     const instance = resolveInstanceConfig({
+      BOARD_WORKSPACE: makeWorkspace(),
       OPENBOARD_OPENCODE_PORT: "5300",
       OPENCODE_PORT: "6200",
     });
@@ -167,12 +191,12 @@ describe("resolveInstanceConfig", () => {
   });
 
   it("falls back to the legacy OPENCODE_PORT when OPENBOARD_OPENCODE_PORT is unset", () => {
-    const instance = resolveInstanceConfig({ OPENCODE_PORT: "6200" });
+    const instance = resolveInstanceConfig({ BOARD_WORKSPACE: makeWorkspace(), OPENCODE_PORT: "6200" });
     expect(instance.opencodePort).toBe(6200);
   });
 
   it("leaves opencodePort undefined when neither OPENBOARD_OPENCODE_PORT nor OPENCODE_PORT is set", () => {
-    const instance = resolveInstanceConfig({});
+    const instance = resolveInstanceConfig({ BOARD_WORKSPACE: makeWorkspace() });
     expect(instance.opencodePort).toBeUndefined();
   });
 
@@ -194,8 +218,9 @@ describe("resolveInstanceConfig", () => {
   });
 
   it("rejects a non-numeric OPENBOARD_OPENCODE_PORT with a clear ConfigError naming the variable", () => {
-    expect(() => resolveInstanceConfig({ OPENBOARD_OPENCODE_PORT: "nope" })).toThrow(ConfigError);
-    expect(() => resolveInstanceConfig({ OPENBOARD_OPENCODE_PORT: "nope" })).toThrow(
+    const workspace = makeWorkspace();
+    expect(() => resolveInstanceConfig({ BOARD_WORKSPACE: workspace, OPENBOARD_OPENCODE_PORT: "nope" })).toThrow(ConfigError);
+    expect(() => resolveInstanceConfig({ BOARD_WORKSPACE: workspace, OPENBOARD_OPENCODE_PORT: "nope" })).toThrow(
       /OPENBOARD_OPENCODE_PORT/,
     );
   });
@@ -206,18 +231,28 @@ describe("resolveInstanceConfig", () => {
   });
 
   it("trims whitespace around OPENBOARD_DB and BOARD_WORKSPACE", () => {
+    const workspace = makeWorkspace();
     const instance = resolveInstanceConfig({
       OPENBOARD_DB: "  /tmp/db.sqlite  ",
-      BOARD_WORKSPACE: "  /tmp/ws  ",
+      BOARD_WORKSPACE: `  ${workspace}  `,
     });
     expect(instance.dbPath).toBe("/tmp/db.sqlite");
-    expect(instance.workspace).toBe("/tmp/ws");
+    expect(instance.workspace).toBe(workspace);
   });
 
   it("uses process.env by default when no env argument is given", () => {
-    const instance = resolveInstanceConfig();
-    expect(instance).toBeTruthy();
-    expect(typeof instance.port).toBe("number");
+    const previous = process.env.BOARD_WORKSPACE;
+    const workspace = makeWorkspace();
+    process.env.BOARD_WORKSPACE = workspace;
+    try {
+      const instance = resolveInstanceConfig();
+      expect(instance).toBeTruthy();
+      expect(typeof instance.port).toBe("number");
+      expect(instance.workspace).toBe(workspace);
+    } finally {
+      if (previous === undefined) delete process.env.BOARD_WORKSPACE;
+      else process.env.BOARD_WORKSPACE = previous;
+    }
   });
 });
 
@@ -309,7 +344,7 @@ describe("resolveAdapterConfig", () => {
   });
 
   it("spawn mode with no OpenCode port configured: auto-selects a free port instead of hardcoding 4096", async () => {
-    const config = await resolveAdapterConfig({});
+    const config = await resolveAdapterConfig({ BOARD_WORKSPACE: makeWorkspace() });
     expect(config.mode).toBe("spawn");
     expect(typeof config.port).toBe("number");
     expect(config.port).toBeGreaterThan(0);
@@ -318,29 +353,30 @@ describe("resolveAdapterConfig", () => {
   });
 
   it("spawn mode with OPENBOARD_OPENCODE_PORT set: uses that exact port, no auto-selection", async () => {
-    const config = await resolveAdapterConfig({ OPENBOARD_OPENCODE_PORT: "5301" });
+    const config = await resolveAdapterConfig({ BOARD_WORKSPACE: makeWorkspace(), OPENBOARD_OPENCODE_PORT: "5301" });
     expect(config.mode).toBe("spawn");
     expect(config.port).toBe(5301);
   });
 
   it("boardPort comes from the resolved instance config (OPENBOARD_PORT)", async () => {
-    const config = await resolveAdapterConfig({ OPENBOARD_PORT: "5201" });
+    const config = await resolveAdapterConfig({ BOARD_WORKSPACE: makeWorkspace(), OPENBOARD_PORT: "5201" });
     expect(config.boardPort).toBe(5201);
   });
 
   it("connect mode: port is loadConfig's resolved value, no free-port selection performed", async () => {
-    const config = await resolveAdapterConfig({ OPENCODE_BASE_URL: "http://example.local:9999" });
+    const config = await resolveAdapterConfig({ BOARD_WORKSPACE: makeWorkspace(), OPENCODE_BASE_URL: "http://example.local:9999" });
     expect(config.mode).toBe("connect");
     expect(config.port).toBe(OPENCODE_DEFAULTS.port);
   });
 
   it("two instances resolved concurrently with no OpenCode port configured get disjoint ports", async () => {
-    const [a, b] = await Promise.all([resolveAdapterConfig({}), resolveAdapterConfig({})]);
+    const workspace = makeWorkspace();
+    const [a, b] = await Promise.all([resolveAdapterConfig({ BOARD_WORKSPACE: workspace }), resolveAdapterConfig({ BOARD_WORKSPACE: workspace })]);
     expect(a.port).not.toBe(b.port);
   });
 
   it("defaults with no env set reproduce the pre-multi-instance boardPort default", async () => {
-    const config = await resolveAdapterConfig({});
+    const config = await resolveAdapterConfig({ BOARD_WORKSPACE: makeWorkspace() });
     expect(config.boardPort).toBe(BOARD_SERVER_DEFAULTS.port);
   });
 });

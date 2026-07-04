@@ -105,8 +105,9 @@ describe("resolveBoardWorkspace", () => {
     );
   });
 
-  it("falls back to the home directory when BOARD_WORKSPACE is unset", () => {
-    const home = process.env.HOME ?? "/Users/test";
-    expect(resolveBoardWorkspace({})).toBe(realpathSync(home));
+  it("throws when BOARD_WORKSPACE is unset", () => {
+    expect(() => resolveBoardWorkspace({})).toThrow(
+      /BOARD_WORKSPACE must be set to an existing directory/,
+    );
   });
 });

@@ -163,8 +163,26 @@ export function createAdapterEnv({
   return resolved;
 }
 
+export function hasAttachTarget(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(
+    env.OPENCODE_BOARD_URL?.trim() ||
+      env.OPENBOARD_INSTANCE_NAME?.trim() ||
+      env.OPENBOARD_INSTANCE_PORT?.trim() ||
+      env.OPENBOARD_PORT?.trim(),
+  );
+}
+
+export function hasConfiguredWorkspace(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.BOARD_WORKSPACE?.trim());
+}
+
 export function startAdapter(options: StartAdapterOptions): AdapterProcess {
   const { repoRoot } = options;
+  const env = options.env ?? process.env;
+  const workspace = env.BOARD_WORKSPACE?.trim();
+  if (!workspace) {
+    throw new Error("Cannot start OpenBoard adapter: BOARD_WORKSPACE must be set to an existing directory.");
+  }
   const distServer = join(repoRoot, "dist", "server", "serve.mjs");
   const sourceServer = join(repoRoot, "src", "server", "serve.ts");
   const tsxBin = join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
@@ -177,8 +195,8 @@ export function startAdapter(options: StartAdapterOptions): AdapterProcess {
 
   const lines: string[] = [];
   const child = spawn(command, args, {
-    cwd: options.env?.BOARD_WORKSPACE || homedir(),
-    env: createAdapterEnv(options),
+    cwd: workspace,
+    env: createAdapterEnv({ ...options, env }),
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -203,7 +221,9 @@ export async function runLauncher(): Promise<number> {
   const rendererPath = join(repoRoot, "dist", "tui", "index.mjs");
   // Selector mode (bare `openboard`): no board is resolved or spawned; the
   // renderer opens the instance launch view and daemons start on demand.
-  const selectorMode = process.env.OPENBOARD_SELECTOR === "1";
+  const selectorMode =
+    process.env.OPENBOARD_SELECTOR === "1" ||
+    (!hasAttachTarget(process.env) && !hasConfiguredWorkspace(process.env));
   const boardUrl = selectorMode ? undefined : resolveBoardUrl();
 
   // Generate a shared board API token so the adapter and renderer can both
@@ -225,7 +245,7 @@ export async function runLauncher(): Promise<number> {
     }
 
     process.stderr.write(`Starting OpenBoard adapter at ${boardUrl}...\n`);
-    adapter = startAdapter({ boardUrl, repoRoot, boardToken });
+    adapter = startAdapter({ boardUrl, repoRoot, env: process.env, boardToken });
     const ready = await waitForBoardHealth(boardUrl);
     if (!ready) {
       stopAdapter(adapter.child);

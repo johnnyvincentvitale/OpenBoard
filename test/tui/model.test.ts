@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   TUI_LAYOUT,
   closeSwitcher,
@@ -21,6 +24,9 @@ import {
   tasksByColumn,
   truncateText,
   transitionView,
+  validateWorkspacePath,
+  isProjectLike,
+  workspaceToInstanceName,
 } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
 
@@ -187,5 +193,50 @@ describe("sidebar detail mode", () => {
     // 6 details fit at inner 26 (26 rows) but not with the 11-row error box.
     expect(sidebarDetailMode(26, 6, true)).toBe("compact");
     expect(sidebarDetailMode(37, 6, true)).toBe("expanded");
+  });
+});
+
+describe("workspace gate validation", () => {
+  const tempDirs: string[] = [];
+  const makeTempDir = () => {
+    const dir = mkdtempSync(join(tmpdir(), "openboard-ws-"));
+    tempDirs.push(dir);
+    return dir;
+  };
+
+  afterAll(() => {
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects empty, missing, files, and unsafe broad directories", () => {
+    expect(validateWorkspacePath("", "/repo").ok).toBe(false);
+    expect(validateWorkspacePath("/tmp/nonexistent-dir-openboard-ws", "/repo").ok).toBe(false);
+    expect(validateWorkspacePath(__filename, __dirname).ok).toBe(false);
+    expect(validateWorkspacePath(homedir(), homedir()).ok).toBe(false);
+    expect(validateWorkspacePath("/", "/repo").ok).toBe(false);
+    expect(validateWorkspacePath(join(homedir(), "Desktop"), homedir()).ok).toBe(false);
+    expect(validateWorkspacePath(join(homedir(), "Downloads"), homedir()).ok).toBe(false);
+  });
+
+  it("accepts an existing safe directory and resolves relative paths against cwd", () => {
+    const cwd = makeTempDir();
+    const child = join(cwd, "project");
+    mkdirSync(child);
+    tempDirs.push(child);
+    const result = validateWorkspacePath("project", cwd);
+    expect(result.ok).toBe(true);
+  });
+
+  it("detects project-like directories but never treats home as project-like", () => {
+    const dir = makeTempDir();
+    expect(isProjectLike(dir)).toBe(false);
+    writeFileSync(join(dir, "package.json"), "{}");
+    expect(isProjectLike(dir)).toBe(true);
+    expect(isProjectLike(homedir())).toBe(false);
+  });
+
+  it("derives a safe instance name from the workspace path", () => {
+    expect(workspaceToInstanceName("/Users/example/code/My Repo")).toBe("my-repo");
+    expect(workspaceToInstanceName("/")).toBe("openboard");
   });
 });

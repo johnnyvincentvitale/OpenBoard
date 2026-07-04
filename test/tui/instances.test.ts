@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, renderApp } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
@@ -77,6 +80,8 @@ function state(overrides: Record<string, unknown> = {}) {
     selectedInstanceIndex: 0,
     fetchingCardCounts: new Set<string>(),
     switcherSelectedIndex: 0,
+    workspaceGateInput: "",
+    workspaceGateSubmitting: false,
     ...overrides,
   } as any;
 }
@@ -1009,6 +1014,63 @@ describe("TUI handoff text wrapping", () => {
   });
 });
 
+describe("TUI workspace gate", () => {
+  const tempDirs: string[] = [];
+  const makeTempDir = () => {
+    const dir = mkdtempSync(join(tmpdir(), "openboard-ws-"));
+    tempDirs.push(dir);
+    return dir;
+  };
+
+  afterAll(() => {
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("renders a blocking setup view with directory prompt", () => {
+    const app = renderApp(fakeUi(), state({ viewState: { view: "workspaceGate", previousView: "launch" } }));
+    const text = textOf(app);
+    expect(text).toContain("SETUP");
+    expect(text).toContain("Workspace Required");
+    expect(text).toContain("Please specify a directory path");
+    expect(text).toContain("DIRECTORY");
+    expect(text).toContain("type absolute path · enter confirm · esc quit");
+  });
+
+  it("shows current-project affordance only for project-like cwd", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "package.json"), "{}");
+    const text = textOf(renderApp(fakeUi(), state({ viewState: { view: "workspaceGate", previousView: "launch" }, cwd: dir })));
+    expect(text).toContain("current project");
+  });
+
+  it("workspace gate captures typed paths, supports backspace, and submits on enter", async () => {
+    const setupWorkspace = vi.fn(async () => undefined);
+    const s = state({ viewState: { view: "workspaceGate", previousView: "launch" } });
+    await handleKeypress({ name: "/", sequence: "/" } as any, s, actions({ setupWorkspace }));
+    await handleKeypress({ name: "t", sequence: "t" } as any, s, actions({ setupWorkspace }));
+    await handleKeypress({ name: "backspace", sequence: "\u007f" } as any, s, actions({ setupWorkspace }));
+    await handleKeypress({ name: "m", sequence: "m" } as any, s, actions({ setupWorkspace }));
+    expect(s.workspaceGateInput).toBe("/m");
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ setupWorkspace }));
+    expect(setupWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("workspace gate disables run/task creation keys before a board is selected", async () => {
+    const s = state({ viewState: { view: "workspaceGate", previousView: "launch" } });
+    await handleKeypress({ name: "n", sequence: "n" } as any, s, actions());
+    expect(s.overlay).toBe("none");
+    expect(s.newTask).toBeUndefined();
+  });
+
+  it("existing named-instance launch view still renders attach controls", () => {
+    const app = renderApp(fakeUi(), state({ instanceList: [instance("alpha", "running", 4097, { cardCount: 3 })] }));
+    const text = textOf(app);
+    expect(text).toContain("● alpha  RUNNING  :4097  /work/alpha · 3 cards");
+    expect(text).toContain("↵ launch board");
+    expect(text).not.toContain("Workspace Required");
+  });
+});
+
 function archiveRecord(
   id: string,
   archivedAt: string,
@@ -1079,6 +1141,7 @@ function actions(overrides: Record<string, unknown> = {}) {
     openArchive: vi.fn(async () => undefined),
     closeArchive: vi.fn(),
     refreshArchive: vi.fn(async () => undefined),
+    setupWorkspace: vi.fn(async () => undefined),
     ...overrides,
   } as any;
 }

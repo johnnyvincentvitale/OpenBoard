@@ -99,6 +99,12 @@ describe("pty-manager helpers", () => {
       /BOARD_WORKSPACE must not be empty/,
     );
   });
+
+  it("rejects an unset BOARD_WORKSPACE instead of falling back to the home directory", () => {
+    expect(() => resolveBoardWorkspace({} as NodeJS.ProcessEnv)).toThrow(
+      /BOARD_WORKSPACE must be set to an existing directory/,
+    );
+  });
 });
 
 describe("PtyManager", () => {

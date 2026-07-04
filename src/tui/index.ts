@@ -38,6 +38,9 @@ import {
   InstanceListItem,
   INSTANCE_STATUS_GLYPHS,
   instanceStatusLabel,
+  validateWorkspacePath,
+  isProjectLike,
+  workspaceToInstanceName,
 } from "./model";
 import { createRootLifecycle } from "./root-lifecycle";
 import { buildWordmarkRows } from "./wordmark";
@@ -335,6 +338,9 @@ interface TuiState {
   confirmRemoveName?: string;
   detailTab?: "prompt" | "handoff";
   moveTargetColumn?: Column;
+  workspaceGateInput: string;
+  workspaceGateError?: string;
+  workspaceGateSubmitting: boolean;
 }
 
 interface TuiActions {
@@ -357,6 +363,7 @@ interface TuiActions {
   openArchive: () => Promise<void>;
   closeArchive: () => void;
   refreshArchive: () => Promise<void>;
+  setupWorkspace: () => Promise<void>;
 }
 
 export async function runOpenBoardTui(
@@ -396,6 +403,8 @@ export async function runOpenBoardTui(
     selectedInstanceIndex: 0,
     fetchingCardCounts: new Set(),
     switcherSelectedIndex: 0,
+    workspaceGateInput: "",
+    workspaceGateSubmitting: false,
   };
 
   let refreshTimer: NodeJS.Timeout | undefined;
@@ -745,6 +754,58 @@ export async function runOpenBoardTui(
     }
   };
 
+  const setupWorkspace = async () => {
+    const input = state.workspaceGateInput.trim();
+    const target = input || (isProjectLike(state.cwd) ? state.cwd : "");
+    if (!target) {
+      state.workspaceGateError = "Please type a path or navigate to a project directory.";
+      render();
+      return;
+    }
+
+    const validation = validateWorkspacePath(target, state.cwd);
+    if (!validation.ok) {
+      state.workspaceGateError = validation.error;
+      render();
+      return;
+    }
+
+    state.workspaceGateError = undefined;
+    state.workspaceGateSubmitting = true;
+    state.status = "creating workspace board...";
+    render();
+
+    try {
+      await refreshInstanceList();
+      const existing = state.instanceList.find((item) => item.definition.workspace === validation.path);
+      if (existing) {
+        await attachInstance(existing);
+        state.workspaceGateSubmitting = false;
+        return;
+      }
+
+      const baseName = workspaceToInstanceName(validation.path);
+      const usedNames = new Set(state.instanceList.map((item) => item.definition.name));
+      let name = baseName;
+      for (let suffix = 2; usedNames.has(name); suffix += 1) {
+        name = `${baseName}-${suffix}`;
+      }
+
+      await state.instanceProvider.add(name, validation.path);
+      await state.instanceProvider.start(name);
+      await refreshInstanceList();
+      const created = state.instanceList.find((item) => item.definition.name === name);
+      if (!created) throw new Error("instance created but not found in list after refresh");
+      await attachInstance(created);
+      state.workspaceGateSubmitting = false;
+    } catch (error) {
+      state.workspaceGateSubmitting = false;
+      state.workspaceGateError = errorMessage(error);
+      state.status = "workspace setup failed";
+      render();
+    }
+  };
+
   renderer.keyInput.on("keypress", (key) => {
     handleKeypress(key, state, {
       refresh,
@@ -765,6 +826,7 @@ export async function runOpenBoardTui(
       openArchive,
       closeArchive,
       refreshArchive,
+      setupWorkspace,
     }).catch((error) => {
       setError(error, "key handling failed");
       render();
@@ -778,6 +840,7 @@ export async function runOpenBoardTui(
 
   refreshTimer = setInterval(() => {
     if (state.viewState.view === "launch") return;
+    if (state.viewState.view === "workspaceGate") return;
     if (state.viewState.view === "archive") return;
     refresh(true).catch((error) => {
       setError(error, "refresh failed");
@@ -786,7 +849,10 @@ export async function runOpenBoardTui(
   }, POLL_INTERVAL_MS);
 
   await refreshInstanceList();
-  if (initialAttach) await refresh(true);
+  if (!initialAttach && state.instanceList.length === 0) {
+    state.viewState = transitionView(state.viewState, "workspaceGate");
+    render();
+  } else if (initialAttach) await refresh(true);
   else render();
   renderer.start();
 }
@@ -878,11 +944,13 @@ function reportFatalError(error: unknown): void {
 export function renderApp(ui: OpenTui, state: TuiState) {
   const children = [
     renderHeader(ui, state),
-    state.viewState.view === "launch"
-      ? renderLaunchView(ui, state)
-      : state.viewState.view === "archive"
-        ? renderArchiveView(ui, state)
-        : renderMain(ui, state),
+    state.viewState.view === "workspaceGate"
+      ? renderWorkspaceGateView(ui, state)
+      : state.viewState.view === "launch"
+        ? renderLaunchView(ui, state)
+        : state.viewState.view === "archive"
+          ? renderArchiveView(ui, state)
+          : renderMain(ui, state),
     renderCommandStrip(ui, state),
   ];
   if (state.overlay === "help") children.push(renderHelpOverlay(ui));
@@ -950,6 +1018,11 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     }
   } else if (state.viewState.view === "launch") {
     connection = "";
+    host = "";
+    taskLabel = "";
+    refreshed = "";
+  } else if (state.viewState.view === "workspaceGate") {
+    connection = "SETUP";
     host = "";
     taskLabel = "";
     refreshed = "";
@@ -1274,6 +1347,50 @@ function renderInlineMoveDetail(ui: OpenTui, state: TuiState, task: Task) {
     }),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     ui.Text({ content: "↑/↓ or 1-4 select lane · enter confirm · esc cancel", fg: COLORS.dim, height: 1, truncate: true }),
+  );
+}
+
+// ── Workspace gate view (first-run directory selection) ────────────────────────
+
+function renderWorkspaceGateView(ui: OpenTui, state: TuiState) {
+  const cwdIsProject = isProjectLike(state.cwd);
+  return ui.Box(
+    {
+      flexGrow: 1,
+      width: "100%",
+      flexDirection: "column",
+      ...boxBg(COLORS.panel),
+      padding: 1,
+      gap: 0,
+    },
+    renderWordmark(ui),
+    ui.Box({ height: 1 }),
+    ui.Text({ content: "Workspace Required", fg: COLORS.bright, attributes: ui.TextAttributes.BOLD, height: 1 }),
+    ui.Box({ height: 1 }),
+    ui.Text({ content: "OpenBoard needs a project workspace directory to run agents.", fg: COLORS.text, height: 1, truncate: true }),
+    ui.Text({ content: "Please specify a directory path or choose a project workspace.", fg: COLORS.muted, height: 1, truncate: true }),
+    ui.Box({ height: 1 }),
+    renderInputField(
+      ui,
+      "DIRECTORY",
+      state.workspaceGateInput || shortPath(state.cwd),
+      true,
+      shortPath(state.cwd),
+      1,
+      state.workspaceGateInput.length > 0 ? COLORS.text : COLORS.muted,
+    ),
+    ui.Box({ height: 1 }),
+    cwdIsProject
+      ? ui.Text({ content: "Current directory appears project-like (current project); press enter to use it.", fg: COLORS.accentBright, height: 1, truncate: true })
+      : ui.Text({ content: `Current directory: ${shortPath(state.cwd)}`, fg: COLORS.dim, height: 1, truncate: true }),
+    ui.Box({ height: 1 }),
+    state.workspaceGateError
+      ? ui.Text({ content: state.workspaceGateError, fg: COLORS.bright, wrapMode: "word", height: 2 })
+      : ui.Box({ height: 2 }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    state.workspaceGateSubmitting
+      ? ui.Text({ content: "Creating workspace board...", fg: COLORS.accentBright, height: 1 })
+      : ui.Text({ content: "type a path then press enter · esc quit", fg: COLORS.dim, height: 1, truncate: true }),
   );
 }
 
@@ -1953,6 +2070,8 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
         content:
           state.viewState.view === "archive"
             ? "↑/↓ navigate · ←/→ tabs: Prompt/Handoff · / search · i instance · l lane · u refresh · b back · q quit"
+            : state.viewState.view === "workspaceGate"
+            ? "type absolute path · enter confirm · esc quit"
             : state.viewState.view === "launch"
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
             : "↑/↓ cards · ←/→ lanes · b switch board · n new task · m move card · u refresh · ? help · q quit · A global archive",
@@ -2283,6 +2402,11 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.viewState.view === "workspaceGate") {
+    await handleWorkspaceGateKey(key, state, actions);
+    return;
+  }
+
   if (state.viewState.view === "launch") {
     await handleLaunchViewKey(key, state, actions);
     return;
@@ -2578,6 +2702,33 @@ function setDraftText(draft: NewTaskDraft, value: string): void {
       draft.directory = value;
       return;
   }
+}
+
+async function handleWorkspaceGateKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  if (state.workspaceGateSubmitting) return;
+
+  if (isEscapeKey(key)) {
+    actions.shutdown();
+    return;
+  }
+
+  if (isEnterKey(key)) {
+    await actions.setupWorkspace();
+    return;
+  }
+
+  if (key.name === "backspace" || key.sequence === "\u007f" || key.sequence === "\b") {
+    state.workspaceGateInput = state.workspaceGateInput.slice(0, -1);
+    state.workspaceGateError = undefined;
+    actions.render();
+    return;
+  }
+
+  if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return;
+
+  state.workspaceGateInput += key.sequence;
+  state.workspaceGateError = undefined;
+  actions.render();
 }
 
 async function handleLaunchViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {

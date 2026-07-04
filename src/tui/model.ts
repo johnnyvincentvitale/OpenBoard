@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
-import { renameSync } from "node:fs";
+import { existsSync, realpathSync, renameSync, statSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { createInstanceDaemon, createInstanceRegistry } from "../instances";
 import type { Column, ModelRef, RosterAgent, Task, TaskRunState } from "../shared";
 import {
@@ -242,7 +243,7 @@ export function instanceStatusLabel(status: InstanceStatus): string {
 
 // ── View state machine ───────────────────────────────────────────────────────────
 
-export type TuiView = "launch" | "board" | "switcher" | "archive";
+export type TuiView = "launch" | "board" | "switcher" | "archive" | "workspaceGate";
 
 export interface ViewState {
   view: TuiView;
@@ -283,6 +284,82 @@ export function closeArchive(state: ViewState): ViewState {
 export function selectInstanceInSwitcher(state: ViewState): ViewState {
   const target = state.previousView === "launch" ? "launch" : "board";
   return { view: target, previousView: null };
+}
+
+// ── Workspace gate ──────────────────────────────────────────────────────────────
+
+function unsafeWorkspacePaths(home = homedir()): Set<string> {
+  const resolvedHome = resolve(home);
+  return new Set([
+    resolvedHome,
+    resolve("/"),
+    resolve(resolvedHome, "Desktop"),
+    resolve(resolvedHome, "Downloads"),
+  ]);
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/**
+ * Validate a first-run workspace directory. The gate intentionally rejects
+ * broad personal folders so agents cannot be armed against an unsafe default.
+ */
+export function validateWorkspacePath(
+  raw: string,
+  cwd: string,
+): { ok: true; path: string } | { ok: false; error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, error: "Please specify a directory path." };
+
+  const requested = trimmed.startsWith("/") ? resolve(trimmed) : resolve(cwd, trimmed);
+  const canonical = canonicalPath(requested);
+  if (unsafeWorkspacePaths().has(canonical)) {
+    return { ok: false, error: "Cannot use home, root, Desktop, or Downloads as a board workspace." };
+  }
+
+  if (!existsSync(requested)) {
+    return { ok: false, error: `Directory does not exist: ${shortPath(requested)}` };
+  }
+
+  if (!statSync(requested).isDirectory()) {
+    return { ok: false, error: `Not a directory: ${shortPath(requested)}` };
+  }
+
+  return { ok: true, path: canonical };
+}
+
+export function isProjectLike(path: string): boolean {
+  const canonical = canonicalPath(path);
+  if (unsafeWorkspacePaths().has(canonical)) return false;
+  if (!existsSync(path) || !statSync(path).isDirectory()) return false;
+
+  return [
+    ".git",
+    "package.json",
+    "Cargo.toml",
+    "go.mod",
+    "Makefile",
+    "pyproject.toml",
+    "Gemfile",
+    "CMakeLists.txt",
+  ].some((marker) => existsSync(join(path, marker)));
+}
+
+export function workspaceToInstanceName(workspace: string): string {
+  return (
+    basename(workspace)
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "") || "openboard"
+  );
 }
 
 // ── Instance list helpers ────────────────────────────────────────────────────────

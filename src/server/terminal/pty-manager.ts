@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync as nodeExistsSync, statSync as nodeStatSync } from "node:fs";
-import { homedir } from "node:os";
 import type { Task, TaskStore } from "../../shared";
 import {
   isExternalDirectoriesAllowed,
@@ -136,10 +135,7 @@ export function resolveBoardWorkspace(
     throw new TerminalManagerError(400, "BOARD_WORKSPACE must not be empty");
   }
 
-  const fallback = homedir();
-  if (existsSync(fallback)) return fallback;
-
-  throw new TerminalManagerError(409, "BOARD_WORKSPACE does not exist");
+  throw new TerminalManagerError(400, "BOARD_WORKSPACE must be set to an existing directory");
 }
 
 export function resolveShell(

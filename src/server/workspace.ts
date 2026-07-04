@@ -7,7 +7,6 @@
  * directories.
  */
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { isAbsolute, parse, resolve, sep } from "node:path";
 import { AdapterError } from "../shared/errors";
 
@@ -42,11 +41,8 @@ export function isUnderWorkspace(canonical: string, workspace: string): boolean 
  * Resolve the board workspace for this process.
  *
  * Returns the configured `BOARD_WORKSPACE` if it points to an existing
- * directory. An explicitly configured but missing, empty, or non-directory
- * value is rejected with a validation error.
- *
- * Only when `BOARD_WORKSPACE` is unset does this fall back to the user's home
- * directory, matching the historical default.
+ * directory. A missing, empty, non-directory, or unset value is rejected
+ * with a validation error.
  */
 export function resolveBoardWorkspace(
   env: NodeJS.ProcessEnv = process.env,
@@ -68,10 +64,7 @@ export function resolveBoardWorkspace(
     throw AdapterError.validation("BOARD_WORKSPACE must not be empty");
   }
 
-  const fallback = homedir();
-  if (fsExistsSync(fallback)) return resolveWorkspace(fallback);
-
-  throw new AdapterError("validation", "BOARD_WORKSPACE does not exist");
+  throw AdapterError.validation("BOARD_WORKSPACE must be set to an existing directory");
 }
 
 /**
