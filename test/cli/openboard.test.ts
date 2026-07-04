@@ -196,6 +196,8 @@ describe("openboard add", () => {
       workspace: "/ws/new",
       opencodePort: undefined,
     });
+    // add must NOT auto-start the instance
+    expect(provider.start).not.toHaveBeenCalled();
   });
 
   it("auto-assigns the next available board port", async () => {
@@ -230,18 +232,18 @@ describe("openboard add", () => {
     });
   });
 
-  it("auto-starts the instance after add", async () => {
+  it("does NOT auto-start the instance after add", async () => {
     const provider = mockProvider();
     const { code, out } = await run(
       ["add", "fresh", "--workspace", "/ws/fresh"],
       provider,
     );
     expect(code).toBe(0);
-    expect(provider.start).toHaveBeenCalledWith("fresh");
-    expect(out).toContain('Instance "fresh" is running');
+    expect(provider.start).not.toHaveBeenCalled();
+    expect(out).toContain('Added instance "fresh"');
   });
 
-  it("skips the auto-start with --no-start", async () => {
+  it("accepts --no-start as a backward-compatible no-op", async () => {
     const provider = mockProvider();
     const { code, out } = await run(
       ["add", "fresh", "--workspace", "/ws/fresh", "--no-start"],
@@ -250,19 +252,6 @@ describe("openboard add", () => {
     expect(code).toBe(0);
     expect(provider.start).not.toHaveBeenCalled();
     expect(out).toContain('Added instance "fresh"');
-  });
-
-  it("reports add success but exits 1 when the auto-start fails", async () => {
-    const provider = mockProvider({
-      start: vi.fn().mockRejectedValue(new Error("port taken")),
-    });
-    const { code, out, err } = await run(
-      ["add", "fresh", "--workspace", "/ws/fresh"],
-      provider,
-    );
-    expect(code).toBe(1);
-    expect(out).toContain('Added instance "fresh"');
-    expect(err).toContain("failed to start");
   });
 
   it("rejects invalid instance names", async () => {

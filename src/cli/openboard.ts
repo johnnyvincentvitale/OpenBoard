@@ -380,8 +380,7 @@ Running openboard with no arguments opens the instance selector.
 Commands:
   list                                    Show registered instances
   add <name> --workspace <dir> [--port N] [--no-start]
-                                           Register a new instance (and start it,
-                                           unless --no-start)
+                                            Register a new instance
   remove <name> [--force]                 Unregister an instance
   start <name>                            Start an instance daemon
   stop <name>                             Stop an instance daemon
@@ -483,21 +482,6 @@ export async function runOpenboard(
         stdout.write(
           `Added instance "${definition.name}" on port ${definition.port} (${definition.workspace})\n`,
         );
-        if (!parsed.noStart) {
-          try {
-            const runtime = await provider.start(definition.name);
-            stdout.write(
-              `Instance "${definition.name}" is ${runtime.status} at ${runtime.boardUrl}\n`,
-            );
-          } catch (error) {
-            // The add itself succeeded — report the start failure without
-            // making the registration look failed.
-            stderr.write(
-              `Warning: instance added but failed to start: ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-            return 1;
-          }
-        }
         return 0;
       }
       case "remove": {
