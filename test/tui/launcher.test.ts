@@ -35,7 +35,7 @@ describe("TUI launcher", () => {
     expect(boardPortFromUrl("http://127.0.0.1:5010")).toBe(5010);
   });
 
-  it("uses Electron-compatible default data directories", () => {
+  it("uses platform default data directories", () => {
     expect(defaultOpenBoardDataDir("darwin", {}, "/Users/example")).toBe(
       "/Users/example/Library/Application Support/OpenBoard",
     );

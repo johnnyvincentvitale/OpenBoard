@@ -38,8 +38,8 @@ export async function main(): Promise<void> {
   await assertPortFree(config.boardPort, config.hostname);
 
   // Per-instance board API token — random at startup, configurable via
-  // OPENBOARD_API_TOKEN env var. Same-origin clients (Electron, TUI, MCP)
-  // pick it up from the environment so users don't paste it manually.
+  // OPENBOARD_API_TOKEN env var. Local clients pick it up from the environment
+  // so users don't paste it manually.
   const boardToken = resolveBoardToken(process.env);
 
   const handle = await startOrConnect(config);
@@ -82,9 +82,10 @@ export async function main(): Promise<void> {
   });
   registerTerminalRoutes(app, { manager: terminalManager });
 
-  // Serve the built frontend (dist/web) for the Electron shell / production. Absolute
-  // path so it's independent of the process cwd (the adapter/OpenCode default workspace). API
-  // routes are already registered above and match first; this catch-all serves the SPA.
+  // Serve the built frontend (dist/web) for browser fallback / production.
+  // Absolute path so it's independent of the process cwd (the adapter/OpenCode
+  // default workspace). API routes are already registered above and match
+  // first; this catch-all serves the SPA.
   const webDir =
     process.env.BOARD_WEB_DIR ??
     resolve(dirname(fileURLToPath(import.meta.url)), "../../dist/web");

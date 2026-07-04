@@ -1,7 +1,7 @@
 /**
  * Multi-instance integration test — proves two fully independent OpenBoard
  * *adapter* processes (spawned via `tsx src/server/serve.ts`, exactly as
- * `npm run dev:server` / the Electron main process do) can run
+ * `npm run dev:server` does) can run
  * simultaneously with disjoint ports, disjoint task/board DB files, and
  * disjoint spawned OpenCode backends, driven purely by env.
  *

@@ -4,9 +4,9 @@ description: >
   This skill should be used when the user asks to "plan the board", "how should
   I run agents in this repo", "set up a multi-agent workflow", "/board-plan",
   "choose models for my agents", "which OpenCode agents should I use", or wants
-  to design a multi-agent run before dispatching. Use after the agent-readiness
-  report and before the orchestrator dispatches cards, to lock the run shape,
-  the card contracts, the agent profiles, and the OpenCode model/provider setup.
+  to design a multi-agent run before dispatching. Use after startup and before
+  the orchestrator dispatches cards, to lock the run shape, the card contracts,
+  the agent profiles, and the OpenCode model/provider setup.
 ---
 
 # Board Plan
@@ -22,9 +22,9 @@ Plan, do not implement. The orchestrator session decomposes, dispatches,
 reviews, and integrates; it does not write feature code itself. Work that needs
 doing goes on a card.
 
-Assume `startup` has established the board surface. Use the `agent-readiness`
-report if one exists — its verified build/test command becomes the verification
-currency for the whole run. If there is no runnable build/test command, stop:
+Assume `startup` has established the board surface. Use verified build/test
+commands from the current repo as the verification currency for the whole run.
+If there is no runnable build/test command, stop:
 an unattended run cannot verify itself, and planning one anyway is theater.
 
 ## Decide What Deserves A Card

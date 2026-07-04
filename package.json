@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "description": "Local Devin-style Kanban command center for OpenCode sessions",
-  "main": "electron/main.cjs",
   "bin": {
     "openboard": "dist/cli/openboard.mjs"
   },
@@ -19,7 +18,7 @@
     "build": "vite build",
     "start": "tsx src/server/serve.ts",
     "build:web": "vite build",
-    "build:server": "esbuild src/server/serve.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server/serve.mjs --external:better-sqlite3 --external:node-pty --external:electron --banner:js=\"import{createRequire as __ocbCreateRequire}from'module';const require=__ocbCreateRequire(import.meta.url);\"",
+    "build:server": "esbuild src/server/serve.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server/serve.mjs --external:better-sqlite3 --external:node-pty --banner:js=\"import{createRequire as __ocbCreateRequire}from'module';const require=__ocbCreateRequire(import.meta.url);\"",
     "build:mcp": "esbuild src/mcp/server.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/mcp/server.mjs",
     "build:cli": "esbuild src/cli/openboard.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/cli/openboard.mjs",
     "build:tui": "npm run build:tui:renderer && npm run build:tui:launcher",
@@ -27,26 +26,7 @@
     "build:tui:launcher": "esbuild src/tui/launcher.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/tui/launcher.mjs",
     "build:app": "npm run build:web && npm run build:server && npm run build:mcp && npm run build:tui && npm run build:cli",
     "tui": "npm run build:tui && node dist/tui/launcher.mjs",
-    "electron": "npm run build:web && electron .",
-    "electron:pack": "npm run build:app && electron-rebuild -f -o better-sqlite3,node-pty && electron-builder --dir --config.npmRebuild=false && npm rebuild better-sqlite3 node-pty",
     "prepare": "husky"
-  },
-  "build": {
-    "appId": "app.openboard.desktop",
-    "productName": "OpenBoard",
-    "asarUnpack": [
-      "node_modules/better-sqlite3/**",
-      "node_modules/node-pty/**"
-    ],
-    "files": [
-      "dist/**",
-      "electron/**",
-      "package.json"
-    ],
-    "mac": {
-      "target": "dir",
-      "identity": null
-    }
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
@@ -59,8 +39,6 @@
     "@vitejs/plugin-react": "^6.0.3",
     "@vitest/coverage-v8": "^4.1.9",
     "concurrently": "^10.0.3",
-    "electron": "^43.0.0",
-    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
     "husky": "^9.1.7",
     "jsdom": "^29.1.1",

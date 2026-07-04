@@ -17,9 +17,8 @@ deliberately, and roster-verified before any OpenBoard card uses them.
   then install only after a separate parse-validation step succeeds.
 - Do not ask an OpenCode worker card to edit OpenCode profile/config files.
   Profile authoring is orchestrator-side setup, not board-dispatched work.
-- Do not edit live config in place while relying on `opencode`, OpenBoard
-  refresh, or Electron restart to catch mistakes. Stage first, validate first,
-  then install.
+- Do not edit live config in place while relying on `opencode` or OpenBoard
+  refresh to catch mistakes. Stage first, validate first, then install.
 - Do not overwrite an existing profile without a timestamped backup and an
   explicit reason. Stop and ask before overwriting a durable shared profile.
 - Do not create cards until the restarted OpenCode roster proves the profile is
@@ -172,8 +171,6 @@ Prompt body requirements:
    - Named OpenBoard instance: stop/start that selected instance (or use a
      product `restart` command when one exists), then keep using its resolved
      `OPENCODE_BOARD_URL`.
-   - Electron/native GUI without a named instance: restart that app/server
-     process and re-resolve the board URL.
    - Explicit `OPENCODE_BASE_URL` / connect mode: OpenBoard does not own the
      OpenCode process; restart the external `opencode serve` process or ask
      the operator to do it before roster proof.

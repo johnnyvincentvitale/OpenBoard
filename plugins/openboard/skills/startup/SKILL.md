@@ -6,13 +6,12 @@ description: >
   "start OpenBoard", "use /startup", "check the OpenBoard app", or before
   creating, running, judging, or inspecting cards. Use when a named OpenBoard
   instance must be selected, when OPENCODE_BOARD_URL may be unset, when
-  MCP/API/GUI alignment matters, or when Electron versus browser fallback
-  matters.
+  MCP/API/TUI alignment matters, or when browser fallback needs to be labeled.
 ---
 
 # Startup
 
-Establish the selected OpenBoard control surface before any orchestration skill creates or judges cards. Prefer the real Electron app or named-instance TUI when the task is about the packaged/native user experience, board persistence, or what the user sees. Use browser fallback only when the user explicitly accepts a dev-server surface.
+Establish the selected OpenBoard control surface before any orchestration skill creates or judges cards. Prefer the named-instance TUI when the task is about the primary user experience, board persistence, or what the user sees. Use browser fallback only when the user explicitly accepts a dev-server surface.
 
 Do not assume a running server, default port, old browser tab, or previous session points at the same board the user is viewing. Prove the selected instance, endpoint, GUI/TUI surface, task store, and agent roster in the current turn.
 
@@ -35,14 +34,11 @@ Follow this sequence before any OpenBoard work:
    verify API/MCP/GUI/TUI alignment, and confirm this session is looking at the
    same board and task store the user sees.
 3. Do not dispatch work or judge cards until the board surface is established.
-4. After board proof, ask: "Would you like me to assess your repository's
-   readiness for agentic development?"
-5. If yes, run `agent-readiness` and return the report.
-6. Then use `board-plan` to design the workflow, agents/profiles/models, and
+4. Then use `board-plan` to design the workflow, agents/profiles/models, and
    card shape.
-7. Use `create-profile` for any custom OpenCode agent profiles before cards
+5. Use `create-profile` for any custom OpenCode agent profiles before cards
    depend on them.
-8. Then use `openboard-orchestrator` to drive execution, keeping the user in
+6. Then use `openboard-orchestrator` to drive execution, keeping the user in
    control and reporting only verified board/work state.
 
 ## Step Completion Gate
@@ -51,7 +47,7 @@ At the end of every OpenBoard phase, explicitly close the step before doing the
 next one. Use this pattern:
 
 ```text
-STEP COMPLETE: <startup | readiness | planning | profile creation | dispatch/review>
+STEP COMPLETE: <startup | planning | profile creation | dispatch/review>
 VERIFIED: <one-line evidence>
 NEXT STEP: <the next skill or action>
 Ready to move on to <next step>?
@@ -65,7 +61,7 @@ the next skill immediately.
 ## Connect
 
 1. Determine the intended surface:
-   - Named-instance TUI or Electron/native GUI for normal OpenBoard testing.
+   - Named-instance TUI for normal OpenBoard testing.
    - Browser fallback only for frontend/dev-server checks.
    - Existing app process when the user says it is already running.
 2. Select the board instance before resolving a URL:
@@ -87,26 +83,9 @@ the next skill immediately.
 4. Probe the selected adapter before acting:
    - `GET /api/agents`
    - `GET /api/tasks`
-5. Confirm the GUI/TUI and API match:
+5. Confirm the TUI and API match:
    - The task list includes the cards the user can see, or
    - The user has been told that the selected endpoint is a different board/store.
-
-## Start Electron
-
-When no suitable app is running and the user wants the real OpenBoard app, start it from the local OpenBoard repo root:
-
-```sh
-npm run electron
-```
-
-Then verify:
-
-- The native window opened or was brought to the front.
-- The adapter printed a board URL.
-- `GET /api/agents` returns the expected OpenCode roster.
-- `GET /api/tasks` returns the task list backing the visible board.
-
-Do not continue from a silent or crashed app launch. Inspect the terminal/process state and report the failure.
 
 ## Browser Fallback
 
@@ -117,7 +96,7 @@ npm run dev:server
 npm run dev
 ```
 
-Label all evidence from this surface as browser/dev-server evidence. Do not use it to answer whether packaged Electron behavior works.
+Label all evidence from this surface as browser/dev-server evidence.
 
 ## MCP Readiness
 
@@ -145,22 +124,14 @@ the board's HTTP API or GUI, and say MCP was not the control path.
 
 If MCP is unavailable, use the adapter API directly and state that MCP was not the control path.
 
-## Offer Readiness
-
-Once the board surface is proven, offer the user a repository readiness
-assessment before planning a run: "Would you like me to assess your repository's
-readiness for agentic development?" If they accept, run the `agent-readiness`
-skill and return its report. Do not create cards from the readiness gaps — the
-report is for the user to act on.
-
 ## Handoff
 
 When startup is complete, hand the orchestrator these facts:
 
 - Selected instance name, or "explicit URL" / "legacy single-board fallback".
 - Board URL.
-- Surface type: named-instance TUI, Electron, browser fallback, or API-only.
-- Whether the GUI is visible.
+- Surface type: named-instance TUI, browser fallback, or API-only.
+- Whether the TUI is visible.
 - Agent roster summary.
 - Existing relevant card IDs and columns.
 - Any mismatch between visible GUI, API, and MCP.
@@ -169,5 +140,5 @@ When startup is complete, hand the orchestrator these facts:
   `OPENCODE_BASE_URL` boards, state that OpenBoard does not own the OpenCode
   process and the external server must be restarted by the operator.
 
-Then ask whether to move to repository readiness. Do not proceed without the
-user's confirmation unless they already explicitly requested the full sequence.
+Then ask whether to move to planning. Do not proceed without the user's
+confirmation unless they already explicitly requested the full sequence.

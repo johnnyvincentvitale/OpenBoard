@@ -37,7 +37,7 @@ export function getOpenTuiRuntimeStatus(
       "OpenBoard's OpenTUI renderer needs Bun or Node 26.3+ with --experimental-ffi.",
       reason,
       "Use Bun for the TUI runner, or run Node 26.3+ with: node --experimental-ffi dist/tui/index.mjs",
-      "The Electron app, adapter, MCP server, and shared client still support the existing Node 22 path.",
+      "The adapter, MCP server, and shared client still support the existing Node 22 path.",
     ].join("\n"),
   };
 }

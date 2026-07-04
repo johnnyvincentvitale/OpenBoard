@@ -72,10 +72,10 @@ Clients send the token in one of two ways:
 - `?board_token=<token>` query parameter (for SSE/EventSource/WebSocket clients
   that cannot set custom headers)
 
-Local clients launched by OpenBoard itself — the Electron UI, the TUI, and the
-`openboard` CLI — receive the token automatically through the environment. The
-web UI receives it via an injected `<script>` tag in the HTML. No manual
-copying is needed for these same-origin clients.
+Local clients launched by OpenBoard itself — the TUI and the `openboard` CLI —
+receive the token automatically through the environment. The web UI receives it
+via an injected `<script>` tag in the HTML. No manual copying is needed for
+these same-origin clients.
 
 Dispatched OpenCode sessions also receive the token inside the appended
 completion-contract prompt so they can report `/complete` or `/block` back to
@@ -116,7 +116,7 @@ Set `BOARD_WORKSPACE` to a directory path. This is the root that all task and
 terminal directories must fall under:
 
 ```
-BOARD_WORKSPACE=/path/to/your/repo npm run electron
+BOARD_WORKSPACE=/path/to/your/repo npm run dev:server
 ```
 
 If `BOARD_WORKSPACE` is unset, the server falls back to your home directory. An
@@ -131,7 +131,7 @@ workspace, set `OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES=true`. This disables the
 workspace boundary check entirely for all tasks and terminals on the instance.
 
 ```
-OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES=true BOARD_WORKSPACE=/path/to/repo npm run electron
+OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES=true BOARD_WORKSPACE=/path/to/repo npm run dev:server
 ```
 
 **This is unsafe.** When enabled, an agent can be dispatched into any directory

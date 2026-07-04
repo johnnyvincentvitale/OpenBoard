@@ -1,8 +1,8 @@
 # OpenBoard
 
-Skills that turn a coding-agent session into an **OpenBoard orchestrator cockpit**: assess a
-repository's readiness for autonomous work, plan a multi-agent run, dispatch OpenCode agents onto
-an OpenBoard board, and verify the results — with the human in the pilot seat.
+Skills that turn a coding-agent session into an **OpenBoard orchestrator cockpit**: plan a
+multi-agent run, dispatch OpenCode agents onto an OpenBoard board, and verify the results —
+with the human in the pilot seat.
 
 Multi-platform: the same `skills/` tree is used by **Claude Code** (`.claude-plugin`),
 **Codex** (`.codex-plugin`), and **OpenCode** native skills.
@@ -26,8 +26,8 @@ Then install it into your agent harness:
   symlink.
 - **Codex** — follow Codex CLI plugin conventions for the `.codex-plugin`
   directory.
-- **OpenCode native** — copy or symlink `plugins/openboard/skills/` into
-  `.opencode/skills/` or `~/.config/opencode/skills/`.
+- **OpenCode native** — copy or symlink `plugins/openboard/skills/` into your
+  OpenCode skills directory.
 
 If you copy the plugin elsewhere, the bootstrap script can no longer find
 `dist/mcp/server.mjs` automatically. Set the absolute path explicitly:
@@ -55,16 +55,13 @@ Keep harness-specific wrappers specific to their harness:
 - `.codex-plugin/plugin.json` for Codex metadata/default prompts.
 - `.claude-plugin/plugin.json` plus `hooks/` for SessionStart-capable harnesses
   such as Claude Code and observed Codex CLI plugin sessions.
-- OpenCode uses direct skill discovery from `.opencode/skills/` or
-  `~/.config/opencode/skills/`; its plugin should stay a thin startup hook, not
-  a copy of the full skill bodies.
+- OpenCode uses direct skill discovery from its configured skills directory;
+  its plugin should stay a thin startup hook, not a copy of the full skill bodies.
 
 ## Skills
 
-- `startup` — connect to or start OpenBoard, verify the visible GUI/API/MCP surface, and hand off
+- `startup` — connect to or start OpenBoard, verify the visible TUI/API/MCP surface, and hand off
   board facts (URL, roster, task state). Run this first.
-- `agent-readiness` — score a repository's readiness for autonomous agent work and report the
-  gaps (report-only; never creates cards).
 - `board-plan` — design the run before dispatch: workflow shape, file-disjoint decomposition,
   agent profiles + model/provider selection, cards-as-contracts, and the failure policy.
 - `create-profile` — create or repair OpenCode agent profiles with staged validation, safe
@@ -75,11 +72,10 @@ Keep harness-specific wrappers specific to their harness:
 ## Flow
 
 ```
-startup → agent-readiness → board-plan → create-profile → openboard-orchestrator
+startup → board-plan → create-profile → openboard-orchestrator
 ```
 
-Establish the board, optionally assess repo readiness, plan the run, validate any custom
-profiles, then dispatch and verify.
+Establish the board, plan the run, validate any custom profiles, then dispatch and verify.
 
 ## Components
 
@@ -105,9 +101,9 @@ profiles, then dispatch and verify.
 
 ## Usage
 
-Start the OpenBoard app, open a coding-agent session in the target repo, and let the flow run —
-`startup` establishes the board, then the session offers a readiness assessment, plans the run
-with you, and orchestrates it. Nothing dispatches or integrates without your approval.
+Start OpenBoard, open a coding-agent session in the target repo, and let the flow run —
+`startup` establishes the board, then the session plans the run with you and orchestrates it.
+Nothing dispatches or integrates without your approval.
 
 ### Auth token
 
@@ -122,5 +118,5 @@ export OPENCODE_BOARD_URL=http://127.0.0.1:4097
 ```
 
 The bundled MCP server reads `OPENBOARD_API_TOKEN` and sends it as a bearer
-token on board API requests. Local OpenBoard clients (Electron, TUI, CLI)
-inject the token automatically.
+token on board API requests. Local OpenBoard clients (TUI and CLI) inject the
+token automatically.

@@ -1,9 +1,9 @@
 {
   "name": "openboard",
   "version": "0.1.0",
-  "description": "OpenBoard skills to connect to the board, assess repository readiness, plan multi-agent runs, validate OpenCode profiles, and dispatch and verify agent work.",
+  "description": "OpenBoard skills to connect to the board, plan multi-agent runs, validate OpenCode profiles, and dispatch and verify agent work.",
   "author": {
     "name": "OpenBoard"
   },
-  "keywords": ["openboard", "opencode", "orchestration", "multi-agent", "readiness", "planning"]
+  "keywords": ["openboard", "opencode", "orchestration", "multi-agent", "planning"]
 }

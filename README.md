@@ -1,20 +1,19 @@
 # OpenBoard
 
 A local, Devin/Hermes-style **multi-agent command center for [OpenCode](https://opencode.ai)**.
-V1 ships the **TUI + named-instance CLI** workflow. Post a task, assign it an OpenCode agent,
+OpenBoard ships the **TUI + named-instance CLI** workflow. Post a task, assign it an OpenCode agent,
 hit **Run** — the board dispatches a real session that **autonomously does the work**, and
 the card **auto-advances To Do → In Progress → Review** as the agent runs. Moving to Done is
 manual until OpenCode exposes a stronger task-complete signal. It's the named-agent,
 multi-agent workflow OpenCode doesn't ship, and a free alternative to Devin Desktop's Kanban.
 
-## V1 scope
+## Scope
 
-V1 is TUI-only for tester readiness and release decisions:
+The public repo is TUI/CLI/server-first:
 
 - Ship/test surface: `openboard` named-instance CLI and OpenTUI board.
 - Primary launch path: `openboard attach <instance>` or `npm run tui`.
 - Primary validation: TUI build, CLI/instance flow, server/task lifecycle, integration tests, and source tests.
-- The Electron app is not a V1 ship target and must not be treated as a blocker, packaging gate, or readiness requirement unless a task explicitly asks for Electron work.
 
 ## What it does
 - **Tasks, not just sessions.** A card in To Do is a spec: title, description, working
@@ -63,7 +62,7 @@ After the security hardening, mutating and sensitive board routes require a
 per-instance board API token. The `/api/health` endpoint remains unauthenticated;
 all other `/api/*` routes require the token.
 
-Local launches (Electron, `npm run tui`, `openboard start`) inject the token
+Local launches (`npm run tui`, `openboard start`) inject the token
 automatically — no manual setup is needed. External clients, scripts, and the
 MCP server must provide the token via the `OPENBOARD_API_TOKEN` environment
 variable:
@@ -270,7 +269,6 @@ src/db/        better-sqlite3 task store + session-column sidecar
 src/tui/       V1 OpenTUI board, selected-card details, instance switcher, launcher
 src/cli/       named-instance CLI (`openboard`)
 src/web/       non-V1 React web board
-electron/      non-V1 Electron shell
 test/          unit + DOM + integration
 ```
 
@@ -300,5 +298,4 @@ Concurrent agents in one repo share a working tree and can clobber each other. T
 ## Roadmap
 - V1 TUI + named-instance CLI — **ship target**.
 - Worktree-per-agent isolation — **done** (board default + per-task override, sync/integrate).
-- Electron app — **out of V1 scope**; do not use packaging/signing as a V1 readiness gate.
 - Multi-CLI: back an agent with Codex or Claude instead of OpenCode (a provider seam / ACP host).

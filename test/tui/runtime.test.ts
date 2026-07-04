@@ -21,6 +21,6 @@ describe("OpenTUI runtime guard", () => {
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain("Bun or Node 26.3+");
-    expect(result.message).toContain("Electron app, adapter, MCP server, and shared client");
+    expect(result.message).toContain("adapter, MCP server, and shared client");
   });
 });
