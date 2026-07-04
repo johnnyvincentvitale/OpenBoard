@@ -11,6 +11,7 @@ import type { McpToolOptions } from "../../src/mcp/tools";
 import type { RosterAgent, Task } from "../../src/shared";
 
 const CWD = "/tmp/openboard-project";
+const NO_AUTH_ENV = { OPENBOARD_API_TOKEN: "" };
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -241,7 +242,7 @@ describe("MCP list tools", () => {
     ];
     const fetchMock = vi.fn(async () => jsonResponse(tasks));
 
-    const result = await listTasks({ fetch: fetchMock, cwd: CWD });
+    const result = await listTasks({ fetch: fetchMock, cwd: CWD, env: NO_AUTH_ENV });
 
     expect(fetchMock).toHaveBeenCalledWith(`${DEFAULT_BOARD_URL}/api/tasks`, { method: "GET" });
     expect(result).toEqual({
@@ -269,7 +270,7 @@ describe("MCP list tools", () => {
     ];
     const fetchMock = vi.fn(async () => jsonResponse(agents));
 
-    const result = await listAgents({ fetch: fetchMock, cwd: CWD });
+    const result = await listAgents({ fetch: fetchMock, cwd: CWD, env: NO_AUTH_ENV });
 
     expect(fetchMock).toHaveBeenCalledWith(`${DEFAULT_BOARD_URL}/api/agents`, { method: "GET" });
     expect(result).toEqual({ boardUrl: DEFAULT_BOARD_URL, count: 2, agents });
