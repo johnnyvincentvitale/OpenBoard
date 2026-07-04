@@ -291,10 +291,10 @@ export function selectInstanceInSwitcher(state: ViewState): ViewState {
 function unsafeWorkspacePaths(home = homedir()): Set<string> {
   const resolvedHome = resolve(home);
   return new Set([
-    resolvedHome,
-    resolve("/"),
-    resolve(resolvedHome, "Desktop"),
-    resolve(resolvedHome, "Downloads"),
+    canonicalPath(resolvedHome),
+    canonicalPath(resolve("/")),
+    canonicalPath(resolve(resolvedHome, "Desktop")),
+    canonicalPath(resolve(resolvedHome, "Downloads")),
   ]);
 }
 

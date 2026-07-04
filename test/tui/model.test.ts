@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -233,6 +233,41 @@ describe("workspace gate validation", () => {
     writeFileSync(join(dir, "package.json"), "{}");
     expect(isProjectLike(dir)).toBe(true);
     expect(isProjectLike(homedir())).toBe(false);
+  });
+
+  it("rejects symlinks that canonicalize to unsafe home folders", async () => {
+    const fakeHome = makeTempDir();
+    const desktop = join(fakeHome, "Desktop");
+    const downloads = join(fakeHome, "Downloads");
+    mkdirSync(desktop);
+    mkdirSync(downloads);
+    writeFileSync(join(fakeHome, "package.json"), "{}");
+    writeFileSync(join(desktop, "package.json"), "{}");
+    writeFileSync(join(downloads, "package.json"), "{}");
+
+    vi.resetModules();
+    vi.doMock("node:os", async () => {
+      const actual = await vi.importActual<typeof import("node:os")>("node:os");
+      return { ...actual, homedir: () => fakeHome };
+    });
+
+    try {
+      const model = await import("../../src/tui/model");
+      for (const [name, target] of Object.entries({ home: fakeHome, Desktop: desktop, Downloads: downloads })) {
+        const link = join(makeTempDir(), `${name}-link`);
+        symlinkSync(target, link, "dir");
+
+        const validation = model.validateWorkspacePath(link, tmpdir());
+        expect(validation).toEqual({
+          ok: false,
+          error: "Cannot use home, root, Desktop, or Downloads as a board workspace.",
+        });
+        expect(model.isProjectLike(link)).toBe(false);
+      }
+    } finally {
+      vi.doUnmock("node:os");
+      vi.resetModules();
+    }
   });
 
   it("derives a safe instance name from the workspace path", () => {
