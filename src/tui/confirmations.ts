@@ -171,7 +171,7 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
  * Build the copy for the confirmation prompt shown in the Selected/details column.
  */
 export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task, "title">): ConfirmationCopy {
-  const title = `${capitalize(actionVerb(action, true))} this card?`;
+  const title = action === "move-to-done" ? "Move this card to Done?" : `${capitalize(actionVerb(action, true))} this card?`;
 
   let body: string[];
   switch (action) {

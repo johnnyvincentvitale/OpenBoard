@@ -2,7 +2,7 @@
 import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
-import type { BoardClient } from "../client/board-client";
+import type { BoardClient, BoardHealth } from "../client/board-client";
 import type { Column, CompletionReport, ModelRef, RosterAgent, Task, TaskIsolationMode } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -11,7 +11,6 @@ import {
   TUI_COLUMNS,
   TUI_LAYOUT,
   agentLabel,
-  formatElapsed,
   modelLabel,
   laneCapacity,
   laneInnerHeight,
@@ -20,7 +19,6 @@ import {
   reconcileLaneOffset,
   shortPath,
   sidebarDetailMode,
-  taskStatus,
   tasksByColumn,
   // Instance-related exports
   InstanceLifecycleProvider,
@@ -42,6 +40,17 @@ import {
   isProjectLike,
   workspaceToInstanceName,
 } from "./model";
+import {
+  buildConfirmationCopy,
+  buildRunConfidenceDetails,
+  clearConfirmation,
+  confirmationStatus,
+  formatConfidenceDetail,
+  requestConfirmation,
+  type ConfirmableAction,
+  type PendingConfirmation,
+} from "./confirmations";
+import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
 import { createRootLifecycle } from "./root-lifecycle";
 import { buildWordmarkRows } from "./wordmark";
 import { RGBA, type KeyEvent, type VChild } from "@opentui/core";
@@ -319,6 +328,8 @@ interface TuiState {
   error?: string;
   refreshing: boolean;
   lastRefresh?: Date;
+  health?: BoardHealth;
+  healthError?: string;
   cwd: string;
   overlay: Overlay;
   newTask?: NewTaskDraft;
@@ -338,6 +349,7 @@ interface TuiState {
   confirmRemoveName?: string;
   detailTab?: "prompt" | "handoff";
   moveTargetColumn?: Column;
+  pendingConfirmation?: PendingConfirmation;
   workspaceGateInput: string;
   workspaceGateError?: string;
   workspaceGateSubmitting: boolean;
@@ -481,10 +493,25 @@ export async function runOpenBoardTui(
     }
 
     try {
-      const [tasks, agents] = await Promise.all([currentClient.listTasks(), currentClient.listAgents()]);
+      const [tasks, agents, healthResult] = await Promise.all([
+        currentClient.listTasks(),
+        currentClient.listAgents(),
+        currentClient.getHealth().then(
+          (health) => ({ ok: true as const, health }),
+          (error) => ({ ok: false as const, error }),
+        ),
+      ]);
       state.tasks = tasks;
       state.agents = agents;
       state.selectedTaskId = resolveSelectedTaskId(tasks, state.selectedTaskId);
+      state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
+      if (healthResult.ok) {
+        state.health = healthResult.health;
+        state.healthError = undefined;
+      } else {
+        state.health = undefined;
+        state.healthError = errorMessage(healthResult.error);
+      }
       state.error = undefined;
       state.status = tasks.length === 0 ? "board is empty" : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
       state.lastRefresh = new Date();
@@ -1009,6 +1036,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
   let host = boardHost(state.boardUrl);
   let taskLabel = `${state.tasks.length} TASK${state.tasks.length === 1 ? "" : "S"}`;
   let refreshed = state.lastRefresh ? formatClock(state.lastRefresh) : "NO REFRESH";
+  let healthLabel = boardHealthLabel(state);
   let instanceLabel = "";
 
   if (state.viewState.view === "board") {
@@ -1021,21 +1049,25 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     host = "";
     taskLabel = "";
     refreshed = "";
+    healthLabel = "";
   } else if (state.viewState.view === "workspaceGate") {
     connection = "SETUP";
     host = "";
     taskLabel = "";
     refreshed = "";
+    healthLabel = "";
   } else if (state.viewState.view === "switcher") {
     connection = "SWITCHER";
     host = "";
     taskLabel = "";
     refreshed = "";
+    healthLabel = "";
   } else if (state.viewState.view === "archive") {
     connection = "ARCHIVE";
     host = "";
     taskLabel = `${state.archive?.records.length ?? 0} RECORD${state.archive?.records.length === 1 ? "" : "S"}`;
     refreshed = "";
+    healthLabel = "";
   }
 
   return ui.Box(
@@ -1049,12 +1081,22 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     },
     ui.Box({ flexGrow: 1 }),
     ui.Text({
-      content: `${connection}${host}${instanceLabel} · ${taskLabel} · ${refreshed}`.replace(/^ · /, "").replace(/ · $/, ""),
+      content: [connection, host, instanceLabel.replace(/^ · /, ""), taskLabel, refreshed, healthLabel].filter(Boolean).join(" · "),
       fg: state.error ? COLORS.bright : COLORS.muted,
       height: 1,
       truncate: true,
     }),
   );
+}
+
+function boardHealthLabel(state: TuiState): string {
+  if (state.health?.adapter === "ok") {
+    const opencode = state.health.opencode.status === "ok"
+      ? `OpenCode ${state.health.opencode.version}`
+      : "OpenCode unreachable";
+    return `Board ok · ${opencode}`;
+  }
+  return state.healthError ? "Board health unknown" : "";
 }
 
 function renderWordmark(ui: OpenTui) {
@@ -1323,6 +1365,25 @@ function renderBoardHandoffTab(ui: OpenTui, completion: CompletionReport | null)
 
 function renderInlineMoveDetail(ui: OpenTui, state: TuiState, task: Task) {
   const target = state.moveTargetColumn ?? task.column;
+  if (target === "done" && state.pendingConfirmation?.action === "move-to-done" && state.pendingConfirmation.taskId === task.id) {
+    const copy = buildConfirmationCopy("move-to-done", task);
+    return ui.Box(
+      {
+        flexGrow: 1,
+        flexDirection: "column",
+        gap: 1,
+        ...boxBg(COLORS.panel),
+      },
+      ui.Text({ content: "Move this card to Done?", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
+      ui.Text({ content: task.title, fg: COLORS.bright, height: 2, wrapMode: "word" }),
+      ui.Text({ content: `Current lane: ${TUI_COLUMN_LABELS[task.column]}`, fg: COLORS.muted, height: 1 }),
+      ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+      ...copy.body.map((line) => ui.Text({ content: line, fg: COLORS.text, wrapMode: "word", height: 2 })),
+      ui.Box({ flexGrow: 1 }),
+      ui.Text({ content: "Press enter again to move to Done.", fg: COLORS.accentBright, height: 1, truncate: true }),
+      ui.Text({ content: "completedBy: User · esc cancel", fg: COLORS.dim, height: 1, truncate: true }),
+    );
+  }
 
   return ui.Box(
     {
@@ -1759,12 +1820,7 @@ interface MetaRow {
 // Status row text: glyph + label, plus the live elapsed time while running
 // (`● RUNNING · 4m 12s`). The 2.5s poll re-render keeps the clock ticking.
 function taskStatusText(task: Task): string {
-  const status = taskStatus(task);
-  const elapsed =
-    task.runState === "running" && task.runStartedAt
-      ? ` · ${formatElapsed(Date.now() - task.runStartedAt)}`
-      : "";
-  return `${status.glyph} ${status.label}${elapsed}`;
+  return compactTaskBoardLabel(task);
 }
 
 function renderTask(ui: OpenTui, state: TuiState, task: Task) {
@@ -1868,22 +1924,30 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
 
 function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   const instance = currentInstanceItem(state);
+  const lifecycleRows: MetaRow[] = taskLifecycleDetailRows(task).map((row) => ({
+    label: row.label,
+    value: row.value,
+    color: lifecycleRowColor(row.role, task),
+  }));
   const rows: MetaRow[] = [
     { label: "INSTANCE", value: instance ? `${instance.definition.name}:${instance.definition.port}` : boardHost(state.boardUrl), color: COLORS.text },
-    { label: "STATE", value: taskStatusText(task), color: taskStatusColor(task) },
+    ...lifecycleRows,
     { label: "LANE", value: TUI_COLUMN_LABELS[task.column], color: COLORS.muted },
     { label: "AGENT", value: agentLabel(task, state.agents), color: COLORS.text },
     { label: "MODEL", value: modelLabel(task.model), color: COLORS.text },
     { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
     { label: "ISO", value: task.isolation ?? "board default", color: COLORS.text },
   ];
-  if (task.completedBy) rows.push({ label: "COMPLETED BY", value: task.completedBy, color: COLORS.accentBright });
   if (task.sessionId) rows.push({ label: "SESSION", value: task.sessionId, color: COLORS.muted });
   if (task.worktreeBranch) rows.push({ label: "BRANCH", value: `⑃ ${task.worktreeBranch}`, color: COLORS.muted });
   if (task.baseBranch) rows.push({ label: "BASE", value: `⑃ ${task.baseBranch}`, color: COLORS.muted });
 
   if (state.moveTargetColumn) {
     return renderInlineMoveDetail(ui, state, task);
+  }
+
+  if (state.pendingConfirmation?.taskId === task.id) {
+    return renderPendingConfirmationDetail(ui, state, task, state.pendingConfirmation.action);
   }
 
   if (state.detailTab) {
@@ -1897,6 +1961,14 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   return mode === "expanded"
     ? renderExpandedDetails(ui, task, rows)
     : renderCompactDetails(ui, task, rows);
+}
+
+function lifecycleRowColor(role: string | undefined, task: Task): TuiColor {
+  if (role === "state") return taskStatusColor(task);
+  if (role === "error") return COLORS.bright;
+  if (role === "completedBy") return COLORS.accentBright;
+  if (role === "pending") return COLORS.bright;
+  return COLORS.text;
 }
 
 function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
@@ -1947,6 +2019,41 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
       content,
     ),
     ui.Text({ content: "esc details · ←/→ tabs · m move card", fg: COLORS.muted, height: 1, truncate: true }),
+  );
+}
+
+function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Task, action: ConfirmableAction) {
+  const copy = buildConfirmationCopy(action, task);
+  const confidence = action === "run" || action === "retry" ? buildRunConfidenceDetails(task) : [];
+
+  return ui.Box(
+    {
+      flexGrow: 1,
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
+    },
+    ui.Text({ content: copy.title, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
+    ui.Text({ content: task.title, fg: COLORS.bright, height: 2, wrapMode: "word" }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...copy.body.map((line) => ui.Text({ content: line, fg: COLORS.text, wrapMode: "word", height: 2 })),
+    ...(confidence.length
+      ? [
+          ui.Text({ content: "Pre-run confidence", fg: COLORS.dim, height: 1, truncate: true }),
+          ui.Box(
+            { width: "100%", flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
+            ...confidence.map((detail) => ui.Text({
+              content: formatConfidenceDetail(detail),
+              fg: detail.ok ? COLORS.muted : COLORS.bright,
+              height: 1,
+              truncate: true,
+            })),
+          ),
+        ]
+      : []),
+    ui.Box({ flexGrow: 1 }),
+    ui.Text({ content: copy.confirmHint, fg: COLORS.accentBright, height: 1, truncate: true }),
+    ui.Text({ content: "esc cancel · changing selection clears", fg: COLORS.dim, height: 1, truncate: true }),
   );
 }
 
@@ -2438,52 +2545,58 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
   // Board view keybindings
   switch (key.sequence) {
     case "q":
+      clearPendingConfirmation(state);
       actions.shutdown();
       return;
     case "?":
+      clearPendingConfirmation(state);
       state.overlay = "help";
       actions.render();
       return;
     case "n":
+      clearPendingConfirmation(state);
       state.newTask = createNewTaskDraft(state);
       state.overlay = "newTask";
       state.error = undefined;
       actions.render();
       return;
     case "u":
+      clearPendingConfirmation(state);
       await actions.refresh();
       return;
     case "r":
-      await actions.runAction("run", (task) => actions.client.runTask(task.id));
+      await handleConfirmableCardAction("run", state, actions, (task) => actions.client.runTask(task.id), "run");
       return;
     case "R":
-      await actions.runAction("retry", (task) => actions.client.retryTask(task.id));
+      await handleConfirmableCardAction("retry", state, actions, (task) => actions.client.retryTask(task.id), "retry");
       return;
     case "a":
-      await actions.archiveTask(state.selectedTaskId ?? "");
+      await handleConfirmableCardAction("archive", state, actions, (task) => actions.archiveTask(task.id), "archive");
       return;
     case "A":
+      clearPendingConfirmation(state);
       await actions.openArchive();
       return;
     case "d":
-      await actions.runAction("delete", (task) => actions.client.deleteTask(task.id));
+      await handleConfirmableCardAction("delete", state, actions, (task) => actions.client.deleteTask(task.id), "delete");
       return;
     case "s":
+      clearPendingConfirmation(state);
       await actions.runAction("sync", (task) => actions.client.syncTask(task.id));
       return;
     case "i":
+      clearPendingConfirmation(state);
       await actions.runAction("integrate", (task) => actions.client.integrateTask(task.id));
       return;
     case "g":
+      clearPendingConfirmation(state);
       await actions.runAction("init git and run", (task) => actions.client.initGitAndRun(task.id));
       return;
     case "x":
-      await actions.runAction("move done", (task) => {
-        const endOfDone = state.tasks.filter((item) => item.column === "done" && item.id !== task.id).length;
-        return actions.client.moveTask(task.id, "done", endOfDone, "User");
-      });
+      await confirmMoveToDone(state, actions);
       return;
     case "m":
+      clearPendingConfirmation(state);
       if (!state.selectedTaskId) {
         state.status = "no task selected to move";
         actions.render();
@@ -2494,6 +2607,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       actions.render();
       return;
     case "b":
+      clearPendingConfirmation(state);
       state.viewState = openSwitcher(state.viewState);
       state.switcherSelectedIndex = state.instanceList.findIndex((item) => item.runtime.boardUrl === state.boardUrl);
       if (state.switcherSelectedIndex === -1) state.switcherSelectedIndex = 0;
@@ -2502,11 +2616,13 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
   }
 
   if (isEscapeKey(key)) {
+    clearPendingConfirmation(state);
     await actions.detachInstance();
     return;
   }
 
   if (isEnterKey(key) && state.selectedTaskId) {
+    clearPendingConfirmation(state);
     state.detailTab = state.detailTab ? undefined : "prompt";
     actions.render();
     return;
@@ -2514,17 +2630,77 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
 
   if (keyName === "down") {
     state.selectedTaskId = nextTaskId(state.tasks, state.selectedTaskId, 1);
+    state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
     actions.render();
   } else if (keyName === "up") {
     state.selectedTaskId = nextTaskId(state.tasks, state.selectedTaskId, -1);
+    state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
     actions.render();
   } else if (keyName === "left") {
     state.selectedTaskId = nearestTaskInColumn(state.tasks, state.selectedTaskId, -1);
+    state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
     actions.render();
   } else if (keyName === "right") {
     state.selectedTaskId = nearestTaskInColumn(state.tasks, state.selectedTaskId, 1);
+    state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
     actions.render();
   }
+}
+
+async function handleConfirmableCardAction(
+  action: ConfirmableAction,
+  state: TuiState,
+  actions: TuiActions,
+  execute: (task: Task) => Promise<unknown>,
+  label: string,
+): Promise<void> {
+  const task = selectedTask(state);
+  if (!task) {
+    state.status = "no task selected";
+    state.error = undefined;
+    clearPendingConfirmation(state);
+    actions.render();
+    return;
+  }
+
+  const result = requestConfirmation(state, action, task.id);
+  state.pendingConfirmation = result.state.pendingConfirmation;
+  state.detailTab = undefined;
+  state.moveTargetColumn = undefined;
+  state.error = undefined;
+
+  if (!result.execute) {
+    state.status = confirmationStatus(action, task);
+    actions.render();
+    return;
+  }
+
+  clearPendingConfirmation(state);
+  await actions.runAction(label, execute);
+}
+
+async function confirmMoveToDone(state: TuiState, actions: TuiActions): Promise<void> {
+  await handleConfirmableCardAction(
+    "move-to-done",
+    state,
+    actions,
+    (task) => moveTaskToDone(state, actions, task),
+    "move done",
+  );
+}
+
+function moveTaskToDone(state: TuiState, actions: TuiActions, task: Task): Promise<unknown> {
+  const endOfDone = state.tasks.filter((item) => item.column === "done" && item.id !== task.id).length;
+  return actions.client.moveTask(task.id, "done", endOfDone, "User");
+}
+
+function clearPendingConfirmation(state: TuiState): void {
+  state.pendingConfirmation = clearConfirmation(state).pendingConfirmation;
+}
+
+function clearPendingForSelection(state: Pick<TuiState, "pendingConfirmation">, selectedTaskId: string | undefined): PendingConfirmation | undefined {
+  if (!state.pendingConfirmation || state.pendingConfirmation.taskId === selectedTaskId) return state.pendingConfirmation;
+  return undefined;
 }
 
 async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
@@ -2935,6 +3111,7 @@ async function handleInlineMoveKey(key: KeyEvent, state: TuiState, actions: TuiA
 
   if (isEscapeKey(key)) {
     state.moveTargetColumn = undefined;
+    clearPendingConfirmation(state);
     actions.render();
     return;
   }
@@ -2944,8 +3121,22 @@ async function handleInlineMoveKey(key: KeyEvent, state: TuiState, actions: TuiA
     if (target === task.column) {
       // No change, just close
       state.moveTargetColumn = undefined;
+      clearPendingConfirmation(state);
       actions.render();
       return;
+    }
+    if (target === "done") {
+      const result = requestConfirmation(state, "move-to-done", task.id);
+      state.pendingConfirmation = result.state.pendingConfirmation;
+      state.error = undefined;
+      if (!result.execute) {
+        state.status = `Move "${task.title}" to Done? Press enter again to confirm.`;
+        actions.render();
+        return;
+      }
+      clearPendingConfirmation(state);
+    } else {
+      clearPendingConfirmation(state);
     }
     const targetLane = state.tasks.filter((item) => item.column === target && item.id !== task.id).length;
     const completedBy = target === "done" ? "User" : null;
@@ -2966,12 +3157,14 @@ async function handleInlineMoveKey(key: KeyEvent, state: TuiState, actions: TuiA
   }
 
   if (keyName === "down") {
+    clearPendingConfirmation(state);
     state.moveTargetColumn = nextColumn(state.moveTargetColumn ?? task?.column ?? "todo", 1);
     actions.render();
     return;
   }
 
   if (keyName === "up") {
+    clearPendingConfirmation(state);
     state.moveTargetColumn = nextColumn(state.moveTargetColumn ?? task?.column ?? "todo", -1);
     actions.render();
     return;
@@ -2980,6 +3173,7 @@ async function handleInlineMoveKey(key: KeyEvent, state: TuiState, actions: TuiA
   // Number keys 1-4 select lane directly
   const numMap: Record<string, Column> = { "1": "todo", "2": "in_progress", "3": "review", "4": "done" };
   if (key.sequence in numMap) {
+    clearPendingConfirmation(state);
     state.moveTargetColumn = numMap[key.sequence];
     actions.render();
     return;

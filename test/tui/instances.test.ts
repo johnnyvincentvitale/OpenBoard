@@ -248,6 +248,23 @@ describe("TUI label cleanup", () => {
     expect(text).not.toContain("b switch · n new");
   });
 
+  it("board header shows health/version without removing instance and task count", () => {
+    const alpha = instance("alpha", "running", 4097);
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      instanceList: [alpha],
+      boardUrl: alpha.runtime.boardUrl,
+      tasks: [task("todo-card", "todo")],
+      health: { adapter: "ok", opencode: { status: "ok", version: "1.2.3" } },
+      lastRefresh: new Date("2026-07-04T12:00:00Z"),
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("INSTANCE alpha:4097");
+    expect(text).toContain("1 TASK");
+    expect(text).toContain("Board ok · OpenCode 1.2.3");
+  });
+
   it("selected-card action hints use 'archive task'", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -837,7 +854,7 @@ describe("TUI inline manual move", () => {
     expect(moveTask).not.toHaveBeenCalled();
   });
 
-  it("move to Done calls client.moveTask with completedBy 'User'", async () => {
+  it("move to Done requires enter twice and calls client.moveTask with completedBy 'User'", async () => {
     const moveTask = vi.fn(async () => [{ ...task("todo-card", "done"), completedBy: "User" }]);
     const s = state({
       viewState: { view: "board", previousView: "launch" },
@@ -845,6 +862,14 @@ describe("TUI inline manual move", () => {
       selectedTaskId: "todo-card",
       moveTargetColumn: "done",
     });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({
+      client: { moveTask },
+    }));
+
+    expect(moveTask).not.toHaveBeenCalled();
+    expect(s.pendingConfirmation).toEqual({ action: "move-to-done", taskId: "todo-card" });
+    expect(s.status).toContain("Press enter again");
 
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({
       client: { moveTask },
@@ -895,7 +920,7 @@ describe("TUI inline manual move", () => {
     expect(s.status).toBe("move failed");
   });
 
-  it("x key moves to Done with completedBy 'User'", async () => {
+  it("x key arms then moves to Done with completedBy 'User'", async () => {
     const moveTask = vi.fn(async () => [{ ...task("todo-card", "done"), completedBy: "User" }]);
     const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
     const s = state({
@@ -909,7 +934,15 @@ describe("TUI inline manual move", () => {
       runAction,
     }));
 
-    // runAction is called with label "move done" and a callback
+    expect(runAction).not.toHaveBeenCalled();
+    expect(s.pendingConfirmation).toEqual({ action: "move-to-done", taskId: "todo-card" });
+
+    await handleKeypress({ name: "x", sequence: "x" } as any, s, actions({
+      client: { moveTask },
+      runAction,
+    }));
+
+    // Second press calls runAction with label "move done" and a callback
     expect(runAction).toHaveBeenCalledTimes(1);
     expect(runAction.mock.calls[0]?.[0]).toBe("move done");
     expect(typeof runAction.mock.calls[0]?.[1]).toBe("function");
