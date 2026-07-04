@@ -34,11 +34,14 @@ Follow this sequence before any OpenBoard work:
    verify API/MCP/GUI/TUI alignment, and confirm this session is looking at the
    same board and task store the user sees.
 3. Do not dispatch work or judge cards until the board surface is established.
-4. Then use `board-plan` to design the workflow, agents/profiles/models, and
+4. After board proof, ask: "Would you like me to assess your repository's
+   readiness for agentic development?"
+5. If yes, run `agent-readiness` and return the report.
+6. Then use `board-plan` to design the workflow, agents/profiles/models, and
    card shape.
-5. Use `create-profile` for any custom OpenCode agent profiles before cards
+7. Use `create-profile` for any custom OpenCode agent profiles before cards
    depend on them.
-6. Then use `openboard-orchestrator` to drive execution, keeping the user in
+8. Then use `openboard-orchestrator` to drive execution, keeping the user in
    control and reporting only verified board/work state.
 
 ## Step Completion Gate
@@ -47,7 +50,7 @@ At the end of every OpenBoard phase, explicitly close the step before doing the
 next one. Use this pattern:
 
 ```text
-STEP COMPLETE: <startup | planning | profile creation | dispatch/review>
+STEP COMPLETE: <startup | readiness | planning | profile creation | dispatch/review>
 VERIFIED: <one-line evidence>
 NEXT STEP: <the next skill or action>
 Ready to move on to <next step>?
@@ -124,6 +127,14 @@ the board's HTTP API or GUI, and say MCP was not the control path.
 
 If MCP is unavailable, use the adapter API directly and state that MCP was not the control path.
 
+## Offer Readiness
+
+Once the board surface is proven, offer the user a repository readiness
+assessment before planning a run: "Would you like me to assess your repository's
+readiness for agentic development?" If they accept, run the `agent-readiness`
+skill and return its report. Do not create cards from the readiness gaps — the
+report is for the user to act on.
+
 ## Handoff
 
 When startup is complete, hand the orchestrator these facts:
@@ -140,5 +151,5 @@ When startup is complete, hand the orchestrator these facts:
   `OPENCODE_BASE_URL` boards, state that OpenBoard does not own the OpenCode
   process and the external server must be restarted by the operator.
 
-Then ask whether to move to planning. Do not proceed without the user's
-confirmation unless they already explicitly requested the full sequence.
+Then ask whether to move to repository readiness. Do not proceed without the
+user's confirmation unless they already explicitly requested the full sequence.

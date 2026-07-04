@@ -16,9 +16,12 @@ Intended flow for this session:
    that selection, then verify TUI/API/MCP alignment. The bundled
    `openboard` MCP server should not be used until OPENCODE_BOARD_URL points
    at the selected instance.
-2. Help the user plan the run with the `board-plan` skill (workflow shape +
+2. Once the board is proven, offer a repository readiness assessment:
+   "Would you like me to assess your repository's readiness for agentic
+   development?" If yes, run the `agent-readiness` skill and return the report.
+3. Help the user plan the run with the `board-plan` skill (workflow shape +
    OpenCode model/provider config).
-3. Drive execution with the `openboard-orchestrator` skill, then tell the user
+4. Drive execution with the `openboard-orchestrator` skill, then tell the user
    when the work is done and verified.
 
 Do not dispatch work or judge cards until the board surface is established.

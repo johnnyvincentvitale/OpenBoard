@@ -46,6 +46,7 @@ describe("plugin manifests", () => {
       "src/tui/wordmark.ts",
       "test/plugin/manifest.test.ts",
       ...collectFiles(PLUGIN_ROOT),
+      ...collectFiles(join(REPO_ROOT, ".opencode", "skills")),
     ];
     const raw = files.map((file) => readFileSync(isAbsolute(file) ? file : join(REPO_ROOT, file), "utf8")).join("\n");
     const privateVaultName = ["Brain", "Pro"].join("-");
