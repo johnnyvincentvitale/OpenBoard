@@ -65,7 +65,11 @@ async function handleCompletion(
     const updated = store.update(id, {
       runState: outcome === "complete" ? "idle" : "error",
       error: outcome === "complete" ? undefined : payload.residualRisk,
-      finalSessionOutput: task.harness === "claude-code" ? null : finalSessionOutput ?? null,
+      finalSessionOutput: task.harness === "claude-code"
+        ? null
+        : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
+          ? finalSessionOutput ?? null
+          : task.finalSessionOutput ?? null,
       ...completionMetadata,
       ...(task.harness === "claude-code"
         ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }

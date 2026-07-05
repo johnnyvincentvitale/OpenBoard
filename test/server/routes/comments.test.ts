@@ -48,6 +48,33 @@ describe("task comment and event routes", () => {
     ]);
   });
 
+  it("creates replies to existing comments", async () => {
+    const task = store.create({ title: "A", description: "", directory: "/repo" });
+    store.move(task.id, "review", 0);
+    const app = appFor(store);
+
+    const rootResponse = await app.request(`/api/tasks/${task.id}/comments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ author: "orchestrator", body: "Reviewed" }),
+    });
+    const root = await rootResponse.json();
+
+    const replyResponse = await app.request(`/api/tasks/${task.id}/comments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ author: "reviewer", body: "Reply", parentCommentId: root.id }),
+    });
+
+    expect(replyResponse.status).toBe(201);
+    expect(await replyResponse.json()).toMatchObject({
+      taskId: task.id,
+      author: "reviewer",
+      body: "Reply",
+      parentCommentId: root.id,
+    });
+  });
+
   it("validates comment body and unknown tasks", async () => {
     const task = store.create({ title: "A", description: "", directory: "/repo" });
     const app = appFor(store);
@@ -64,5 +91,45 @@ describe("task comment and event routes", () => {
 
     const missingEvents = await app.request("/api/tasks/missing/events");
     expect(missingEvents.status).toBe(404);
+  });
+
+  it("rejects comments before checking the column only after the body is valid", async () => {
+    const task = store.create({ title: "A", description: "", directory: "/repo" });
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/comments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ author: "orchestrator", body: "Reviewed" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toBe("Comments can only be added to Review or Done tasks");
+  });
+
+  it("rejects missing or foreign parent comments with validation errors", async () => {
+    const task = store.create({ title: "A", description: "", directory: "/repo" });
+    const other = store.create({ title: "B", description: "", directory: "/repo" });
+    store.move(task.id, "review", 0);
+    store.move(other.id, "review", 1);
+    const foreignParent = store.addComment({ taskId: other.id, author: "reviewer", body: "Other task" });
+    const app = appFor(store);
+
+    const missingParent = await app.request(`/api/tasks/${task.id}/comments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ author: "orchestrator", body: "Reply", parentCommentId: "comment_missing" }),
+    });
+    const foreignParentRes = await app.request(`/api/tasks/${task.id}/comments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ author: "orchestrator", body: "Reply", parentCommentId: foreignParent.id }),
+    });
+
+    expect(missingParent.status).toBe(400);
+    expect(foreignParentRes.status).toBe(400);
+    expect((await missingParent.json()).error.message).toBe("parentCommentId must reference a comment on this task");
+    expect((await foreignParentRes.json()).error.message).toBe("parentCommentId must reference a comment on this task");
   });
 });

@@ -208,6 +208,7 @@ describe("completion routes", () => {
       runStartedAt: 100,
       completion: null,
       completionSource: "idle-fallback",
+      finalSessionOutput: "captured assistant output",
     });
     store.move(task.id, "review", 0);
     const app = appFor(store);
@@ -225,6 +226,7 @@ describe("completion routes", () => {
     expect(body.runState).toBe("idle");
     expect(body.completionSource).toBe("reported");
     expect(body.completion).toMatchObject({ ...validBody, outcome: "complete" });
+    expect(body.finalSessionOutput).toBe("captured assistant output");
   });
 
   it("upgrades an idle-fallback review task when the late /block report arrives", async () => {
@@ -235,6 +237,7 @@ describe("completion routes", () => {
       runStartedAt: 100,
       completion: null,
       completionSource: "idle-fallback",
+      finalSessionOutput: "captured assistant output",
     });
     store.move(task.id, "review", 0);
     const app = appFor(store);
@@ -252,6 +255,7 @@ describe("completion routes", () => {
     expect(body.error).toBe("needs credentials");
     expect(body.completionSource).toBe("reported");
     expect(body.completion).toMatchObject({ outcome: "blocked", residualRisk: "needs credentials" });
+    expect(body.finalSessionOutput).toBe("captured assistant output");
   });
 
   it("rejects an idle-fallback upgrade after the task has been re-dispatched", async () => {

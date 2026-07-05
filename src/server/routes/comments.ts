@@ -42,9 +42,16 @@ export function registerTaskCommentRoutes(app: Hono, deps: { store: TaskStore })
         throw AdapterError.validation("Comments can only be added to Review or Done tasks");
       }
 
-      const comment = store.addComment({ taskId, author, body: commentBody, parentCommentId: parentCommentId ?? null });
-      store.addEvent({ taskId, type: "comment_added", body: { commentId: comment.id, author, parentCommentId: comment.parentCommentId ?? null } });
-      return c.json(comment, 201);
+      try {
+        const comment = store.addComment({ taskId, author, body: commentBody, parentCommentId: parentCommentId ?? null });
+        store.addEvent({ taskId, type: "comment_added", body: { commentId: comment.id, author, parentCommentId: comment.parentCommentId ?? null } });
+        return c.json(comment, 201);
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("unknown parent comment")) {
+          throw AdapterError.validation("parentCommentId must reference a comment on this task");
+        }
+        throw err;
+      }
     } catch (err) {
       return respondWithError(c, err);
     }

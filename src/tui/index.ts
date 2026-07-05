@@ -2646,7 +2646,6 @@ function renderHelpOverlay(ui: OpenTui) {
     ["n", "new task"],
     ["u", "refresh board"],
     ["b", "switch instances"],
-    ["e", "rename instance (launch view)"],
     ["esc", "detach / close overlay"],
     ["q", "quit"],
     ["", ""],
