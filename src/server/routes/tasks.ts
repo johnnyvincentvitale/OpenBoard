@@ -5,7 +5,7 @@
  */
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { TASK_ROUTE_PATTERNS, TASK_ISOLATION_MODES, USER_COMPLETED_BY, isColumn } from "../../shared";
+import { TASK_ROUTE_PATTERNS, TASK_ISOLATION_MODES, TASK_TYPES, USER_COMPLETED_BY, isColumn } from "../../shared";
 import type { CreateTaskInput, Dispatcher, ModelRef, RosterAgent, TaskIsolationMode, TaskStore } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
@@ -21,6 +21,10 @@ interface AgentRosterDep {
 
 function isIsolationMode(value: unknown): value is TaskIsolationMode {
   return typeof value === "string" && (TASK_ISOLATION_MODES as readonly string[]).includes(value);
+}
+
+function isTaskType(value: unknown): value is CreateTaskInput["type"] {
+  return typeof value === "string" && (TASK_TYPES as readonly string[]).includes(value);
 }
 
 interface RetryTaskBody {
@@ -64,16 +68,26 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model, isolation } = body;
+      const { title, description, directory, agent, model, isolation, assignedTo } = body;
+      const taskType = body.type ?? "agent";
 
       if (typeof title !== "string" || title.trim().length === 0) {
         throw AdapterError.validation("title must be a non-empty string");
       }
+      if (!isTaskType(taskType)) {
+        throw AdapterError.validation("type must be 'manual' or 'agent'");
+      }
       if (typeof directory !== "string" || directory.trim().length === 0) {
         throw AdapterError.validation("directory must be a non-empty string");
       }
+      if (assignedTo !== undefined && typeof assignedTo !== "string") {
+        throw AdapterError.validation("assignedTo must be a string when provided");
+      }
       if (isolation !== undefined && !isIsolationMode(isolation)) {
         throw AdapterError.validation("isolation must be 'worktree' or 'in-place'");
+      }
+      if (taskType === "manual" && (agent !== undefined || model !== undefined)) {
+        throw AdapterError.validation("manual tasks cannot define agent or model");
       }
 
       const workspace = resolveBoardWorkspace();
@@ -82,15 +96,17 @@ export function registerTaskRoutes(
         allowExternal,
       });
 
-      const resolvedModel = await resolveModel(agent, model);
+      const resolvedModel = taskType === "agent" ? await resolveModel(agent, model) : undefined;
 
       const task = store.create({
+        type: taskType,
         title,
         description: typeof description === "string" ? description : "",
         directory: canonicalDirectory,
-        ...(typeof agent === "string" ? { agent } : {}),
+        ...(taskType === "agent" && typeof agent === "string" ? { agent } : {}),
+        ...(taskType === "manual" && typeof assignedTo === "string" && assignedTo.trim() ? { assignedTo: assignedTo.trim() } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
-        ...(isIsolationMode(isolation) ? { isolation } : {}),
+        ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
       });
 
       return c.json(task, 201);
@@ -301,6 +317,7 @@ function assertRunnableActiveTask(store: TaskStore, id: string, action: "run" | 
   const task = store.get(id);
   if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
   if (task.archived) throw new ArchivedTaskActionError(action);
+  if (task.type === "manual") throw AdapterError.validation(`Manual tasks cannot ${action}; convert it to an agent task first.`);
 }
 
 /** Translate a thrown value into the AdapterError JSON envelope + status. */

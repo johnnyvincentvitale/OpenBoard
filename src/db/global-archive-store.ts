@@ -26,10 +26,12 @@ CREATE TABLE IF NOT EXISTS global_archive (
   source_workspace      TEXT NOT NULL,
   source_db_path        TEXT NOT NULL,
   task_id               TEXT NOT NULL,
+  task_type             TEXT NOT NULL DEFAULT 'agent',
   title                 TEXT NOT NULL,
   description           TEXT NOT NULL,
   directory             TEXT NOT NULL,
   agent                 TEXT,
+  assigned_to           TEXT,
   model                 TEXT,
   isolation             TEXT,
   column_name           TEXT NOT NULL,
@@ -42,6 +44,7 @@ CREATE TABLE IF NOT EXISTS global_archive (
   base_branch           TEXT,
   completion            TEXT,
   completion_source     TEXT,
+  completed_by          TEXT,
   archived_at           INTEGER NOT NULL,
   task_created_at       INTEGER NOT NULL,
   task_updated_at       INTEGER NOT NULL,
@@ -49,6 +52,12 @@ CREATE TABLE IF NOT EXISTS global_archive (
   PRIMARY KEY(source_db_path, task_id)
 );
 `;
+
+const GLOBAL_ARCHIVE_COLUMNS: Array<[name: string, definition: string]> = [
+  ["task_type", "TEXT NOT NULL DEFAULT 'agent'"],
+  ["assigned_to", "TEXT"],
+  ["completed_by", "TEXT"],
+];
 
 /** Identity of the source OpenBoard instance that archived a task. */
 export interface SourceInstanceInfo {
@@ -69,10 +78,12 @@ export interface GlobalArchiveRecord {
   source_workspace: string;
   source_db_path: string;
   task_id: string;
+  task_type: string;
   title: string;
   description: string;
   directory: string;
   agent: string | null;
+  assigned_to: string | null;
   model: string | null;
   isolation: string | null;
   column_name: string;
@@ -85,6 +96,7 @@ export interface GlobalArchiveRecord {
   base_branch: string | null;
   completion: string | null;
   completion_source: string | null;
+  completed_by: string | null;
   archived_at: number;
   task_created_at: number;
   task_updated_at: number;
@@ -140,24 +152,25 @@ export class GlobalArchiveStore {
 
     this.db.pragma("journal_mode = WAL");
     this.db.exec(GLOBAL_ARCHIVE_SCHEMA);
+    ensureColumns(this.db);
 
     this.stmts = {
       upsert: this.db.prepare(
         `INSERT OR REPLACE INTO global_archive (
            source_instance_name, source_port, source_workspace, source_db_path,
-           task_id, title, description, directory,
-           agent, model, isolation,
+           task_id, task_type, title, description, directory,
+           agent, assigned_to, model, isolation,
            column_name, run_state, run_started_at, error,
            session_id, worktree_path, worktree_branch, base_branch,
-           completion, completion_source,
+           completion, completion_source, completed_by,
            archived_at, task_created_at, task_updated_at, mirrored_at
          ) VALUES (
            @sourceInstanceName, @sourcePort, @sourceWorkspace, @sourceDbPath,
-           @taskId, @title, @description, @directory,
-           @agent, @model, @isolation,
+           @taskId, @taskType, @title, @description, @directory,
+           @agent, @assignedTo, @model, @isolation,
            @columnName, @runState, @runStartedAt, @error,
            @sessionId, @worktreePath, @worktreeBranch, @baseBranch,
-           @completion, @completionSource,
+           @completion, @completionSource, @completedBy,
            @archivedAt, @taskCreatedAt, @taskUpdatedAt, @mirroredAt
          )`,
       ),
@@ -187,10 +200,12 @@ export class GlobalArchiveStore {
       sourceWorkspace: source.workspace,
       sourceDbPath: source.dbPath,
       taskId: task.id,
+      taskType: task.type ?? "agent",
       title: task.title,
       description: task.description,
       directory: task.directory,
       agent: task.agent ?? null,
+      assignedTo: task.assignedTo ?? null,
       model: task.model ? JSON.stringify(task.model) : null,
       isolation: task.isolation ?? null,
       columnName: task.column,
@@ -203,6 +218,7 @@ export class GlobalArchiveStore {
       baseBranch: task.baseBranch ?? null,
       completion: task.completion ? JSON.stringify(task.completion) : null,
       completionSource: task.completionSource ?? null,
+      completedBy: task.completedBy ?? null,
       archivedAt,
       taskCreatedAt: task.createdAt,
       taskUpdatedAt: task.updatedAt,
@@ -236,6 +252,18 @@ export class GlobalArchiveStore {
   close(): void {
     if (this.ownsDb) {
       this.db.close();
+    }
+  }
+}
+
+function ensureColumns(db: Database.Database): void {
+  const existing = new Set(
+    (db.prepare("PRAGMA table_info(global_archive)").all() as Array<{ name: string }>)
+      .map((column) => column.name),
+  );
+  for (const [name, definition] of GLOBAL_ARCHIVE_COLUMNS) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE global_archive ADD COLUMN ${name} ${definition}`);
     }
   }
 }

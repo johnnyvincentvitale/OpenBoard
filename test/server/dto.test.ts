@@ -194,6 +194,7 @@ describe("mapTaskToDto", () => {
   it("carries BoardV3 task metadata", () => {
     const task: Task = {
       id: "task_1",
+      type: "agent",
       title: "Task",
       description: "Do it",
       directory: "/repo",

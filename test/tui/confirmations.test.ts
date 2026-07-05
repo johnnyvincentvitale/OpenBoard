@@ -131,6 +131,29 @@ describe("confirmation copy builders", () => {
     expect(copy.body[0]).toContain("Widget work");
     expect(copy.confirmHint).toBe(expectedHint);
   });
+
+  it("includes reported completion context before move-to-done signoff", () => {
+    const copy = buildConfirmationCopy("move-to-done", {
+      title: "UX polish",
+      completionSource: "reported",
+      completion: {
+        outcome: "complete",
+        summary: "done",
+        changedFiles: [],
+        verification: [
+          { command: "typecheck", result: "passed" },
+          { command: "tests", result: "passed" },
+        ],
+        residualRisk: "none reported",
+        reportedAt: 1,
+      },
+    });
+
+    expect(copy.body).toContain("Completion: reported complete");
+    expect(copy.body).toContain("Verification: typecheck passed, tests passed");
+    expect(copy.body).toContain("Residual risk: none reported");
+    expect(copy.body).toContain("Source: agent-reported");
+  });
 });
 
 describe("pre-run confidence details", () => {

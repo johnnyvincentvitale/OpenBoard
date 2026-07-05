@@ -365,6 +365,7 @@ describe("openboard start", () => {
     const { code, err } = await run(["start", "bad"], provider);
     expect(code).toBe(1);
     expect(err).toContain('Failed to spawn instance "bad"');
+    expect(err).toContain("ENOENT");
   });
 });
 

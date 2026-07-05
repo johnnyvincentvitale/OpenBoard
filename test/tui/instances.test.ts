@@ -10,6 +10,7 @@ function fakeUi() {
   return {
     TextAttributes: { BOLD: "bold" },
     Box: (props: Record<string, unknown>, ...children: unknown[]) => ({ type: "Box", props, children }),
+    ScrollBox: (props: Record<string, unknown>, ...children: unknown[]) => ({ type: "ScrollBox", props, children }),
     Text: (props: Record<string, unknown>) => ({ type: "Text", props, children: [] }),
     fg: () => (value: unknown) => String(value),
     t: (strings: TemplateStringsArray, ...values: unknown[]) =>
@@ -33,6 +34,21 @@ function textNodesContaining(node: any, needle: string): any[] {
   if (!node || typeof node !== "object") return [];
   const matches = node.type === "Text" && typeof node.props?.content === "string" && node.props.content.includes(needle) ? [node] : [];
   return [...matches, ...(node.children ?? []).flatMap((child: unknown) => textNodesContaining(child, needle))];
+}
+
+function nodesByType(node: any, type: string): any[] {
+  if (!node || typeof node !== "object") return [];
+  const matches = node.type === type ? [node] : [];
+  return [...matches, ...(node.children ?? []).flatMap((child: unknown) => nodesByType(child, type))];
+}
+
+function metaRowByLabel(node: any, label: string): any | undefined {
+  return nodesByType(node, "Box")
+    .find((candidate) =>
+      candidate.props?.height === 1 &&
+      candidate.props?.flexDirection === "row" &&
+      candidate.children?.[0]?.props?.content === label &&
+      candidate.children?.[0]?.props?.width === 13);
 }
 
 function countOccurrences(text: string, needle: string): number {
@@ -72,6 +88,7 @@ function state(overrides: Record<string, unknown> = {}) {
     refreshing: false,
     cwd: "/repo",
     overlay: "none",
+    terminalCols: 180,
     terminalRows: 80,
     laneOffsets: { todo: 0, in_progress: 0, review: 0, done: 0 },
     viewState: initialViewState,
@@ -80,6 +97,7 @@ function state(overrides: Record<string, unknown> = {}) {
     selectedInstanceIndex: 0,
     fetchingCardCounts: new Set<string>(),
     switcherSelectedIndex: 0,
+    instanceActionState: {},
     workspaceGateInput: "",
     workspaceGateSubmitting: false,
     ...overrides,
@@ -116,6 +134,31 @@ describe("TUI instance rendering", () => {
     expect(text).toContain("○ beta  STOPPED  :4098  /work/beta");
     expect(text).toContain("⚠ gamma  STALE  :4099  /work/gamma");
     expect(text).toContain("! delta  UNHEALTHY  :4100  /work/delta · —");
+  });
+
+  it("renders vertical separation between the launch wordmark and instance rows", () => {
+    const app = renderApp(fakeUi(), state({
+      instanceList: [instance("alpha", "running", 4097, { cardCount: 3 })],
+      terminalRows: 56,
+    }));
+
+    const wordmarkAndSpacer = (app as any).children[1].children.slice(0, 2);
+    expect(wordmarkAndSpacer[0].props.height).toBe(6);
+    expect(wordmarkAndSpacer[1].props.height).toBe(2);
+  });
+
+  it("shows a minimum-size screen instead of rendering cramped layout", () => {
+    const app = renderApp(fakeUi(), state({
+      terminalCols: 120,
+      terminalRows: 24,
+      instanceList: [instance("alpha", "running", 4097, { cardCount: 3 })],
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("OpenBoard needs more room");
+    expect(text).toContain("Current 120x24");
+    expect(text).toContain("minimum 160x30");
+    expect(text).not.toContain("● alpha");
   });
 
   it("validates add-instance names before calling the provider", async () => {
@@ -242,10 +285,23 @@ describe("TUI label cleanup", () => {
     }));
 
     const text = textOf(app);
+    expect(text).toContain("esc instances");
     expect(text).toContain("b switch board");
     expect(text).toContain("n new task");
     expect(text).toContain("m move card");
     expect(text).not.toContain("b switch · n new");
+  });
+
+  it("q quits from launch view", async () => {
+    const shutdown = vi.fn();
+    const s = state({
+      viewState: { view: "launch", previousView: null },
+      instanceList: [instance("alpha", "running", 4097, { cardCount: 3 })],
+    });
+
+    await handleKeypress({ name: "q", sequence: "q" } as any, s, actions({ shutdown }));
+
+    expect(shutdown).toHaveBeenCalledTimes(1);
   });
 
   it("board header shows health/version without removing instance and task count", () => {
@@ -261,6 +317,7 @@ describe("TUI label cleanup", () => {
 
     const text = textOf(app);
     expect(text).toContain("INSTANCE alpha:4097");
+    expect(text).toContain("WORKSPACE /work/alpha");
     expect(text).toContain("1 TASK");
     expect(text).toContain("Board ok · OpenCode 1.2.3");
   });
@@ -275,6 +332,53 @@ describe("TUI label cleanup", () => {
     const text = textOf(app);
     expect(text).toContain("a archive task");
     expect(text).not.toContain("a archive · d delete");
+  });
+});
+
+describe("TUI switcher start/stop controls", () => {
+  it("renders start and stop controls plus transient lifecycle states", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "switcher", previousView: "board" },
+      instanceList: [
+        instance("alpha", "running", 4097),
+        instance("beta", "stopped", 4098),
+      ],
+      instanceActionState: { beta: "starting" },
+      switcherSelectedIndex: 1,
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("alpha  RUNNING  :4097  s stop");
+    expect(text).toContain("beta  STARTING  :4098  s start");
+    expect(text).toContain("s start/stop");
+  });
+
+  it("s starts a stopped instance from the switcher", async () => {
+    const startInstance = vi.fn(async () => undefined);
+    const beta = instance("beta", "stopped", 4098);
+    const s = state({
+      viewState: { view: "switcher", previousView: "board" },
+      instanceList: [beta],
+      switcherSelectedIndex: 0,
+    });
+
+    await handleKeypress({ name: "s", sequence: "s" } as any, s, actions({ startInstance }));
+
+    expect(startInstance).toHaveBeenCalledWith("beta");
+  });
+
+  it("s stops a running instance from the switcher", async () => {
+    const stopInstance = vi.fn(async () => undefined);
+    const alpha = instance("alpha", "running", 4097);
+    const s = state({
+      viewState: { view: "switcher", previousView: "board" },
+      instanceList: [alpha],
+      switcherSelectedIndex: 0,
+    });
+
+    await handleKeypress({ name: "s", sequence: "s" } as any, s, actions({ stopInstance }));
+
+    expect(stopInstance).toHaveBeenCalledWith("alpha");
   });
 });
 
@@ -386,6 +490,28 @@ describe("TUI archive detail cleanup", () => {
     expect(text).toContain("none");
   });
 
+  it("archive detail tabs render in stable scroll containers", () => {
+    const promptApp = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt"),
+    }));
+    const handoffApp = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", JSON.stringify({
+        outcome: "complete",
+        summary: "Fixed the bug",
+        changedFiles: ["src/a.ts"],
+        verification: [],
+        residualRisk: "none",
+      })), "handoff"),
+    }));
+
+    expect(nodesByType(promptApp, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-prompt-task-1");
+    expect(nodesByType(handoffApp, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-handoff-task-1");
+    expect(nodesByType(promptApp, "ScrollBox").find((node) => node.props.id === "archive-detail-prompt-task-1")?.props)
+      .toMatchObject({ scrollY: true, scrollX: false, stickyScroll: false, minHeight: 0 });
+  });
+
   it("handoff tab renders empty state when completion is null", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "archive", previousView: "launch" },
@@ -414,6 +540,30 @@ describe("TUI archive detail cleanup", () => {
 
     const text = textOf(app);
     expect(text).toContain("Fix the login bug"); // from archiveRecord default description
+  });
+
+  it("detail metadata uses selected-card spacing and includes card fields", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null, {
+        task_type: "agent",
+        completed_by: "User",
+        session_id: "ses_123",
+        worktree_path: "/repo/.openboard-worktrees/example_123_reported_complete",
+      }), "prompt"),
+    }));
+
+    for (const label of ["INSTANCE", "TYPE", "ACCEPTED BY", "LANE", "AGENT", "MODEL", "DIR", "ISO", "WORKTREE", "SESSION"]) {
+      const row = metaRowByLabel(app, label);
+      expect(row?.children[0].props.width).toBe(13);
+      expect(row?.children[1].props.fg).toBe("#ffffff");
+    }
+
+    const text = textOf(app);
+    expect(text).toContain("agent");
+    expect(text).toContain("User");
+    expect(text).toContain("example_123_reported_complete");
+    expect(text).toContain("ses_123");
   });
 
   it("prompt tab renders empty prompt message when description is empty", () => {
@@ -479,6 +629,28 @@ describe("TUI archive search mode indicator", () => {
     expect(s.archive.searchMode).toBe(false);
     // Search query is preserved (not cleared on Enter exit)
     expect(s.archive.searchQuery).toBe("test");
+  });
+});
+
+describe("TUI archive list windowing", () => {
+  it("renders a selected-row window with overflow indicators for long archive lists", () => {
+    const records = Array.from({ length: 30 }, (_, index) =>
+      archiveRecord(`task-${String(index).padStart(2, "0")}`, "2026-07-03 12:00", null),
+    );
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      terminalRows: 30,
+      archive: {
+        ...archiveState(records),
+        selectedIndex: 20,
+      },
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("▸ 2026-07-03 · test-instance · Task task-20");
+    expect(text).toContain("↑ ");
+    expect(text).toContain("↓ ");
+    expect(text).not.toContain("Task task-00");
   });
 });
 
@@ -617,6 +789,29 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(text).toContain("Handoff");
   });
 
+  it("Selected column grows on wider terminals", () => {
+    const narrow = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalCols: 160,
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: undefined,
+    }));
+    const wide = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalCols: 210,
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: undefined,
+    }));
+
+    const narrowSelected = boxesContaining(narrow, "No cards yet")
+      .find((node) => node.props?.title === "Selected");
+    const wideSelected = boxesContaining(wide, "No cards yet")
+      .find((node) => node.props?.title === "Selected");
+
+    expect(narrowSelected?.props.width).toBe(44);
+    expect(wideSelected?.props.width).toBeGreaterThan(44);
+  });
+
   it("Selected column reserves one row per inline detail metadata item", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -626,9 +821,93 @@ describe("TUI Enter key shows inline selected-card details", () => {
     }));
 
     const metadataBox = boxesContaining(app, "STATE")
-      .find((node) => textOf(node).includes("LANE") && textOf(node).includes("AGENT") && node.props?.height === 3);
+      .find((node) => textOf(node).includes("TYPE") && textOf(node).includes("LANE") && textOf(node).includes("AGENT") && node.props?.height === 4);
 
     expect(metadataBox).toBeTruthy();
+  });
+
+  it("Selected column shows STATE above TYPE", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 30,
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    }));
+
+    const text = textOf(app);
+    expect(text.indexOf("STATE")).toBeGreaterThan(-1);
+    expect(text.indexOf("TYPE")).toBeGreaterThan(-1);
+    expect(text.indexOf("STATE")).toBeLessThan(text.indexOf("TYPE"));
+  });
+
+  it("Selected column shows STATE above INSTANCE before opening details", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 30,
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    }));
+
+    const text = textOf(app);
+    expect(text.indexOf("STATE")).toBeGreaterThan(-1);
+    expect(text.indexOf("INSTANCE")).toBeGreaterThan(-1);
+    expect(text.indexOf("STATE")).toBeLessThan(text.indexOf("INSTANCE"));
+  });
+
+  it("Selected column compact metadata has a wider gutter and white values", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 30,
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    }));
+
+    for (const label of ["INSTANCE", "STATE", "TYPE", "LANE", "DIR"]) {
+      const row = metaRowByLabel(app, label);
+      expect(row?.children[0].props.width).toBe(13);
+      expect(row?.children[1].props.fg).toBe("#ffffff");
+    }
+  });
+
+  it("inline error detail uses compact error notice at short heights", () => {
+    const errorTask = {
+      ...task("error-card", "review"),
+      runState: "error" as const,
+      error: "long prompt layout smoke failure",
+      description: "Long prompt text ".repeat(80),
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 30,
+      tasks: [errorTask],
+      selectedTaskId: "error-card",
+      detailTab: "prompt",
+    }));
+
+    const errorBox = boxesContaining(app, "! ERROR")
+      .find((node) => textOf(node).includes("long prompt layout smoke failure") && node.props?.height === 3);
+
+    expect(errorBox).toBeTruthy();
+  });
+
+  it("selected error notice hugs short error text at normal heights", () => {
+    const errorTask = {
+      ...task("error-card", "review"),
+      runState: "error" as const,
+      error: "long prompt layout smoke failure",
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 56,
+      tasks: [errorTask],
+      selectedTaskId: "error-card",
+      detailTab: "prompt",
+    }));
+
+    const errorBox = nodesByType(app, "Box")
+      .find((node) => node.props?.id === "selected-error-box");
+
+    expect(errorBox?.props.height).toBe(5);
   });
 
   it("inline detail mode closes with esc key", async () => {
@@ -644,6 +923,30 @@ describe("TUI Enter key shows inline selected-card details", () => {
 
     expect(s.overlay).toBe("none");
     expect(s.detailTab).toBeUndefined();
+    expect(detachInstance).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a", "archive"],
+    ["d", "delete"],
+    ["x", "move-to-done"],
+  ] as const)("esc cancels %s confirmation without opening instances", async (keySequence, expectedAction) => {
+    const detachInstance = vi.fn(async () => undefined);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    });
+    const a = actions({ detachInstance });
+
+    await handleKeypress({ name: keySequence, sequence: keySequence } as any, s, a);
+    expect(s.pendingConfirmation).toEqual({ action: expectedAction, taskId: "todo-card" });
+
+    await handleKeypress({ name: "escape", sequence: "\u001b" } as any, s, a);
+
+    expect(s.pendingConfirmation).toBeUndefined();
+    expect(s.viewState.view).toBe("board");
+    expect(s.status).toBe("cancelled");
     expect(detachInstance).not.toHaveBeenCalled();
   });
 
@@ -707,8 +1010,8 @@ describe("TUI Enter key shows inline selected-card details", () => {
   });
 });
 
-describe("TUI completedBy display", () => {
-  it("sidebar shows COMPLETED BY when task has completedBy attribute", () => {
+describe("TUI accepted-by display", () => {
+  it("sidebar shows ACCEPTED BY when task has completedBy attribute", () => {
     const doneCard = { ...task("done-card", "done"), completedBy: "User" };
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -717,11 +1020,11 @@ describe("TUI completedBy display", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("COMPLETED BY");
+    expect(text).toContain("ACCEPTED BY");
     expect(text).toContain("User");
   });
 
-  it("sidebar does NOT show COMPLETED BY when task has no completedBy", () => {
+  it("sidebar does NOT show ACCEPTED BY when task has no completedBy", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [task("todo-card", "todo")],
@@ -729,9 +1032,197 @@ describe("TUI completedBy display", () => {
     }));
 
     const text = textOf(app);
-    expect(text).not.toContain("COMPLETED BY");
+    expect(text).not.toContain("ACCEPTED BY");
   });
 
+  it("done agent-reported cards show the agent but manual done cards do not", () => {
+    const agentDone = {
+      ...task("agent-done", "done"),
+      type: "agent" as const,
+      agent: "build",
+      completedBy: "User",
+      completionSource: "reported" as const,
+      completion: {
+        outcome: "complete" as const,
+        summary: "done",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "none",
+        reportedAt: 1,
+      },
+    };
+    const manualDone = {
+      ...task("manual-done", "done"),
+      type: "manual" as const,
+      assignedTo: "Johnny",
+      completedBy: "User",
+    };
+
+    const agentText = textOf(renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [agentDone],
+      selectedTaskId: "agent-done",
+    })));
+    expect(agentText).toContain("AGENT");
+    expect(agentText).toContain("build");
+    expect(agentText).toContain("ACCEPTED BY");
+
+    const manualText = textOf(renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [manualDone],
+      selectedTaskId: "manual-done",
+    })));
+    expect(manualText).toContain("ASSIGNED TO");
+    expect(manualText).not.toContain("AGENT");
+  });
+
+});
+
+describe("TUI worktree metadata", () => {
+  it("shows worktree id below ISO and above SESSION for worktree-isolated cards", () => {
+    const worktreeTask = {
+      ...task("worktree-card", "review"),
+      isolation: "worktree" as const,
+      worktreePath: "/repo/.opencode-board-worktrees/openboard/task_abc123",
+      sessionId: "ses_123",
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [worktreeTask],
+      selectedTaskId: "worktree-card",
+      terminalRows: 80,
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("ISO");
+    expect(text).toContain("WORKTREE");
+    expect(text).toContain("task_abc123");
+    expect(text).toContain("SESSION");
+    expect(text.indexOf("ISO")).toBeLessThan(text.indexOf("WORKTREE"));
+    expect(text.indexOf("WORKTREE")).toBeLessThan(text.indexOf("SESSION"));
+  });
+
+  it("falls back to task id for worktree cards without a stored worktree path", () => {
+    const exampleDone = {
+      ...task("example_reported_complete", "done"),
+      isolation: "worktree" as const,
+      sessionId: "ses_123",
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [exampleDone],
+      selectedTaskId: "example_reported_complete",
+      terminalRows: 80,
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("WORKTREE");
+    expect(text).toContain("example_reported_complete");
+    expect(text.indexOf("WORKTREE")).toBeLessThan(text.indexOf("SESSION"));
+  });
+});
+
+describe("TUI manual task creation", () => {
+  it("n opens the new task form in the Selected column with CARD TYPE focused", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    });
+
+    await handleKeypress({ name: "n", sequence: "n" } as any, s, actions());
+
+    expect(s.overlay).toBe("none");
+    expect(s.newTask.field).toBe("type");
+
+    const app = renderApp(fakeUi(), s);
+    const selected = boxesContaining(app, "New Task")
+      .find((node) => node.props?.title === "Selected");
+    const text = textOf(app);
+    expect(selected).toBeTruthy();
+    expect(text).toContain("CARD TYPE");
+    expect(text).toContain("Create agent task");
+  });
+
+  it("renders manual card fields without agent-only controls", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: {
+        type: "manual",
+        title: "PM review",
+        description: "Check the copy",
+        directory: "/repo",
+        agentId: "build",
+        assignedTo: "Johnny",
+        isolation: "worktree",
+        field: "assignedTo",
+        submitting: false,
+      },
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("CARD TYPE");
+    expect(text).toContain("manual");
+    expect(text).toContain("NOTES");
+    expect(text).toContain("ASSIGNED TO");
+    expect(text).toContain("Create manual task");
+    expect(text).not.toContain("AGENT");
+    expect(text).not.toContain("MODEL");
+    expect(text).not.toContain("ISOLATION");
+  });
+
+  it("submits manual cards with type and assignee", async () => {
+    const createTask = vi.fn(async (payload: unknown) => ({
+      ...task("manual-card", "todo"),
+      ...(payload as object),
+      id: "manual-card",
+    }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: {
+        type: "manual",
+        title: "PM review",
+        description: "Check the copy",
+        directory: "/repo",
+        agentId: "build",
+        assignedTo: "Johnny",
+        isolation: "worktree",
+        field: "assignedTo",
+        submitting: false,
+      },
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({
+      client: { createTask },
+    }));
+
+    expect(createTask).toHaveBeenCalledWith({
+      type: "manual",
+      title: "PM review",
+      description: "Check the copy",
+      directory: "/repo",
+      assignedTo: "Johnny",
+    });
+    expect(s.overlay).toBe("none");
+    expect(s.newTask).toBeUndefined();
+    expect(s.selectedTaskId).toBe("manual-card");
+  });
+
+  it("does not run manual cards from the board", async () => {
+    const runTask = vi.fn(async () => task("manual-card", "todo"));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("manual-card", "todo"), type: "manual", assignedTo: "Johnny" }],
+      selectedTaskId: "manual-card",
+    });
+
+    await handleKeypress({ name: "r", sequence: "r" } as any, s, actions({
+      client: { runTask },
+    }));
+
+    expect(runTask).not.toHaveBeenCalled();
+    expect(s.status).toContain("manual cards are not runnable");
+  });
 });
 
 describe("TUI inline manual move", () => {
@@ -778,7 +1269,7 @@ describe("TUI inline manual move", () => {
     expect(text).toContain("↑/↓ or 1-4 select lane");
   });
 
-  it("move to Done shows completedBy: User hint", () => {
+  it("move to Done shows accepted-by User hint", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [task("todo-card", "todo")],
@@ -787,7 +1278,7 @@ describe("TUI inline manual move", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("completedBy: User");
+    expect(text).toContain("accepted by User");
   });
 
   it("move target navigates with up/down arrows", async () => {
@@ -1006,6 +1497,8 @@ describe("TUI handoff text wrapping", () => {
     const verificationText = textNodesContaining(app, "npm run typecheck")[0];
     expect(changedFilesText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1, height: 3 });
     expect(verificationText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1, height: 4 });
+
+    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).toContain("board-detail-handoff-done-card");
   });
 
   it("board detail handoff tab shows empty state when no completion", () => {
@@ -1031,6 +1524,8 @@ describe("TUI handoff text wrapping", () => {
 
     const text = textOf(app);
     expect(text).toContain("Fix the login bug");
+    const scrollBox = nodesByType(app, "ScrollBox").find((node) => node.props.id === "board-detail-prompt-todo-card");
+    expect(scrollBox?.props).toMatchObject({ scrollY: true, scrollX: false, stickyScroll: false, minHeight: 0 });
   });
 
   it("board detail prompt tab shows empty state when description is empty", () => {
@@ -1116,10 +1611,12 @@ function archiveRecord(
     source_workspace: "/repo/test",
     source_db_path: "/data/test.sqlite",
     task_id: id,
+    task_type: "agent",
     title: `Task ${id}`,
     description: "Fix the login bug",
     directory: "/repo/test",
     agent: "build",
+    assigned_to: null,
     model: '{"providerID":"openai","id":"gpt-5.5"}',
     isolation: "worktree",
     column_name: "done",
@@ -1132,6 +1629,7 @@ function archiveRecord(
     base_branch: null,
     completion,
     completion_source: null,
+    completed_by: null,
     archived_at: new Date(archivedAt).getTime(),
     task_created_at: 1,
     task_updated_at: 1,

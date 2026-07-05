@@ -208,6 +208,7 @@ describe("POST /api/tasks", () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.title).toBe("Fix the bug");
+    expect(body.type).toBe("agent");
     expect(body.description).toBe("There is a bug");
     expect(body.directory).toBe(repoDir);
     expect(body.column).toBe("todo");
@@ -216,6 +217,49 @@ describe("POST /api/tasks", () => {
 
     // Persisted in the store.
     expect(store.list()).toHaveLength(1);
+  });
+
+  it("creates a manual task with an assignee and no agent metadata", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "manual",
+        title: "PM signoff",
+        description: "Review the copy",
+        directory: repoDir,
+        assignedTo: "Johnny",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.type).toBe("manual");
+    expect(body.assignedTo).toBe("Johnny");
+    expect(body.agent).toBeUndefined();
+    expect(body.model).toBeUndefined();
+    expect(store.get(body.id)?.type).toBe("manual");
+  });
+
+  it("rejects manual tasks with agent metadata", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "manual",
+        title: "Bad manual card",
+        directory: repoDir,
+        agent: "build",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("manual tasks cannot define agent");
   });
 
   it("responds 400 validation when title is missing/empty", async () => {
@@ -592,6 +636,18 @@ describe("POST /api/tasks/:id/run", () => {
     expect(dispatcher.run).not.toHaveBeenCalled();
   });
 
+  it("returns 400 and does not dispatch run for a manual task", async () => {
+    const task = store.create({ type: "manual", title: "Manual", description: "review it", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}/run`, { method: "POST" });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Manual tasks cannot run");
+    expect(dispatcher.run).not.toHaveBeenCalled();
+  });
+
   it("propagates a thrown AdapterError from the dispatcher", async () => {
     const { AdapterError } = await import("../../../src/shared/errors");
     dispatcher.run.mockImplementationOnce(async () => {
@@ -706,6 +762,18 @@ describe("POST /api/tasks/:id/retry", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error.message).toBe("Cannot retry an archived task");
+    expect(dispatcher.retry).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 and does not dispatch retry for a manual task", async () => {
+    const task = store.create({ type: "manual", title: "Manual", description: "review it", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}/retry`, { method: "POST" });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Manual tasks cannot retry");
     expect(dispatcher.retry).not.toHaveBeenCalled();
   });
 });

@@ -17,7 +17,8 @@ export type TaskLifecyclePhase =
   | "review-blocked"
   | "review-idle-fallback"
   | "review-error"
-  | "review-unassigned"
+  | "review-no-agent-report"
+  | "review-manual"
   | "done-user"
   | "done";
 
@@ -41,7 +42,7 @@ export interface LifecycleDetailRow {
     | "elapsed"
     | "outcome"
     | "source"
-    | "completedBy"
+    | "acceptedBy"
     | "error"
     | "pending"
     | "generic";
@@ -50,7 +51,7 @@ export interface LifecycleDetailRow {
 /** The minimal task shape the lifecycle helpers need to inspect. */
 export type TaskLifecycleInput = Pick<
   Task,
-  "runState" | "column" | "pending" | "runStartedAt" | "completion" | "completionSource" | "completedBy" | "error"
+  "type" | "runState" | "column" | "pending" | "runStartedAt" | "completion" | "completionSource" | "completedBy" | "error" | "sessionId"
 >;
 
 function normalizeOutcome(outcome: string | undefined): string {
@@ -93,6 +94,9 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
   }
 
   if (task.column === "review") {
+    if (task.type === "manual") {
+      return { phase: "review-manual", ...base, detail: "MANUAL" };
+    }
     if (task.completion) {
       const outcome = task.completion.outcome;
       const source = task.completionSource ?? "reported";
@@ -104,10 +108,10 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
       }
       return { phase: "review-reported-complete", ...base, detail: normalizeOutcome(outcome) };
     }
-    if (task.runState === "idle") {
-      return { phase: "review-unassigned", ...base, detail: "NO REPORT" };
+    if (task.sessionId) {
+      return { phase: "review-no-agent-report", ...base, detail: "NO AGENT REPORT" };
     }
-    return { phase: "review-error", ...base, detail: base.label === "REVIEW" ? "ERROR" : base.label };
+    return { phase: "review-no-agent-report", ...base, detail: "NO AGENT REPORT" };
   }
 
   if (task.column === "done") {
@@ -168,13 +172,15 @@ export function taskLifecycleDetailRows(task: TaskLifecycleInput, now = Date.now
         value: task.completionSource ?? "reported",
         role: "source",
       });
-    } else if (status.phase === "review-unassigned") {
-      rows.push({ label: "OUTCOME", value: "NO REPORT", role: "outcome" });
+    } else if (status.phase === "review-no-agent-report") {
+      rows.push({ label: "OUTCOME", value: "NO AGENT REPORT", role: "outcome" });
+    } else if (status.phase === "review-manual") {
+      rows.push({ label: "OUTCOME", value: "MANUAL", role: "outcome" });
     }
   }
 
   if (task.column === "done" && task.completedBy) {
-    rows.push({ label: "COMPLETED BY", value: task.completedBy, role: "completedBy" });
+    rows.push({ label: "ACCEPTED BY", value: task.completedBy, role: "acceptedBy" });
   }
 
   if (task.runState === "error" && task.error) {

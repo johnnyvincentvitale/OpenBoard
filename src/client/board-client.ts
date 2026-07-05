@@ -9,6 +9,7 @@ import type {
   RosterAgent,
   Task,
   TaskIsolationMode,
+  TaskType,
 } from "../shared";
 import { buildTaskPath, TASK_ISOLATION_MODES } from "../shared";
 
@@ -31,21 +32,25 @@ export interface BoardClientOptions {
 
 export interface TaskSummary {
   id: string;
+  type: TaskType;
   title: string;
   directory: string;
   column: Task["column"];
   runState: Task["runState"];
   agent?: string;
+  assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
   sessionId?: string;
 }
 
 export interface CreateBoardTaskInput {
+  type?: TaskType;
   title: string;
   description?: string;
   directory?: string;
   agent?: string;
+  assignedTo?: string;
   model?: string | ModelRef;
   isolation?: string;
 }
@@ -170,11 +175,13 @@ export function parseModelRef(model: string): ModelRef {
 export function toTaskSummary(task: Task): TaskSummary {
   return {
     id: task.id,
+    type: task.type ?? "agent",
     title: task.title,
     directory: task.directory,
     column: task.column,
     runState: task.runState,
     ...(task.agent !== undefined ? { agent: task.agent } : {}),
+    ...(task.assignedTo !== undefined ? { assignedTo: task.assignedTo } : {}),
     ...(task.model !== undefined ? { model: task.model } : {}),
     ...(task.isolation !== undefined ? { isolation: task.isolation } : {}),
     ...(task.sessionId !== undefined ? { sessionId: task.sessionId } : {}),
@@ -199,19 +206,23 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
 
   const directory = resolveTaskDirectory(task.directory, cwd);
   const payload: CreateTaskInput = {
+    type: task.type ?? "agent",
     title,
     description: task.description ?? "",
     directory,
   };
 
   const agent = task.agent?.trim();
-  if (agent) payload.agent = agent;
+  if (payload.type === "agent" && agent) payload.agent = agent;
 
-  if (task.model !== undefined) {
+  const assignedTo = task.assignedTo?.trim();
+  if (payload.type === "manual" && assignedTo) payload.assignedTo = assignedTo;
+
+  if (payload.type === "agent" && task.model !== undefined) {
     payload.model = typeof task.model === "string" ? parseModelRef(task.model) : task.model;
   }
 
-  if (task.isolation !== undefined) {
+  if (payload.type === "agent" && task.isolation !== undefined) {
     if (!VALID_ISOLATION.has(task.isolation as TaskIsolationMode)) {
       throw new Error("isolation must be 'worktree' or 'in-place'");
     }

@@ -100,6 +100,7 @@ describe("MCP add_tasks", () => {
       created: [
         {
           id: "task-1",
+          type: "agent",
           title: "Ship the MCP intake",
           directory: `${CWD}/app`,
           column: "todo",
@@ -117,6 +118,7 @@ describe("MCP add_tasks", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
+          type: "agent",
           title: "Ship the MCP intake",
           description: "Create cards only",
           directory: `${CWD}/app`,
@@ -251,6 +253,7 @@ describe("MCP list tools", () => {
       tasks: [
         {
           id: "t1",
+          type: "agent",
           title: "Existing",
           directory: CWD,
           column: "review",

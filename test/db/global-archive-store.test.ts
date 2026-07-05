@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { GlobalArchiveStore, resolveGlobalArchivePath } from "../../src/db/global-archive-store";
 
@@ -143,9 +144,11 @@ describe("GlobalArchiveStore", () => {
       store.mirrorTask(
         {
           id: "task_columns",
+          type: "agent",
           title: "Columns check",
           description: "spot-check fields",
           directory: "/repo",
+          completedBy: "User",
           column: "done",
           position: 0,
           runState: "idle",
@@ -165,10 +168,57 @@ describe("GlobalArchiveStore", () => {
       const row = rows[0]!;
       expect(row.title).toBe("Columns check");
       expect(row.source_instance_name).toBe("src-inst");
+      expect(row.task_type).toBe("agent");
+      expect(row.completed_by).toBe("User");
       expect(row.archived_at).toBe(99);
       expect(row.task_id).toBe("task_columns");
     } finally {
       store.close();
+    }
+  });
+
+  it("migrates existing archive databases with selected-card metadata columns", () => {
+    const db = new Database(":memory:");
+    db.exec(`
+      CREATE TABLE global_archive (
+        source_instance_name TEXT,
+        source_port INTEGER NOT NULL,
+        source_workspace TEXT NOT NULL,
+        source_db_path TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        directory TEXT NOT NULL,
+        agent TEXT,
+        model TEXT,
+        isolation TEXT,
+        column_name TEXT NOT NULL,
+        run_state TEXT NOT NULL,
+        run_started_at INTEGER,
+        error TEXT,
+        session_id TEXT,
+        worktree_path TEXT,
+        worktree_branch TEXT,
+        base_branch TEXT,
+        completion TEXT,
+        completion_source TEXT,
+        archived_at INTEGER NOT NULL,
+        task_created_at INTEGER NOT NULL,
+        task_updated_at INTEGER NOT NULL,
+        mirrored_at INTEGER NOT NULL,
+        PRIMARY KEY(source_db_path, task_id)
+      );
+    `);
+
+    const store = new GlobalArchiveStore(db);
+    try {
+      const columns = new Set((db.prepare("PRAGMA table_info(global_archive)").all() as Array<{ name: string }>).map((column) => column.name));
+      expect(columns.has("task_type")).toBe(true);
+      expect(columns.has("assigned_to")).toBe(true);
+      expect(columns.has("completed_by")).toBe(true);
+    } finally {
+      store.close();
+      db.close();
     }
   });
 });

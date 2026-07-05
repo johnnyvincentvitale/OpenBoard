@@ -561,7 +561,7 @@ export async function runOpenboard(
     }
   } catch (error) {
     if (error instanceof InstanceError) {
-      stderr.write(`Error: ${error.message}\n`);
+      stderr.write(`Error: ${formatInstanceError(error)}\n`);
       return 1;
     }
     if (error instanceof Error) {
@@ -571,6 +571,17 @@ export async function runOpenboard(
     stderr.write(`Error: ${String(error)}\n`);
     return 1;
   }
+}
+
+function formatInstanceError(error: InstanceError): string {
+  const cause = error.cause;
+  if (cause instanceof Error && cause.message.trim()) {
+    return `${error.message}: ${cause.message}`;
+  }
+  if (typeof cause === "string" && cause.trim()) {
+    return `${error.message}: ${cause}`;
+  }
+  return error.message;
 }
 
 async function main(): Promise<number> {

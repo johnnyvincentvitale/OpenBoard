@@ -53,6 +53,7 @@ describe("SqliteTaskStore", () => {
       const task = store.create(input({ title: "First" }));
 
       expect(task.id).toBe("task_1");
+      expect(task.type).toBe("agent");
       expect(task.title).toBe("First");
       expect(task.description).toBe("Do the thing");
       expect(task.directory).toBe("/tmp/project");
@@ -68,6 +69,24 @@ describe("SqliteTaskStore", () => {
       expect(task.completedBy).toBeNull();
       expect(task.createdAt).toBe(1_000);
       expect(task.updatedAt).toBe(1_000);
+    });
+
+    it("round-trips manual task type and assignee", () => {
+      const created = store.create(input({
+        type: "manual",
+        assignedTo: "Johnny",
+      }));
+
+      expect(created.type).toBe("manual");
+      expect(created.assignedTo).toBe("Johnny");
+
+      const fetched = store.get(created.id);
+      expect(fetched?.type).toBe("manual");
+      expect(fetched?.assignedTo).toBe("Johnny");
+
+      const listed = store.list().find((t) => t.id === created.id);
+      expect(listed?.type).toBe("manual");
+      expect(listed?.assignedTo).toBe("Johnny");
     });
 
     it("appends subsequent tasks at the end of todo (max position + 1)", () => {

@@ -19,6 +19,7 @@ import { bootstrap } from "./schema";
 const TASK_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS task (
   id          TEXT PRIMARY KEY,
+  task_type   TEXT NOT NULL DEFAULT 'agent',
   title       TEXT NOT NULL,
   description TEXT NOT NULL,
   directory   TEXT NOT NULL,
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS task (
   run_started_at INTEGER,
   error       TEXT,
   agent       TEXT,
+  assigned_to TEXT,
   model       TEXT,
   isolation       TEXT,
   worktree_path   TEXT,
@@ -64,6 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_task_links_parent ON task_links(parent_id);
 
 /** Columns added after the initial task schema — ALTER-in for pre-existing DBs. */
 const TASK_ADDED_COLUMNS: Array<[string, string]> = [
+  ["task_type", "TEXT NOT NULL DEFAULT 'agent'"],
+  ["assigned_to", "TEXT"],
   ["isolation", "TEXT"],
   ["worktree_path", "TEXT"],
   ["worktree_branch", "TEXT"],
@@ -80,6 +84,7 @@ const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
 
 interface TaskRowRecord {
   id: string;
+  task_type: string;
   title: string;
   description: string;
   directory: string;
@@ -90,6 +95,7 @@ interface TaskRowRecord {
   run_started_at: number | null;
   error: string | null;
   agent: string | null;
+  assigned_to: string | null;
   model: string | null;
   isolation: string | null;
   worktree_path: string | null;
@@ -107,6 +113,7 @@ interface TaskRowRecord {
 function toTask(record: TaskRowRecord): Task {
   const task: Task = {
     id: record.id,
+    type: record.task_type === "manual" ? "manual" : "agent",
     title: record.title,
     description: record.description,
     directory: record.directory,
@@ -116,6 +123,7 @@ function toTask(record: TaskRowRecord): Task {
     createdAt: record.created_at,
     updatedAt: record.updated_at,
     agent: record.agent ?? undefined,
+    assignedTo: record.assigned_to ?? undefined,
     model: record.model ? (JSON.parse(record.model) as ModelRef) : undefined,
     archived: record.archived === 1,
     parentIds: [],
@@ -179,11 +187,12 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, run_started_at, error, agent, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, completion_source, completed_by, created_at, updated_at)
-         VALUES (@id, @title, @description, @directory, @column, @position, @sessionId, @runState, @runStartedAt, @error, @agent, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @completionSource, @completedBy, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, title, description, directory, column, position, session_id, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, completion_source, completed_by, created_at, updated_at)
+         VALUES (@id, @type, @title, @description, @directory, @column, @position, @sessionId, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @completionSource, @completedBy, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
+           task_type = @type,
            title = @title,
            description = @description,
            directory = @directory,
@@ -194,6 +203,7 @@ export class SqliteTaskStore implements TaskStore {
            run_started_at = @runStartedAt,
            error = @error,
            agent = @agent,
+           assigned_to = @assignedTo,
            model = @model,
            isolation = @isolation,
            worktree_path = @worktreePath,
@@ -293,6 +303,7 @@ export class SqliteTaskStore implements TaskStore {
 
       this.stmts.insertTask.run({
         id,
+        type: data.type ?? "agent",
         title: data.title,
         description: data.description,
         directory: data.directory,
@@ -303,6 +314,7 @@ export class SqliteTaskStore implements TaskStore {
         runStartedAt: null,
         error: null,
         agent: data.agent ?? null,
+        assignedTo: data.assignedTo ?? null,
         model: data.model ? JSON.stringify(data.model) : null,
         isolation: data.isolation ?? null,
         worktreePath: null,
@@ -333,6 +345,7 @@ export class SqliteTaskStore implements TaskStore {
 
       this.stmts.updateTaskFields.run({
         id: taskId,
+        type: merged.type,
         title: merged.title,
         description: merged.description,
         directory: merged.directory,
@@ -343,6 +356,7 @@ export class SqliteTaskStore implements TaskStore {
         runStartedAt: merged.runStartedAt ?? null,
         error: merged.error ?? null,
         agent: merged.agent ?? null,
+        assignedTo: merged.assignedTo ?? null,
         model: merged.model ? JSON.stringify(merged.model) : null,
         isolation: merged.isolation ?? null,
         worktreePath: merged.worktreePath ?? null,

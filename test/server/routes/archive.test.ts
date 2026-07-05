@@ -89,12 +89,14 @@ describe("archive routes", () => {
 
   it("mirrors an archived task into the global archive store", async () => {
     const task = store.create({
+      type: "agent",
       title: "Mirror me",
       description: "test desc",
       directory: "/repo",
       agent: "build",
       isolation: "worktree",
     });
+    store.update(task.id, { completedBy: "User" });
     store.move(task.id, "review", 0);
 
     expect(globalArchiveStore.countMirrored()).toBe(0);
@@ -110,6 +112,8 @@ describe("archive routes", () => {
     expect(mirrored!.source_port).toBe(4099);
     expect(mirrored!.source_workspace).toBe("/ws");
     expect(mirrored!.source_db_path).toBe("/db/test-tasks.sqlite");
+    expect(mirrored!.task_type).toBe("agent");
+    expect(mirrored!.completed_by).toBe("User");
     expect(mirrored!.task_id).toBe(task.id);
   });
 

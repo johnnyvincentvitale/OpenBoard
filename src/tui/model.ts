@@ -500,6 +500,11 @@ export const TUI_LAYOUT = {
   cardHeight: 8,
 } as const;
 
+export const TUI_MIN_SIZE = {
+  columns: 160,
+  rows: 30,
+} as const;
+
 /**
  * Rows available for cards inside a lane. The root column stacks
  * header / main / command strip with `rootPadding` and two `rootGap` seams,
@@ -513,6 +518,31 @@ export function laneInnerHeight(terminalRows: number): number {
     TUI_LAYOUT.commandStripHeight;
   const laneChrome = 2 * (TUI_LAYOUT.laneBorder + TUI_LAYOUT.lanePadding);
   return terminalRows - rootChrome - laneChrome;
+}
+
+export function archiveListCapacity(terminalRows: number): number {
+  const rootChrome =
+    2 * TUI_LAYOUT.rootPadding +
+    2 * TUI_LAYOUT.rootGap +
+    TUI_LAYOUT.headerHeight +
+    TUI_LAYOUT.commandStripHeight;
+  const panelChrome = 2 + 2 + 1; // border, padding, filter/search row
+  return Math.max(1, terminalRows - rootChrome - panelChrome);
+}
+
+export function archiveListWindow(
+  selectedIndex: number,
+  totalRecords: number,
+  terminalRows: number,
+): { offset: number; capacity: number } {
+  const rawCapacity = archiveListCapacity(terminalRows);
+  const capacity = Math.min(totalRecords, totalRecords > rawCapacity ? Math.max(1, rawCapacity - 2) : rawCapacity);
+  if (totalRecords <= 0 || capacity <= 0) return { offset: 0, capacity: 0 };
+
+  const selected = Math.min(Math.max(0, selectedIndex), totalRecords - 1);
+  const maxOffset = Math.max(0, totalRecords - capacity);
+  const offset = Math.min(Math.max(0, selected - capacity + 1), maxOffset);
+  return { offset, capacity };
 }
 
 /**

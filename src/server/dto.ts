@@ -18,6 +18,7 @@ export interface TaskDto extends Task {
 export function mapTaskToDto(task: Task): TaskDto {
   return {
     ...task,
+    type: task.type ?? "agent",
     archived: task.archived ?? false,
     parentIds: [...(task.parentIds ?? [])],
     completion: task.completion

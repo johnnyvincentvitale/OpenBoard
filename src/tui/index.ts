@@ -3,14 +3,16 @@ import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import type { Column, CompletionReport, ModelRef, RosterAgent, Task, TaskIsolationMode } from "../shared";
+import type { Column, CompletionReport, ModelRef, RosterAgent, Task, TaskIsolationMode, TaskType } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
 import {
   TUI_COLUMN_LABELS,
   TUI_COLUMNS,
   TUI_LAYOUT,
+  TUI_MIN_SIZE,
   agentLabel,
+  archiveListWindow,
   modelLabel,
   laneCapacity,
   laneInnerHeight,
@@ -53,7 +55,7 @@ import {
 import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
 import { createRootLifecycle } from "./root-lifecycle";
 import { buildWordmarkRows } from "./wordmark";
-import { RGBA, type KeyEvent, type VChild } from "@opentui/core";
+import { RGBA, type KeyEvent, type ScrollBoxOptions, type VChild } from "@opentui/core";
 
 type OpenTui = typeof import("@opentui/core");
 type TuiColor = string | RGBA;
@@ -62,7 +64,10 @@ const ROOT_ID = "openboard-root";
 const POLL_INTERVAL_MS = 2500;
 const WORDMARK_WIDTH = 45;
 const WORDMARK_HEIGHT = 6;
-const SIDEBAR_WIDTH = 44;
+const SIDEBAR_MIN_WIDTH = 44;
+const SIDEBAR_MAX_WIDTH = 68;
+const SIDEBAR_GROWTH_START_WIDTH = TUI_MIN_SIZE.columns;
+const SIDEBAR_META_LABEL_WIDTH = 13;
 const LANE_MIN_WIDTH = 20;
 // Over-long on purpose: Text truncates it to each container's inner width, giving a
 // full-bleed rule without measuring the lane.
@@ -240,9 +245,10 @@ function textBg(color: TuiColor): { bg: TuiColor } | Record<string, never> {
   return SAFE_COLOR_MODE ? {} : { bg: color };
 }
 
-const FIELD_ORDER = ["title", "description", "agent", "model", "directory", "isolation"] as const;
+const AGENT_FIELD_ORDER = ["type", "title", "description", "agent", "model", "directory", "isolation"] as const;
+const MANUAL_FIELD_ORDER = ["type", "title", "description", "assignedTo"] as const;
 type Overlay = "none" | "help" | "newTask" | "addInstance" | "renameInstance";
-type NewTaskField = (typeof FIELD_ORDER)[number];
+type NewTaskField = (typeof AGENT_FIELD_ORDER)[number] | (typeof MANUAL_FIELD_ORDER)[number];
 type AddInstanceField = "name" | "workspace";
 type RenameInstanceField = "newName";
 
@@ -252,10 +258,12 @@ interface GlobalArchiveRecord {
   source_workspace: string;
   source_db_path: string;
   task_id: string;
+  task_type?: TaskType | string | null;
   title: string;
   description: string;
   directory: string;
   agent: string | null;
+  assigned_to?: string | null;
   model: string | null;
   isolation: string | null;
   column_name: string;
@@ -268,6 +276,7 @@ interface GlobalArchiveRecord {
   base_branch: string | null;
   completion: string | null;
   completion_source: string | null;
+  completed_by?: string | null;
   archived_at: number;
   task_created_at: number;
   task_updated_at: number;
@@ -281,10 +290,12 @@ interface ArchiveReaderOptions {
 }
 
 interface NewTaskDraft {
+  type: TaskType;
   title: string;
   description: string;
   directory: string;
   agentId: string;
+  assignedTo: string;
   model?: ModelRef;
   isolation: TaskIsolationMode;
   field: NewTaskField;
@@ -337,6 +348,7 @@ interface TuiState {
   renameInstance?: RenameInstanceDraft;
   archive?: ArchiveState;
   archiveBoardUrl?: string;
+  terminalCols: number;
   terminalRows: number;
   laneOffsets: Record<Column, number>;
   // Instance management
@@ -346,6 +358,7 @@ interface TuiState {
   selectedInstanceIndex: number;
   fetchingCardCounts: Set<string>;
   switcherSelectedIndex: number;
+  instanceActionState: Record<string, "starting" | "stopping" | undefined>;
   confirmRemoveName?: string;
   detailTab?: "prompt" | "handoff";
   moveTargetColumn?: Column;
@@ -407,6 +420,7 @@ export async function runOpenBoardTui(
     refreshing: false,
     cwd: client.cwd,
     overlay: "none",
+    terminalCols: renderer.terminalWidth,
     terminalRows: renderer.terminalHeight,
     laneOffsets: { todo: 0, in_progress: 0, review: 0, done: 0 },
     viewState: initialAttach ? transitionView(initialViewState, "board") : initialViewState,
@@ -415,6 +429,7 @@ export async function runOpenBoardTui(
     selectedInstanceIndex: 0,
     fetchingCardCounts: new Set(),
     switcherSelectedIndex: 0,
+    instanceActionState: {},
     workspaceGateInput: "",
     workspaceGateSubmitting: false,
   };
@@ -459,6 +474,7 @@ export async function runOpenBoardTui(
 
     try {
       resetTerminalModes();
+      state.terminalCols = renderer.terminalWidth;
       state.terminalRows = renderer.terminalHeight;
       mountRoot(renderApp(ui, state));
       renderer.requestRender();
@@ -592,6 +608,7 @@ export async function runOpenBoardTui(
 
   const startInstance = async (name: string) => {
     state.status = `starting ${name}...`;
+    state.instanceActionState[name] = "starting";
     render();
     try {
       await state.instanceProvider.start(name);
@@ -599,13 +616,16 @@ export async function runOpenBoardTui(
       state.status = `started ${name}`;
     } catch (error) {
       state.error = errorMessage(error);
-      state.status = `start failed`;
+      state.status = `start failed: ${errorMessage(error)}`;
+    } finally {
+      delete state.instanceActionState[name];
     }
     render();
   };
 
   const stopInstance = async (name: string) => {
     state.status = `stopping ${name}...`;
+    state.instanceActionState[name] = "stopping";
     render();
     try {
       await state.instanceProvider.stop(name);
@@ -613,7 +633,9 @@ export async function runOpenBoardTui(
       state.status = `stopped ${name}`;
     } catch (error) {
       state.error = errorMessage(error);
-      state.status = `stop failed`;
+      state.status = `stop failed: ${errorMessage(error)}`;
+    } finally {
+      delete state.instanceActionState[name];
     }
     render();
   };
@@ -969,6 +991,8 @@ function reportFatalError(error: unknown): void {
 }
 
 export function renderApp(ui: OpenTui, state: TuiState) {
+  if (isBelowMinimumSize(state)) return renderMinimumSizeApp(ui, state);
+
   const children = [
     renderHeader(ui, state),
     state.viewState.view === "workspaceGate"
@@ -981,7 +1005,6 @@ export function renderApp(ui: OpenTui, state: TuiState) {
     renderCommandStrip(ui, state),
   ];
   if (state.overlay === "help") children.push(renderHelpOverlay(ui));
-  if (state.overlay === "newTask") children.push(renderNewTaskOverlay(ui, state));
   if (state.overlay === "addInstance") children.push(renderAddInstanceOverlay(ui, state));
   if (state.overlay === "renameInstance") children.push(renderRenameInstanceOverlay(ui, state));
   if (state.viewState.view === "switcher") children.push(renderSwitcherOverlay(ui, state));
@@ -997,6 +1020,45 @@ export function renderApp(ui: OpenTui, state: TuiState) {
       gap: TUI_LAYOUT.rootGap,
     },
     ...children,
+  );
+}
+
+function isBelowMinimumSize(state: Pick<TuiState, "terminalCols" | "terminalRows">): boolean {
+  return state.terminalCols < TUI_MIN_SIZE.columns || state.terminalRows < TUI_MIN_SIZE.rows;
+}
+
+function renderMinimumSizeApp(ui: OpenTui, state: TuiState) {
+  return ui.Box(
+    {
+      id: ROOT_ID,
+      width: "100%",
+      height: "100%",
+      ...boxBg(COLORS.bg),
+      flexDirection: "column",
+      padding: 1,
+      gap: 1,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    ui.Text({
+      content: "OpenBoard needs more room",
+      fg: COLORS.bright,
+      attributes: ui.TextAttributes.BOLD,
+      height: 1,
+      truncate: true,
+    }),
+    ui.Text({
+      content: `Current ${state.terminalCols}x${state.terminalRows} · minimum ${TUI_MIN_SIZE.columns}x${TUI_MIN_SIZE.rows}`,
+      fg: COLORS.muted,
+      height: 1,
+      truncate: true,
+    }),
+    ui.Text({
+      content: "Resize the terminal to continue · q quit",
+      fg: COLORS.text,
+      height: 1,
+      truncate: true,
+    }),
   );
 }
 
@@ -1038,11 +1100,15 @@ function renderHeader(ui: OpenTui, state: TuiState) {
   let refreshed = state.lastRefresh ? formatClock(state.lastRefresh) : "NO REFRESH";
   let healthLabel = boardHealthLabel(state);
   let instanceLabel = "";
+  let workspaceLabel = "";
 
   if (state.viewState.view === "board") {
     const currentInstance = currentInstanceItem(state);
     if (currentInstance) {
       instanceLabel = ` · INSTANCE ${currentInstance.definition.name}:${currentInstance.definition.port}`;
+      workspaceLabel = `WORKSPACE ${shortPath(currentInstance.definition.workspace)}`;
+    } else {
+      workspaceLabel = `WORKSPACE ${shortPath(state.cwd)}`;
     }
   } else if (state.viewState.view === "launch") {
     connection = "";
@@ -1050,24 +1116,28 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     taskLabel = "";
     refreshed = "";
     healthLabel = "";
+    workspaceLabel = "";
   } else if (state.viewState.view === "workspaceGate") {
     connection = "SETUP";
     host = "";
     taskLabel = "";
     refreshed = "";
     healthLabel = "";
+    workspaceLabel = "";
   } else if (state.viewState.view === "switcher") {
     connection = "SWITCHER";
     host = "";
     taskLabel = "";
     refreshed = "";
     healthLabel = "";
+    workspaceLabel = "";
   } else if (state.viewState.view === "archive") {
     connection = "ARCHIVE";
     host = "";
     taskLabel = `${state.archive?.records.length ?? 0} RECORD${state.archive?.records.length === 1 ? "" : "S"}`;
     refreshed = "";
     healthLabel = "";
+    workspaceLabel = "";
   }
 
   return ui.Box(
@@ -1081,7 +1151,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     },
     ui.Box({ flexGrow: 1 }),
     ui.Text({
-      content: [connection, host, instanceLabel.replace(/^ · /, ""), taskLabel, refreshed, healthLabel].filter(Boolean).join(" · "),
+      content: [connection, host, instanceLabel.replace(/^ · /, ""), workspaceLabel, taskLabel, refreshed, healthLabel].filter(Boolean).join(" · "),
       fg: state.error ? COLORS.bright : COLORS.muted,
       height: 1,
       truncate: true,
@@ -1153,7 +1223,11 @@ function renderMain(ui: OpenTui, state: TuiState) {
 function renderArchiveView(ui: OpenTui, state: TuiState) {
   const archive = state.archive;
   const records = archive ? filteredArchiveRecords(archive) : [];
-  const selected = archive ? records[clampIndex(archive.selectedIndex, records.length)] : undefined;
+  const selectedIndex = archive ? clampIndex(archive.selectedIndex, records.length) : 0;
+  const selected = archive ? records[selectedIndex] : undefined;
+  const window = archiveListWindow(selectedIndex, records.length, state.terminalRows);
+  const visibleRecords = records.slice(window.offset, window.offset + window.capacity);
+  const hiddenBelow = records.length - window.offset - visibleRecords.length;
 
   return ui.Box(
     {
@@ -1190,7 +1264,11 @@ function renderArchiveView(ui: OpenTui, state: TuiState) {
         ? ui.Text({ content: "No archived tasks", fg: COLORS.muted, height: 1 })
         : ui.Box(
             { flexGrow: 1, flexDirection: "column", overflow: "hidden", ...boxBg(COLORS.panel) },
-            ...records.map((record, index) => renderArchiveRow(ui, state, record, index === (archive?.selectedIndex ?? 0))),
+            ...(window.offset > 0 ? [renderArchiveOverflow(ui, window.offset, "↑")] : []),
+            ...visibleRecords.map((record, index) =>
+              renderArchiveRow(ui, state, record, window.offset + index === selectedIndex),
+            ),
+            ...(hiddenBelow > 0 ? [renderArchiveOverflow(ui, hiddenBelow, "↓")] : []),
           ),
     ),
     ui.Box(
@@ -1214,6 +1292,15 @@ function renderArchiveView(ui: OpenTui, state: TuiState) {
   );
 }
 
+function renderArchiveOverflow(ui: OpenTui, count: number, arrow: string) {
+  return ui.Text({
+    content: `${arrow} ${count} archived task${count === 1 ? "" : "s"}`,
+    fg: COLORS.dim,
+    height: 1,
+    truncate: true,
+  });
+}
+
 function renderArchiveRow(ui: OpenTui, _state: TuiState, record: GlobalArchiveRecord, selected: boolean) {
   const line = `${selected ? "▸ " : "  "}${formatArchiveDate(record.archived_at).slice(0, 10)} · ${record.source_instance_name ?? "unknown"} · ${record.title} · ${record.column_name} · ${record.agent ?? "unassigned"}`;
   return ui.Box(
@@ -1226,6 +1313,7 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
   const completion = parseCompletion(record.completion);
   const model = parseModelRef(record.model);
   const tab = state.archive?.detailTab ?? "prompt";
+  const rows = archiveDetailRows(record, model);
 
   const activeTabFg = COLORS.accentBright;
   const inactiveTabFg = COLORS.dim;
@@ -1234,18 +1322,16 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
 
   const tabContent: VChild =
     tab === "prompt"
-      ? ui.Text({ content: record.description || "(empty prompt)", fg: COLORS.text, wrapMode: "word", flexGrow: 1 })
-      : renderHandoffTab(ui, completion);
+      ? renderScrollableDetailText(ui, `archive-detail-prompt-${record.task_id}`, record.description || "(empty prompt)")
+      : renderHandoffTab(ui, completion, `archive-detail-handoff-${record.task_id}`);
 
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
     ui.Text({ content: record.title, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, wrapMode: "word", height: 3 }),
-    renderDetail(ui, "INSTANCE", `${record.source_instance_name ?? "unknown"}:${record.source_port}`),
-    renderDetail(ui, "WORKSPACE", shortPath(record.source_workspace), COLORS.muted),
-    renderDetail(ui, "LANE", record.column_name, COLORS.muted),
-    renderDetail(ui, "AGENT", record.agent ?? "unassigned"),
-    renderDetail(ui, "MODEL", model ? modelLabel(model) : "agent default"),
-    renderDetail(ui, "ARCHIVED", formatArchiveDate(record.archived_at), COLORS.muted),
+    ui.Box(
+      { width: "100%", height: rows.length, flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
+      ...rows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright)),
+    ),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     // Tab headers
     ui.Box(
@@ -1268,10 +1354,74 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
   );
 }
 
-function renderHandoffTab(ui: OpenTui, completion: CompletionReport | null) {
+function archiveDetailRows(record: GlobalArchiveRecord, model: ModelRef | null): MetaRow[] {
+  const taskType = record.task_type === "manual" ? "manual" : "agent";
+  return [
+    { label: "INSTANCE", value: `${record.source_instance_name ?? "unknown"}:${record.source_port}`, color: COLORS.text },
+    { label: "TYPE", value: taskType, color: COLORS.text },
+    ...(record.completed_by ? [{ label: "ACCEPTED BY", value: record.completed_by, color: COLORS.text }] : []),
+    { label: "LANE", value: TUI_COLUMN_LABELS[archiveColumn(record.column_name)], color: COLORS.text },
+    ...(taskType === "manual"
+      ? [{ label: "ASSIGNED TO", value: record.assigned_to ?? "unassigned", color: COLORS.text }]
+      : [
+          { label: "AGENT", value: record.agent ?? "unassigned", color: COLORS.text },
+          { label: "MODEL", value: model ? modelLabel(model) : "agent default", color: COLORS.text },
+          { label: "DIR", value: shortPath(record.directory), color: COLORS.text },
+          { label: "ISO", value: record.isolation ?? "board default", color: COLORS.text },
+          ...(record.isolation === "worktree"
+            ? [{ label: "WORKTREE", value: archiveWorktreeId(record), color: COLORS.text }]
+            : []),
+        ]),
+    ...(record.session_id ? [{ label: "SESSION", value: record.session_id, color: COLORS.text }] : []),
+    { label: "WORKSPACE", value: shortPath(record.source_workspace), color: COLORS.text },
+    { label: "ARCHIVED", value: formatArchiveDate(record.archived_at), color: COLORS.text },
+  ];
+}
+
+function archiveColumn(column: string): Column {
+  return TUI_COLUMNS.includes(column as Column) ? column as Column : "todo";
+}
+
+function archiveWorktreeId(record: Pick<GlobalArchiveRecord, "task_id" | "worktree_path" | "worktree_branch">): string {
+  if (record.worktree_path) return record.worktree_path.split("/").filter(Boolean).at(-1) ?? record.task_id;
+  if (record.worktree_branch) return record.worktree_branch.split("/").filter(Boolean).at(-1) ?? record.task_id;
+  return record.task_id;
+}
+
+function renderScrollableDetailText(ui: OpenTui, id: string, content: string) {
+  return ui.ScrollBox(
+    scrollBoxProps(id),
+    ui.Text({ content, fg: COLORS.text, width: "100%", minWidth: 0, flexShrink: 1, wrapMode: "word" }),
+  );
+}
+
+function scrollBoxProps(id: string): ScrollBoxOptions {
+  return {
+    id,
+    flexGrow: 1,
+    minHeight: 0,
+    scrollY: true,
+    scrollX: false,
+    stickyScroll: false,
+    ...boxBg(COLORS.panel),
+    contentOptions: {
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
+    },
+    viewportOptions: {
+      ...boxBg(COLORS.panel),
+    },
+    wrapperOptions: {
+      ...boxBg(COLORS.panel),
+    },
+  };
+}
+
+function renderHandoffTab(ui: OpenTui, completion: CompletionReport | null, scrollId: string) {
   if (!completion) {
-    return ui.Box(
-      { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    return ui.ScrollBox(
+      scrollBoxProps(scrollId),
       ui.Text({ content: "No completion report available", fg: COLORS.muted, height: 1 }),
     );
   }
@@ -1281,8 +1431,8 @@ function renderHandoffTab(ui: OpenTui, completion: CompletionReport | null) {
     ? completion.verification.map((item) => `${item.command} → ${item.result}`)
     : ["none"];
 
-  return ui.Box(
-    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+  return ui.ScrollBox(
+    scrollBoxProps(scrollId),
     ui.Box(
       { width: "100%", flexDirection: "column", gap: 0 },
       ui.Text({ content: "SUMMARY", fg: COLORS.dim, height: 1 }),
@@ -1325,10 +1475,10 @@ function archiveFilterLabel(archive: ArchiveState | undefined): string {
   return filters.length ? filters.join(" · ") : "all archived tasks";
 }
 
-function renderBoardHandoffTab(ui: OpenTui, completion: CompletionReport | null) {
+function renderBoardHandoffTab(ui: OpenTui, completion: CompletionReport | null, scrollId: string) {
   if (!completion) {
-    return ui.Box(
-      { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    return ui.ScrollBox(
+      scrollBoxProps(scrollId),
       ui.Text({ content: "No completion report available", fg: COLORS.muted, height: 1 }),
     );
   }
@@ -1338,8 +1488,8 @@ function renderBoardHandoffTab(ui: OpenTui, completion: CompletionReport | null)
     ? completion.verification.map((item) => `${item.command} → ${item.result}`)
     : ["none"];
 
-  return ui.Box(
-    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+  return ui.ScrollBox(
+    scrollBoxProps(scrollId),
     ui.Box(
       { width: "100%", flexDirection: "column", gap: 0 },
       ui.Text({ content: "SUMMARY", fg: COLORS.dim, height: 1 }),
@@ -1381,7 +1531,7 @@ function renderInlineMoveDetail(ui: OpenTui, state: TuiState, task: Task) {
       ...copy.body.map((line) => ui.Text({ content: line, fg: COLORS.text, wrapMode: "word", height: 2 })),
       ui.Box({ flexGrow: 1 }),
       ui.Text({ content: "Press enter again to move to Done.", fg: COLORS.accentBright, height: 1, truncate: true }),
-      ui.Text({ content: "completedBy: User · esc cancel", fg: COLORS.dim, height: 1, truncate: true }),
+      ui.Text({ content: "accepted by User · esc cancel", fg: COLORS.dim, height: 1, truncate: true }),
     );
   }
 
@@ -1399,7 +1549,7 @@ function renderInlineMoveDetail(ui: OpenTui, state: TuiState, task: Task) {
     ...TUI_COLUMNS.map((col, index) => {
       const active = col === target;
       return ui.Text({
-        content: `${active ? "▸ " : "  "}${index + 1}. ${TUI_COLUMN_LABELS[col]}${col === task.column ? " (current)" : ""}${col === "done" ? " ← completedBy: User" : ""}`,
+        content: `${active ? "▸ " : "  "}${index + 1}. ${TUI_COLUMN_LABELS[col]}${col === task.column ? " (current)" : ""}${col === "done" ? " ← accepted by User" : ""}`,
         fg: active ? COLORS.accentBright : col === task.column ? COLORS.muted : COLORS.text,
         ...textBg(active ? COLORS.panelRaised : COLORS.panel),
         height: 1,
@@ -1462,6 +1612,7 @@ function renderLaunchView(ui: OpenTui, state: TuiState) {
     // Large wordmark lives on the launch view only; board view drops it for
     // more vertical room in the lanes.
     renderWordmark(ui),
+    ui.Box({ height: state.terminalRows >= 36 ? 2 : 1 }),
   ];
 
   if (state.instanceList.length === 0) {
@@ -1533,7 +1684,7 @@ function renderSwitcherOverlay(ui: OpenTui, state: TuiState) {
     const item = state.instanceList[i];
     const selected = i === state.switcherSelectedIndex;
     const isCurrent = item.runtime.boardUrl === state.boardUrl;
-    rows.push(renderSwitcherRow(ui, item, selected, isCurrent));
+    rows.push(renderSwitcherRow(ui, state, item, selected, isCurrent));
   }
 
   return ui.Box(
@@ -1568,16 +1719,23 @@ function renderSwitcherOverlay(ui: OpenTui, state: TuiState) {
       ui.Text({ content: "────────────────────────────────────────────────", fg: COLORS.hairline, height: 1 }),
       ...rows,
       ui.Text({ content: "────────────────────────────────────────────────", fg: COLORS.hairline, height: 1 }),
-      ui.Text({ content: "↑/↓ navigate · enter select · esc cancel", fg: COLORS.dim, height: 1 }),
+      ui.Text({ content: "↑/↓ navigate · enter select · s start/stop · esc cancel", fg: COLORS.dim, height: 1 }),
     ),
   );
 }
 
-function renderSwitcherRow(ui: OpenTui, item: InstanceListItem, selected: boolean, isCurrent: boolean) {
+function renderSwitcherRow(ui: OpenTui, state: TuiState, item: InstanceListItem, selected: boolean, isCurrent: boolean) {
   const glyph = INSTANCE_STATUS_GLYPHS[item.runtime.status] ?? "?";
+  const action = state.instanceActionState[item.definition.name];
+  const status = action === "starting"
+    ? "STARTING"
+    : action === "stopping"
+    ? "STOPPING"
+    : instanceStatusLabel(item.runtime.status);
+  const control = item.runtime.status === "running" ? "s stop" : "s start";
 
   const currentMarker = isCurrent ? " ← current" : "";
-  const line = `${selected ? "▸ " : "  "}${glyph} ${item.definition.name}  ${instanceStatusLabel(item.runtime.status)}  :${item.definition.port}${currentMarker}`;
+  const line = `${selected ? "▸ " : "  "}${glyph} ${item.definition.name}  ${status}  :${item.definition.port}  ${control}${currentMarker}`;
 
   return ui.Box(
     {
@@ -1874,9 +2032,20 @@ function renderTask(ui: OpenTui, state: TuiState, task: Task) {
 function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   const dir: MetaRow = { label: "DIR", value: shortPath(task.directory), color: COLORS.muted };
   const agent: MetaRow = { label: "AGENT", value: task.agent ?? "agent", color: COLORS.muted };
+  const type: MetaRow = { label: "TYPE", value: task.type ?? "agent", color: COLORS.muted };
+  const assigned: MetaRow = { label: "ASSIGN", value: task.assignedTo ?? "unassigned", color: COLORS.muted };
 
   if (task.runState === "error") {
     return [dir, { label: "ERR", value: task.error ?? "run failed", color: COLORS.text }];
+  }
+  if (task.type === "manual") {
+    return [type, assigned];
+  }
+  if (task.column === "done" && task.completionSource === "reported") {
+    const second = task.worktreeBranch
+      ? { label: "BRANCH", value: `⑃ ${task.worktreeBranch}`, color: COLORS.muted }
+      : dir;
+    return [agent, second];
   }
   if ((task.column === "review" || task.column === "done") && task.worktreeBranch) {
     return [{ label: "BRANCH", value: `⑃ ${task.worktreeBranch}`, color: COLORS.muted }, dir];
@@ -1884,7 +2053,7 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   return [dir, agent];
 }
 
-function renderTaskMeta(ui: OpenTui, meta: MetaRow, done: boolean, labelWidth = 7) {
+function renderTaskMeta(ui: OpenTui, meta: MetaRow, done: boolean, labelWidth = 7, valueColor?: TuiColor) {
   return ui.Box(
     { width: "100%", height: 1, flexDirection: "row" },
     ui.Text({ content: meta.label, fg: COLORS.dim, width: labelWidth, height: 1 }),
@@ -1892,7 +2061,7 @@ function renderTaskMeta(ui: OpenTui, meta: MetaRow, done: boolean, labelWidth = 
     // card's right border when the path/branch is longer than the lane is wide.
     ui.Text({
       content: meta.value,
-      fg: done ? COLORS.dim : meta.color,
+      fg: valueColor ?? (done ? COLORS.dim : meta.color),
       flexGrow: 1,
       flexShrink: 1,
       minWidth: 0,
@@ -1906,7 +2075,7 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
   const task = selectedTask(state);
   return ui.Box(
     {
-      width: SIDEBAR_WIDTH,
+      width: selectedPanelWidth(state.terminalCols),
       height: "100%",
       flexDirection: "column",
       border: true,
@@ -1918,8 +2087,13 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
       title: "Selected",
       titleColor: COLORS.text,
     },
-    task ? renderTaskDetails(ui, state, task) : renderEmptyDetails(ui),
+    state.newTask ? renderInlineNewTask(ui, state) : task ? renderTaskDetails(ui, state, task) : renderEmptyDetails(ui),
   );
+}
+
+function selectedPanelWidth(terminalCols: number): number {
+  const extra = Math.max(0, terminalCols - SIDEBAR_GROWTH_START_WIDTH);
+  return Math.min(SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH + Math.floor(extra / 2));
 }
 
 function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
@@ -1929,14 +2103,25 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
     value: row.value,
     color: lifecycleRowColor(row.role, task),
   }));
+  const stateRow = lifecycleRows.find((row) => row.label === "STATE");
+  const secondaryLifecycleRows = lifecycleRows.filter((row) => row.label !== "STATE");
   const rows: MetaRow[] = [
+    ...(stateRow ? [stateRow] : []),
     { label: "INSTANCE", value: instance ? `${instance.definition.name}:${instance.definition.port}` : boardHost(state.boardUrl), color: COLORS.text },
-    ...lifecycleRows,
+    { label: "TYPE", value: task.type ?? "agent", color: COLORS.text },
+    ...secondaryLifecycleRows,
     { label: "LANE", value: TUI_COLUMN_LABELS[task.column], color: COLORS.muted },
-    { label: "AGENT", value: agentLabel(task, state.agents), color: COLORS.text },
-    { label: "MODEL", value: modelLabel(task.model), color: COLORS.text },
-    { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
-    { label: "ISO", value: task.isolation ?? "board default", color: COLORS.text },
+    ...(task.type === "manual"
+      ? [{ label: "ASSIGNED TO", value: task.assignedTo ?? "unassigned", color: COLORS.text }]
+      : [
+          { label: "AGENT", value: agentLabel(task, state.agents), color: COLORS.text },
+          { label: "MODEL", value: modelLabel(task.model), color: COLORS.text },
+          { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
+          { label: "ISO", value: task.isolation ?? "board default", color: COLORS.text },
+          ...(task.isolation === "worktree"
+            ? [{ label: "WORKTREE", value: worktreeId(task), color: COLORS.muted }]
+            : []),
+        ]),
   ];
   if (task.sessionId) rows.push({ label: "SESSION", value: task.sessionId, color: COLORS.muted });
   if (task.worktreeBranch) rows.push({ label: "BRANCH", value: `⑃ ${task.worktreeBranch}`, color: COLORS.muted });
@@ -1963,10 +2148,16 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
     : renderCompactDetails(ui, task, rows);
 }
 
+function worktreeId(task: Pick<Task, "id" | "worktreePath" | "worktreeBranch">): string {
+  if (task.worktreePath) return task.worktreePath.split("/").filter(Boolean).at(-1) ?? task.id;
+  if (task.worktreeBranch) return task.worktreeBranch.split("/").filter(Boolean).at(-1) ?? task.id;
+  return task.id;
+}
+
 function lifecycleRowColor(role: string | undefined, task: Task): TuiColor {
   if (role === "state") return taskStatusColor(task);
   if (role === "error") return COLORS.bright;
-  if (role === "completedBy") return COLORS.accentBright;
+  if (role === "acceptedBy") return COLORS.accentBright;
   if (role === "pending") return COLORS.bright;
   return COLORS.text;
 }
@@ -1975,9 +2166,9 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
   const tab = state.detailTab ?? "prompt";
   const content: VChild =
     tab === "prompt"
-      ? ui.Text({ content: task.description || "(empty prompt)", fg: COLORS.text, wrapMode: "word", flexGrow: 1 })
-      : renderBoardHandoffTab(ui, task.completion ?? null);
-  const inlineRows = rows.filter((row) => ["STATE", "LANE", "AGENT", "COMPLETED BY"].includes(row.label));
+      ? renderScrollableDetailText(ui, `board-detail-prompt-${task.id}`, task.description || "(empty prompt)")
+      : renderBoardHandoffTab(ui, task.completion ?? null, `board-detail-handoff-${task.id}`);
+  const inlineRows = rows.filter((row) => ["TYPE", "STATE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY"].includes(row.label));
 
   return ui.Box(
     {
@@ -1995,9 +2186,9 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
     }),
     ui.Box(
       { width: "100%", height: inlineRows.length, flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
-      ...inlineRows.map((row) => renderTaskMeta(ui, row, false, 10)),
+      ...inlineRows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright)),
     ),
-    ...(task.error ? [renderErrorBox(ui, task.error)] : []),
+    ...(task.error ? [renderErrorBox(ui, task.error, inlineErrorMode(state.terminalRows))] : []),
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 2 },
       ui.Text({
@@ -2058,7 +2249,7 @@ function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Ta
 }
 
 function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
-  const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, row.color));
+  const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, COLORS.bright));
   if (task.error) details.push(renderErrorBox(ui, task.error));
 
   return ui.Box(
@@ -2101,8 +2292,7 @@ function renderCompactDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
     }),
     ui.Box(
       { width: "100%", flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
-      // Width 8: "SESSION" is the widest sidebar label and needs a trailing space.
-      ...compactRows.map((row) => renderTaskMeta(ui, row, false, 8)),
+      ...compactRows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright)),
     ),
     ui.Box({ flexGrow: 1 }),
     ...renderDetailHints(ui),
@@ -2116,9 +2306,35 @@ function renderDetailHints(ui: OpenTui): VChild[] {
   ];
 }
 
-function renderErrorBox(ui: OpenTui, error: string) {
+function inlineErrorMode(terminalRows: number): "compact" | "full" {
+  return terminalRows <= 34 ? "compact" : "full";
+}
+
+function renderErrorBox(ui: OpenTui, error: string, mode: "compact" | "full" = "full") {
+  const errorRows = Math.min(3, Math.max(1, Math.ceil(error.length / 56)));
+  if (mode === "compact") {
+    return ui.Box(
+      {
+        id: "selected-error-box",
+        width: "100%",
+        height: 3,
+        border: true,
+        borderStyle: "single",
+        borderColor: COLORS.laneError,
+        paddingX: 1,
+        flexDirection: "row",
+        alignItems: "center",
+        ...boxBg(COLORS.panel),
+      },
+      ui.Text({ content: `! ERROR · ${error}`, fg: COLORS.bright, height: 1, truncate: true }),
+    );
+  }
+
   return ui.Box(
     {
+      id: "selected-error-box",
+      width: "100%",
+      height: errorRows + 4,
       border: true,
       borderStyle: "single",
       borderColor: COLORS.laneError,
@@ -2126,7 +2342,7 @@ function renderErrorBox(ui: OpenTui, error: string) {
       flexDirection: "column",
     },
     ui.Text({ content: "! ERROR", fg: COLORS.bright, height: 1 }),
-    ui.Text({ content: error, fg: COLORS.text, wrapMode: "word", height: 5 }),
+    ui.Text({ content: error, fg: COLORS.text, wrapMode: "word", height: errorRows }),
   );
 }
 
@@ -2181,7 +2397,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? "type absolute path · enter confirm · esc quit"
             : state.viewState.view === "launch"
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
-            : "↑/↓ cards · ←/→ lanes · b switch board · n new task · m move card · u refresh · ? help · q quit · A global archive",
+            : "↑/↓ cards · ←/→ lanes · esc instances · b switch board · n new task · m move card · u refresh · ? help · q quit · A global archive",
         fg: COLORS.text,
         height: 1,
         flexGrow: 1,
@@ -2210,7 +2426,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["d", "delete selected card"],
     ["s", "sync worktree"],
     ["i", "integrate branch"],
-    ["x", "move to Done (completedBy: User)"],
+    ["x", "move to Done (accepted by User)"],
     ["m", "manual move to lane"],
     ["g", "init git and run"],
     ["n", "new task"],
@@ -2277,97 +2493,78 @@ function renderHelpOverlay(ui: OpenTui) {
   );
 }
 
-function renderNewTaskOverlay(ui: OpenTui, state: TuiState) {
+function renderInlineNewTask(ui: OpenTui, state: TuiState) {
   const draft = state.newTask ?? createNewTaskDraft(state);
 
   return ui.Box(
     {
-      position: "absolute",
-      top: 0,
-      left: 0,
       width: "100%",
       height: "100%",
-      zIndex: 50,
-      ...boxBg("#000000"),
-      flexDirection: "row",
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
     },
-    ui.Box({ flexGrow: 1 }),
+    ui.Text({
+      content: "New Task",
+      fg: COLORS.text,
+      attributes: ui.TextAttributes.BOLD,
+      height: 1,
+      truncate: true,
+    }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     ui.Box(
       {
-        width: 52,
-        height: "100%",
-        flexDirection: "row",
-        ...boxBg(COLORS.bg),
+        flexGrow: 1,
+        flexDirection: "column",
+        gap: 1,
+        ...boxBg(COLORS.panel),
       },
-      ui.Box({ width: 1, height: "100%", ...boxBg(COLORS.border) }),
-      ui.Box(
-        {
-          flexGrow: 1,
-          height: "100%",
-          flexDirection: "column",
-          ...boxBg(COLORS.bg),
-          padding: 1,
-          gap: 1,
-        },
-        ui.Box(
-          { width: "100%", flexDirection: "row", height: 1 },
-          ui.Text({
-            content: "New Task",
-            fg: COLORS.text,
-            attributes: ui.TextAttributes.BOLD,
-            height: 1,
-            flexGrow: 1,
-          }),
-          ui.Text({ content: "✕", fg: COLORS.dim, height: 1, width: 2 }),
-        ),
-        ui.Text({ content: "────────────────────────────────────────────────", fg: COLORS.hairline, height: 1 }),
-        ui.Box(
-          {
-            flexGrow: 1,
-            flexDirection: "column",
-            gap: 1,
-            ...boxBg(COLORS.bg),
-          },
-          renderInputField(ui, "TITLE", draft.title, draft.field === "title", "", 1),
-          renderInputField(
-            ui,
-            "PROMPT",
-            draft.description,
-            draft.field === "description",
-            "Describe the task for the agent...",
-            4,
-          ),
-          renderSelectField(ui, "AGENT", currentAgentLabel(draft), draft.field === "agent"),
-          renderSelectField(ui, "MODEL", currentModelLabel(draft), draft.field === "model"),
-          renderInputField(
-            ui,
-            "DIR",
-            draft.field === "directory" ? draft.directory : shortPath(draft.directory),
-            draft.field === "directory",
-            state.cwd,
-            1,
-            COLORS.muted,
-          ),
-          renderIsolationField(ui, draft),
-          draft.error
-            ? ui.Text({ content: draft.error, fg: COLORS.bright, wrapMode: "word", height: 2 })
-            : ui.Box({ height: 2 }),
-        ),
-        ui.Text({ content: "────────────────────────────────────────────────", fg: COLORS.hairline, height: 1 }),
-        ui.Box(
-          { width: "100%", flexDirection: "row", height: 1, gap: 1 },
-          ui.Text({
-            content: draft.submitting ? "Creating..." : "Create task",
-            fg: COLORS.bright,
-            ...textBg(COLORS.accent),
-            height: 1,
-            width: 14,
-          }),
-          ui.Text({ content: "esc cancel", fg: COLORS.muted, height: 1, flexGrow: 1 }),
-        ),
-        ui.Text({ content: "tab next field · shift+tab previous · enter create", fg: COLORS.dim, height: 1 }),
+      renderSelectField(ui, "CARD TYPE", draft.type, draft.field === "type"),
+      renderInputField(ui, "TITLE", draft.title, draft.field === "title", "", 1),
+      renderInputField(
+        ui,
+        draft.type === "manual" ? "NOTES" : "PROMPT",
+        draft.description,
+        draft.field === "description",
+        draft.type === "manual" ? "Notes for the PM/manual card..." : "Describe the task for the agent...",
+        4,
       ),
+      ...(draft.type === "manual"
+        ? [
+            renderInputField(ui, "ASSIGNED TO", draft.assignedTo, draft.field === "assignedTo", "Name or role", 1),
+          ]
+        : [
+            renderSelectField(ui, "AGENT", currentAgentLabel(draft), draft.field === "agent"),
+            renderSelectField(ui, "MODEL", currentModelLabel(draft), draft.field === "model"),
+            renderInputField(
+              ui,
+              "DIR",
+              draft.field === "directory" ? draft.directory : shortPath(draft.directory),
+              draft.field === "directory",
+              state.cwd,
+              1,
+              COLORS.muted,
+            ),
+            renderIsolationField(ui, draft),
+          ]),
+      draft.error
+        ? ui.Text({ content: draft.error, fg: COLORS.bright, wrapMode: "word", height: 2 })
+        : ui.Box({ height: 2 }),
     ),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ui.Box(
+      { width: "100%", flexDirection: "row", height: 1, gap: 1 },
+      ui.Text({
+        content: draft.submitting ? "Creating..." : draft.type === "manual" ? "Create manual task" : "Create agent task",
+        fg: COLORS.bright,
+        ...textBg(COLORS.accent),
+        height: 1,
+        width: 20,
+        truncate: true,
+      }),
+      ui.Text({ content: "esc cancel", fg: COLORS.muted, height: 1, flexGrow: 1, truncate: true }),
+    ),
+    ui.Text({ content: "tab next field · shift+tab previous · enter create", fg: COLORS.dim, height: 1, truncate: true }),
   );
 }
 
@@ -2489,7 +2686,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
-  if (state.overlay === "newTask") {
+  if ((state.overlay === "newTask" || state.newTask) && state.viewState.view === "board") {
     await handleNewTaskKey(key, state, actions);
     return;
   }
@@ -2556,7 +2753,9 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     case "n":
       clearPendingConfirmation(state);
       state.newTask = createNewTaskDraft(state);
-      state.overlay = "newTask";
+      state.overlay = "none";
+      state.detailTab = undefined;
+      state.moveTargetColumn = undefined;
       state.error = undefined;
       actions.render();
       return;
@@ -2616,6 +2815,13 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
   }
 
   if (isEscapeKey(key)) {
+    if (state.pendingConfirmation) {
+      clearPendingConfirmation(state);
+      state.error = undefined;
+      state.status = "cancelled";
+      actions.render();
+      return;
+    }
     clearPendingConfirmation(state);
     await actions.detachInstance();
     return;
@@ -2657,6 +2863,14 @@ async function handleConfirmableCardAction(
   const task = selectedTask(state);
   if (!task) {
     state.status = "no task selected";
+    state.error = undefined;
+    clearPendingConfirmation(state);
+    actions.render();
+    return;
+  }
+
+  if ((action === "run" || action === "retry") && task.type === "manual") {
+    state.status = "manual cards are not runnable; convert to an agent card first";
     state.error = undefined;
     clearPendingConfirmation(state);
     actions.render();
@@ -2764,7 +2978,14 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
   actions.render();
 
   try {
-    const task = await actions.client.createTask({
+    const task = await actions.client.createTask(draft.type === "manual" ? {
+      type: "manual",
+      title,
+      description: draft.description,
+      directory,
+      assignedTo: draft.assignedTo.trim() || undefined,
+    } : {
+      type: "agent",
       title,
       description: draft.description,
       directory,
@@ -2791,24 +3012,32 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
   const agentId = defaultAgentId(state.agents);
   const agent = state.agents.find((item) => item.id === agentId);
   return {
+    type: "agent",
     title: "",
     description: "",
     directory: state.cwd,
     agentId,
+    assignedTo: "",
     model: agent?.model,
     isolation: "worktree",
-    field: "title",
+    field: "type",
     submitting: false,
   };
 }
 
 function moveDraftField(draft: NewTaskDraft, delta: number): void {
-  const index = FIELD_ORDER.indexOf(draft.field);
-  draft.field = FIELD_ORDER[(index + delta + FIELD_ORDER.length) % FIELD_ORDER.length];
+  const order = newTaskFieldOrder(draft);
+  const current = order.includes(draft.field) ? draft.field : "type";
+  const index = order.indexOf(current);
+  draft.field = order[(index + delta + order.length) % order.length];
 }
 
 function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number): boolean {
   switch (draft.field) {
+    case "type":
+      draft.type = draft.type === "agent" ? "manual" : "agent";
+      if (!newTaskFieldOrder(draft).includes(draft.field)) draft.field = "type";
+      return true;
     case "agent":
       cycleAgent(draft, state.agents, delta);
       return true;
@@ -2841,7 +3070,7 @@ function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], delta: number): 
 }
 
 function applyTextInput(draft: NewTaskDraft, key: KeyEvent): boolean {
-  if (draft.field !== "title" && draft.field !== "description" && draft.field !== "directory") return false;
+  if (draft.field !== "title" && draft.field !== "description" && draft.field !== "directory" && draft.field !== "assignedTo") return false;
 
   if (key.name === "backspace" || key.sequence === "\u007f" || key.sequence === "\b") {
     setDraftText(draft, readDraftText(draft).slice(0, -1));
@@ -2861,6 +3090,8 @@ function readDraftText(draft: NewTaskDraft): string {
       return draft.description;
     case "directory":
       return draft.directory;
+    case "assignedTo":
+      return draft.assignedTo;
     default:
       return "";
   }
@@ -2877,7 +3108,14 @@ function setDraftText(draft: NewTaskDraft, value: string): void {
     case "directory":
       draft.directory = value;
       return;
+    case "assignedTo":
+      draft.assignedTo = value;
+      return;
   }
+}
+
+function newTaskFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
+  return draft.type === "manual" ? MANUAL_FIELD_ORDER : AGENT_FIELD_ORDER;
 }
 
 async function handleWorkspaceGateKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
@@ -2910,7 +3148,7 @@ async function handleWorkspaceGateKey(key: KeyEvent, state: TuiState, actions: T
 async function handleLaunchViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
   const keyName = key.name || key.sequence;
 
-  if (isEscapeKey(key)) {
+  if (isEscapeKey(key) || key.sequence === "q") {
     actions.shutdown();
     return;
   }
@@ -3011,6 +3249,22 @@ async function handleSwitcherKey(key: KeyEvent, state: TuiState, actions: TuiAct
       state.viewState = selectInstanceInSwitcher(state.viewState);
     }
     actions.render();
+    return;
+  }
+
+  if (key.sequence === "s") {
+    const item = state.instanceList[state.switcherSelectedIndex];
+    if (!item) return;
+    if (state.instanceActionState[item.definition.name]) {
+      state.status = `${item.definition.name} is already ${state.instanceActionState[item.definition.name]}`;
+      actions.render();
+      return;
+    }
+    if (item.runtime.status === "running") {
+      await actions.stopInstance(item.definition.name);
+    } else {
+      await actions.startInstance(item.definition.name);
+    }
     return;
   }
 }

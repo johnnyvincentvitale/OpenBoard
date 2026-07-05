@@ -4,6 +4,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   TUI_LAYOUT,
+  archiveListCapacity,
+  archiveListWindow,
   closeSwitcher,
   formatElapsed,
   initialViewState,
@@ -167,6 +169,23 @@ describe("lane windowing", () => {
     expect(reconcileLaneOffset(5, -1, 7, 4)).toBe(3);
     expect(reconcileLaneOffset(-2, -1, 7, 4)).toBe(0);
     expect(reconcileLaneOffset(2, -1, 2, 4)).toBe(0);
+  });
+});
+
+describe("archive list windowing", () => {
+  it("derives archive row capacity from the shared root chrome", () => {
+    expect(archiveListCapacity(30)).toBe(16);
+    expect(archiveListCapacity(56)).toBe(42);
+  });
+
+  it("keeps the selected archived row inside the visible window", () => {
+    expect(archiveListWindow(0, 30, 30)).toEqual({ offset: 0, capacity: 14 });
+    expect(archiveListWindow(20, 30, 30)).toEqual({ offset: 7, capacity: 14 });
+    expect(archiveListWindow(29, 30, 30)).toEqual({ offset: 16, capacity: 14 });
+  });
+
+  it("does not reserve overflow rows when every archived row fits", () => {
+    expect(archiveListWindow(2, 3, 30)).toEqual({ offset: 0, capacity: 3 });
   });
 });
 

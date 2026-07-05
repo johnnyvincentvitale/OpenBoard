@@ -91,6 +91,7 @@ describe("board client", () => {
       `${DEFAULT_BOARD_URL}/api/tasks`,
     ]);
     expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      type: "agent",
       title: "Build TUI",
       description: "Shared client first",
       directory: `${CWD}/app`,
@@ -104,6 +105,7 @@ describe("board client", () => {
     const tasks: Task[] = [
       {
         id: "task-1",
+        type: "agent",
         title: "Existing",
         description: "",
         directory: CWD,
@@ -127,6 +129,7 @@ describe("board client", () => {
     await expect(client.listTaskSummaries()).resolves.toEqual([
       {
         id: "task-1",
+        type: "agent",
         title: "Existing",
         directory: CWD,
         column: "review",

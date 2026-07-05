@@ -5,6 +5,7 @@ import type { Task } from "../../src/shared";
 function baseTask(overrides: Partial<Task> = {}): Task {
   return {
     id: "task-1",
+    type: "agent",
     title: "Test task",
     description: "Do something",
     directory: "/tmp/test",
@@ -216,7 +217,7 @@ describe("task lifecycle helpers", () => {
     it("returns state and completed-by rows", () => {
       expect(taskLifecycleDetailRows(task)).toEqual([
         { label: "STATE", value: "○ DONE", role: "state" },
-        { label: "COMPLETED BY", value: "User", role: "completedBy" },
+        { label: "ACCEPTED BY", value: "User", role: "acceptedBy" },
       ]);
     });
   });
@@ -235,12 +236,29 @@ describe("task lifecycle helpers", () => {
     });
   });
 
-  describe("review idle fallback without completion is treated as unassigned", () => {
-    const task = baseTask({ column: "review", runState: "idle" });
+  describe("review agent task without completion report", () => {
+    const task = baseTask({ column: "review", runState: "idle", sessionId: "ses_1" });
 
-    it("reports review-unassigned phase", () => {
-      expect(taskLifecycleStatus(task).phase).toBe("review-unassigned");
-      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · NO REPORT");
+    it("reports no-agent-report phase", () => {
+      expect(taskLifecycleStatus(task).phase).toBe("review-no-agent-report");
+      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · NO AGENT REPORT");
+      expect(taskLifecycleDetailRows(task)).toEqual([
+        { label: "STATE", value: "▲ REVIEW", role: "state" },
+        { label: "OUTCOME", value: "NO AGENT REPORT", role: "outcome" },
+      ]);
+    });
+  });
+
+  describe("review manual task", () => {
+    const task = baseTask({ type: "manual", column: "review", runState: "idle", assignedTo: "Johnny" });
+
+    it("reports manual phase", () => {
+      expect(taskLifecycleStatus(task).phase).toBe("review-manual");
+      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · MANUAL");
+      expect(taskLifecycleDetailRows(task)).toEqual([
+        { label: "STATE", value: "▲ REVIEW", role: "state" },
+        { label: "OUTCOME", value: "MANUAL", role: "outcome" },
+      ]);
     });
   });
 

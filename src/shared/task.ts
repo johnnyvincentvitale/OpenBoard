@@ -20,6 +20,9 @@ export type TaskRunState = (typeof TASK_RUN_STATES)[number];
 export const TASK_ISOLATION_MODES = ["worktree", "in-place"] as const;
 export type TaskIsolationMode = (typeof TASK_ISOLATION_MODES)[number];
 
+export const TASK_TYPES = ["manual", "agent"] as const;
+export type TaskType = (typeof TASK_TYPES)[number];
+
 export type TaskRunOutcome = "complete" | "blocked";
 
 export interface CompletionVerification {
@@ -66,6 +69,8 @@ export interface ModelRef {
 
 export interface Task {
   id: string;
+  /** Manual/PM cards are tracked but cannot be dispatched until converted to agent cards. */
+  type?: TaskType;
   title: string;
   /** The prompt handed to the agent when the task is run. */
   description: string;
@@ -73,6 +78,8 @@ export interface Task {
   directory: string;
   /** Which OpenCode agent (roster entry) executes this task. */
   agent?: string;
+  /** Human assignee for manual/PM cards. */
+  assignedTo?: string;
   /** Model the dispatched session runs on. For new tasks with an assigned agent and no explicit model, the create route resolves this from the live roster. */
   model?: ModelRef;
   column: Column;
@@ -130,10 +137,12 @@ export const TASK_PENDING = ["git-init"] as const;
 export type TaskPending = (typeof TASK_PENDING)[number];
 
 export interface CreateTaskInput {
+  type?: TaskType;
   title: string;
   description: string;
   directory: string;
   agent?: string;
+  assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
 }

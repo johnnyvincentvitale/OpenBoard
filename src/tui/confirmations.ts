@@ -170,7 +170,7 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
 /**
  * Build the copy for the confirmation prompt shown in the Selected/details column.
  */
-export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task, "title">): ConfirmationCopy {
+export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task, "title" | "completion" | "completionSource">): ConfirmationCopy {
   const title = action === "move-to-done" ? "Move this card to Done?" : `${capitalize(actionVerb(action, true))} this card?`;
 
   let body: string[];
@@ -188,10 +188,23 @@ export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task
       ];
       break;
     case "move-to-done":
-      body = [
-        `Mark "${task.title}" as completed manually.`,
-        "The card will move to the Done lane with completedBy: User.",
-      ];
+      if (task.completion && task.completionSource === "reported") {
+        const verification = task.completion.verification.length
+          ? task.completion.verification.map((item) => `${item.command} ${item.result}`).join(", ")
+          : "none reported";
+        body = [
+          `Completion: reported ${task.completion.outcome}`,
+          `Verification: ${verification}`,
+          `Residual risk: ${task.completion.residualRisk || "none reported"}`,
+          "Source: agent-reported",
+          "Final user signoff will move the card to Done as accepted by User.",
+        ];
+      } else {
+        body = [
+          `Mark "${task.title}" as completed manually.`,
+          "The card will move to the Done lane as accepted by User.",
+        ];
+      }
       break;
     case "archive":
       body = [
