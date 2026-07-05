@@ -244,6 +244,8 @@ describe("archive routes", () => {
           parentIds: [],
           completion: null,
           completionSource: null,
+          baseCommit: null,
+          dirtyAtDispatch: false,
           createdAt: 1,
           updatedAt: 2,
         },

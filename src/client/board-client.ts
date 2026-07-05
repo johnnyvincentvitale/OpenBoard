@@ -5,6 +5,7 @@ import type {
   Column,
   CreateTaskInput,
   CompletionReport,
+  DiffResponse,
   MergeOutcome,
   ModelRef,
   RosterAgent,
@@ -130,6 +131,7 @@ export interface BoardClient {
   addComment(id: string, author: string, body: string, parentCommentId?: string | null): Promise<TaskComment>;
   listComments(id: string): Promise<TaskComment[]>;
   listTaskEvents(id: string): Promise<TaskEvent[]>;
+  getTaskDiff(id: string): Promise<DiffResponse>;
   getSettings(): Promise<BoardSettings>;
   updateSettings(patch: Pick<BoardSettings, "worktreeDefault">): Promise<BoardSettings>;
   getHealth(): Promise<BoardHealth>;
@@ -216,6 +218,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     addComment: (id, author, body, parentCommentId) => postJson<TaskComment>(resolved, buildTaskPath.comments(id), { author, body, ...(parentCommentId !== undefined ? { parentCommentId } : {}) }),
     listComments: (id) => requestJson<TaskComment[]>(resolved, buildTaskPath.comments(id), { method: "GET" }),
     listTaskEvents: (id) => requestJson<TaskEvent[]>(resolved, buildTaskPath.taskEvents(id), { method: "GET" }),
+    getTaskDiff: (id) => requestJson<DiffResponse>(resolved, buildTaskPath.diff(id), { method: "GET" }),
     getSettings: () => requestJson<BoardSettings>(resolved, buildTaskPath.settings(), { method: "GET" }),
     updateSettings: (patch) =>
       requestJson<BoardSettings>(resolved, buildTaskPath.settings(), {

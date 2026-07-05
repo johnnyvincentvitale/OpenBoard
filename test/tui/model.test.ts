@@ -45,6 +45,8 @@ function task(id: string, column: Column, position: number): Task {
     column,
     position,
     runState: "unstarted",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: position,
     updatedAt: position,
   };
@@ -309,8 +311,10 @@ describe("board filter helpers", () => {
       type: "agent",
       column: "todo",
       position: 0,
-      runState: "unstarted",
-      createdAt: 0,
+runState: "unstarted",
+    baseCommit: null,
+    dirtyAtDispatch: false,
+    createdAt: 0,
       updatedAt: 0,
       ...overrides,
     };

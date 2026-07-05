@@ -599,4 +599,87 @@ describe("SqliteTaskStore", () => {
       expect(() => store.listEvents("missing")).toThrow(/unknown task/);
     });
   });
+
+  describe("baseCommit / dirtyAtDispatch", () => {
+    it("defaults to null and false on newly created tasks", () => {
+      const task = store.create(input());
+      expect(task.baseCommit).toBeNull();
+      expect(task.dirtyAtDispatch).toBe(false);
+    });
+
+    it("round-trips null baseCommit and false dirtyAtDispatch", () => {
+      const task = store.create(input());
+      const fetched = store.get(task.id);
+      expect(fetched?.baseCommit).toBeNull();
+      expect(fetched?.dirtyAtDispatch).toBe(false);
+
+      const listed = store.list().find((t) => t.id === task.id);
+      expect(listed?.baseCommit).toBeNull();
+      expect(listed?.dirtyAtDispatch).toBe(false);
+    });
+
+    it("can set baseCommit and dirtyAtDispatch via update", () => {
+      const task = store.create(input());
+      const updated = store.update(task.id, {
+        baseCommit: "abc1234def",
+        dirtyAtDispatch: true,
+      });
+
+      expect(updated?.baseCommit).toBe("abc1234def");
+      expect(updated?.dirtyAtDispatch).toBe(true);
+
+      const fetched = store.get(task.id);
+      expect(fetched?.baseCommit).toBe("abc1234def");
+      expect(fetched?.dirtyAtDispatch).toBe(true);
+    });
+
+    it("can clear baseCommit back to null", () => {
+      const task = store.create(input());
+      store.update(task.id, { baseCommit: "abc1234", dirtyAtDispatch: true });
+      store.update(task.id, { baseCommit: null, dirtyAtDispatch: false });
+
+      const cleared = store.get(task.id);
+      expect(cleared?.baseCommit).toBeNull();
+      expect(cleared?.dirtyAtDispatch).toBe(false);
+    });
+
+    it("migrates baseCommit and dirtyAtDispatch into a pre-existing DB (columns added)", () => {
+      const db = new Database(":memory:");
+      db.exec(`
+        CREATE TABLE task (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL, directory TEXT NOT NULL,
+          column TEXT NOT NULL, position INTEGER NOT NULL, session_id TEXT, run_state TEXT NOT NULL,
+          error TEXT, agent TEXT, model TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          UNIQUE(column, position)
+        );
+      `);
+
+      // Insert a row into the pre-migration schema
+      db.prepare(
+        "INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("task_pre", "Pre", "desc", "/repo", "todo", 0, null, "unstarted", 1000, 1000);
+
+      const migratedStore = new SqliteTaskStore(db);
+
+      // Verify the new columns were added
+      const taskColumns = new Set(
+        (db.prepare("PRAGMA table_info(task)").all() as Array<{ name: string }>).map((row) => row.name),
+      );
+      expect(taskColumns.has("base_commit")).toBe(true);
+      expect(taskColumns.has("dirty_at_dispatch")).toBe(true);
+
+      // Existing row got the defaults
+      const existing = migratedStore.get("task_pre");
+      expect(existing?.baseCommit).toBeNull();
+      expect(existing?.dirtyAtDispatch).toBe(false);
+
+      // New rows created after migration also work
+      const created = migratedStore.create(input({ title: "Post" }));
+      expect(created.baseCommit).toBeNull();
+      expect(created.dirtyAtDispatch).toBe(false);
+
+      migratedStore.close();
+      db.close();
+    });
+  });
 });

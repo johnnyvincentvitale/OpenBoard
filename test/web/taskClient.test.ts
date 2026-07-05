@@ -20,6 +20,8 @@ const sampleTask: Task = {
   position: 0,
   sessionId: "ses_1",
   runState: "idle",
+  baseCommit: null,
+  dirtyAtDispatch: false,
   createdAt: 1,
   updatedAt: 2,
 };

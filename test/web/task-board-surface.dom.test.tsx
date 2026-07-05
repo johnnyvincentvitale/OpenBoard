@@ -17,6 +17,8 @@ function makeTask(overrides: Partial<Task> & { id: string; title: string }): Tas
     column: "todo",
     position: 0,
     runState: "unstarted",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: 1,
     updatedAt: 1,
     ...overrides,

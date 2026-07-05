@@ -20,6 +20,8 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     column: "todo",
     position: 0,
     runState: "unstarted",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     ...overrides,

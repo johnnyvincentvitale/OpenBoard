@@ -7,7 +7,7 @@ import {
   resolveBoardUrl,
 } from "../../src/client/board-client";
 import type { BoardClientOptions, BoardHealth } from "../../src/client/board-client";
-import type { BoardSettings, MergeOutcome, RosterAgent, Task } from "../../src/shared";
+import type { BoardSettings, DiffResponse, MergeOutcome, RosterAgent, Task } from "../../src/shared";
 
 const CWD = "/tmp/openboard-project";
 
@@ -36,6 +36,8 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
     column: "todo",
     position: 0,
     runState: "unstarted",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: 1,
     updatedAt: 1,
   };
@@ -150,6 +152,8 @@ describe("board client", () => {
         runState: "idle",
         agent: "build",
         sessionId: "session-1",
+        baseCommit: null,
+        dirtyAtDispatch: false,
         createdAt: 1,
         updatedAt: 1,
       },
@@ -315,5 +319,44 @@ describe("board client", () => {
       `${DEFAULT_BOARD_URL}/api/health`,
       `${DEFAULT_BOARD_URL}/api/health`,
     ]);
+  });
+
+  it("fetches task diff from GET /api/tasks/:id/diff", async () => {
+    const diffResponse: DiffResponse = {
+      kind: "diff",
+      files: [
+        { file: "src/a.ts", additions: 5, deletions: 2, status: "modified", patch: "@@ -1 +1 @@" },
+      ],
+    };
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      return jsonResponse(diffResponse);
+    });
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.getTaskDiff("task-1");
+
+    expect(result).toEqual(diffResponse);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${DEFAULT_BOARD_URL}/api/tasks/task-1/diff`,
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("getTaskDiff returns no-git variant when there is no git evidence", async () => {
+    const noGitResponse: DiffResponse = {
+      kind: "no-git",
+      reason: "not a git repository",
+    };
+    const fetchMock = vi.fn(async () => jsonResponse(noGitResponse));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.getTaskDiff("task-2");
+
+    expect(result.kind).toBe("no-git");
+    expect(result).toEqual(noGitResponse);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${DEFAULT_BOARD_URL}/api/tasks/task-2/diff`,
+      expect.objectContaining({ method: "GET" }),
+    );
   });
 });

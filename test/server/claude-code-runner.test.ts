@@ -14,6 +14,8 @@ const task: Task = {
   column: "todo",
   position: 0,
   runState: "unstarted",
+  baseCommit: null,
+  dirtyAtDispatch: false,
   createdAt: 1,
   updatedAt: 1,
 };

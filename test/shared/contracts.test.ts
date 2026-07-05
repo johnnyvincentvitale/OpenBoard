@@ -15,6 +15,7 @@ import {
   OPENCODE_DEFAULTS,
   BOARD_SERVER_DEFAULTS,
   AdapterError,
+  buildTaskPath,
 } from "../../src/shared/index";
 
 describe("frozen contracts", () => {
@@ -64,5 +65,44 @@ describe("frozen contracts", () => {
       error: { code: "session_not_found", message: "no session ses_x" },
     });
     expect(AdapterError.unreachable().status).toBe(503);
+  });
+});
+
+describe("diff contract", () => {
+  it("diff route lives under /api/tasks/:id/diff", () => {
+    expect(buildTaskPath.diff("task-1")).toBe("/api/tasks/task-1/diff");
+    // URI-encoded paths
+    expect(buildTaskPath.diff("a/b")).toBe("/api/tasks/a%2Fb/diff");
+  });
+
+  it("DiffResponse union is importable with both variants", () => {
+    // Compile-time check: the types must be assignable
+    const diffOk: import("../../src/shared").DiffResponse = {
+      kind: "diff",
+      files: [{ file: "src/a.ts", additions: 3, deletions: 1, status: "modified" }],
+    };
+    expect(diffOk.kind).toBe("diff");
+    expect(diffOk.files).toHaveLength(1);
+
+    const noGit: import("../../src/shared").DiffResponse = {
+      kind: "no-git",
+      reason: "not a git repository",
+    };
+    expect(noGit.kind).toBe("no-git");
+    expect(noGit.reason).toBe("not a git repository");
+  });
+
+  it("DiffFile has the required four statuses", () => {
+    const statuses = ["added", "deleted", "modified"] as const;
+    for (const s of statuses) {
+      const f: import("../../src/shared").DiffFile = {
+        file: "x.ts",
+        patch: "line",
+        additions: 0,
+        deletions: 0,
+        status: s,
+      };
+      expect(f.status).toBe(s);
+    }
   });
 });

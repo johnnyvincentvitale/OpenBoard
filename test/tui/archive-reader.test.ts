@@ -23,6 +23,8 @@ function task(id: string): Task {
     column: "done",
     position: 0,
     runState: "idle",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: 1,
     updatedAt: 2,
   };

@@ -34,6 +34,8 @@ function task(overrides: Partial<Task> = {}): Task {
     position: 0,
     runState: "unstarted",
     agent: "coder",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: 1,
     updatedAt: 1,
     ...overrides,

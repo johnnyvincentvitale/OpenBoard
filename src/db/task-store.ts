@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS task (
   completion_source TEXT,
   completion_location TEXT,
   completed_by    TEXT,
+  base_commit     TEXT,
+  dirty_at_dispatch INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   UNIQUE(column, position)
@@ -125,6 +127,8 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["completion_source", "TEXT"],
   ["completion_location", "TEXT"],
   ["completed_by", "TEXT"],
+  ["base_commit", "TEXT"],
+  ["dirty_at_dispatch", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
@@ -164,6 +168,8 @@ interface TaskRowRecord {
   completion_source: string | null;
   completion_location: string | null;
   completed_by: string | null;
+  base_commit: string | null;
+  dirty_at_dispatch: number;
   created_at: number;
   updated_at: number;
 }
@@ -208,6 +214,8 @@ function toTask(record: TaskRowRecord): Task {
     completionSource: record.completion_source as CompletionSource | null,
     completionLocation: record.completion_location as TaskCompletionLocation | null,
     completedBy: record.completed_by ?? null,
+    baseCommit: record.base_commit ?? null,
+    dirtyAtDispatch: record.dirty_at_dispatch === 1,
   };
   if (record.session_id !== null) task.sessionId = record.session_id;
   if (record.harness_session_id !== null) task.harnessSessionId = record.harness_session_id;
@@ -295,8 +303,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, created_at, updated_at)
-         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, created_at, updated_at)
+         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -333,6 +341,8 @@ export class SqliteTaskStore implements TaskStore {
            completion_source = @completionSource,
            completion_location = @completionLocation,
            completed_by = @completedBy,
+           base_commit = @baseCommit,
+           dirty_at_dispatch = @dirtyAtDispatch,
            updated_at = @updatedAt
          WHERE id = @id`,
       ),
@@ -484,6 +494,8 @@ export class SqliteTaskStore implements TaskStore {
         completionSource: null,
         completionLocation: null,
         completedBy: null,
+        baseCommit: null,
+        dirtyAtDispatch: 0,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -537,6 +549,8 @@ export class SqliteTaskStore implements TaskStore {
         completionSource: merged.completionSource ?? null,
         completionLocation: merged.completionLocation ?? null,
         completedBy: merged.completedBy ?? null,
+        baseCommit: merged.baseCommit ?? null,
+        dirtyAtDispatch: merged.dirtyAtDispatch ? 1 : 0,
         updatedAt: this.now(),
       });
 

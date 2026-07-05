@@ -73,6 +73,8 @@ function task(id: string, column: Column): Task {
     column,
     position: 0,
     runState: "idle",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: 1,
     updatedAt: 1,
   };

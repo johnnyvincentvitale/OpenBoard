@@ -1,5 +1,25 @@
 import type { Column } from "./columns";
 
+/** A single file in a task diff response. Mirrors OpenCode's server diff contract. */
+export interface DiffFile {
+  file: string;
+  patch?: string;
+  additions: number;
+  deletions: number;
+  status: "added" | "deleted" | "modified";
+}
+
+/**
+ * Structured diff response from GET /api/tasks/:id/diff.
+ * - `kind: "diff"` carries the file-level patches.
+ * - `kind: "no-git"` is a non-crash sentinel for when git evidence is
+ *   missing (non-git dir, deleted branch, etc.). The reason string is a
+ *   human-readable message destined for the TUI header/detail pane.
+ */
+export type DiffResponse =
+  | { kind: "diff"; files: DiffFile[] }
+  | { kind: "no-git"; reason: string };
+
 /**
  * The live execution state of a task, derived from its linked OpenCode session.
  * - unstarted: no session yet (a spec in To Do)
@@ -150,6 +170,17 @@ export interface Task {
   worktreeBranch?: string;
   /** The upstream branch the worktree was cut from (merge target on integrate). */
   baseBranch?: string;
+  /**
+   * The HEAD commit SHA recorded at dispatch time. Used by the diff engine to
+   * compute what the task changed vs the baseline. Null when not recorded
+   * (pre-existing rows or dispatch before this field existed).
+   */
+  baseCommit: string | null;
+  /**
+   * True when the task's working directory had uncommitted changes at dispatch
+   * time. Drives an honesty label in the diff view header. Default false.
+   */
+  dirtyAtDispatch: boolean;
   /** A decision the run is blocked on and the UI must resolve (e.g. "git-init" for a non-repo dir). */
   pending?: TaskPending;
   /** Hidden from active boards/lists when true; default false. */
@@ -314,6 +345,7 @@ export const TASK_ROUTE_PATTERNS = {
   initGit: "/api/tasks/:id/init-git",
   sync: "/api/tasks/:id/sync",
   integrate: "/api/tasks/:id/integrate",
+  diff: "/api/tasks/:id/diff",
   comments: "/api/tasks/:id/comments",
   taskEvents: "/api/tasks/:id/events",
   settings: "/api/settings",
@@ -331,6 +363,7 @@ export const buildTaskPath = {
   initGit: (id: string) => `/api/tasks/${encodeURIComponent(id)}/init-git`,
   sync: (id: string) => `/api/tasks/${encodeURIComponent(id)}/sync`,
   integrate: (id: string) => `/api/tasks/${encodeURIComponent(id)}/integrate`,
+  diff: (id: string) => `/api/tasks/${encodeURIComponent(id)}/diff`,
   links: (id: string) => `/api/tasks/${encodeURIComponent(id)}/links`,
   unlink: (id: string, parentId: string) =>
     `/api/tasks/${encodeURIComponent(id)}/links/${encodeURIComponent(parentId)}`,

@@ -63,6 +63,8 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
     column: "todo",
     position: 0,
     runState: "unstarted",
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: 1,
     updatedAt: 1,
   };
@@ -336,6 +338,8 @@ describe("MCP orchestrator tools", () => {
     sessionId: "ses_1",
     runStartedAt: 10,
     parentIds: ["task-0"],
+    baseCommit: null,
+    dirtyAtDispatch: false,
     createdAt: 1,
     updatedAt: 2,
   };
@@ -487,6 +491,8 @@ describe("MCP list tools", () => {
         agent: "build",
         isolation: "worktree",
         sessionId: "session-1",
+        baseCommit: null,
+        dirtyAtDispatch: false,
         createdAt: 1,
         updatedAt: 1,
       },
