@@ -1032,6 +1032,25 @@ describe("TUI board view command strip", () => {
     expect(text).toContain("q quit · A global archive");
   });
 
+  it("board view puts the connection header below the menu and removes duplicate task refresh labels from the menu", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("test-card", "todo")],
+      status: "1 task",
+      lastRefresh: new Date("2026-07-04T12:00:00Z"),
+    }));
+
+    const text = textOf(app);
+    expect(text.indexOf("q quit · A global archive")).toBeLessThan(text.indexOf("CONNECTED"));
+    expect(text).toContain("1 TASK");
+
+    const commandStrip = nodesByType(app, "Box")
+      .find((node) => node.props?.border === true && textOf(node).includes("q quit · A global archive"));
+    expect(commandStrip).toBeTruthy();
+    expect(textOf(commandStrip)).not.toContain("1 task");
+    expect(textOf(commandStrip)).not.toContain("last refresh");
+  });
+
   it("launch view command strip already includes A global archive", () => {
     const app = renderApp(fakeUi(), state({
       instanceList: [instance("alpha", "running", 4097)],
@@ -1552,7 +1571,7 @@ describe("TUI edit mode (e)", () => {
 });
 
 describe("TUI filter mode (f)", () => {
-  it("f opens the category picker in the selected card's lane", async () => {
+  it("f opens the global category picker from the selected card", async () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [task("todo-card", "todo")],
@@ -1562,6 +1581,20 @@ describe("TUI filter mode (f)", () => {
     await handleKeypress({ name: "f", sequence: "f" } as any, s, actions());
 
     expect(s.filterMode).toEqual({ column: "todo", step: "category", selectedIndex: 0 });
+  });
+
+  it("renders the filter picker in the details panel without replacing a lane", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+      filterMode: { column: "todo", step: "category", selectedIndex: 0 },
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("todo-card");
+    expect(text).toContain("Global Filter");
+    expect(text).toContain("Filter by:");
   });
 
   it("selecting a category then a value applies the board filter and exits filter mode", async () => {

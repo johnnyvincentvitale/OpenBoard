@@ -351,7 +351,7 @@ interface ArchiveState {
 /** Detail tabs shown for a selected card via Enter. */
 export type TaskDetailTab = "prompt" | "handoff" | "output" | "comments";
 
-/** State for the two-step selected-column filter picker opened with f/F. */
+/** State for the two-step global filter picker opened with f/F. */
 interface FilterModeState {
   column: Column;
   step: "category" | "value";
@@ -1050,17 +1050,16 @@ function reportFatalError(error: unknown): void {
 export function renderApp(ui: OpenTui, state: TuiState) {
   if (isBelowMinimumSize(state)) return renderMinimumSizeApp(ui, state);
 
-  const children = [
-    renderHeader(ui, state),
-    state.viewState.view === "workspaceGate"
+  const mainView = state.viewState.view === "workspaceGate"
       ? renderWorkspaceGateView(ui, state)
       : state.viewState.view === "launch"
         ? renderLaunchView(ui, state)
         : state.viewState.view === "archive"
           ? renderArchiveView(ui, state)
-          : renderMain(ui, state),
-    renderCommandStrip(ui, state),
-  ];
+          : renderMain(ui, state);
+  const children = state.viewState.view === "board"
+    ? [mainView, renderCommandStrip(ui, state), renderHeader(ui, state)]
+    : [renderHeader(ui, state), mainView, renderCommandStrip(ui, state)];
   if (state.overlay === "help") children.push(renderHelpOverlay(ui));
   if (state.overlay === "addInstance") children.push(renderAddInstanceOverlay(ui, state));
   if (state.overlay === "renameInstance") children.push(renderRenameInstanceOverlay(ui, state));
@@ -2006,10 +2005,6 @@ function renderBoard(ui: OpenTui, state: TuiState) {
 }
 
 function renderColumn(ui: OpenTui, state: TuiState, column: Column, tasks: Task[]) {
-  if (state.filterMode && state.filterMode.column === column) {
-    return renderColumnFilterPicker(ui, state, column, state.filterMode);
-  }
-
   // Arrow keys move selection, not a scrollbar — the lane renders the window of
   // cards around the selection and marks what's clipped in either direction.
   const innerHeight = laneInnerHeight(state.terminalRows);
@@ -2070,9 +2065,9 @@ function renderLaneOverflow(ui: OpenTui, count: number, arrow: string) {
   });
 }
 
-// Filter mode replaces one lane's card list with a two-step picker (category, then
-// live values) so filtering never leaves the normal 4-column board layout.
-function renderColumnFilterPicker(ui: OpenTui, state: TuiState, column: Column, mode: NonNullable<TuiState["filterMode"]>) {
+// Filter mode is global, so the picker lives in the Details panel instead of
+// replacing one board lane's card list.
+function renderDetailsFilterPicker(ui: OpenTui, state: TuiState, mode: NonNullable<TuiState["filterMode"]>) {
   const items = mode.step === "category"
     ? boardFilterCategories().map((category) => category.label)
     : boardFilterOptions(state.tasks, mode.category as BoardFilterKind);
@@ -2080,20 +2075,17 @@ function renderColumnFilterPicker(ui: OpenTui, state: TuiState, column: Column, 
   return ui.Box(
     {
       flexGrow: 1,
-      flexShrink: 1,
-      flexBasis: 0,
-      minWidth: LANE_MIN_WIDTH,
-      height: "100%",
       flexDirection: "column",
-      border: true,
-      borderStyle: "single",
-      borderColor: COLORS.borderHot,
       ...boxBg(COLORS.panel),
-      padding: TUI_LAYOUT.lanePadding,
-      gap: TUI_LAYOUT.laneGap,
-      title: `${TUI_COLUMN_LABELS[column]} · filter`,
-      titleColor: COLORS.text,
+      gap: 1,
     },
+    ui.Text({
+      content: "Global Filter",
+      fg: COLORS.text,
+      attributes: ui.TextAttributes.BOLD,
+      height: 1,
+      truncate: true,
+    }),
     ui.Text({
       content: mode.step === "category" ? "Filter by:" : `Filter · ${boardFilterCategories().find((c) => c.kind === mode.category)?.label}:`,
       fg: COLORS.muted,
@@ -2252,7 +2244,13 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
       title: "Selected",
       titleColor: COLORS.text,
     },
-    state.newTask ? renderInlineNewTask(ui, state) : task ? renderTaskDetails(ui, state, task) : renderEmptyDetails(ui),
+    state.filterMode
+      ? renderDetailsFilterPicker(ui, state, state.filterMode)
+      : state.newTask
+        ? renderInlineNewTask(ui, state)
+        : task
+          ? renderTaskDetails(ui, state, task)
+          : renderEmptyDetails(ui),
   );
 }
 
@@ -2657,7 +2655,7 @@ function renderDetail(ui: OpenTui, label: string, value: string, valueColor: Tui
 }
 
 function renderCommandStrip(ui: OpenTui, state: TuiState) {
-  const refreshed = state.lastRefresh ? formatClock(state.lastRefresh) : "never";
+  const showBoardSummary = state.viewState.view !== "board";
 
   return ui.Box(
     {
@@ -2673,7 +2671,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
     // Live status line: errors first, otherwise the action feedback the key
     // handlers write (run/retry/abort/create results, refresh progress).
     ui.Text({
-      content: state.error ?? state.status,
+      content: commandStripStatus(state),
       fg: state.error ? COLORS.bright : COLORS.muted,
       height: 1,
       truncate: true,
@@ -2698,15 +2696,28 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
         flexGrow: 1,
         truncate: true,
       }),
-      ui.Text({
-        content: `${state.tasks.length} task${state.tasks.length === 1 ? "" : "s"} · last refresh ${refreshed}`,
-        fg: state.error ? COLORS.bright : COLORS.muted,
-        height: 1,
-        width: 36,
-        truncate: true,
-      }),
+      ...(showBoardSummary
+        ? [
+            ui.Text({
+              content: `${state.tasks.length} task${state.tasks.length === 1 ? "" : "s"} · last refresh ${state.lastRefresh ? formatClock(state.lastRefresh) : "never"}`,
+              fg: state.error ? COLORS.bright : COLORS.muted,
+              height: 1,
+              width: 36,
+              truncate: true,
+            }),
+          ]
+        : []),
     ),
   );
+}
+
+function commandStripStatus(state: TuiState): string {
+  if (state.error) return state.error;
+  if (state.viewState.view === "board") {
+    const taskSummary = `${state.tasks.length} task${state.tasks.length === 1 ? "" : "s"}`;
+    if (state.status === taskSummary || state.status === "board is empty") return "";
+  }
+  return state.status;
 }
 
 function renderHelpOverlay(ui: OpenTui) {
