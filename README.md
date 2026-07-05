@@ -28,6 +28,8 @@ The public repo is TUI/CLI/server-first:
   autonomously reads/writes/runs to completion.
 - **Cards move themselves.** The dispatcher watches OpenCode's `/event` stream and advances
   the card to Review when the session goes idle; the UI updates live over SSE.
+- **Review diffs in place.** On Review cards, press `v` to open the full-screen diff view
+  before syncing, integrating, or accepting the work.
 - **Per-card actions:** Run, Retry (re-prompt), Stop (abort), Delete.
 
 ## How it works
@@ -235,6 +237,10 @@ The MCP server's tools are an orchestrator control surface for the existing task
 `complete_task`, `block_task`, `sync_task`, `integrate_task`, `comment_task`, `add_note`, and
 `task_events`. `move_task` requires `completedBy` when moving to Done, and `integrate_task`
 requires `confirmReviewed: true`.
+
+Review cards expose `GET /api/tasks/:id/diff`, which the TUI uses for the `v`
+full-screen diff view. Non-Review cards return 409, unknown tasks return 404,
+and missing git evidence returns a readable no-git response instead of crashing.
 
 ## BoardV3 task lifecycle
 Beyond Run/Retry/Stop, a Task carries an explicit completion contract, optional

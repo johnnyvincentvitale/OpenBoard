@@ -213,19 +213,18 @@ function capBytes(files: DiffFile[], maxBytes: number): { files: DiffFile[]; cap
 export async function computeDiff(task: Task): Promise<DiffResponse> {
   // --- Worktree cards ---
   if (task.worktreePath && task.worktreeBranch) {
-    // Find a usable base ref: baseBranch is the upstream branch name;
-    // fall back to baseCommit (the recorded SHA at dispatch) when baseBranch
-    // is missing.
-    const baseRef = task.baseBranch ?? task.baseCommit;
+    // Compare the live task worktree against the recorded base. Review cards
+    // usually contain uncommitted edits; integration creates the task commit
+    // later, so a branch-to-branch diff would hide the changes users need to
+    // review.
+    const baseRef = task.baseCommit ?? task.baseBranch;
     if (!baseRef) {
       return { kind: "no-git", reason: "No base reference recorded for this worktree task" };
     }
-    // Merge-base diff: baseRef...worktreeBranch shows only what changed on
-    // the task branch since it diverged.
     const result = await git(task.worktreePath, [
       "diff",
       `--unified=${DIFF_CONTEXT_LINES}`,
-      `${baseRef}...${task.worktreeBranch}`,
+      baseRef,
     ]);
     if (result.code !== 0) {
       return {
@@ -234,6 +233,21 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
       };
     }
     let files = parseUnifiedDiff(result.stdout);
+    const untrackedResult = await git(task.worktreePath, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+    ]);
+    if (untrackedResult.code === 0) {
+      const untrackedPaths = untrackedResult.stdout
+        .split("\n")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      for (const path of untrackedPaths) {
+        const df = await untrackedFileDiff(task.worktreePath, path);
+        files.push(df);
+      }
+    }
     if (files.length === 0) {
       return { kind: "diff", files: [], capped: false };
     }

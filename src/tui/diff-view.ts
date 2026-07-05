@@ -35,6 +35,7 @@ export interface DiffViewState {
   error?: string;
   kind?: "diff" | "no-git";
   noGitReason?: string;
+  capped: boolean;
   files: DiffFile[];
   selectedFileIndex: number;
   selectedHunk?: SelectedHunk;
@@ -60,6 +61,7 @@ export function createLoadingDiffViewState(task: Task): DiffViewState {
     sourceLabel: diffSourceLabel(task),
     dirtyAtDispatch: task.dirtyAtDispatch,
     loading: true,
+    capped: false,
     files: [],
     selectedFileIndex: 0,
     reviewedFiles: new Set(),
@@ -75,6 +77,7 @@ export function applyDiffResponse(state: DiffViewState, response: DiffResponse):
     loading: false,
     error: undefined,
     kind: "diff",
+    capped: response.capped,
     files: response.files,
     selectedFileIndex: 0,
     selectedHunk: undefined,
@@ -196,7 +199,8 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
   if (state.kind === "no-git") return `${state.sourceLabel} · no git evidence`;
   const fileWord = state.files.length === 1 ? "file" : "files";
   const dirty = state.dirtyAtDispatch ? " · includes pre-existing changes" : "";
-  return `${state.sourceLabel} · ${state.files.length} ${fileWord}${dirty}`;
+  const capped = state.capped ? " · capped" : "";
+  return `${state.sourceLabel} · ${state.files.length} ${fileWord}${dirty}${capped}`;
 }
 
 export function diffViewKeyHints(): string {

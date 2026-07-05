@@ -78,7 +78,7 @@ function actions(overrides: Record<string, unknown> = {}) {
     shutdown: vi.fn(),
     runAction: vi.fn(async () => undefined),
     client: {
-      getTaskDiff: vi.fn(async () => ({ kind: "diff", files: [] })),
+      getTaskDiff: vi.fn(async () => ({ kind: "diff", files: [], capped: false })),
       ...(overrides as any).client,
     },
     archiveTask: vi.fn(async () => undefined),
@@ -106,6 +106,7 @@ describe("TUI diff view entry (v)", () => {
     const getTaskDiff = vi.fn(async () => ({
       kind: "diff" as const,
       files: [{ file: "src/a.ts", additions: 2, deletions: 1, status: "modified" as const, patch: "@@ -1,1 +1,1 @@\n-a\n+b\n" }],
+      capped: false,
     }));
     const a = actions({ client: { getTaskDiff } });
 
@@ -161,6 +162,7 @@ describe("TUI diff view navigation and exit", () => {
       dirtyAtDispatch: false,
       loading: false,
       kind: "diff",
+      capped: false,
       files: [
         { file: "a.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\nx\n" },
         { file: "b.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\ny\n" },

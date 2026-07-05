@@ -81,6 +81,7 @@ describe("diff response application", () => {
     const next = applyDiffResponse(loading, response);
     expect(next.loading).toBe(false);
     expect(next.kind).toBe("diff");
+    expect(next.capped).toBe(false);
     expect(next.files).toHaveLength(2);
     expect(next.selectedFileIndex).toBe(0);
   });
@@ -117,6 +118,14 @@ describe("diff view header label", () => {
     expect(diffViewHeaderLabel(clean)).toBe("working tree diff · 2 files");
     expect(diffViewHeaderLabel(undefined)).toContain("select a Review card");
   });
+
+  it("surfaces capped server diffs in the header label", () => {
+    const capped = applyDiffResponse(
+      createLoadingDiffViewState(task()),
+      { kind: "diff", files: [diffFile()], capped: true },
+    );
+    expect(diffViewHeaderLabel(capped)).toBe("working tree diff · 1 file · capped");
+  });
 });
 
 describe("diff file navigation", () => {
@@ -125,6 +134,7 @@ describe("diff file navigation", () => {
     ...createLoadingDiffViewState(task()),
     loading: false,
     kind: "diff",
+    capped: false,
     files,
     selectedFileIndex: 0,
   };

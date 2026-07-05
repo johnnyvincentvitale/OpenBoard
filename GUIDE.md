@@ -106,8 +106,9 @@ kanban boards, then verify it exists."* Small, harmless, observable.
 
 Watch the card move to In Progress, then Review. Select it and press **`enter`**
 to read the agent's handoff — its summary, changed files, and what it ran to
-verify. If you accept the work, press **`x`** to move it to Done. If not,
-**`R`** retries. Press **`?`** anytime for the full key reference.
+verify. Press **`v`** to inspect the full-screen diff before you accept it.
+If you accept the work, press **`x`** to move it to Done. If not, **`R`**
+retries. Press **`?`** anytime for the full key reference.
 
 ## 5. Core concepts
 
@@ -201,7 +202,7 @@ want agents working in.
 (state, agent/harness, model, directory, worktree, session). Press **`?`** for
 the complete key overlay — that's the authoritative reference. The ones you'll
 use constantly: `n` new task, `r` run, `enter` read the handoff, `x` accept to
-Done, `b` switch instances, `A` browse the archive.
+Done, `v` view a Review-card diff, `b` switch instances, `A` browse the archive.
 
 **Worktree isolation — the multi-agent rule.** Concurrent agents in one repo
 share a working tree and *will* clobber each other; there's no file locking.
@@ -210,8 +211,8 @@ run gets its own `git worktree` on a `board/<taskId>` branch — never your main
 tree. After a run: **`s`** syncs the base branch into the worktree (resolve
 drift there), **`i`** integrates the worktree branch back into base and removes
 the worktree. Conflicts are reported, never forced. Rule of thumb: isolate
-whenever more than one card can touch the same repo, and read the worktree
-diff before integrating.
+whenever more than one card can touch the same repo, and press **`v`** on the
+Review card to read the worktree diff before integrating.
 
 ## 8. Harnesses: OpenCode and Claude Code
 

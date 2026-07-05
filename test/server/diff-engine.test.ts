@@ -62,7 +62,7 @@ describe("computeDiff", () => {
       }
     });
 
-    it("returns diffs for a worktree with a baseBranch", async () => {
+    it("returns uncommitted and untracked diffs for a live worktree before integration", async () => {
       const repoDir = join(tmpDir, "repo");
       const baseCommit = initRepo(repoDir);
 
@@ -70,10 +70,11 @@ describe("computeDiff", () => {
       const worktreePath = join(tmpDir, "wt");
       runGit(repoDir, ["worktree", "add", "-b", "board/task_test", worktreePath, "HEAD"]);
 
-      // Make a change in the worktree
+      // Make changes in the worktree without committing. Review happens
+      // before OpenBoard creates the integration commit, so the diff endpoint
+      // must show the live worktree state.
+      writeFileSync(join(worktreePath, "README.md"), "# Worktree edit\n");
       writeFileSync(join(worktreePath, "src.ts"), "console.log('new');\n");
-      runGit(worktreePath, ["add", "src.ts"]);
-      runGit(worktreePath, ["commit", "-m", "add src.ts"]);
 
       const task = makeBaseTask({
         directory: repoDir,
@@ -86,10 +87,9 @@ describe("computeDiff", () => {
       const result = await computeDiff(task);
       expect(result.kind).toBe("diff");
       if (result.kind === "diff") {
-        expect(result.files.length).toBe(1);
-        expect(result.files[0]?.file).toBe("src.ts");
-        expect(result.files[0]?.status).toBe("added");
-        expect(result.files[0]?.additions).toBeGreaterThan(0);
+        expect(result.files.map((f) => f.file).sort()).toEqual(["README.md", "src.ts"]);
+        expect(result.files.find((f) => f.file === "README.md")?.status).toBe("modified");
+        expect(result.files.find((f) => f.file === "src.ts")?.status).toBe("added");
         expect(result.capped).toBe(false);
       }
     });
