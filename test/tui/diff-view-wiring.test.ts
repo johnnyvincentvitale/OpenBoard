@@ -198,6 +198,23 @@ describe("TUI diff view navigation and exit", () => {
     expect(s.diffView.selectedFileIndex).toBe(0);
   });
 
+  it("left/right hunk navigation keeps the selected file stable", async () => {
+    const s = openedState();
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+    expect(s.detailScrollTop["diff-patch"]).toBe(0);
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+
+    await handleKeypress({ name: "left", sequence: "\u001b[D" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+  });
+
   it("m toggles the selected file's reviewed dimming state", async () => {
     const s = openedState();
     await handleKeypress({ sequence: "m", name: "m" } as any, s, actions());

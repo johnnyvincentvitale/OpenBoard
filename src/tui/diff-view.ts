@@ -135,27 +135,18 @@ export function hunkLineOffsets(patch: string | undefined): number[] {
   return patch.split("\n").flatMap((line, index) => (line.startsWith("@@") ? [index] : []));
 }
 
-function allHunks(files: DiffFile[]): SelectedHunk[] {
-  return files.flatMap((file, fileIndex) =>
-    hunkLineOffsets(file.patch).map((_, hunkIndex) => ({ fileIndex, hunkIndex })),
-  );
-}
-
-/** Steps to the next/previous hunk across all files, wrapping and jumping files as needed. */
+/** Steps to the next/previous hunk within the currently selected file only. */
 export function moveHunkSelection(state: DiffViewState, delta: 1 | -1): DiffViewState {
-  const hunks = allHunks(state.files);
-  if (hunks.length === 0) return state;
+  const file = state.files[state.selectedFileIndex];
+  const offsets = hunkLineOffsets(file?.patch);
+  if (offsets.length === 0) return state;
 
-  const currentIndex = state.selectedHunk
-    ? hunks.findIndex(
-        (hunk) => hunk.fileIndex === state.selectedHunk!.fileIndex && hunk.hunkIndex === state.selectedHunk!.hunkIndex,
-      )
-    : -1;
-  const nextIndex = currentIndex === -1 ? (delta === 1 ? 0 : hunks.length - 1) : (currentIndex + delta + hunks.length) % hunks.length;
-  const next = hunks[nextIndex];
-  if (!next) return state;
+  const currentIndex = state.selectedHunk?.fileIndex === state.selectedFileIndex ? state.selectedHunk.hunkIndex : -1;
+  const nextIndex = currentIndex === -1
+    ? delta === 1 ? 0 : offsets.length - 1
+    : (currentIndex + delta + offsets.length) % offsets.length;
 
-  return { ...state, selectedFileIndex: next.fileIndex, selectedHunk: next };
+  return { ...state, selectedHunk: { fileIndex: state.selectedFileIndex, hunkIndex: nextIndex } };
 }
 
 /** Target scrollTop (in patch rows) for the currently selected hunk, else the top of the file. */
@@ -204,7 +195,7 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
 }
 
 export function diffViewKeyHints(): string {
-  return "↑/↓ files · ←/→ hunks · m mark reviewed · t split/unified · ? help · esc/q back";
+  return "↑/↓ files · ←/→ hunks in file · m mark reviewed · t split/unified · ? help · esc/q back";
 }
 
 export interface DiffViewTheme {
@@ -285,14 +276,19 @@ export function renderDiffView(
     {
       id: DIFF_FILE_LIST_SCROLL_ID,
       width: DIFF_FILE_COLUMN_WIDTH,
+      height: "100%",
+      minHeight: 0,
       flexShrink: 0,
       scrollY: true,
       scrollX: false,
+      stickyScroll: false,
       border: true,
       borderStyle: "single",
       borderColor: theme.border,
       ...theme.boxBg(theme.panel),
       contentOptions: { flexDirection: "column", ...theme.boxBg(theme.panel) },
+      viewportOptions: { ...theme.boxBg(theme.panel) },
+      wrapperOptions: { ...theme.boxBg(theme.panel) },
       onMouseScroll(this: { scrollTop: number }) {
         const box = this;
         process.nextTick(() => {
@@ -333,12 +329,17 @@ export function renderDiffView(
   const patchScroll = ui.ScrollBox(
     {
       id: DIFF_PATCH_SCROLL_ID,
+      width: "100%",
       flexGrow: 1,
+      flexShrink: 1,
       minHeight: 0,
       scrollY: true,
       scrollX: false,
+      stickyScroll: false,
       ...theme.boxBg(theme.panel),
       contentOptions: { flexDirection: "column", ...theme.boxBg(theme.panel) },
+      viewportOptions: { ...theme.boxBg(theme.panel) },
+      wrapperOptions: { ...theme.boxBg(theme.panel) },
       onMouseScroll(this: { scrollTop: number }) {
         const box = this;
         process.nextTick(() => {
@@ -354,6 +355,9 @@ export function renderDiffView(
     {
       flexGrow: 1,
       minWidth: 0,
+      minHeight: 0,
+      height: "100%",
+      flexShrink: 1,
       flexDirection: "column",
       border: true,
       borderStyle: "single",
@@ -365,7 +369,7 @@ export function renderDiffView(
   );
 
   return ui.Box(
-    { flexGrow: 1, width: "100%", flexDirection: "row", gap: 1, ...theme.boxBg(theme.panel) },
+    { flexGrow: 1, width: "100%", minHeight: 0, flexDirection: "row", gap: 1, ...theme.boxBg(theme.panel) },
     fileList,
     patchPane,
   );

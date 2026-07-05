@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  DIFF_FILE_COLUMN_WIDTH,
+  DIFF_FILE_LIST_SCROLL_ID,
   DIFF_MIN_SPLIT_WIDTH,
+  DIFF_PATCH_SCROLL_ID,
   applyDiffError,
   applyDiffResponse,
   canOpenDiffView,
@@ -169,9 +172,9 @@ describe("diff hunk navigation", () => {
     expect(hunkLineOffsets(undefined)).toEqual([]);
   });
 
-  it("steps across files when the current file runs out of hunks", () => {
+  it("keeps hunk navigation within the currently selected file", () => {
     const files = [
-      diffFile({ file: "a.ts", patch: "@@ -1,1 +1,1 @@\nx\n" }),
+      diffFile({ file: "a.ts", patch: "@@ -1,1 +1,1 @@\nx\n@@ -9,1 +9,1 @@\nz\n" }),
       diffFile({ file: "b.ts", patch: "@@ -1,1 +1,1 @@\ny\n@@ -9,1 +9,1 @@\nz\n" }),
     ];
     let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
@@ -180,17 +183,38 @@ describe("diff hunk navigation", () => {
     expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
 
     state = moveHunkSelection(state, 1);
-    expect(state.selectedHunk).toEqual({ fileIndex: 1, hunkIndex: 0 });
+    expect(state.selectedFileIndex).toBe(0);
+    expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
 
+    // Wraps within the selected file instead of jumping to b.ts.
     state = moveHunkSelection(state, 1);
-    expect(state.selectedHunk).toEqual({ fileIndex: 1, hunkIndex: 1 });
-
-    // Wraps back to the first hunk of the first file.
-    state = moveHunkSelection(state, 1);
+    expect(state.selectedFileIndex).toBe(0);
     expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
 
     state = moveHunkSelection(state, -1);
-    expect(state.selectedHunk).toEqual({ fileIndex: 1, hunkIndex: 1 });
+    expect(state.selectedFileIndex).toBe(0);
+    expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
+  });
+
+  it("does not change files for one-hunk-per-file diffs", () => {
+    const files = [
+      diffFile({ file: "a.ts", patch: "@@ -1,1 +1,1 @@\nx\n" }),
+      diffFile({ file: "b.ts", patch: "@@ -1,1 +1,1 @@\ny\n" }),
+    ];
+    let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+
+    state = moveHunkSelection(state, 1);
+    expect(state.selectedFileIndex).toBe(0);
+    expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+
+    state = moveHunkSelection(state, 1);
+    expect(state.selectedFileIndex).toBe(0);
+    expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+
+    state = { ...state, selectedFileIndex: 1, selectedHunk: undefined };
+    state = moveHunkSelection(state, -1);
+    expect(state.selectedFileIndex).toBe(1);
+    expect(state.selectedHunk).toEqual({ fileIndex: 1, hunkIndex: 0 });
   });
 
   it("computes the patch scrollTop target for the selected hunk", () => {
@@ -292,6 +316,44 @@ describe("renderDiffView", () => {
     const diffNodes = nodesByType(tree, "Diff");
     expect(diffNodes).toHaveLength(1);
     expect(diffNodes[0].props.view).toBe("split");
+  });
+
+  it("emits stable ScrollBox layout props for the file list and patch pane", () => {
+    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+      kind: "diff",
+      files: [diffFile({ file: "src/a.ts" }), diffFile({ file: "src/b.ts" })],
+      capped: false,
+    });
+    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 200);
+    const scrollBoxes = nodesByType(tree, "ScrollBox");
+    const fileList = scrollBoxes.find((node) => node.props.id === DIFF_FILE_LIST_SCROLL_ID);
+    const patchPane = scrollBoxes.find((node) => node.props.id === DIFF_PATCH_SCROLL_ID);
+
+    expect(fileList?.props).toMatchObject({
+      width: DIFF_FILE_COLUMN_WIDTH,
+      height: "100%",
+      minHeight: 0,
+      flexShrink: 0,
+      scrollY: true,
+      scrollX: false,
+      stickyScroll: false,
+    });
+    expect(fileList?.props.contentOptions).toMatchObject({ flexDirection: "column" });
+    expect(fileList?.props.viewportOptions).toBeDefined();
+    expect(fileList?.props.wrapperOptions).toBeDefined();
+
+    expect(patchPane?.props).toMatchObject({
+      width: "100%",
+      flexGrow: 1,
+      flexShrink: 1,
+      minHeight: 0,
+      scrollY: true,
+      scrollX: false,
+      stickyScroll: false,
+    });
+    expect(patchPane?.props.contentOptions).toMatchObject({ flexDirection: "column" });
+    expect(patchPane?.props.viewportOptions).toBeDefined();
+    expect(patchPane?.props.wrapperOptions).toBeDefined();
   });
 
   it("falls back to unified below the split width threshold", () => {
