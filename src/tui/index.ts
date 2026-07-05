@@ -64,6 +64,7 @@ import {
   diffViewKeyHints,
   renderDiffView,
   DIFF_FILE_COLUMN_WIDTH,
+  DIFF_FILE_ROW_HEIGHT,
   DIFF_PATCH_SCROLL_ID,
   type DiffViewState,
   type DiffViewTheme,
@@ -1326,6 +1327,11 @@ function diffPatchPaneWidth(terminalCols: number): number {
   return Math.max(0, terminalCols - DIFF_FILE_COLUMN_WIDTH - TUI_LAYOUT.laneGap - 4);
 }
 
+function diffFileListVisibleRows(terminalRows: number): number {
+  // Root padding + header + command strip + diff file-list status line consume the rest.
+  return Math.max(1, Math.floor(Math.max(1, terminalRows - 6) / DIFF_FILE_ROW_HEIGHT));
+}
+
 function renderDiffViewMain(ui: OpenTui, state: TuiState) {
   return renderDiffView(
     ui,
@@ -1333,6 +1339,7 @@ function renderDiffViewMain(ui: OpenTui, state: TuiState) {
     state.detailScrollTop,
     state.diffView,
     diffPatchPaneWidth(state.terminalCols),
+    diffFileListVisibleRows(state.terminalRows),
   );
 }
 

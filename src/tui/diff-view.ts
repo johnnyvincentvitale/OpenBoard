@@ -13,9 +13,11 @@ type ThemeColor = string | RGBA;
 
 /** Narrow file-selection column width, matching OpenCode's own diff-viewer layout constant. */
 export const DIFF_FILE_COLUMN_WIDTH = 32;
+/** Every file-list entry is exactly two terminal rows: filename, then stats/marker. */
+export const DIFF_FILE_ROW_HEIGHT = 2;
 /** Minimum patch-pane width for side-by-side split view; narrower falls back to unified. */
 export const DIFF_MIN_SPLIT_WIDTH = 100;
-/** Shared `state.detailScrollTop` keys so scroll position persists like every other detail pane. */
+/** Shared ids/`state.detailScrollTop` keys so scroll position persists like every other detail pane. */
 export const DIFF_FILE_LIST_SCROLL_ID = "diff-files";
 export const DIFF_PATCH_SCROLL_ID = "diff-patch";
 
@@ -157,6 +159,39 @@ export function diffPatchScrollTop(state: DiffViewState): number {
   return offsets[state.selectedHunk.hunkIndex] ?? 0;
 }
 
+export interface DiffFileListWindow {
+  offset: number;
+  capacity: number;
+  hiddenAbove: number;
+  hiddenBelow: number;
+}
+
+/** Deterministic manual file-list windowing keeps the selected file visible without ScrollBox churn. */
+export function diffFileListWindow(selectedIndex: number, totalFiles: number, visibleRows: number): DiffFileListWindow {
+  const capacity = Math.max(1, Math.min(totalFiles, Math.floor(visibleRows) || 1));
+  if (totalFiles <= 0) return { offset: 0, capacity: 1, hiddenAbove: 0, hiddenBelow: 0 };
+  const selected = Math.max(0, Math.min(selectedIndex, totalFiles - 1));
+  const centered = selected - Math.floor(capacity / 2);
+  const maxOffset = Math.max(0, totalFiles - capacity);
+  const offset = Math.max(0, Math.min(centered, maxOffset));
+  return {
+    offset,
+    capacity,
+    hiddenAbove: offset,
+    hiddenBelow: Math.max(0, totalFiles - offset - capacity),
+  };
+}
+
+export function diffHunkPositionLabel(state: DiffViewState): string {
+  const file = state.files[state.selectedFileIndex];
+  const count = hunkLineOffsets(file?.patch).length;
+  if (count === 0) return "0 hunks";
+  if (count === 1) return "1 hunk";
+  const selected = state.selectedHunk?.fileIndex === state.selectedFileIndex ? state.selectedHunk.hunkIndex : 0;
+  const current = Math.max(0, Math.min(selected, count - 1)) + 1;
+  return `hunk ${current}/${count}`;
+}
+
 const EXTENSION_FILETYPES: Record<string, string> = {
   ".ts": "typescript",
   ".tsx": "typescript",
@@ -219,15 +254,20 @@ function fileRow(
   reviewed: boolean,
 ): VChild {
   const nameColor = reviewed ? theme.dim : selected ? theme.bright : theme.text;
+  const namePrefix = selected ? "▸ " : "  ";
+  const name = `${namePrefix}${truncateText(file.file, DIFF_FILE_COLUMN_WIDTH - namePrefix.length - 2)}`;
+  const additions = truncateText(`+${file.additions}`, 7);
+  const deletions = truncateText(`-${file.deletions}`, 7);
   return ui.Box(
     {
       width: "100%",
+      height: DIFF_FILE_ROW_HEIGHT,
       flexDirection: "column",
       flexShrink: 0,
       ...theme.boxBg(selected ? theme.panelRaised : theme.panel),
     },
     ui.Text({
-      content: truncateText(file.file, DIFF_FILE_COLUMN_WIDTH - 2),
+      content: name,
       fg: nameColor,
       width: "100%",
       height: 1,
@@ -235,12 +275,16 @@ function fileRow(
     }),
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1 },
-      ui.Text({ content: `+${file.additions} `, fg: reviewed ? theme.dim : theme.laneDone, height: 1 }),
-      ui.Text({ content: `-${file.deletions}`, fg: reviewed ? theme.dim : theme.laneError, height: 1 }),
+      ui.Text({ content: additions, fg: reviewed ? theme.dim : theme.laneDone, height: 1, width: 7, truncate: true }),
+      ui.Text({ content: deletions, fg: reviewed ? theme.dim : theme.laneError, height: 1, width: 7, truncate: true }),
       ui.Box({ flexGrow: 1 }),
       reviewed ? ui.Text({ content: "✓", fg: theme.dim, height: 1, width: 1 }) : ui.Box({ width: 1 }),
     ),
   );
+}
+
+function fileListFillerRow(ui: OpenTui, theme: DiffViewTheme): VChild {
+  return ui.Box({ width: "100%", height: DIFF_FILE_ROW_HEIGHT, flexShrink: 0, ...theme.boxBg(theme.panel) });
 }
 
 function fullWidthMessage(ui: OpenTui, theme: DiffViewTheme, content: string): VChild {
@@ -261,6 +305,7 @@ export function renderDiffView(
   scrollState: Record<string, number>,
   state: DiffViewState | undefined,
   patchPaneWidth: number,
+  visibleFileRows = 12,
 ): VChild {
   if (!state) return fullWidthMessage(ui, theme, "Select a Review card and press v to view its diff.");
   if (state.loading) return fullWidthMessage(ui, theme, "Loading diff…");
@@ -272,35 +317,35 @@ export function renderDiffView(
   const reviewed = selectedFile ? isFileReviewed(state, selectedFile.file) : false;
   const view = effectiveDiffView(state, patchPaneWidth);
 
-  const fileList = ui.ScrollBox(
+  const window = diffFileListWindow(state.selectedFileIndex, state.files.length, visibleFileRows);
+  const visibleFiles = state.files.slice(window.offset, window.offset + window.capacity);
+  const fillerCount = Math.max(0, window.capacity - visibleFiles.length);
+  const fileList = ui.Box(
     {
       id: DIFF_FILE_LIST_SCROLL_ID,
       width: DIFF_FILE_COLUMN_WIDTH,
       height: "100%",
       minHeight: 0,
       flexShrink: 0,
-      scrollY: true,
-      scrollX: false,
-      stickyScroll: false,
+      flexDirection: "column",
       border: true,
       borderStyle: "single",
       borderColor: theme.border,
+      overflow: "hidden",
       ...theme.boxBg(theme.panel),
-      contentOptions: { flexDirection: "column", ...theme.boxBg(theme.panel) },
-      viewportOptions: { ...theme.boxBg(theme.panel) },
-      wrapperOptions: { ...theme.boxBg(theme.panel) },
-      onMouseScroll(this: { scrollTop: number }) {
-        const box = this;
-        process.nextTick(() => {
-          scrollState[DIFF_FILE_LIST_SCROLL_ID] = Math.max(0, Math.trunc(box.scrollTop));
-        });
-      },
     },
-    ...state.files.map((file, index) =>
-      fileRow(ui, theme, file, index === state.selectedFileIndex, isFileReviewed(state, file.file)),
+    ui.Text({
+      content: `files ↑${window.hiddenAbove} ↓${window.hiddenBelow}`,
+      fg: theme.muted,
+      width: "100%",
+      height: 1,
+      truncate: true,
+    }),
+    ...visibleFiles.map((file, index) =>
+      fileRow(ui, theme, file, window.offset + index === state.selectedFileIndex, isFileReviewed(state, file.file)),
     ),
+    ...Array.from({ length: fillerCount }, () => fileListFillerRow(ui, theme)),
   );
-  (fileList as unknown as { scrollTop: number }).scrollTop = scrollState[DIFF_FILE_LIST_SCROLL_ID] ?? 0;
 
   const patchHeader = ui.Box(
     { width: "100%", flexDirection: "row", height: 1, flexShrink: 0 },
@@ -311,6 +356,7 @@ export function renderDiffView(
       truncate: true,
       height: 1,
     }),
+    ui.Text({ content: `${diffHunkPositionLabel(state)} · `, fg: theme.muted, height: 1 }),
     ui.Text({ content: view === "split" ? "split" : "unified", fg: theme.muted, height: 1 }),
   );
 
