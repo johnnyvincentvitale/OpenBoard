@@ -243,7 +243,7 @@ export function instanceStatusLabel(status: InstanceStatus): string {
 
 // ── View state machine ───────────────────────────────────────────────────────────
 
-export type TuiView = "launch" | "board" | "switcher" | "archive" | "workspaceGate";
+export type TuiView = "launch" | "board" | "switcher" | "archive" | "workspaceGate" | "diff";
 
 export interface ViewState {
   view: TuiView;
@@ -277,6 +277,16 @@ export function openArchive(state: ViewState): ViewState {
 }
 
 export function closeArchive(state: ViewState): ViewState {
+  if (state.previousView) return { view: state.previousView, previousView: null };
+  return { view: "board", previousView: null };
+}
+
+export function openDiffView(state: ViewState): ViewState {
+  if (state.view === "diff") return state;
+  return { view: "diff", previousView: state.view };
+}
+
+export function closeDiffView(state: ViewState): ViewState {
   if (state.previousView) return { view: state.previousView, previousView: null };
   return { view: "board", previousView: null };
 }

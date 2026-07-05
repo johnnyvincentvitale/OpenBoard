@@ -47,7 +47,27 @@ import {
   validateWorkspacePath,
   isProjectLike,
   workspaceToInstanceName,
+  openDiffView,
+  closeDiffView,
 } from "./model";
+import {
+  canOpenDiffView,
+  createLoadingDiffViewState,
+  applyDiffResponse,
+  applyDiffError,
+  moveFileSelection as moveDiffFileSelection,
+  toggleFileReviewed as toggleDiffFileReviewed,
+  toggleViewOverride as toggleDiffViewOverride,
+  moveHunkSelection as moveDiffHunkSelection,
+  diffPatchScrollTop,
+  diffViewHeaderLabel,
+  diffViewKeyHints,
+  renderDiffView,
+  DIFF_FILE_COLUMN_WIDTH,
+  DIFF_PATCH_SCROLL_ID,
+  type DiffViewState,
+  type DiffViewTheme,
+} from "./diff-view";
 import {
   buildConfirmationCopy,
   buildRunConfidenceDetails,
@@ -418,6 +438,8 @@ interface TuiState {
   // Comments detail tab
   comments?: CommentsPanelState;
   commentDraft?: CommentDraftState;
+  // Full-screen diff view (v on a selected Review card)
+  diffView?: DiffViewState;
 }
 
 interface TuiActions {
@@ -1056,7 +1078,9 @@ export function renderApp(ui: OpenTui, state: TuiState) {
         ? renderLaunchView(ui, state)
         : state.viewState.view === "archive"
           ? renderArchiveView(ui, state)
-          : renderMain(ui, state);
+          : state.viewState.view === "diff"
+            ? renderDiffViewMain(ui, state)
+            : renderMain(ui, state);
   const children = state.viewState.view === "board"
     ? [mainView, renderCommandStrip(ui, state), renderHeader(ui, state)]
     : [renderHeader(ui, state), mainView, renderCommandStrip(ui, state)];
@@ -1196,6 +1220,13 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     refreshed = "";
     healthLabel = "";
     workspaceLabel = "";
+  } else if (state.viewState.view === "diff") {
+    connection = "DIFF";
+    host = "";
+    taskLabel = diffViewHeaderLabel(state.diffView);
+    refreshed = "";
+    healthLabel = "";
+    workspaceLabel = "";
   }
 
   return ui.Box(
@@ -1275,6 +1306,33 @@ function renderMain(ui: OpenTui, state: TuiState) {
     },
     renderBoard(ui, state),
     renderSidebar(ui, state),
+  );
+}
+
+const DIFF_VIEW_THEME: DiffViewTheme = {
+  text: COLORS.text,
+  bright: COLORS.bright,
+  muted: COLORS.muted,
+  dim: COLORS.dim,
+  border: COLORS.border,
+  panel: COLORS.panel,
+  panelRaised: COLORS.panelRaised,
+  laneDone: COLORS.laneDone,
+  laneError: COLORS.laneError,
+  boxBg,
+};
+
+function diffPatchPaneWidth(terminalCols: number): number {
+  return Math.max(0, terminalCols - DIFF_FILE_COLUMN_WIDTH - TUI_LAYOUT.laneGap - 4);
+}
+
+function renderDiffViewMain(ui: OpenTui, state: TuiState) {
+  return renderDiffView(
+    ui,
+    DIFF_VIEW_THEME,
+    state.detailScrollTop,
+    state.diffView,
+    diffPatchPaneWidth(state.terminalCols),
   );
 }
 
@@ -2690,6 +2748,8 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? "type absolute path · enter confirm · esc quit"
             : state.viewState.view === "launch"
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
+            : state.viewState.view === "diff"
+            ? diffViewKeyHints()
             : "↑/↓ cards · ←/→ lanes · esc instances · b switch board · n new task · e edit · f filter · m move card · u refresh · ? help · q quit · A global archive",
         fg: COLORS.text,
         height: 1,
@@ -2740,6 +2800,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["m", "manual move to lane"],
     ["g", "init git and run"],
     ["n", "new task"],
+    ["v", "view diff (Review cards)"],
     ["u", "refresh board"],
     ["b", "switch instances"],
     ["esc", "detach / close overlay"],
@@ -2751,6 +2812,13 @@ function renderHelpOverlay(ui: OpenTui) {
     ["/", "search (enter to exit)"],
     ["i", "cycle instance filter"],
     ["l", "cycle lane filter"],
+    ["", ""],
+    ["DIFF VIEW", ""],
+    ["↑/↓", "select file"],
+    ["←/→", "previous/next hunk"],
+    ["m", "mark selected file reviewed"],
+    ["t", "toggle split/unified"],
+    ["esc / q", "back to board"],
   ];
 
   return ui.Box(
@@ -2768,7 +2836,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ui.Box(
       {
         width: 52,
-        height: 38,
+        height: 45,
         flexDirection: "column",
         border: true,
         borderStyle: "single",
@@ -3052,6 +3120,11 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.viewState.view === "diff") {
+    await handleDiffViewKey(key, state, actions);
+    return;
+  }
+
   if (state.viewState.view === "archive") {
     await handleArchiveViewKey(key, state, actions);
     return;
@@ -3154,6 +3227,9 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       return;
     case "d":
       await handleConfirmableCardAction("delete", state, actions, (task) => actions.client.deleteTask(task.id), "delete");
+      return;
+    case "v":
+      await openDiffViewForSelection(state, actions);
       return;
     case "s":
       clearPendingConfirmation(state);
@@ -3319,6 +3395,83 @@ async function confirmMoveToDone(state: TuiState, actions: TuiActions): Promise<
 function moveTaskToDone(state: TuiState, actions: TuiActions, task: Task): Promise<unknown> {
   const endOfDone = state.tasks.filter((item) => item.column === "done" && item.id !== task.id).length;
   return actions.client.moveTask(task.id, "done", endOfDone, "User");
+}
+
+async function openDiffViewForSelection(state: TuiState, actions: TuiActions): Promise<void> {
+  clearPendingConfirmation(state);
+  const task = selectedTask(state);
+  if (!canOpenDiffView(task)) {
+    state.status = "diff view is only available for Review cards";
+    actions.render();
+    return;
+  }
+
+  closeInlineDetail(state);
+  state.moveTargetColumn = undefined;
+  state.viewState = openDiffView(state.viewState);
+  state.diffView = createLoadingDiffViewState(task!);
+  actions.render();
+
+  try {
+    const response = await actions.client.getTaskDiff(task!.id);
+    if (state.diffView?.taskId === task!.id) state.diffView = applyDiffResponse(state.diffView, response);
+  } catch (error) {
+    if (state.diffView?.taskId === task!.id) state.diffView = applyDiffError(state.diffView, errorMessage(error));
+  }
+  actions.render();
+}
+
+async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  if (isEscapeKey(key) || key.sequence === "q") {
+    state.viewState = closeDiffView(state.viewState);
+    state.diffView = undefined;
+    actions.render();
+    return;
+  }
+
+  if (!state.diffView) return;
+  const keyName = key.name || key.sequence;
+  const patchPaneWidth = diffPatchPaneWidth(state.terminalCols);
+
+  if (keyName === "down") {
+    state.diffView = moveDiffFileSelection(state.diffView, 1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    actions.render();
+    return;
+  }
+  if (keyName === "up") {
+    state.diffView = moveDiffFileSelection(state.diffView, -1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    actions.render();
+    return;
+  }
+  if (keyName === "right") {
+    state.diffView = moveDiffHunkSelection(state.diffView, 1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    actions.render();
+    return;
+  }
+  if (keyName === "left") {
+    state.diffView = moveDiffHunkSelection(state.diffView, -1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    actions.render();
+    return;
+  }
+  if (key.sequence === "m") {
+    state.diffView = toggleDiffFileReviewed(state.diffView);
+    actions.render();
+    return;
+  }
+  if (key.sequence === "t") {
+    state.diffView = toggleDiffViewOverride(state.diffView, patchPaneWidth);
+    actions.render();
+    return;
+  }
+  if (key.sequence === "?") {
+    state.overlay = "help";
+    actions.render();
+    return;
+  }
 }
 
 function clearPendingConfirmation(state: TuiState): void {
