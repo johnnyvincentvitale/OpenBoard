@@ -159,6 +159,18 @@ export function diffPatchScrollTop(state: DiffViewState): number {
   return offsets[state.selectedHunk.hunkIndex] ?? 0;
 }
 
+/** Patch text presented to DiffRenderable. Selected hunks are sliced to the top
+ * so live navigation is visible even when DiffRenderable owns its own height and
+ * ignores the outer ScrollBox's scrollTop.
+ */
+export function diffPatchForRender(state: DiffViewState, file: DiffFile): string | undefined {
+  if (!file.patch || !state.selectedHunk || state.selectedHunk.fileIndex !== state.selectedFileIndex) return file.patch;
+  const offsets = hunkLineOffsets(file.patch);
+  const selectedOffset = offsets[state.selectedHunk.hunkIndex];
+  if (!selectedOffset) return file.patch;
+  return file.patch.split("\n").slice(selectedOffset).join("\n");
+}
+
 export interface DiffFileListWindow {
   offset: number;
   capacity: number;
@@ -360,9 +372,10 @@ export function renderDiffView(
     ui.Text({ content: view === "split" ? "split" : "unified", fg: theme.muted, height: 1 }),
   );
 
-  const patchBody: VChild = selectedFile?.patch
+  const renderPatch = selectedFile ? diffPatchForRender(state, selectedFile) : undefined;
+  const patchBody: VChild = renderPatch
     ? ui.h(ui.DiffRenderable, {
-        diff: selectedFile.patch,
+        diff: renderPatch,
         view,
         filetype: reviewed ? "text" : filetypeForFile(selectedFile.file),
         showLineNumbers: true,

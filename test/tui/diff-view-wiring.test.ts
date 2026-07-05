@@ -164,7 +164,7 @@ describe("TUI diff view navigation and exit", () => {
       kind: "diff",
       capped: false,
       files: [
-        { file: "a.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\nx\n" },
+        { file: "a.ts", additions: 3, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\nx\n@@ -9,1 +9,1 @@\ny\n@@ -20,1 +20,1 @@\nz\n" },
         { file: "b.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\ny\n" },
       ],
       selectedFileIndex: 0,
@@ -198,21 +198,39 @@ describe("TUI diff view navigation and exit", () => {
     expect(s.diffView.selectedFileIndex).toBe(0);
   });
 
-  it("left/right hunk navigation keeps the selected file stable", async () => {
+  it("left/right hunk navigation recognizes sequence-only arrows and keeps the selected file stable", async () => {
     const s = openedState();
 
-    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, actions());
+    await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
     expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
     expect(s.detailScrollTop["diff-patch"]).toBe(0);
 
-    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, actions());
+    await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
-    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
+    expect(s.detailScrollTop["diff-patch"]).toBe(2);
 
-    await handleKeypress({ name: "left", sequence: "\u001b[D" } as any, s, actions());
+    await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
-    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 2 });
+    expect(s.detailScrollTop["diff-patch"]).toBe(4);
+
+    await handleKeypress({ sequence: "\u001b[D" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
+  });
+
+  it("one-hunk files explain their hunk count without changing files", async () => {
+    const s = openedState();
+    s.diffView.selectedFileIndex = 1;
+
+    await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(1);
+    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 1, hunkIndex: 0 });
+
+    const tree = renderApp(fakeUi(), s);
+    expect(textOf(tree)).toContain("1 hunk");
   });
 
   it("m toggles the selected file's reviewed dimming state", async () => {

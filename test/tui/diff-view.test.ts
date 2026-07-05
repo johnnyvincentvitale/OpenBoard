@@ -10,6 +10,7 @@ import {
   canOpenDiffView,
   createLoadingDiffViewState,
   diffPatchScrollTop,
+  diffPatchForRender,
   diffFileListWindow,
   diffHunkPositionLabel,
   diffSourceLabel,
@@ -232,6 +233,19 @@ describe("diff hunk navigation", () => {
     expect(diffPatchScrollTop(state)).toBe(3);
   });
 
+  it("slices the rendered patch so the selected hunk is visibly at the top", () => {
+    const patch = "file header\n@@ -1,1 +1,1 @@\n-old1\n+new1\n@@ -9,1 +9,1 @@\n-old2\n+new2\n@@ -20,1 +20,1 @@\n-old3\n+new3\n";
+    const files = [diffFile({ patch })];
+    let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+
+    expect(diffPatchForRender(state, files[0])).toBe(patch);
+    state = moveHunkSelection(state, 1);
+    state = moveHunkSelection(state, 1);
+    const rendered = diffPatchForRender(state, files[0]);
+    expect(rendered?.startsWith("@@ -9,1 +9,1 @@")).toBe(true);
+    expect(rendered).not.toContain("old1");
+  });
+
   it("labels one-hunk and multi-hunk files in the patch header", () => {
     const files = [
       diffFile({ file: "one.ts", patch: "@@ -1,1 +1,1 @@\nx\n" }),
@@ -401,6 +415,20 @@ describe("renderDiffView", () => {
     });
     const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 200);
     expect(textOf(tree)).toContain("1 hunk");
+  });
+
+  it("renders the selected hunk at the top of the patch pane", () => {
+    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+      kind: "diff",
+      files: [diffFile({ patch: "preamble\n@@ -1,1 +1,1 @@\n-a\n+b\n@@ -5,1 +5,1 @@\n-c\n+d\n@@ -9,1 +9,1 @@\n-e\n+f\n" })],
+      capped: false,
+    });
+    const selected = moveHunkSelection(moveHunkSelection(state, 1), 1);
+    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, selected, 200);
+    const diff = nodesByType(tree, "Diff")[0];
+    expect(textOf(tree)).toContain("hunk 2/3");
+    expect(diff.props.diff.startsWith("@@ -5,1 +5,1 @@")).toBe(true);
+    expect(diff.props.diff).not.toContain("-a");
   });
 
   it("falls back to unified below the split width threshold", () => {

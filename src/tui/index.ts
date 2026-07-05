@@ -3452,13 +3452,13 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
     actions.render();
     return;
   }
-  if (keyName === "right") {
+  if (keyName === "right" || key.sequence === "\u001b[C") {
     state.diffView = moveDiffHunkSelection(state.diffView, 1);
     state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
     actions.render();
     return;
   }
-  if (keyName === "left") {
+  if (keyName === "left" || key.sequence === "\u001b[D") {
     state.diffView = moveDiffHunkSelection(state.diffView, -1);
     state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
     actions.render();
