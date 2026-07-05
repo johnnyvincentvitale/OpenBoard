@@ -7,7 +7,10 @@ import { computeDiff } from "../../src/server/diff-engine";
 import type { Task } from "../../src/shared";
 
 function runGit(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+  );
+  return execFileSync("git", args, { cwd, encoding: "utf-8", env }).trim();
 }
 
 function makeBaseTask(overrides: Partial<Task> = {}): Task {
