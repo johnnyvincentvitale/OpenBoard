@@ -14,13 +14,20 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import type { DiffFile, DiffResponse, Task } from "../shared";
 
 const execFileAsync = promisify(execFile);
 
 const DIFF_CONTEXT_LINES = 12;
 const MAX_TOTAL_PATCH_BYTES = 2 * 1024 * 1024; // 2 MB
+// Per-file guard for untracked files, applied before any content is read
+// into memory. Keeps a single huge or binary untracked file from spiking
+// memory or producing a garbage text patch ahead of the total byte cap.
+const MAX_UNTRACKED_FILE_BYTES = 1 * 1024 * 1024; // 1 MB
+// Bytes sniffed from the head of an untracked file to detect binary content
+// (mirrors git's own NUL-byte heuristic).
+const BINARY_SNIFF_BYTES = 8000;
 
 interface GitResult {
   code: number;
@@ -121,26 +128,63 @@ function parseFileChunk(chunk: string): DiffFile | null {
   return { file, patch, additions, deletions, status };
 }
 
+interface UntrackedDiffResult {
+  file: DiffFile;
+  /** True when the file was too large to safely diff — the response-level
+   * `capped` flag must reflect this even when the total byte cap wasn't hit. */
+  forcedCap: boolean;
+}
+
+function untrackedMetadataOnly(filePath: string): DiffFile {
+  return { file: filePath, patch: undefined, additions: 0, deletions: 0, status: "added" };
+}
+
+/** Sniff the head of a file for NUL bytes to detect binary content, without
+ * reading the whole file into memory. */
+async function looksBinary(fullPath: string): Promise<boolean> {
+  const fd = await open(fullPath, "r");
+  try {
+    const buffer = Buffer.alloc(BINARY_SNIFF_BYTES);
+    const { bytesRead } = await fd.read(buffer, 0, BINARY_SNIFF_BYTES, 0);
+    return buffer.subarray(0, bytesRead).includes(0);
+  } finally {
+    await fd.close();
+  }
+}
+
 /**
  * Create a synthetic /dev/null-style added-file patch for an untracked file.
  * Reads the file content and produces a unified diff header that shows every
- * line as added.
+ * line as added — unless the file is oversized or binary, in which case a
+ * metadata-only DiffFile (no patch) is returned so we never read a huge or
+ * binary file fully into memory just to discard it.
  */
 async function untrackedFileDiff(
   cwd: string,
   filePath: string,
-): Promise<DiffFile> {
+): Promise<UntrackedDiffResult> {
+  const fullPath = `${cwd}/${filePath}`;
+
+  let size: number;
+  try {
+    size = (await stat(fullPath)).size;
+  } catch {
+    return { file: untrackedMetadataOnly(filePath), forcedCap: false };
+  }
+
+  if (size > MAX_UNTRACKED_FILE_BYTES) {
+    return { file: untrackedMetadataOnly(filePath), forcedCap: true };
+  }
+
+  if (await looksBinary(fullPath)) {
+    return { file: untrackedMetadataOnly(filePath), forcedCap: false };
+  }
+
   let content: string;
   try {
-    content = await readFile(`${cwd}/${filePath}`, "utf-8");
+    content = await readFile(fullPath, "utf-8");
   } catch {
-    return {
-      file: filePath,
-      patch: `diff --git a/${filePath} b/${filePath}\nnew file mode 100644\n--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,0 @@\n`,
-      additions: 0,
-      deletions: 0,
-      status: "added",
-    };
+    return { file: untrackedMetadataOnly(filePath), forcedCap: false };
   }
   const lines = content.split("\n");
   // Remove trailing empty line from split (files usually end with newline).
@@ -163,11 +207,8 @@ async function untrackedFileDiff(
   ].join("\n");
 
   return {
-    file: filePath,
-    patch,
-    additions,
-    deletions: 0,
-    status: "added",
+    file: { file: filePath, patch, additions, deletions: 0, status: "added" },
+    forcedCap: false,
   };
 }
 
@@ -233,6 +274,7 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
       };
     }
     let files = parseUnifiedDiff(result.stdout);
+    let forcedCapped = false;
     const untrackedResult = await git(task.worktreePath, [
       "ls-files",
       "--others",
@@ -244,15 +286,16 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
         .map((p) => p.trim())
         .filter(Boolean);
       for (const path of untrackedPaths) {
-        const df = await untrackedFileDiff(task.worktreePath, path);
+        const { file: df, forcedCap } = await untrackedFileDiff(task.worktreePath, path);
         files.push(df);
+        if (forcedCap) forcedCapped = true;
       }
     }
     if (files.length === 0) {
       return { kind: "diff", files: [], capped: false };
     }
     const capped = capBytes(files, MAX_TOTAL_PATCH_BYTES);
-    return { kind: "diff", files: capped.files, capped: capped.capped };
+    return { kind: "diff", files: capped.files, capped: capped.capped || forcedCapped };
   }
 
   // --- Claude Code cards with harness worktree metadata ---
@@ -296,25 +339,26 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     }
 
     let files = parseUnifiedDiff(diffResult.stdout);
+    let forcedCapped = false;
 
-    // Include untracked files as added.
-    if (!task.dirtyAtDispatch) {
-      // Only include untracked when the working tree was clean at dispatch —
-      // otherwise the diff baseline is already fuzzy.
-      const untrackedResult = await git(task.directory, [
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-      ]);
-      if (untrackedResult.code === 0) {
-        const untrackedPaths = untrackedResult.stdout
-          .split("\n")
-          .map((p) => p.trim())
-          .filter(Boolean);
-        for (const path of untrackedPaths) {
-          const df = await untrackedFileDiff(task.directory, path);
-          files.push(df);
-        }
+    // Include untracked files as added, regardless of dirtyAtDispatch — the
+    // in-place lane always shows the total working-tree diff against
+    // baseCommit; dirtyAtDispatch only drives the TUI's honesty label, it
+    // does not filter the diff content.
+    const untrackedResult = await git(task.directory, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+    ]);
+    if (untrackedResult.code === 0) {
+      const untrackedPaths = untrackedResult.stdout
+        .split("\n")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      for (const path of untrackedPaths) {
+        const { file: df, forcedCap } = await untrackedFileDiff(task.directory, path);
+        files.push(df);
+        if (forcedCap) forcedCapped = true;
       }
     }
 
@@ -322,7 +366,7 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
       return { kind: "diff", files: [], capped: false };
     }
     const capped = capBytes(files, MAX_TOTAL_PATCH_BYTES);
-    return { kind: "diff", files: capped.files, capped: capped.capped };
+    return { kind: "diff", files: capped.files, capped: capped.capped || forcedCapped };
   }
 
   // --- No git evidence ---

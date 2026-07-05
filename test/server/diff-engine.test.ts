@@ -139,7 +139,7 @@ describe("computeDiff", () => {
       }
     });
 
-    it("skips untracked files when dirtyAtDispatch is true", async () => {
+    it("includes untracked files as added even when dirtyAtDispatch is true", async () => {
       const repoDir = join(tmpDir, "repo");
       const baseCommit = initRepo(repoDir);
 
@@ -154,9 +154,12 @@ describe("computeDiff", () => {
       const result = await computeDiff(task);
       expect(result.kind).toBe("diff");
       if (result.kind === "diff") {
-        // Should not include untracked files
+        // dirtyAtDispatch only drives the TUI honesty label — the diff
+        // content itself still includes untracked files as added.
         const untracked = result.files.find((f) => f.file === "untracked.ts");
-        expect(untracked).toBeUndefined();
+        expect(untracked).toBeDefined();
+        expect(untracked?.status).toBe("added");
+        expect(untracked?.patch).toContain("+export const x = 1;");
       }
     });
 
@@ -247,6 +250,59 @@ describe("computeDiff", () => {
         expect(filesWithoutPatches.length).toBeGreaterThan(0);
         // All files should still have metadata.
         expect(result.files.every((f) => f.file && f.status && typeof f.additions === "number")).toBe(true);
+      }
+    });
+  });
+
+  describe("untracked file guards", () => {
+    it("returns metadata-only entry and capped=true for an oversized untracked file", async () => {
+      const repoDir = join(tmpDir, "repo");
+      const baseCommit = initRepo(repoDir);
+
+      // Just over the 1 MB per-file guard — large enough to prove the file's
+      // content was never expanded into a text patch, small enough to keep
+      // the test fast.
+      writeFileSync(join(repoDir, "huge.txt"), "x".repeat(1_100_000));
+
+      const task = makeBaseTask({
+        directory: repoDir,
+        baseCommit,
+        dirtyAtDispatch: false,
+      });
+
+      const result = await computeDiff(task);
+      expect(result.kind).toBe("diff");
+      if (result.kind === "diff") {
+        expect(result.capped).toBe(true);
+        const huge = result.files.find((f) => f.file === "huge.txt");
+        expect(huge).toBeDefined();
+        expect(huge?.status).toBe("added");
+        expect(huge?.patch).toBeUndefined();
+      }
+    });
+
+    it("returns metadata-only entry for an untracked binary file without a garbage text patch", async () => {
+      const repoDir = join(tmpDir, "repo");
+      const baseCommit = initRepo(repoDir);
+
+      const binary = Buffer.alloc(200);
+      binary.writeUInt8(0x89, 0);
+      binary.writeUInt8(0x00, 50); // NUL byte marks it binary
+      writeFileSync(join(repoDir, "untracked.png"), binary);
+
+      const task = makeBaseTask({
+        directory: repoDir,
+        baseCommit,
+        dirtyAtDispatch: false,
+      });
+
+      const result = await computeDiff(task);
+      expect(result.kind).toBe("diff");
+      if (result.kind === "diff") {
+        const img = result.files.find((f) => f.file === "untracked.png");
+        expect(img).toBeDefined();
+        expect(img?.status).toBe("added");
+        expect(img?.patch).toBeUndefined();
       }
     });
   });
