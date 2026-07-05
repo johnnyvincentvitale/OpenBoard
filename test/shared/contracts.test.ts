@@ -80,9 +80,10 @@ describe("diff contract", () => {
     const diffOk: import("../../src/shared").DiffResponse = {
       kind: "diff",
       files: [{ file: "src/a.ts", additions: 3, deletions: 1, status: "modified" }],
+      capped: false,
     };
     expect(diffOk.kind).toBe("diff");
-    expect(diffOk.files).toHaveLength(1);
+    expect((diffOk as { kind: "diff"; files: unknown[] }).files).toHaveLength(1);
 
     const noGit: import("../../src/shared").DiffResponse = {
       kind: "no-git",

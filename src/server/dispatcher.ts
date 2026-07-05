@@ -20,7 +20,7 @@ import type { OpencodeHandle } from "./opencode";
 import { eventLiveState, eventSessionId } from "./events/session-status";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeCodeRunner, type ClaudeCodeRunnerLike } from "./claude-code-runner";
-import { dirtyWarning, inspectGitDirectory } from "./git-inspect";
+import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
 import {
   isExternalDirectoriesAllowed,
   isUnderWorkspace,
@@ -362,6 +362,19 @@ export class TaskDispatcher implements Dispatcher {
       execDirectory = this.resolveDirectory(wt.worktreePath);
     }
 
+    // Record git baseline at dispatch time for diff computation later. The
+    // worktree lane's baseCommit is the main-repo HEAD (not the worktree
+    // checkout), captured via the original execDirectory before the worktree
+    // path swap above.
+    const baseCommitDir = wantsWorktree(task, this.store)
+      ? this.resolveDirectory(task.directory)
+      : execDirectory;
+    const [baseCommit, dirty] = await Promise.all([
+      resolveHeadCommit(baseCommitDir),
+      isWorkingTreeDirty(baseCommitDir),
+    ]);
+    this.store.update(taskId, { baseCommit, dirtyAtDispatch: dirty });
+
     if (task.harness === "claude-code") {
       return this.runClaudeTask(task, execDirectory, task.description, "run");
     }
@@ -433,6 +446,12 @@ export class TaskDispatcher implements Dispatcher {
     const runStartedAt = Date.now();
     const warning = await dirtyWarning(execDirectory);
     const gitInfo = await inspectGitDirectory(execDirectory);
+    // Record git baseline at dispatch for diff computation.
+    const baseCommit = gitInfo.isRepo
+      ? (await resolveHeadCommit(execDirectory))
+      : null;
+    const dirty = gitInfo.dirtySummary !== undefined;
+    this.store.update(task.id, { baseCommit, dirtyAtDispatch: dirty });
     try {
       const launched = await this.claudeRunner[action]({
         task,

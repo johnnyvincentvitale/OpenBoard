@@ -90,6 +90,31 @@ export async function dirtyWarning(cwd: string): Promise<string | undefined> {
   return `Warning: target working tree has ${count} uncommitted path${count === 1 ? "" : "s"}. Claude Code may isolate edits in its own worktree. Please commit before using Claude agents in this repo.`;
 }
 
+/**
+ * Resolve the full HEAD commit SHA at dispatch time. Returns null when the
+ * directory is not a git repo or HEAD does not exist (e.g. empty repo).
+ */
+export async function resolveHeadCommit(cwd: string): Promise<string | null> {
+  const info = await inspectGitDirectory(cwd);
+  if (!info.isRepo) return null;
+
+  const result = await git(cwd, ["rev-parse", "HEAD"]);
+  if (result.code !== 0 || !result.stdout.trim()) return null;
+  return result.stdout.trim();
+}
+
+/**
+ * True when the working tree has uncommitted or untracked changes.
+ */
+export async function isWorkingTreeDirty(cwd: string): Promise<boolean> {
+  const info = await inspectGitDirectory(cwd);
+  if (!info.isRepo) return false;
+
+  const result = await git(cwd, ["status", "--porcelain"]);
+  if (result.code !== 0) return false;
+  return result.stdout.trim().length > 0;
+}
+
 async function fileDiffersInGit(cwd: string, file: string, baseBranch?: string): Promise<boolean> {
   const safe = safeRelativePath(file);
   if (!safe) return false;

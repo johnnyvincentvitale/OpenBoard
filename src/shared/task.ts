@@ -11,13 +11,15 @@ export interface DiffFile {
 
 /**
  * Structured diff response from GET /api/tasks/:id/diff.
- * - `kind: "diff"` carries the file-level patches.
+ * - `kind: "diff"` carries the file-level patches. `capped` is true when
+ *   the total patch bytes exceeded the ~2 MB cap and some file patches
+ *   were dropped (file metadata + stats are still present).
  * - `kind: "no-git"` is a non-crash sentinel for when git evidence is
  *   missing (non-git dir, deleted branch, etc.). The reason string is a
  *   human-readable message destined for the TUI header/detail pane.
  */
 export type DiffResponse =
-  | { kind: "diff"; files: DiffFile[] }
+  | { kind: "diff"; files: DiffFile[]; capped: boolean }
   | { kind: "no-git"; reason: string };
 
 /**

@@ -327,6 +327,7 @@ describe("board client", () => {
       files: [
         { file: "src/a.ts", additions: 5, deletions: 2, status: "modified", patch: "@@ -1 +1 @@" },
       ],
+      capped: false,
     };
     const fetchMock = vi.fn(async (url: string | URL) => {
       return jsonResponse(diffResponse);

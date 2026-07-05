@@ -10,6 +10,17 @@ import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, R
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
+import { computeDiff } from "../diff-engine";
+
+/** Guard error: GET /api/tasks/:id/diff is only valid for Review cards. */
+class NonReviewDiffError extends Error {
+  readonly status = 409;
+
+  constructor() {
+    super("Diff is only available for Review cards");
+    this.name = "NonReviewDiffError";
+  }
+}
 
 type TaskListStore = TaskStore & {
   list(filter?: { archived?: "exclude" | "only" | "all" }): ReturnType<TaskStore["list"]>;
@@ -451,6 +462,22 @@ export function registerTaskRoutes(
     }
   });
 
+  // Diff view (Review cards only) — token-authenticated like all /api/* routes.
+  app.get(TASK_ROUTE_PATTERNS.diff, async (c) => {
+    const id = c.req.param("id");
+    try {
+      const task = store.get(id);
+      if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
+      if (task.column !== "review") {
+        throw new NonReviewDiffError();
+      }
+      const diff = await computeDiff(task);
+      return c.json(diff, 200);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
   app.get(TASK_ROUTE_PATTERNS.settings, (c) => {
     try {
       return c.json(store.getSettings(), 200);
@@ -515,6 +542,12 @@ function respondWithError(c: Context, err: unknown): Response {
           unmetParents: err.unmetParents,
         },
       },
+      err.status as ContentfulStatusCode,
+    );
+  }
+  if (err instanceof NonReviewDiffError) {
+    return c.json(
+      { error: { code: "validation", message: err.message } },
       err.status as ContentfulStatusCode,
     );
   }

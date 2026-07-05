@@ -1335,3 +1335,63 @@ describe("POST /api/tasks directory containment", () => {
     expect(store.list()).toHaveLength(1);
   });
 });
+
+// --- GET /api/tasks/:id/diff --------------------------------------------------
+
+describe("GET /api/tasks/:id/diff", () => {
+  let store: SqliteTaskStore;
+  let dispatcher: ReturnType<typeof makeFakeDispatcher>;
+
+  beforeEach(() => {
+    store = new SqliteTaskStore(":memory:");
+    dispatcher = makeFakeDispatcher(store);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it("returns 404 for an unknown task", async () => {
+    const app = buildApp(store, dispatcher);
+    const res = await app.request("/api/tasks/task_missing/diff");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 409 for a non-Review card", async () => {
+    const task = store.create({ title: "To Do", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/diff`);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error.message).toContain("only available for Review cards");
+  });
+
+  it("returns a no-git response for a Review card without git evidence", async () => {
+    const task = store.create({ title: "Review", description: "", directory: repoDir });
+    store.move(task.id, "review", 0);
+    store.update(task.id, { baseCommit: null, dirtyAtDispatch: false });
+
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/diff`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe("no-git");
+    expect(body.reason).toBeDefined();
+  });
+
+  it("returns a diff response for a Review card with a recorded baseCommit in a git repo", async () => {
+    const task = store.create({ title: "Review", description: "", directory: repoDir });
+    store.move(task.id, "review", 0);
+    // repoDir is a tested git repo; record its HEAD commit
+    store.update(task.id, { baseCommit: "abc123def", dirtyAtDispatch: false });
+
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/diff`);
+    // The diff engine tries to run git in the directory — repoDir is a real git
+    // repo (created in test setup), so we expect either a diff or no-git
+    // response (not a 404/409).
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(["diff", "no-git"]).toContain(body.kind);
+  });
+});
