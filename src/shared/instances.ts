@@ -176,9 +176,10 @@ export class InstanceSpawnError extends InstanceError {
  * - `start`:  Launch an instance as a background daemon.
  * - `stop`:   Signal a running daemon to shut down.
  * - `attach`: Open the TUI for an instance (or the default instance).
+ * - `mcp`:    Start the MCP server bound to an explicit named instance.
  * - `rename`: Rename an instance (stops/restarts if running).
  */
-export const CLI_COMMANDS = ["list", "add", "remove", "start", "stop", "attach", "rename"] as const;
+export const CLI_COMMANDS = ["list", "add", "remove", "start", "stop", "attach", "mcp", "rename"] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 /** Arguments for the `list` subcommand. */
@@ -223,6 +224,12 @@ export interface CliAttachArgs {
   name?: string;
 }
 
+/** Arguments for the `mcp` subcommand. */
+export interface CliMcpArgs {
+  command: "mcp";
+  name: string;
+}
+
 /** Arguments for the `rename` subcommand. */
 export interface CliRenameArgs {
   command: "rename";
@@ -238,6 +245,7 @@ export type CliArgs =
   | CliStartArgs
   | CliStopArgs
   | CliAttachArgs
+  | CliMcpArgs
   | CliRenameArgs;
 
 // ── Pure validation helpers ──────────────────────────────────────────────────

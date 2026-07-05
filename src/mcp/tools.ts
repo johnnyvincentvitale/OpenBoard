@@ -7,10 +7,21 @@ import {
   resolveBoardUrl,
   toTaskSummary,
   type BoardClientOptions,
+  type BoardHealth,
   type CompletionInput,
   type TaskSummary,
 } from "../client/board-client";
 import type { Column, MergeOutcome, RosterAgent, TaskComment, TaskEvent } from "../shared";
+import { CLAUDE_CODE_PERMISSION_MODES } from "../shared";
+import {
+  currentSelectionFromOptions,
+  listInstances as listRegisteredInstances,
+  mergeHealthIdentity,
+  resolveInstanceTarget,
+  resolveSelectedOptions,
+  type CurrentSelection,
+  type InstanceSummary,
+} from "./instance-selection";
 
 const IdSchema = z.string().min(1);
 const CompletionReportInputSchema = z
@@ -35,10 +46,12 @@ const ManualTaskInputSchema = z
 const AgentTaskInputSchema = z
   .object({
     type: z.literal("agent").optional(),
+    harness: z.enum(["opencode", "claude-code"]).optional(),
     title: z.string(),
     description: z.string().optional(),
     directory: z.string().optional(),
     agent: z.string().optional(),
+    claudePermissionMode: z.enum(CLAUDE_CODE_PERMISSION_MODES).optional(),
     model: z.string().optional(),
     isolation: z.enum(["worktree", "in-place"]).optional(),
   })
@@ -49,10 +62,12 @@ export const CreateTaskInputSchema = z.union([ManualTaskInputSchema, AgentTaskIn
 export const AddTaskInputSchema = z
   .object({
     type: z.enum(["manual", "agent"]).optional(),
+    harness: z.enum(["opencode", "claude-code"]).optional(),
     title: z.string(),
     description: z.string().optional(),
     directory: z.string().optional(),
     agent: z.string().optional(),
+    claudePermissionMode: z.enum(CLAUDE_CODE_PERMISSION_MODES).optional(),
     assignedTo: z.string().optional(),
     model: z.string().optional(),
     isolation: z.enum(["worktree", "in-place"]).optional(),
@@ -86,8 +101,9 @@ export const CommentTaskInputSchema = z.object({ taskId: IdSchema, author: z.str
 export const IntegrateTaskInputSchema = z
   .object({ taskId: IdSchema, confirmReviewed: z.literal(true), targetBranch: z.string().optional() })
   .strict();
+export const SelectInstanceInputSchema = z.object({ name: IdSchema }).strict();
 
-export type McpToolOptions = BoardClientOptions;
+export type McpToolOptions = BoardClientOptions & { mcpStartedAt?: string };
 
 export interface AddTasksResult {
   boardUrl: string;
@@ -140,6 +156,26 @@ export interface ListAgentsResult {
   agents: RosterAgent[];
 }
 
+export interface CurrentInstanceResult {
+  boardUrl?: string;
+  selection: CurrentSelection;
+}
+
+export interface ListInstancesResult {
+  count: number;
+  instances: InstanceSummary[];
+}
+
+export interface OpenboardStatusResult {
+  boardUrl?: string;
+  selection: CurrentSelection;
+  mcpStartedAt: string;
+  apiReachable: boolean;
+  health?: BoardHealth;
+  agentCount?: number;
+  taskCount?: number;
+}
+
 export { BOARD_UNAVAILABLE_MESSAGE, DEFAULT_BOARD_URL, parseModelRef, resolveBoardUrl };
 
 export async function addTasks(input: unknown, options: McpToolOptions = {}): Promise<AddTasksResult> {
@@ -156,54 +192,54 @@ export async function addTasks(input: unknown, options: McpToolOptions = {}): Pr
 
 export async function createTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {
   const parsed = CreateTaskInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.createTask(parsed);
   return { boardUrl: client.boardUrl, task: toTaskSummary(task) };
 }
 
 export async function listTasks(options: McpToolOptions = {}): Promise<ListTasksResult> {
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const tasks = await client.listTaskSummaries();
   return { boardUrl: client.boardUrl, count: tasks.length, tasks };
 }
 
 export async function listAgents(options: McpToolOptions = {}): Promise<ListAgentsResult> {
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const agents = await client.listAgents();
   return { boardUrl: client.boardUrl, count: agents.length, agents };
 }
 
 export async function linkTasks(input: unknown, options: McpToolOptions = {}): Promise<LinkTasksResult> {
   const parsed = LinkTasksInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.linkTasks(parsed.parentId, parsed.childId);
   return { boardUrl: client.boardUrl, parentId: parsed.parentId, childId: parsed.childId, task: toTaskSummary(task) };
 }
 
 export async function unlinkTasks(input: unknown, options: McpToolOptions = {}): Promise<LinkTasksResult> {
   const parsed = LinkTasksInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.unlinkTasks(parsed.parentId, parsed.childId);
   return { boardUrl: client.boardUrl, parentId: parsed.parentId, childId: parsed.childId, task: toTaskSummary(task) };
 }
 
 export async function runTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {
   const parsed = RunTaskInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.runTask(parsed.taskId);
   return { boardUrl: client.boardUrl, task: toTaskSummary(task) };
 }
 
 export async function retryTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {
   const parsed = RetryTaskInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.retryTask(parsed.taskId, parsed.feedback);
   return { boardUrl: client.boardUrl, task: toTaskSummary(task) };
 }
 
 export async function abortTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {
   const parsed = TaskIdInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.abortTask(parsed.taskId);
   return { boardUrl: client.boardUrl, task: toTaskSummary(task) };
 }
@@ -213,42 +249,42 @@ export async function moveTask(input: unknown, options: McpToolOptions = {}): Pr
   if (parsed.column === "done" && !parsed.completedBy?.trim()) {
     throw new Error("completedBy is required when moving a task to done through MCP");
   }
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const tasks = await client.moveTask(parsed.taskId, parsed.column as Column, parsed.position, parsed.completedBy);
   return { boardUrl: client.boardUrl, count: tasks.length, tasks: tasks.map(toTaskSummary) };
 }
 
 export async function completeTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {
   const parsed = CompleteTaskInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.completeTask(parsed.taskId, parsed.report as CompletionInput, parsed.runStartedAt);
   return { boardUrl: client.boardUrl, task: toTaskSummary(task) };
 }
 
 export async function blockTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {
   const parsed = CompleteTaskInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const task = await client.blockTask(parsed.taskId, parsed.report as CompletionInput, parsed.runStartedAt);
   return { boardUrl: client.boardUrl, task: toTaskSummary(task) };
 }
 
 export async function syncTask(input: unknown, options: McpToolOptions = {}): Promise<MergeResult> {
   const parsed = TaskIdInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const outcome = await client.syncTask(parsed.taskId);
   return { boardUrl: client.boardUrl, outcome: { ...outcome, task: toTaskSummary(outcome.task) } };
 }
 
 export async function integrateTask(input: unknown, options: McpToolOptions = {}): Promise<MergeResult> {
   const parsed = IntegrateTaskInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const outcome = await client.integrateTask(parsed.taskId, parsed.targetBranch);
   return { boardUrl: client.boardUrl, outcome: { ...outcome, task: toTaskSummary(outcome.task) } };
 }
 
 export async function commentTask(input: unknown, options: McpToolOptions = {}): Promise<CommentResult> {
   const parsed = CommentTaskInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const comment = await client.addComment(parsed.taskId, parsed.author, parsed.body);
   return { boardUrl: client.boardUrl, comment };
 }
@@ -257,7 +293,54 @@ export const addNote = commentTask;
 
 export async function taskEvents(input: unknown, options: McpToolOptions = {}): Promise<TaskEventsResult> {
   const parsed = TaskIdInputSchema.parse(input);
-  const client = createBoardClient(options);
+  const client = await createMcpBoardClient(options);
   const events = await client.listTaskEvents(parsed.taskId);
   return { boardUrl: client.boardUrl, taskId: parsed.taskId, count: events.length, events };
+}
+
+export async function listInstances(): Promise<ListInstancesResult> {
+  const instances = await listRegisteredInstances();
+  return { count: instances.length, instances };
+}
+
+export async function currentInstance(options: McpToolOptions = {}): Promise<CurrentInstanceResult> {
+  const selection = currentSelectionFromOptions(options);
+  return { ...(selection.boardUrl !== undefined ? { boardUrl: selection.boardUrl } : {}), selection };
+}
+
+export async function openboardStatus(options: McpToolOptions = {}): Promise<OpenboardStatusResult> {
+  const initialSelection = currentSelectionFromOptions(options);
+  try {
+    const client = await createMcpBoardClient(options);
+    const health = await client.getHealth();
+    const [agents, tasks] = await Promise.allSettled([client.listAgents(), client.listTaskSummaries()]);
+    const selection = mergeHealthIdentity(initialSelection, health);
+    return {
+      boardUrl: client.boardUrl,
+      selection,
+      mcpStartedAt: options.mcpStartedAt ?? new Date(0).toISOString(),
+      apiReachable: true,
+      health,
+      ...(agents.status === "fulfilled" ? { agentCount: agents.value.length } : {}),
+      ...(tasks.status === "fulfilled" ? { taskCount: tasks.value.length } : {}),
+    };
+  } catch {
+    return {
+      ...(initialSelection.boardUrl !== undefined ? { boardUrl: initialSelection.boardUrl } : {}),
+      selection: initialSelection,
+      mcpStartedAt: options.mcpStartedAt ?? new Date(0).toISOString(),
+      apiReachable: false,
+    };
+  }
+}
+
+export async function selectInstance(input: unknown, options: McpToolOptions = {}): Promise<{ boardUrl: string; selection: CurrentSelection; options: McpToolOptions }> {
+  const parsed = SelectInstanceInputSchema.parse(input);
+  const target = await resolveInstanceTarget(parsed.name, options);
+  const nextOptions: McpToolOptions = { ...target.options, requireExplicitBoardUrl: options.requireExplicitBoardUrl, mcpStartedAt: options.mcpStartedAt };
+  return { boardUrl: target.runtime.boardUrl, selection: currentSelectionFromOptions(nextOptions), options: nextOptions };
+}
+
+async function createMcpBoardClient(options: McpToolOptions) {
+  return createBoardClient(await resolveSelectedOptions(options));
 }

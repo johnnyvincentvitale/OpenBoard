@@ -8,17 +8,36 @@
 import type { Hono } from "hono";
 import { ROUTE_PATTERNS } from "../../shared";
 import type { OpencodeHandle } from "../opencode";
+import type { SourceInstanceInfo } from "../../db/global-archive-store";
 
 /** The OpenCode SDK client type, derived from the Phase-1 connection handle. */
 type OpencodeClientLike = OpencodeHandle["client"];
 
 type OpencodeHealthStatus = { status: "ok"; version: string } | { status: "unreachable" };
 
+export interface BoardIdentity {
+  instanceName?: string;
+  boardUrl: string;
+  port: number;
+  workspace: string;
+  dbPath: string;
+  boardTokenPresent: boolean;
+}
+
 /** Registers GET /api/health on the given Hono app. */
-export function registerHealthRoutes(app: Hono, deps: { client: OpencodeClientLike }): void {
+export function registerHealthRoutes(app: Hono, deps: { client: OpencodeClientLike; identity?: SourceInstanceInfo; boardTokenPresent?: boolean }): void {
   app.get(ROUTE_PATTERNS.health, async (c) => {
     const opencode = await checkOpencodeHealth(deps.client);
-    return c.json({ adapter: "ok", opencode }, 200);
+    const source = deps.identity ?? { port: 4097, workspace: process.cwd(), dbPath: "board-tasks.sqlite" };
+    const identity: BoardIdentity = {
+      ...(source.name !== undefined ? { instanceName: source.name } : {}),
+      boardUrl: `http://127.0.0.1:${source.port}`,
+      port: source.port,
+      workspace: source.workspace,
+      dbPath: source.dbPath,
+      boardTokenPresent: Boolean(deps.boardTokenPresent),
+    };
+    return c.json({ adapter: "ok", opencode, identity }, 200);
   });
 }
 

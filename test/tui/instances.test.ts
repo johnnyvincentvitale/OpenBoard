@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, renderApp } from "../../src/tui/index";
+import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
 
@@ -332,6 +332,227 @@ describe("TUI label cleanup", () => {
     const text = textOf(app);
     expect(text).toContain("a archive task");
     expect(text).not.toContain("a archive · d delete");
+  });
+});
+
+describe("TUI new-task prompt editor", () => {
+  function pasteEvent(text: string) {
+    let prevented = false;
+    return {
+      bytes: Uint8Array.from(Buffer.from(text, "utf8")),
+      preventDefault: () => {
+        prevented = true;
+      },
+      get defaultPrevented() {
+        return prevented;
+      },
+    } as any;
+  }
+
+  it("selects and deletes prompt text in the new task form", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "",
+        description: "delete me",
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "description",
+        submitting: false,
+      },
+    });
+
+    await handleKeypress({ name: "a", sequence: "\u0001", ctrl: true } as any, s, actions());
+    await handleKeypress({ name: "backspace", sequence: "\u007f" } as any, s, actions());
+
+    expect(s.newTask.description).toBe("");
+  });
+
+  it("deletes prompt text at the cursor instead of only from the end", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "",
+        description: "abc",
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "description",
+        textCursors: { description: 1 },
+        submitting: false,
+      },
+    });
+
+    await handleKeypress({ name: "delete", sequence: "\u001b[3~" } as any, s, actions());
+
+    expect(s.newTask.description).toBe("ac");
+  });
+
+  it("command-delete deletes the current prompt line", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "",
+        description: "first\nsecond\nthird",
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "description",
+        textCursors: { description: "first\nsec".length },
+        submitting: false,
+      },
+    });
+
+    await handleKeypress({ name: "delete", sequence: "\u001b[3~", meta: true } as any, s, actions());
+
+    expect(s.newTask.description).toBe("first\nthird");
+    expect(s.newTask.textCursors.description).toBe("first\n".length);
+  });
+
+  it("ctrl-u terminal mapping deletes the current prompt line", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "",
+        description: "first\nsecond\nthird",
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "description",
+        textCursors: { description: "first\nsec".length },
+        submitting: false,
+      },
+    });
+
+    await handleKeypress({ name: "u", sequence: "\u0015", ctrl: true } as any, s, actions());
+
+    expect(s.newTask.description).toBe("first\nthird");
+    expect(s.newTask.textCursors.description).toBe("first\n".length);
+  });
+
+  it("command-delete clears single-line new-task text fields", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "dirty repo warning smoke",
+        description: "",
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "title",
+        submitting: false,
+      },
+    });
+
+    await handleKeypress({ name: "backspace", sequence: "\u007f", meta: true } as any, s, actions());
+
+    expect(s.newTask.title).toBe("");
+  });
+
+  it("scrolls long prompt text inside the prompt field", async () => {
+    const longPrompt = Array.from({ length: 80 }, (_, index) => `line-${index}`).join(" ");
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "",
+        description: longPrompt,
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "description",
+        textCursors: { description: 0 },
+        textScrolls: { description: 0 },
+        submitting: false,
+      },
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+
+    expect(s.newTask.textScrolls.description).toBeGreaterThan(0);
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("line-10");
+  });
+
+  it("pastes multi-line text into the focused prompt field", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "",
+        description: "before\n",
+        directory: "/repo",
+        harness: "claude-code",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "in-place",
+        field: "description",
+        textCursors: { description: "before\n".length },
+        submitting: false,
+      },
+    });
+    const event = pasteEvent("line one\nline two\n");
+
+    handlePaste(event, s, actions());
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(s.newTask.description).toBe("before\nline one\nline two\n");
+  });
+
+  it("pastes single-line-normalized text into title fields", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "newTask",
+      newTask: {
+        type: "agent",
+        title: "",
+        description: "",
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "title",
+        submitting: false,
+      },
+    });
+
+    handlePaste(pasteEvent("dirty\nrepo\nsmoke\n"), s, actions());
+
+    expect(s.newTask.title).toBe("dirty repo smoke");
   });
 });
 
@@ -1221,7 +1442,9 @@ describe("TUI manual task creation", () => {
         title: "PM review",
         description: "Check the copy",
         directory: "/repo",
+        harness: "opencode",
         agentId: "build",
+        claudePermissionMode: "bypassPermissions",
         assignedTo: "Johnny",
         isolation: "worktree",
         field: "assignedTo",
@@ -1240,6 +1463,55 @@ describe("TUI manual task creation", () => {
     expect(text).not.toContain("ISOLATION");
   });
 
+  it("renders and submits Claude Code cards with a selected model", async () => {
+    const createTask = vi.fn(async (payload: unknown) => ({
+      ...task("claude-card", "todo"),
+      ...(payload as object),
+      id: "claude-card",
+    }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: {
+        type: "agent",
+        title: "Claude work",
+        description: "Run headlessly",
+        directory: "/repo",
+        harness: "claude-code",
+        agentId: "plan",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        model: { providerID: "claude-code", id: "opus" },
+        isolation: "worktree",
+        field: "model",
+        submitting: false,
+      },
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("HARNESS");
+    expect(text).toContain("Claude Code");
+    expect(text).toContain("PERMS");
+    expect(text).toContain("bypassPermissions");
+    expect(text).toContain("MODEL");
+    expect(text).toContain("opus");
+    expect(text).not.toContain("AGENT");
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({
+      client: { createTask },
+    }));
+
+    expect(createTask).toHaveBeenCalledWith({
+      type: "agent",
+      harness: "claude-code",
+      title: "Claude work",
+      description: "Run headlessly",
+      directory: "/repo",
+      claudePermissionMode: "bypassPermissions",
+      model: { providerID: "claude-code", id: "opus" },
+      isolation: "worktree",
+    });
+  });
+
   it("submits manual cards with type and assignee", async () => {
     const createTask = vi.fn(async (payload: unknown) => ({
       ...task("manual-card", "todo"),
@@ -1253,7 +1525,9 @@ describe("TUI manual task creation", () => {
         title: "PM review",
         description: "Check the copy",
         directory: "/repo",
+        harness: "opencode",
         agentId: "build",
+        claudePermissionMode: "bypassPermissions",
         assignedTo: "Johnny",
         isolation: "worktree",
         field: "assignedTo",
@@ -1650,6 +1924,17 @@ describe("TUI workspace gate", () => {
     expect(s.workspaceGateInput).toBe("/m");
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ setupWorkspace }));
     expect(setupWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("command-delete clears the workspace gate input", async () => {
+    const s = state({
+      viewState: { view: "workspaceGate", previousView: "launch" },
+      workspaceGateInput: "/tmp/openboard-test",
+    });
+
+    await handleKeypress({ name: "backspace", sequence: "\u007f", meta: true } as any, s, actions());
+
+    expect(s.workspaceGateInput).toBe("");
   });
 
   it("workspace gate disables run/task creation keys before a board is selected", async () => {

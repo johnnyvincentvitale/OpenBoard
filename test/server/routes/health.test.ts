@@ -30,7 +30,11 @@ function makeFakeClient(opts: {
 
 function buildApp(client: ReturnType<typeof makeFakeClient>) {
   const app = new Hono();
-  registerHealthRoutes(app, { client });
+  registerHealthRoutes(app, {
+    client,
+    identity: { name: "alpha", port: 4098, workspace: "/repo", dbPath: "/db/tasks.sqlite" },
+    boardTokenPresent: true,
+  });
   return app;
 }
 
@@ -46,6 +50,14 @@ describe("GET /api/health", () => {
     expect(body).toEqual({
       adapter: "ok",
       opencode: { status: "ok", version: "1.x" },
+      identity: {
+        instanceName: "alpha",
+        boardUrl: "http://127.0.0.1:4098",
+        port: 4098,
+        workspace: "/repo",
+        dbPath: "/db/tasks.sqlite",
+        boardTokenPresent: true,
+      },
     });
   });
 
@@ -60,6 +72,14 @@ describe("GET /api/health", () => {
     expect(body).toEqual({
       adapter: "ok",
       opencode: { status: "unreachable" },
+      identity: {
+        instanceName: "alpha",
+        boardUrl: "http://127.0.0.1:4098",
+        port: 4098,
+        workspace: "/repo",
+        dbPath: "/db/tasks.sqlite",
+        boardTokenPresent: true,
+      },
     });
   });
 
@@ -74,6 +94,14 @@ describe("GET /api/health", () => {
     expect(body).toEqual({
       adapter: "ok",
       opencode: { status: "unreachable" },
+      identity: {
+        instanceName: "alpha",
+        boardUrl: "http://127.0.0.1:4098",
+        port: 4098,
+        workspace: "/repo",
+        dbPath: "/db/tasks.sqlite",
+        boardTokenPresent: true,
+      },
     });
   });
 
@@ -88,6 +116,14 @@ describe("GET /api/health", () => {
     expect(body).toEqual({
       adapter: "ok",
       opencode: { status: "unreachable" },
+      identity: {
+        instanceName: "alpha",
+        boardUrl: "http://127.0.0.1:4098",
+        port: 4098,
+        workspace: "/repo",
+        dbPath: "/db/tasks.sqlite",
+        boardTokenPresent: true,
+      },
     });
   });
 });

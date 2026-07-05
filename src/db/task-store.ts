@@ -8,7 +8,9 @@ import type {
   CreateTaskInput,
   ModelRef,
   Task,
+  ClaudeCodePermissionMode,
   TaskComment,
+  TaskCompletionLocation,
   TaskEvent,
   TaskIsolationMode,
   TaskPending,
@@ -22,12 +24,21 @@ const TASK_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS task (
   id          TEXT PRIMARY KEY,
   task_type   TEXT NOT NULL DEFAULT 'agent',
+  harness     TEXT NOT NULL DEFAULT 'opencode',
   title       TEXT NOT NULL,
   description TEXT NOT NULL,
   directory   TEXT NOT NULL,
   column      TEXT NOT NULL,
   position    INTEGER NOT NULL,
   session_id  TEXT,
+  harness_session_id TEXT,
+  harness_session_name TEXT,
+  harness_status TEXT,
+  claude_permission_mode TEXT,
+  harness_cwd TEXT,
+  harness_branch TEXT,
+  harness_commit TEXT,
+  harness_warning TEXT,
   run_state   TEXT NOT NULL,
   run_started_at INTEGER,
   error       TEXT,
@@ -42,6 +53,7 @@ CREATE TABLE IF NOT EXISTS task (
   archived        INTEGER NOT NULL DEFAULT 0,
   completion      TEXT,
   completion_source TEXT,
+  completion_location TEXT,
   completed_by    TEXT,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
@@ -89,6 +101,15 @@ CREATE INDEX IF NOT EXISTS idx_task_events_task_created ON task_events(task_id, 
 /** Columns added after the initial task schema — ALTER-in for pre-existing DBs. */
 const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["task_type", "TEXT NOT NULL DEFAULT 'agent'"],
+  ["harness", "TEXT NOT NULL DEFAULT 'opencode'"],
+  ["harness_session_id", "TEXT"],
+  ["harness_session_name", "TEXT"],
+  ["harness_status", "TEXT"],
+  ["claude_permission_mode", "TEXT"],
+  ["harness_cwd", "TEXT"],
+  ["harness_branch", "TEXT"],
+  ["harness_commit", "TEXT"],
+  ["harness_warning", "TEXT"],
   ["assigned_to", "TEXT"],
   ["isolation", "TEXT"],
   ["worktree_path", "TEXT"],
@@ -99,6 +120,7 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["archived", "INTEGER NOT NULL DEFAULT 0"],
   ["completion", "TEXT"],
   ["completion_source", "TEXT"],
+  ["completion_location", "TEXT"],
   ["completed_by", "TEXT"],
 ];
 
@@ -107,12 +129,21 @@ const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
 interface TaskRowRecord {
   id: string;
   task_type: string;
+  harness: string;
   title: string;
   description: string;
   directory: string;
   column: string;
   position: number;
   session_id: string | null;
+  harness_session_id: string | null;
+  harness_session_name: string | null;
+  harness_status: string | null;
+  claude_permission_mode: string | null;
+  harness_cwd: string | null;
+  harness_branch: string | null;
+  harness_commit: string | null;
+  harness_warning: string | null;
   run_state: string;
   run_started_at: number | null;
   error: string | null;
@@ -127,6 +158,7 @@ interface TaskRowRecord {
   archived: number;
   completion: string | null;
   completion_source: string | null;
+  completion_location: string | null;
   completed_by: string | null;
   created_at: number;
   updated_at: number;
@@ -152,6 +184,7 @@ function toTask(record: TaskRowRecord): Task {
   const task: Task = {
     id: record.id,
     type: record.task_type === "manual" ? "manual" : "agent",
+    harness: record.harness === "claude-code" ? "claude-code" : "opencode",
     title: record.title,
     description: record.description,
     directory: record.directory,
@@ -167,9 +200,18 @@ function toTask(record: TaskRowRecord): Task {
     parentIds: [],
     completion: record.completion ? (JSON.parse(record.completion) as CompletionReport) : null,
     completionSource: record.completion_source as CompletionSource | null,
+    completionLocation: record.completion_location as TaskCompletionLocation | null,
     completedBy: record.completed_by ?? null,
   };
   if (record.session_id !== null) task.sessionId = record.session_id;
+  if (record.harness_session_id !== null) task.harnessSessionId = record.harness_session_id;
+  if (record.harness_session_name !== null) task.harnessSessionName = record.harness_session_name;
+  if (record.harness_status !== null) task.harnessStatus = record.harness_status;
+  if (record.claude_permission_mode !== null) task.claudePermissionMode = record.claude_permission_mode as ClaudeCodePermissionMode;
+  if (record.harness_cwd !== null) task.harnessCwd = record.harness_cwd;
+  if (record.harness_branch !== null) task.harnessBranch = record.harness_branch;
+  if (record.harness_commit !== null) task.harnessCommit = record.harness_commit;
+  if (record.harness_warning !== null) task.harnessWarning = record.harness_warning;
   if (record.run_started_at !== null) task.runStartedAt = record.run_started_at;
   if (record.error !== null) task.error = record.error;
   if (record.isolation !== null) task.isolation = record.isolation as TaskIsolationMode;
@@ -245,18 +287,27 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, title, description, directory, column, position, session_id, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, completion_source, completed_by, created_at, updated_at)
-         VALUES (@id, @type, @title, @description, @directory, @column, @position, @sessionId, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @completionSource, @completedBy, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, completion_source, completion_location, completed_by, created_at, updated_at)
+         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @completionSource, @completionLocation, @completedBy, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
            task_type = @type,
+           harness = @harness,
            title = @title,
            description = @description,
            directory = @directory,
            column = @column,
            position = @position,
            session_id = @sessionId,
+           harness_session_id = @harnessSessionId,
+           harness_session_name = @harnessSessionName,
+           harness_status = @harnessStatus,
+           claude_permission_mode = @claudePermissionMode,
+           harness_cwd = @harnessCwd,
+           harness_branch = @harnessBranch,
+           harness_commit = @harnessCommit,
+           harness_warning = @harnessWarning,
            run_state = @runState,
            run_started_at = @runStartedAt,
            error = @error,
@@ -271,6 +322,7 @@ export class SqliteTaskStore implements TaskStore {
            archived = @archived,
            completion = @completion,
            completion_source = @completionSource,
+           completion_location = @completionLocation,
            completed_by = @completedBy,
            updated_at = @updatedAt
          WHERE id = @id`,
@@ -378,12 +430,21 @@ export class SqliteTaskStore implements TaskStore {
       this.stmts.insertTask.run({
         id,
         type: data.type ?? "agent",
+        harness: data.harness ?? "opencode",
         title: data.title,
         description: data.description,
         directory: data.directory,
         column: DEFAULT_COLUMN,
         position,
         sessionId: null,
+        harnessSessionId: null,
+        harnessSessionName: null,
+        harnessStatus: null,
+        claudePermissionMode: data.claudePermissionMode ?? null,
+        harnessCwd: null,
+        harnessBranch: null,
+        harnessCommit: null,
+        harnessWarning: null,
         runState: "unstarted",
         runStartedAt: null,
         error: null,
@@ -398,6 +459,7 @@ export class SqliteTaskStore implements TaskStore {
         archived: 0,
         completion: null,
         completionSource: null,
+        completionLocation: null,
         completedBy: null,
         createdAt: ts,
         updatedAt: ts,
@@ -420,12 +482,21 @@ export class SqliteTaskStore implements TaskStore {
       this.stmts.updateTaskFields.run({
         id: taskId,
         type: merged.type,
+        harness: merged.harness ?? "opencode",
         title: merged.title,
         description: merged.description,
         directory: merged.directory,
         column: merged.column,
         position: merged.position,
         sessionId: merged.sessionId ?? null,
+        harnessSessionId: merged.harnessSessionId ?? null,
+        harnessSessionName: merged.harnessSessionName ?? null,
+        harnessStatus: merged.harnessStatus ?? null,
+        claudePermissionMode: merged.claudePermissionMode ?? null,
+        harnessCwd: merged.harnessCwd ?? null,
+        harnessBranch: merged.harnessBranch ?? null,
+        harnessCommit: merged.harnessCommit ?? null,
+        harnessWarning: merged.harnessWarning ?? null,
         runState: merged.runState,
         runStartedAt: merged.runStartedAt ?? null,
         error: merged.error ?? null,
@@ -440,6 +511,7 @@ export class SqliteTaskStore implements TaskStore {
         archived: merged.archived ? 1 : 0,
         completion: merged.completion ? JSON.stringify(merged.completion) : null,
         completionSource: merged.completionSource ?? null,
+        completionLocation: merged.completionLocation ?? null,
         completedBy: merged.completedBy ?? null,
         updatedAt: this.now(),
       });

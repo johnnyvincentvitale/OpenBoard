@@ -12,10 +12,9 @@ current turn — never fabricate it.
 Intended flow for this session:
 
 1. Establish the board surface with the `startup` skill: select the named
-   instance or explicit board URL first, set/resolve OPENCODE_BOARD_URL for
-   that selection, then verify TUI/API/MCP alignment. The bundled
-   `openboard` MCP server should not be used until OPENCODE_BOARD_URL points
-   at the selected instance.
+   instance or explicit board URL first, prefer `openboard mcp --instance <name>`
+   for MCP binding, then verify TUI/API/MCP alignment. MCP must not silently
+   fall back to a default port.
 2. Once the board is proven, offer a repository readiness assessment:
    "Would you like me to assess your repository's readiness for agentic
    development?" If yes, run the `agent-readiness` skill and return the report.

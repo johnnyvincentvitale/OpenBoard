@@ -28,7 +28,9 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
     title: input.title as string,
     description: input.description as string,
     directory: input.directory as string,
+    harness: input.harness as Task["harness"],
     agent: input.agent as string | undefined,
+    claudePermissionMode: input.claudePermissionMode as Task["claudePermissionMode"],
     model: input.model as Task["model"],
     isolation: input.isolation as Task["isolation"],
     column: "todo",
@@ -97,6 +99,40 @@ describe("board client", () => {
       directory: `${CWD}/app`,
       agent: "build",
       model: { providerID: "opencode", id: "north-mini-code-free" },
+      isolation: "worktree",
+    });
+  });
+
+  it("creates claude-code tasks with a selected Claude Code model", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-claude", input), 201);
+    });
+    const options = makeOptions([`${CWD}/app`], fetchMock);
+    const client = createBoardClient(options);
+
+    const created = await client.createTask({
+      title: " Claude task ",
+      description: "Use Claude Code",
+      directory: "app",
+      harness: "claude-code",
+      agent: "plan",
+      claudePermissionMode: "auto",
+      model: "claude-code/sonnet",
+      isolation: "worktree",
+    });
+
+    expect(created.harness).toBe("claude-code");
+    expect(created.claudePermissionMode).toBe("auto");
+    expect(created.model).toEqual({ providerID: "claude-code", id: "sonnet" });
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      type: "agent",
+      harness: "claude-code",
+      title: "Claude task",
+      description: "Use Claude Code",
+      directory: `${CWD}/app`,
+      claudePermissionMode: "auto",
+      model: { providerID: "claude-code", id: "sonnet" },
       isolation: "worktree",
     });
   });
@@ -213,6 +249,12 @@ describe("board client", () => {
     );
     await expect(client.createTask({ title: "Bad isolation", isolation: "container" })).rejects.toThrow(
       "isolation must be 'worktree' or 'in-place'",
+    );
+    await expect(client.createTask({ title: "Bad Claude permission", claudePermissionMode: "root" })).rejects.toThrow(
+      "claudePermissionMode can only be set for claude-code agent tasks",
+    );
+    await expect(client.createTask({ title: "Bad Claude permission", harness: "claude-code", claudePermissionMode: "root" })).rejects.toThrow(
+      "claudePermissionMode must be a supported Claude Code permission mode",
     );
     await expect(client.createTask({ title: "Missing dir", directory: "missing" })).rejects.toThrow(
       `directory does not exist: ${CWD}/missing`,

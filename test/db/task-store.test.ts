@@ -127,6 +127,63 @@ describe("SqliteTaskStore", () => {
       expect(listed?.model).toEqual(model);
     });
 
+    it("round-trips claude-code harness metadata through create/update/list/get", () => {
+      const created = store.create(input({
+        harness: "claude-code",
+        agent: "plan",
+        claudePermissionMode: "bypassPermissions",
+      }));
+
+      expect(created.harness).toBe("claude-code");
+      expect(created.claudePermissionMode).toBe("bypassPermissions");
+      expect(created.model).toBeUndefined();
+
+      const updated = store.update(created.id, {
+        runState: "running",
+        harnessSessionId: "claude-session-1",
+        harnessSessionName: "openboard-task-1",
+        harnessStatus: "running",
+        harnessCwd: "/tmp/project/.claude/worktrees/task-1",
+        harnessBranch: "worktree-task-1",
+        harnessCommit: "abc1234",
+        harnessWarning: "Warning: target working tree has 2 uncommitted paths. Claude Code may isolate edits in its own worktree. Please commit before using Claude agents in this repo.",
+        completionLocation: "harness-directory",
+        claudePermissionMode: "manual",
+      });
+
+      expect(updated).toMatchObject({
+        harness: "claude-code",
+        harnessSessionId: "claude-session-1",
+        harnessSessionName: "openboard-task-1",
+        harnessStatus: "running",
+        harnessCwd: "/tmp/project/.claude/worktrees/task-1",
+        harnessBranch: "worktree-task-1",
+        harnessCommit: "abc1234",
+        harnessWarning: "Warning: target working tree has 2 uncommitted paths. Claude Code may isolate edits in its own worktree. Please commit before using Claude agents in this repo.",
+        completionLocation: "harness-directory",
+        claudePermissionMode: "manual",
+      });
+      expect(store.get(created.id)).toMatchObject({
+        harness: "claude-code",
+        harnessSessionId: "claude-session-1",
+        harnessSessionName: "openboard-task-1",
+        harnessStatus: "running",
+        harnessCwd: "/tmp/project/.claude/worktrees/task-1",
+        harnessBranch: "worktree-task-1",
+        harnessCommit: "abc1234",
+        harnessWarning: "Warning: target working tree has 2 uncommitted paths. Claude Code may isolate edits in its own worktree. Please commit before using Claude agents in this repo.",
+        completionLocation: "harness-directory",
+        claudePermissionMode: "manual",
+      });
+      expect(store.list().find((task) => task.id === created.id)).toMatchObject({
+        harness: "claude-code",
+        harnessSessionId: "claude-session-1",
+        harnessCwd: "/tmp/project/.claude/worktrees/task-1",
+        completionLocation: "harness-directory",
+        claudePermissionMode: "manual",
+      });
+    });
+
     it("round-trips a model with a variant", () => {
       const model: ModelRef = { id: "m", providerID: "p", variant: "thinking" };
       const created = store.create(input({ model }));

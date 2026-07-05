@@ -89,12 +89,16 @@ transcripts, logs, or debugging output. Treat OpenCode session history and logs
 as sensitive for the lifetime of the token, and rotate the token by restarting
 the board if those records are exposed.
 
-External clients, including the MCP server when used from an agent harness,
-must provide the token via the `OPENBOARD_API_TOKEN` environment variable:
+External clients must provide the token via the `OPENBOARD_API_TOKEN` environment
+variable. For MCP, prefer the named-instance wrapper so the token and board URL
+are injected automatically:
 
 ```
-OPENBOARD_API_TOKEN=<token> OPENCODE_BOARD_URL=http://127.0.0.1:4097 your-mcp-client
+openboard mcp --instance <name>
 ```
+
+Custom scripts that bypass the wrapper can still set `OPENBOARD_API_TOKEN` and
+`OPENCODE_BOARD_URL` directly.
 
 ### Rotating or resetting the token
 

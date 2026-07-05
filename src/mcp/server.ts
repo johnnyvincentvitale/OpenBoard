@@ -3,12 +3,10 @@
  * by the board's REST API (see `../client/board-client.ts`).
  *
  * Multi-instance: this server always talks to exactly one selected OpenBoard
- * adapter, resolved from `OPENCODE_BOARD_URL`. It does not fall back to a
- * default port; the orchestrator must select an instance first and set
- * `OPENCODE_BOARD_URL` to that instance's adapter URL, e.g.
- * `OPENCODE_BOARD_URL=http://127.0.0.1:4098`. Running against two instances at
- * once requires two separate MCP server processes/configs, each with its own
- * `OPENCODE_BOARD_URL`.
+ * adapter. Prefer `openboard mcp --instance <name>`, which injects the selected
+ * board URL, token, and instance identity. Manual `OPENCODE_BOARD_URL` remains
+ * supported for advanced callers. The server does not fall back to a default
+ * port when no board is selected.
  */
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -23,6 +21,7 @@ import {
   LinkTasksInputSchema,
   MoveTaskInputSchema,
   RetryTaskInputSchema,
+  SelectInstanceInputSchema,
   TaskIdInputSchema,
   abortTask,
   addNote,
@@ -31,13 +30,17 @@ import {
   commentTask,
   completeTask,
   createTask,
+  currentInstance,
   integrateTask,
   linkTasks,
   listAgents,
+  listInstances,
   listTasks,
   moveTask,
+  openboardStatus,
   retryTask,
   runTask,
+  selectInstance,
   syncTask,
   taskEvents,
   unlinkTasks,
@@ -47,11 +50,52 @@ import {
 const SERVER_VERSION = "0.1.0";
 
 export function createMcpServer(options: McpToolOptions = {}): McpServer {
-  const toolOptions: McpToolOptions = { ...options, requireExplicitBoardUrl: true };
+  let toolOptions: McpToolOptions = { ...options, requireExplicitBoardUrl: true, mcpStartedAt: options.mcpStartedAt ?? new Date().toISOString() };
   const server = new McpServer({
     name: "openboard",
     version: SERVER_VERSION,
   });
+
+  server.registerTool(
+    "openboard_status",
+    {
+      title: "OpenBoard MCP status",
+      description: "Report the selected board identity, reachability, and cheap board counts for orchestrator proof.",
+    },
+    async () => toToolResult(await openboardStatus(toolOptions)),
+  );
+
+  server.registerTool(
+    "current_instance",
+    {
+      title: "Current OpenBoard instance",
+      description: "Show the current MCP board target and how it was selected.",
+    },
+    async () => toToolResult(await currentInstance(toolOptions)),
+  );
+
+  server.registerTool(
+    "list_instances",
+    {
+      title: "List OpenBoard instances",
+      description: "List registered OpenBoard instances without exposing tokens.",
+    },
+    async () => toToolResult(await listInstances()),
+  );
+
+  server.registerTool(
+    "select_instance",
+    {
+      title: "Select OpenBoard instance",
+      description: "Switch this MCP server process to a running named instance for future tool calls.",
+      inputSchema: SelectInstanceInputSchema,
+    },
+    async (args) => {
+      const selected = await selectInstance(args, toolOptions);
+      toolOptions = selected.options;
+      return toToolResult({ boardUrl: selected.boardUrl, selection: selected.selection });
+    },
+  );
 
   server.registerTool(
     "create_task",

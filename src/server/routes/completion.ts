@@ -4,10 +4,12 @@ import type {
   BlockTaskBody,
   CompleteTaskBody,
   CompletionReport,
+  Task,
   TaskRunOutcome,
   TaskStore,
 } from "../../shared";
 import { AdapterError } from "../../shared/errors";
+import { inspectCompletionResult } from "../git-inspect";
 
 const END_OF_COLUMN = Number.POSITIVE_INFINITY;
 type CompletionBody = CompleteTaskBody | BlockTaskBody;
@@ -58,9 +60,14 @@ async function handleCompletion(
     const stored = store.setCompletion(id, report, "reported");
     if (!stored) throw AdapterError.notFound(`Task not found: ${id}`);
 
+    const completionMetadata = await completionPatch(task, report);
     const updated = store.update(id, {
       runState: outcome === "complete" ? "idle" : "error",
       error: outcome === "complete" ? undefined : payload.residualRisk,
+      ...completionMetadata,
+      ...(task.harness === "claude-code"
+        ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }
+        : {}),
     });
     if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
     store.addEvent({ taskId: id, type: outcome === "complete" ? "task_completed" : "task_blocked", body: { ...report } });
@@ -71,6 +78,23 @@ async function handleCompletion(
   } catch (err) {
     return respondWithError(c, err);
   }
+}
+
+async function completionPatch(
+  task: Task,
+  report: CompletionReport,
+): Promise<Partial<Omit<Task, "id" | "createdAt">>> {
+  if (task.harness !== "claude-code") return {};
+  const inspected = await inspectCompletionResult(task, report);
+  return {
+    completionLocation: inspected.completionLocation,
+    ...(inspected.harnessCwd ? { harnessCwd: inspected.harnessCwd } : {}),
+    ...(inspected.harnessBranch ? { harnessBranch: inspected.harnessBranch } : {}),
+    ...(inspected.harnessCommit ? { harnessCommit: inspected.harnessCommit } : {}),
+    ...(inspected.worktreePath ? { worktreePath: inspected.worktreePath } : {}),
+    ...(inspected.worktreeBranch ? { worktreeBranch: inspected.worktreeBranch } : {}),
+    ...(inspected.baseBranch ? { baseBranch: inspected.baseBranch } : {}),
+  };
 }
 
 function staleRunMessage(c: Context, runStartedAt: number | undefined): string | undefined {

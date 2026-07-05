@@ -18,6 +18,8 @@ import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import { eventLiveState, eventSessionId } from "./events/session-status";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
+import { ClaudeCodeRunner, type ClaudeCodeRunnerLike } from "./claude-code-runner";
+import { dirtyWarning, inspectGitDirectory } from "./git-inspect";
 import {
   isExternalDirectoriesAllowed,
   isUnderWorkspace,
@@ -61,6 +63,8 @@ export interface TaskDispatcherDeps {
   adapterBaseUrl?: string;
   /** Board API token, used in dispatched completion-report instructions. */
   boardToken?: string;
+  /** Claude Code background-session launcher for `claude-code` harness tasks. */
+  claudeRunner?: ClaudeCodeRunnerLike;
   /** Git worktree engine for isolated runs. Defaults to a real GitWorktreeManager. */
   worktrees?: WorktreeManager;
   /**
@@ -83,6 +87,8 @@ export interface TaskDispatcherDeps {
    * directory and must return an absolute, validated path.
    */
   resolveDirectory?: (raw: string) => string;
+  /** Named OpenBoard instance to expose to spawned Claude Code sessions. */
+  instanceName?: string;
 }
 
 /** Resolve the effective isolation for a task: its override, else the board default. */
@@ -200,6 +206,7 @@ export class TaskDispatcher implements Dispatcher {
   private readonly worktreeBaseDir: (repoRoot: string) => string;
   private readonly adapterBaseUrl: string;
   private readonly boardToken?: string;
+  private readonly claudeRunner: ClaudeCodeRunnerLike;
   private readonly workspace: string;
   private readonly allowExternalDirectories: boolean;
   private readonly resolveDirectory: (raw: string) => string;
@@ -216,6 +223,15 @@ export class TaskDispatcher implements Dispatcher {
     this.worktrees = deps.worktrees ?? new GitWorktreeManager();
     this.adapterBaseUrl = deps.adapterBaseUrl ?? "http://127.0.0.1:0";
     this.boardToken = deps.boardToken;
+    const envInstanceName = process.env.OPENBOARD_INSTANCE_NAME?.trim();
+    const instanceName = deps.instanceName ?? (envInstanceName || undefined);
+    this.claudeRunner =
+      deps.claudeRunner ??
+      new ClaudeCodeRunner({
+        adapterBaseUrl: this.adapterBaseUrl,
+        boardToken: this.boardToken,
+        instanceName,
+      });
     this.workspace = deps.workspace ?? resolveBoardWorkspace();
     this.allowExternalDirectories = deps.allowExternalDirectories ?? isExternalDirectoriesAllowed();
     this.worktreeBaseDir =
@@ -269,6 +285,10 @@ export class TaskDispatcher implements Dispatcher {
       }
       const wt = await this.ensureWorktree(task, execDirectory);
       execDirectory = this.resolveDirectory(wt.worktreePath);
+    }
+
+    if (task.harness === "claude-code") {
+      return this.runClaudeTask(task, execDirectory, task.description, "run");
     }
 
     // The legacy session/message surface is the one that actually wakes the
@@ -326,6 +346,56 @@ export class TaskDispatcher implements Dispatcher {
     if (!fresh) {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
+    return fresh;
+  }
+
+  private async runClaudeTask(
+    task: Task,
+    execDirectory: string,
+    prompt: string,
+    action: "run" | "retry",
+  ): Promise<Task> {
+    const runStartedAt = Date.now();
+    const warning = await dirtyWarning(execDirectory);
+    const gitInfo = await inspectGitDirectory(execDirectory);
+    try {
+      const launched = await this.claudeRunner[action]({
+        task,
+        directory: execDirectory,
+        prompt: this.withClaudePreflightContext(this.withParentHandoffs(task, prompt), warning),
+        runStartedAt,
+      });
+      this.store.update(task.id, {
+        sessionId: undefined,
+        harnessSessionId: launched.sessionId,
+        harnessSessionName: launched.sessionName,
+        harnessStatus: launched.status,
+        harnessCwd: execDirectory,
+        harnessBranch: gitInfo.branch,
+        harnessCommit: gitInfo.commit,
+        harnessWarning: warning,
+        runState: "running",
+        runStartedAt,
+        error: undefined,
+        pending: undefined,
+        completionLocation: undefined,
+      });
+      if (warning) {
+        this.store.addEvent({ taskId: task.id, type: "task_warning", body: { warning } });
+      }
+      this.store.move(task.id, "in_progress", END_OF_COLUMN);
+      this.startClaudeWatcher(task.id, launched.sessionName);
+    } catch (err) {
+      const updated = this.store.update(task.id, {
+        runState: "error",
+        error: errorMessage(err, "Failed to launch Claude Code background session"),
+      });
+      if (!updated) throw AdapterError.notFound(`Task not found: ${task.id}`);
+      return updated;
+    }
+
+    const fresh = this.store.get(task.id);
+    if (!fresh) throw AdapterError.notFound(`Task not found: ${task.id}`);
     return fresh;
   }
 
@@ -475,12 +545,24 @@ export class TaskDispatcher implements Dispatcher {
     return lines.join("\n").trimEnd();
   }
 
+  private withClaudePreflightContext(prompt: string, warning: string | undefined): string {
+    if (!warning) return prompt;
+    return `${prompt}\n\n---\nOPENBOARD PREFLIGHT WARNING\n${warning}\nIf you avoid the dirty target by using a Claude-managed worktree or branch, report the actual cwd, branch, and commit in your final OpenBoard report.`;
+  }
+
   async retry(taskId: string, feedback?: string): Promise<Task> {
     const task = this.store.get(taskId);
     if (!task) {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
     this.assertNotArchived(task, "retry");
+    if (task.harness === "claude-code") {
+      this.assertParentsSatisfied(task);
+      this.store.update(taskId, { completion: null, completionSource: null });
+      const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
+      return this.runClaudeTask(task, execDirectory, feedback ?? task.description, "retry");
+    }
+
     if (!task.sessionId) {
       throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
     }
@@ -537,6 +619,22 @@ export class TaskDispatcher implements Dispatcher {
 
   async abort(taskId: string): Promise<void> {
     const task = this.store.get(taskId);
+    if (task?.harness === "claude-code") {
+      if (task.harnessSessionName) {
+        this.cancelCompletionWatcher(task.harnessSessionName);
+        try {
+          await this.claudeRunner.abort(task.harnessSessionName);
+        } catch (err) {
+          this.store.update(taskId, {
+            runState: "error",
+            error: errorMessage(err, "Claude Code background abort failed"),
+          });
+          return;
+        }
+      }
+      this.store.update(taskId, { runState: "idle", harnessStatus: "aborted" });
+      return;
+    }
     if (!task || !task.sessionId) {
       return;
     }
@@ -574,6 +672,13 @@ export class TaskDispatcher implements Dispatcher {
     const watcher = { cancelled: false };
     this.completionWatchers.set(sessionId, watcher);
     void this.watchCompletion(taskId, sessionId, watcher);
+  }
+
+  private startClaudeWatcher(taskId: string, sessionName: string): void {
+    this.cancelCompletionWatcher(sessionName);
+    const watcher = { cancelled: false };
+    this.completionWatchers.set(sessionName, watcher);
+    void this.watchClaudeCompletion(taskId, sessionName, watcher);
   }
 
   private cancelCompletionWatcher(sessionId: string): void {
@@ -643,6 +748,94 @@ export class TaskDispatcher implements Dispatcher {
     } finally {
       if (this.completionWatchers.get(sessionId) === watcher) {
         this.completionWatchers.delete(sessionId);
+      }
+    }
+  }
+
+  private async watchClaudeCompletion(
+    taskId: string,
+    sessionName: string,
+    watcher: { cancelled: boolean },
+  ): Promise<void> {
+    const startedAt = Date.now();
+
+    try {
+      while (!watcher.cancelled) {
+        await sleep(COMPLETION_POLL_INTERVAL_MS);
+        if (watcher.cancelled) return;
+
+        const task = this.getTaskForWatcher(taskId);
+        if (!task || task.harness !== "claude-code" || task.harnessSessionName !== sessionName || task.runState !== "running") return;
+
+        if (Date.now() - startedAt > COMPLETION_WATCH_TIMEOUT_MS) {
+          this.updateTaskForWatcher(taskId, {
+            runState: "error",
+            error: "Timed out waiting for Claude Code background session completion",
+          });
+          return;
+        }
+
+        let status;
+        try {
+          status = await this.claudeRunner.poll(sessionName);
+        } catch {
+          continue;
+        }
+        if (!status) continue;
+
+        const metadata: Partial<Omit<Task, "id" | "createdAt">> = {
+          harnessStatus: status.status,
+          ...(status.cwd ? { harnessCwd: status.cwd } : {}),
+        };
+        if (status.cwd) {
+          const gitInfo = await inspectGitDirectory(status.cwd);
+          if (gitInfo.branch) metadata.harnessBranch = gitInfo.branch;
+          if (gitInfo.commit) metadata.harnessCommit = gitInfo.commit;
+          if (status.cwd !== task.directory && gitInfo.isRepo && gitInfo.branch) {
+            metadata.worktreePath = status.cwd;
+            metadata.worktreeBranch = gitInfo.branch;
+            if (!task.baseBranch) {
+              const taskGitInfo = await inspectGitDirectory(task.directory);
+              if (taskGitInfo.branch) metadata.baseBranch = taskGitInfo.branch;
+            }
+          }
+        }
+        this.updateTaskForWatcher(taskId, metadata);
+        if (!status.terminal) continue;
+
+        if (status.error) {
+          this.updateTaskForWatcher(taskId, {
+            runState: "error",
+            error: `Claude Code session ended with status: ${status.error}`,
+          });
+          return;
+        }
+
+        const beforeFallback = this.getTaskForWatcher(taskId);
+        if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
+          return;
+        }
+        if (
+          !this.updateTaskForWatcher(taskId, {
+            runState: "idle",
+            error: undefined,
+            completion: null,
+            completionSource: "idle-fallback",
+          })
+        ) {
+          return;
+        }
+        const fresh = this.getTaskForWatcher(taskId);
+        if (fresh && (fresh.column === "todo" || fresh.column === "in_progress")) {
+          const endOfReview = this.listTasksForWatcher().filter((t) => t.column === "review")
+            .length;
+          this.moveTaskForWatcher(taskId, "review", endOfReview);
+        }
+        return;
+      }
+    } finally {
+      if (this.completionWatchers.get(sessionName) === watcher) {
+        this.completionWatchers.delete(sessionName);
       }
     }
   }

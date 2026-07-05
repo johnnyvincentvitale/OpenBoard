@@ -5,8 +5,8 @@
  */
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { TASK_ROUTE_PATTERNS, TASK_ISOLATION_MODES, TASK_TYPES, USER_COMPLETED_BY, isColumn } from "../../shared";
-import type { CreateTaskInput, Dispatcher, ModelRef, RosterAgent, TaskIsolationMode, TaskStore } from "../../shared";
+import { CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, TASK_ROUTE_PATTERNS, TASK_HARNESSES, TASK_ISOLATION_MODES, TASK_TYPES, USER_COMPLETED_BY, isColumn } from "../../shared";
+import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
@@ -25,6 +25,14 @@ function isIsolationMode(value: unknown): value is TaskIsolationMode {
 
 function isTaskType(value: unknown): value is CreateTaskInput["type"] {
   return typeof value === "string" && (TASK_TYPES as readonly string[]).includes(value);
+}
+
+function isTaskHarness(value: unknown): value is TaskHarness {
+  return typeof value === "string" && (TASK_HARNESSES as readonly string[]).includes(value);
+}
+
+function isClaudePermissionMode(value: unknown): value is ClaudeCodePermissionMode {
+  return typeof value === "string" && (CLAUDE_CODE_PERMISSION_MODES as readonly string[]).includes(value);
 }
 
 interface RetryTaskBody {
@@ -59,6 +67,18 @@ export function registerTaskRoutes(
     return matched.model;
   }
 
+  function resolveClaudeModel(explicitModel: unknown): ModelRef | undefined {
+    if (explicitModel === undefined) return undefined;
+    const model = validateExplicitModel(explicitModel);
+    if (model.providerID !== CLAUDE_CODE_MODEL_PROVIDER) {
+      throw AdapterError.validation(`claude-code task model.providerID must be '${CLAUDE_CODE_MODEL_PROVIDER}'`);
+    }
+    if (model.variant !== undefined) {
+      throw AdapterError.validation("claude-code task models cannot define variant");
+    }
+    return model;
+  }
+
   app.post(TASK_ROUTE_PATTERNS.create, async (c) => {
     try {
       let body: Partial<CreateTaskInput>;
@@ -68,14 +88,18 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model, isolation, assignedTo } = body;
+      const { title, description, directory, agent, model, isolation, assignedTo, claudePermissionMode } = body;
       const taskType = body.type ?? "agent";
+      const harness = body.harness ?? "opencode";
 
       if (typeof title !== "string" || title.trim().length === 0) {
         throw AdapterError.validation("title must be a non-empty string");
       }
       if (!isTaskType(taskType)) {
         throw AdapterError.validation("type must be 'manual' or 'agent'");
+      }
+      if (!isTaskHarness(harness)) {
+        throw AdapterError.validation("harness must be 'opencode' or 'claude-code'");
       }
       if (typeof directory !== "string" || directory.trim().length === 0) {
         throw AdapterError.validation("directory must be a non-empty string");
@@ -89,6 +113,15 @@ export function registerTaskRoutes(
       if (taskType === "manual" && (agent !== undefined || model !== undefined)) {
         throw AdapterError.validation("manual tasks cannot define agent or model");
       }
+      if (taskType === "manual" && harness !== "opencode") {
+        throw AdapterError.validation("manual tasks cannot define harness");
+      }
+      if (claudePermissionMode !== undefined && !isClaudePermissionMode(claudePermissionMode)) {
+        throw AdapterError.validation("claudePermissionMode must be a supported Claude Code permission mode");
+      }
+      if (claudePermissionMode !== undefined && (taskType !== "agent" || harness !== "claude-code")) {
+        throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
+      }
 
       const workspace = resolveBoardWorkspace();
       const allowExternal = isExternalDirectoriesAllowed();
@@ -96,14 +129,20 @@ export function registerTaskRoutes(
         allowExternal,
       });
 
-      const resolvedModel = taskType === "agent" ? await resolveModel(agent, model) : undefined;
+      const resolvedModel = taskType === "agent"
+        ? harness === "opencode"
+          ? await resolveModel(agent, model)
+          : resolveClaudeModel(model)
+        : undefined;
 
       const task = store.create({
         type: taskType,
+        ...(taskType === "agent" ? { harness } : {}),
         title,
         description: typeof description === "string" ? description : "",
         directory: canonicalDirectory,
-        ...(taskType === "agent" && typeof agent === "string" ? { agent } : {}),
+        ...(taskType === "agent" && harness === "opencode" && typeof agent === "string" ? { agent } : {}),
+        ...(taskType === "agent" && harness === "claude-code" && isClaudePermissionMode(claudePermissionMode) ? { claudePermissionMode } : {}),
         ...(taskType === "manual" && typeof assignedTo === "string" && assignedTo.trim() ? { assignedTo: assignedTo.trim() } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),

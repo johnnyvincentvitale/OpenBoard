@@ -13,6 +13,8 @@ import {
   listAgents,
   listTasks,
   moveTask,
+  currentInstance,
+  openboardStatus,
   resolveBoardUrl,
   retryTask,
   runTask,
@@ -25,6 +27,14 @@ import type { RosterAgent, Task } from "../../src/shared";
 
 const CWD = "/tmp/openboard-project";
 const NO_AUTH_ENV = { OPENBOARD_API_TOKEN: "" };
+const SELECTED_ENV = {
+  OPENCODE_BOARD_URL: "http://127.0.0.1:4999",
+  OPENBOARD_API_TOKEN: "secret-token",
+  OPENBOARD_INSTANCE_NAME: "alpha",
+  OPENBOARD_INSTANCE_WORKSPACE: "/repo/alpha",
+  OPENBOARD_INSTANCE_DB_PATH: "/data/alpha/board.sqlite",
+  OPENBOARD_SELECTION_SOURCE: "cli --instance",
+};
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -44,7 +54,9 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
     title: input.title as string,
     description: input.description as string,
     directory: input.directory as string,
+    harness: input.harness as Task["harness"],
     agent: input.agent as string | undefined,
+    claudePermissionMode: input.claudePermissionMode as Task["claudePermissionMode"],
     assignedTo: input.assignedTo as string | undefined,
     model: input.model as Task["model"],
     isolation: input.isolation as Task["isolation"],
@@ -174,6 +186,48 @@ describe("MCP add_tasks", () => {
         }),
       }),
     );
+  });
+
+  it("creates claude-code tasks through POST /api/tasks", async () => {
+    const options = makeOptions([`${CWD}/app`]);
+
+    const result = await addTasks(
+      {
+        tasks: [
+          {
+            title: " Claude worker ",
+            description: "Launch Claude Code",
+            directory: `${CWD}/app`,
+            harness: "claude-code",
+            agent: "plan",
+            claudePermissionMode: "bypassPermissions",
+            model: "claude-code/sonnet",
+            isolation: "worktree",
+          },
+        ],
+      },
+      options,
+    );
+
+    expect(result.created[0]).toMatchObject({
+      id: "task-1",
+      type: "agent",
+      harness: "claude-code",
+      title: "Claude worker",
+      claudePermissionMode: "bypassPermissions",
+      model: { providerID: "claude-code", id: "sonnet" },
+      isolation: "worktree",
+    });
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      type: "agent",
+      harness: "claude-code",
+      title: "Claude worker",
+      description: "Launch Claude Code",
+      directory: `${CWD}/app`,
+      claudePermissionMode: "bypassPermissions",
+      model: { providerID: "claude-code", id: "sonnet" },
+      isolation: "worktree",
+    });
   });
 
   it("creates multiple tasks without calling any run endpoint", async () => {
@@ -349,6 +403,73 @@ describe("MCP orchestrator tools", () => {
 
     await expect(integrateTask({ taskId: "task-1", targetBranch: "main" }, options)).rejects.toThrow();
     expect(options.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to 4097 when MCP requires an explicit board selection", async () => {
+    const options = makeOptions([CWD]);
+    options.requireExplicitBoardUrl = true;
+    options.env = {};
+
+    await expect(runTask({ taskId: "task-1" }, options)).rejects.toThrow("No OpenBoard instance selected");
+    expect(options.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reports current instance selection without exposing tokens", async () => {
+    const result = await currentInstance({ env: SELECTED_ENV, requireExplicitBoardUrl: true });
+
+    expect(result).toEqual({
+      boardUrl: "http://127.0.0.1:4999",
+      selection: {
+        selected: true,
+        source: "cli --instance",
+        instanceName: "alpha",
+        boardUrl: "http://127.0.0.1:4999",
+        workspace: "/repo/alpha",
+        dbPath: "/data/alpha/board.sqlite",
+        boardTokenPresent: true,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("secret-token");
+  });
+
+  it("reports openboard_status with health identity and cheap counts", async () => {
+    const health = {
+      adapter: "ok",
+      opencode: { status: "ok", version: "1.2.3" },
+      identity: {
+        instanceName: "alpha",
+        boardUrl: "http://127.0.0.1:4999",
+        port: 4999,
+        workspace: "/repo/alpha",
+        dbPath: "/data/alpha/board.sqlite",
+        boardTokenPresent: true,
+      },
+    };
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/health") return jsonResponse(health);
+      if (path === "/api/agents") return jsonResponse([{ id: "build", mode: "primary" }]);
+      if (path === "/api/tasks") return jsonResponse([task]);
+      return jsonResponse({});
+    });
+
+    const result = await openboardStatus({
+      fetch: fetchMock as McpToolOptions["fetch"],
+      cwd: CWD,
+      env: SELECTED_ENV,
+      requireExplicitBoardUrl: true,
+      mcpStartedAt: "2026-07-04T00:00:00.000Z",
+    });
+
+    expect(result).toMatchObject({
+      boardUrl: "http://127.0.0.1:4999",
+      apiReachable: true,
+      agentCount: 1,
+      taskCount: 1,
+      mcpStartedAt: "2026-07-04T00:00:00.000Z",
+      selection: { instanceName: "alpha", boardTokenPresent: true },
+    });
+    expect(JSON.stringify(result)).not.toContain("secret-token");
   });
 });
 

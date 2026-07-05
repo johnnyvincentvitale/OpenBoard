@@ -11,6 +11,7 @@ import type {
 import { runOpenboard } from "../../src/cli/openboard";
 import type {
   AttachContext,
+  McpContext,
   OutStream,
 } from "../../src/cli/openboard";
 import type { InstanceLifecycleProvider } from "../../src/cli/provider";
@@ -20,6 +21,7 @@ const DEFAULT_DEFINITION: InstanceDefinition = {
   port: 4097,
   workspace: "/home/alice/repos/my-project",
   dbPath: "my-project.sqlite",
+  boardToken: "token-1",
 };
 
 const RUNNING_RUNTIME: InstanceRuntimeState = {
@@ -89,11 +91,13 @@ async function run(
   provider: InstanceLifecycleProvider,
   attach: (ctx: AttachContext) => Promise<number> = () => Promise.resolve(0),
   selector: (ctx: { repoRoot: string }) => Promise<number> = () => Promise.resolve(0),
+  mcp: (ctx: McpContext) => Promise<number> = () => Promise.resolve(0),
 ) {
   const streams = captureStreams();
   const code = await runOpenboard(argv, {
     provider,
     attach,
+    mcp,
     selector,
     stdout: streams.stdout,
     stderr: streams.stderr,
@@ -416,6 +420,50 @@ describe("openboard attach", () => {
     const { code, err } = await run(["attach"], provider);
     expect(code).toBe(1);
     expect(err).toContain("No default instance");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp
+// ---------------------------------------------------------------------------
+
+describe("openboard mcp", () => {
+  it("starts MCP for a named running instance without starting it", async () => {
+    const mcp = vi.fn().mockResolvedValue(0);
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+    });
+
+    const { code } = await run(["mcp", "--instance", "my-project"], provider, undefined, undefined, mcp);
+
+    expect(code).toBe(0);
+    expect(provider.start).not.toHaveBeenCalled();
+    expect(mcp).toHaveBeenCalledWith({
+      repoRoot: expect.any(String) as unknown,
+      definition: DEFAULT_DEFINITION,
+      runtime: RUNNING_RUNTIME,
+    });
+  });
+
+  it("requires --instance", async () => {
+    const provider = mockProvider();
+    const { code, err } = await run(["mcp"], provider);
+
+    expect(code).toBe(1);
+    expect(err).toContain("mcp requires --instance");
+  });
+
+  it("refuses stopped instances", async () => {
+    const mcp = vi.fn().mockResolvedValue(0);
+    const provider = mockProvider({ getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME) });
+
+    const { code, err } = await run(["mcp", "--instance", "my-project"], provider, undefined, undefined, mcp);
+
+    expect(code).toBe(1);
+    expect(err).toContain("is stopped");
+    expect(err).toContain("openboard start my-project");
+    expect(provider.start).not.toHaveBeenCalled();
+    expect(mcp).not.toHaveBeenCalled();
   });
 });
 

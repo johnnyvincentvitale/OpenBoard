@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { OpencodeEvent, Task } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { TaskDispatcher } from "../../src/server/dispatcher";
+import type { ClaudeCodeRunnerLike } from "../../src/server/claude-code-runner";
 import { cleanupTestWorkspace, setupTestWorkspace } from "./test-workspace";
 
 async function* makeAsyncGenerator<T>(items: T[]): AsyncGenerator<T> {
@@ -101,6 +102,28 @@ class FakeOpencodeClient {
       this.subscribeCallCount += 1;
       return { stream: makeAsyncGenerator(script) };
     },
+  };
+}
+
+function makeClaudeRunner(): ClaudeCodeRunnerLike & {
+  run: ReturnType<typeof vi.fn>;
+  retry: ReturnType<typeof vi.fn>;
+  poll: ReturnType<typeof vi.fn>;
+  abort: ReturnType<typeof vi.fn>;
+} {
+  return {
+    run: vi.fn(async () => ({
+      sessionId: "claude-session-1",
+      sessionName: "openboard-task-claude",
+      status: "running",
+    })),
+    retry: vi.fn(async () => ({
+      sessionId: "claude-session-2",
+      sessionName: "openboard-task-claude-retry",
+      status: "running",
+    })),
+    poll: vi.fn(async () => undefined),
+    abort: vi.fn(async () => undefined),
   };
 }
 
@@ -202,6 +225,38 @@ describe("TaskDispatcher", () => {
       expect(persisted?.sessionId).toBe("ses_abc123");
       expect(persisted?.runState).toBe("running");
       expect(persisted?.column).toBe("in_progress");
+    });
+
+    it("launches claude-code tasks through the Claude runner instead of OpenCode sessions", async () => {
+      const task = store.create({
+        title: "Claude lane",
+        description: "Use Claude Code",
+        directory: myProjectDir,
+        harness: "claude-code",
+        agent: "plan",
+      });
+      const claudeRunner = makeClaudeRunner();
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+
+      const result = await dispatcher.run(task.id);
+
+      expect(client.createCalls).toHaveLength(0);
+      expect(client.promptCalls).toHaveLength(0);
+      expect(claudeRunner.run).toHaveBeenCalledWith({
+        task: expect.objectContaining({ id: task.id, harness: "claude-code" }),
+        directory: myProjectDir,
+        prompt: "Use Claude Code",
+        runStartedAt: expect.any(Number),
+      });
+      expect(result).toMatchObject({
+        id: task.id,
+        column: "in_progress",
+        runState: "running",
+        harnessSessionId: "claude-session-1",
+        harnessSessionName: "openboard-task-claude",
+        harnessStatus: "running",
+      });
+      expect(result.sessionId).toBeUndefined();
     });
 
     it("passes the stored task.model to both session.create and session.prompt", async () => {
@@ -727,6 +782,40 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)?.completionSource).toBeNull();
     });
 
+    it("relaunches claude-code tasks through the Claude runner retry hook", async () => {
+      const task = store.create({
+        title: "Claude retry",
+        description: "Original Claude work",
+        directory: projectDir,
+        harness: "claude-code",
+        agent: "plan",
+      });
+      store.move(task.id, "review", 0);
+      store.update(task.id, {
+        runState: "idle",
+        harnessSessionId: "old-claude-session",
+        harnessSessionName: "old-claude-name",
+      });
+      const claudeRunner = makeClaudeRunner();
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+
+      const result = await dispatcher.retry(task.id, "Retry in Claude");
+
+      expect(client.promptCalls).toHaveLength(0);
+      expect(claudeRunner.retry).toHaveBeenCalledWith({
+        task: expect.objectContaining({ id: task.id, harness: "claude-code" }),
+        directory: projectDir,
+        prompt: "Retry in Claude",
+        runStartedAt: expect.any(Number),
+      });
+      expect(result).toMatchObject({
+        column: "in_progress",
+        runState: "running",
+        harnessSessionId: "claude-session-2",
+        harnessSessionName: "openboard-task-claude-retry",
+      });
+    });
+
     it("throws AdapterError.notFound when the task doesn't exist", async () => {
       dispatcher = new TaskDispatcher({ client: client as never, store });
       await expect(dispatcher.retry("task_missing")).rejects.toMatchObject({
@@ -768,6 +857,31 @@ describe("TaskDispatcher", () => {
       await dispatcher.abort(task.id);
 
       expect(client.abortCalls).toEqual([]);
+    });
+
+    it("aborts claude-code tasks through the Claude runner", async () => {
+      const task = store.create({
+        title: "Claude abort",
+        description: "Stop Claude",
+        directory: projectDir,
+        harness: "claude-code",
+      });
+      store.update(task.id, {
+        runState: "running",
+        harnessSessionName: "openboard-task-claude",
+        harnessStatus: "running",
+      });
+      const claudeRunner = makeClaudeRunner();
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+
+      await dispatcher.abort(task.id);
+
+      expect(client.abortCalls).toEqual([]);
+      expect(claudeRunner.abort).toHaveBeenCalledWith("openboard-task-claude");
+      expect(store.get(task.id)).toMatchObject({
+        runState: "idle",
+        harnessStatus: "aborted",
+      });
     });
 
     it("is a no-op when the task doesn't exist", async () => {

@@ -82,12 +82,13 @@ profiles, then dispatch and verify.
 
 ## Components
 
-- **Bundled MCP server** (`.mcp.json`) — a local `openboard` server that auto-connects to the
-  board and exposes guarded orchestrator tools for task create/list, dependencies, run/retry/
+- **Bundled MCP server** (`.mcp.json`) — a local `openboard` server that binds to the
+  selected board and exposes guarded orchestrator tools for task create/list, dependencies, run/retry/
   abort/move, structured complete/block reports, sync/integrate, comments, and task events.
-  Reads `OPENCODE_BOARD_URL`; in multi-instance workflows, select an instance first and set
-  that URL explicitly. It does not assume a default board port. `integrate_task` requires
-  `confirmReviewed: true`; Done moves require explicit `completedBy`.
+  In multi-instance workflows, start it with `openboard mcp --instance <name>` so the CLI injects
+  the selected board URL and token. It does not assume a default board port. `openboard_status`
+  proves the controlled instance. `integrate_task` requires `confirmReviewed: true`; Done moves
+  require explicit `completedBy`.
 - **SessionStart hook** (`hooks/`) — frames a fresh session as the orchestrator
   cockpit and injects the flow in SessionStart-capable harnesses. Claude Code uses
   this path, and Codex CLI plugin sessions have been observed to follow it too.
@@ -111,15 +112,14 @@ and orchestrate it. Nothing dispatches or integrates without your approval.
 ### Auth token
 
 If the selected OpenBoard instance requires authentication (the default after the
-security hardening), the MCP server process must receive the per-instance
-board token. The easiest way is to set the token in the process environment
-before launching the agent harness:
+security hardening), start MCP through the named-instance wrapper so the board URL,
+instance name, and per-instance token are injected automatically:
 
 ```sh
-export OPENBOARD_API_TOKEN=<instance-token>
-export OPENCODE_BOARD_URL=http://127.0.0.1:4097
+openboard mcp --instance <name>
 ```
 
-The bundled MCP server reads `OPENBOARD_API_TOKEN` and sends it as a bearer
-token on board API requests. Local OpenBoard clients (TUI and CLI) inject the
-token automatically.
+Manual `OPENBOARD_API_TOKEN` + `OPENCODE_BOARD_URL` remains available for custom
+scripts, but normal plugin use should not require env export. The bundled MCP
+server sends the token as a bearer token on board API requests and never exposes
+the token through status tools.

@@ -50,8 +50,9 @@ export function createApp(deps: AppDeps): Hono {
   );
 
   // Health route is deliberately unauthenticated so boot-time probes work
-  // without a token. It reports adapter + upstream OpenCode reachability only.
-  registerHealthRoutes(app, { client: deps.client });
+  // without a token. It reports adapter, upstream OpenCode reachability, and
+  // non-secret board identity for MCP/TUI/CLI disambiguation.
+  registerHealthRoutes(app, { client: deps.client, identity: deps.sourceInstance, boardTokenPresent: Boolean(deps.boardToken) });
 
   // All remaining API routes require the board token.
   const auth = requireBoardToken(deps.boardToken);

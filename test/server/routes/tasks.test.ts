@@ -243,6 +243,117 @@ describe("POST /api/tasks", () => {
     expect(store.get(body.id)?.type).toBe("manual");
   });
 
+  it("creates a claude-code agent task without resolving an OpenCode model", async () => {
+    const app = buildApp(store, dispatcher, async () => {
+      throw new Error("roster should not be fetched for Claude Code tasks");
+    });
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "agent",
+        harness: "claude-code",
+        title: "Claude worker",
+        description: "Use Claude Code",
+        directory: repoDir,
+        agent: "plan",
+        claudePermissionMode: "auto",
+        isolation: "worktree",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Task;
+    expect(body.harness).toBe("claude-code");
+    expect(body.agent).toBeUndefined();
+    expect(body.claudePermissionMode).toBe("auto");
+    expect(body.model).toBeUndefined();
+    expect(store.get(body.id)?.harness).toBe("claude-code");
+    expect(store.get(body.id)?.agent).toBeUndefined();
+    expect(store.get(body.id)?.claudePermissionMode).toBe("auto");
+  });
+
+  it("rejects claude-code permission modes outside Claude Code tasks", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad permission",
+        directory: repoDir,
+        claudePermissionMode: "bypassPermissions",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("claudePermissionMode can only be set for claude-code agent tasks");
+  });
+
+  it("rejects unknown claude-code permission modes", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        harness: "claude-code",
+        title: "Bad permission",
+        directory: repoDir,
+        claudePermissionMode: "root",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("claudePermissionMode must be a supported Claude Code permission mode");
+  });
+
+  it("creates a claude-code agent task with a Claude Code model", async () => {
+    const app = buildApp(store, dispatcher, async () => {
+      throw new Error("roster should not be fetched for Claude Code tasks");
+    });
+
+    const model = { providerID: "claude-code", id: "sonnet" };
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        harness: "claude-code",
+        title: "Claude model worker",
+        directory: repoDir,
+        model,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Task;
+    expect(body.harness).toBe("claude-code");
+    expect(body.model).toEqual(model);
+    expect(store.get(body.id)?.model).toEqual(model);
+  });
+
+  it("rejects claude-code tasks with a non-Claude model provider", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        harness: "claude-code",
+        title: "Bad Claude worker",
+        directory: repoDir,
+        model: { providerID: "opencode", id: "north-mini-code-free" },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("claude-code task model.providerID must be 'claude-code'");
+  });
+
   it("rejects manual tasks with agent metadata", async () => {
     const app = buildApp(store, dispatcher);
 

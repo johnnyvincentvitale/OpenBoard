@@ -30,7 +30,7 @@ Follow this sequence before any OpenBoard work:
 
 1. Treat this session as an OpenBoard cockpit, not a normal coding/chat session.
 2. Prove board state first with `startup`: identify the selected named instance
-   or explicit board URL, set/resolve `OPENCODE_BOARD_URL` for that selection,
+   or explicit board URL, prefer `openboard mcp --instance <name>` for MCP binding,
    verify API/MCP/GUI/TUI alignment, and confirm this session is looking at the
    same board and task store the user sees.
 3. Do not dispatch work or judge cards until the board surface is established.
@@ -103,11 +103,16 @@ Label all evidence from this surface as browser/dev-server evidence.
 
 ## MCP Readiness
 
-The plugin bundles a local `openboard` MCP server (`.mcp.json`) that auto-connects
-to the board named by `OPENCODE_BOARD_URL`. In multi-instance workflows, MCP is
-usable only after `OPENCODE_BOARD_URL` points at the selected instance's adapter
-URL. It exposes guarded orchestrator tools for board control:
+The plugin bundles a local `openboard` MCP server (`.mcp.json`). In normal
+multi-instance workflows, start MCP through `openboard mcp --instance <name>` so
+the CLI injects `OPENCODE_BOARD_URL`, `OPENBOARD_API_TOKEN`, and
+`OPENBOARD_INSTANCE_NAME` for the selected running instance. Manual
+`OPENCODE_BOARD_URL` remains an advanced escape hatch, but MCP must never probe
+or silently fall back to `4097`. It exposes guarded orchestrator tools for board
+control:
 
+- `openboard_status` — proves selected instance/URL, workspace, DB identity, API reachability, and cheap counts.
+- `current_instance`, `list_instances`, `select_instance` — inspect/switch explicit named-instance targets.
 - `list_agents` — should match `GET /api/agents` (the assignable roster).
 - `list_tasks` — should match `GET /api/tasks` (avoid duplicate cards).
 - `create_task` / `add_tasks` — create manual or agent cards visible in the GUI.
@@ -119,13 +124,12 @@ URL. It exposes guarded orchestrator tools for board control:
 
 Verify the MCP client points at the same selected board the user is viewing:
 `list_tasks` over MCP must match the visible cards and the selected instance's
-`GET /api/tasks`. If MCP reports "Open OpenBoard first or set
-OPENCODE_BOARD_URL" while a named instance is running on another port, do not
-fall back to `4097`; set `OPENCODE_BOARD_URL` for the selected instance or use
-the adapter API directly and state that MCP was not the control path. The MCP
-server requires the board to be running and the built `dist/mcp/server.mjs`
-bundle. MCP Done moves require explicit `completedBy`; the tool layer must not
-silently default completion attribution.
+`GET /api/tasks`. If MCP reports no selected instance, use `list_instances` or
+`openboard list`, then restart MCP with `openboard mcp --instance <name>` or call
+`select_instance({ name })` for an already-running instance. The MCP server
+requires the board to be running and the built `dist/mcp/server.mjs` bundle. MCP
+Done moves require explicit `completedBy`; the tool layer must not silently
+default completion attribution.
 
 If MCP is unavailable, use the adapter API directly and state that MCP was not the control path.
 

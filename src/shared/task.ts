@@ -23,6 +23,20 @@ export type TaskIsolationMode = (typeof TASK_ISOLATION_MODES)[number];
 export const TASK_TYPES = ["manual", "agent"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
+export const TASK_HARNESSES = ["opencode", "claude-code"] as const;
+export type TaskHarness = (typeof TASK_HARNESSES)[number];
+
+export const CLAUDE_CODE_MODEL_PROVIDER = "claude-code" as const;
+export const CLAUDE_CODE_MODEL_IDS = ["sonnet", "opus", "fable"] as const;
+export type ClaudeCodeModelId = (typeof CLAUDE_CODE_MODEL_IDS)[number];
+
+export const CLAUDE_CODE_PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"] as const;
+export type ClaudeCodePermissionMode = (typeof CLAUDE_CODE_PERMISSION_MODES)[number];
+export const DEFAULT_CLAUDE_CODE_PERMISSION_MODE: ClaudeCodePermissionMode = "bypassPermissions";
+
+export const TASK_COMPLETION_LOCATIONS = ["task-directory", "harness-directory", "mixed", "missing", "none"] as const;
+export type TaskCompletionLocation = (typeof TASK_COMPLETION_LOCATIONS)[number];
+
 export type TaskRunOutcome = "complete" | "blocked";
 
 export interface CompletionVerification {
@@ -83,6 +97,11 @@ export interface ModelRef {
   variant?: string;
 }
 
+export const CLAUDE_CODE_MODELS: readonly ModelRef[] = CLAUDE_CODE_MODEL_IDS.map((id) => ({
+  providerID: CLAUDE_CODE_MODEL_PROVIDER,
+  id,
+}));
+
 export interface Task {
   id: string;
   /** Manual/PM cards are tracked but cannot be dispatched until converted to agent cards. */
@@ -94,6 +113,10 @@ export interface Task {
   directory: string;
   /** Which OpenCode agent (roster entry) executes this task. */
   agent?: string;
+  /** Worker harness that launches agent tasks. Defaults to OpenCode for older rows. */
+  harness?: TaskHarness;
+  /** Claude Code permission mode for Claude-harness agent tasks. */
+  claudePermissionMode?: ClaudeCodePermissionMode;
   /** Human assignee for manual/PM cards. */
   assignedTo?: string;
   /** Model the dispatched session runs on. For new tasks with an assigned agent and no explicit model, the create route resolves this from the live roster. */
@@ -103,6 +126,17 @@ export interface Task {
   position: number;
   /** The OpenCode session executing this task, once run. */
   sessionId?: string;
+  /** Harness-owned session identifier/name for non-OpenCode workers. */
+  harnessSessionId?: string;
+  harnessSessionName?: string;
+  harnessStatus?: string;
+  /** Actual runtime cwd reported by a non-OpenCode harness, which may differ from task.directory. */
+  harnessCwd?: string;
+  /** Branch/commit observed in the harness runtime cwd, when it is a git worktree. */
+  harnessBranch?: string;
+  harnessCommit?: string;
+  /** Preflight/runtime warning from the harness, shown to the operator. */
+  harnessWarning?: string;
   runState: TaskRunState;
   /** Epoch ms of the most recent transition into `running` (kept after the run ends). */
   runStartedAt?: number;
@@ -125,6 +159,8 @@ export interface Task {
   completion?: CompletionReport | null;
   /** Whether completion was agent-reported or synthesized from idle fallback. */
   completionSource?: CompletionSource | null;
+  /** Where the reported changed files were found when the completion report landed. */
+  completionLocation?: TaskCompletionLocation | null;
   /**
    * Attribution for how the card reached Done: "User" when moved manually,
    * an agent identifier when moved by the orchestrator/dispatcher, or unset if
@@ -154,10 +190,12 @@ export type TaskPending = (typeof TASK_PENDING)[number];
 
 export interface CreateTaskInput {
   type?: TaskType;
+  harness?: TaskHarness;
   title: string;
   description: string;
   directory: string;
   agent?: string;
+  claudePermissionMode?: ClaudeCodePermissionMode;
   assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;

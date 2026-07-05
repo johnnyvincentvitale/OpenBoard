@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import type { Column, CompletionReport, ModelRef, RosterAgent, Task, TaskIsolationMode, TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type RosterAgent, type Task, type TaskHarness, type TaskIsolationMode, type TaskType } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
 import {
@@ -55,7 +55,7 @@ import {
 import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
 import { createRootLifecycle } from "./root-lifecycle";
 import { buildWordmarkRows } from "./wordmark";
-import { RGBA, type KeyEvent, type ScrollBoxOptions, type VChild } from "@opentui/core";
+import { RGBA, type KeyEvent, type PasteEvent, type ScrollBoxOptions, type VChild } from "@opentui/core";
 
 type OpenTui = typeof import("@opentui/core");
 type TuiColor = string | RGBA;
@@ -245,10 +245,13 @@ function textBg(color: TuiColor): { bg: TuiColor } | Record<string, never> {
   return SAFE_COLOR_MODE ? {} : { bg: color };
 }
 
-const AGENT_FIELD_ORDER = ["type", "title", "description", "agent", "model", "directory", "isolation"] as const;
+const AGENT_FIELD_ORDER = ["type", "title", "description", "harness", "agent", "model", "directory", "isolation"] as const;
+const CLAUDE_FIELD_ORDER = ["type", "title", "description", "harness", "permissionMode", "model", "directory", "isolation"] as const;
 const MANUAL_FIELD_ORDER = ["type", "title", "description", "assignedTo"] as const;
+const TEXT_INPUT_COLUMNS = 56;
 type Overlay = "none" | "help" | "newTask" | "addInstance" | "renameInstance";
-type NewTaskField = (typeof AGENT_FIELD_ORDER)[number] | (typeof MANUAL_FIELD_ORDER)[number];
+type NewTaskField = (typeof AGENT_FIELD_ORDER)[number] | (typeof CLAUDE_FIELD_ORDER)[number] | (typeof MANUAL_FIELD_ORDER)[number];
+type TextInputField = Extract<NewTaskField, "title" | "description" | "directory" | "assignedTo">;
 type AddInstanceField = "name" | "workspace";
 type RenameInstanceField = "newName";
 
@@ -294,11 +297,16 @@ interface NewTaskDraft {
   title: string;
   description: string;
   directory: string;
+  harness: TaskHarness;
   agentId: string;
+  claudePermissionMode: ClaudeCodePermissionMode;
   assignedTo: string;
   model?: ModelRef;
   isolation: TaskIsolationMode;
   field: NewTaskField;
+  textCursors?: Partial<Record<TextInputField, number>>;
+  textScrolls?: Partial<Record<TextInputField, number>>;
+  textSelection?: { field: TextInputField; start: number; end: number };
   submitting: boolean;
   error?: string;
 }
@@ -880,6 +888,10 @@ export async function runOpenBoardTui(
       setError(error, "key handling failed");
       render();
     });
+  });
+
+  renderer.keyInput.on("paste", (event) => {
+    handlePaste(event, state, { render });
   });
 
   renderer.on("resize", () => render());
@@ -2031,7 +2043,16 @@ function renderTask(ui: OpenTui, state: TuiState, task: Task) {
 // the working dir and its agent.
 function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   const dir: MetaRow = { label: "DIR", value: shortPath(task.directory), color: COLORS.muted };
-  const agent: MetaRow = { label: "AGENT", value: task.agent ?? "agent", color: COLORS.muted };
+  const agent: MetaRow = {
+    label: task.harness === "claude-code" ? "CLAUDE" : "AGENT",
+    value: task.agent ?? "agent",
+    color: COLORS.muted,
+  };
+  const model: MetaRow = {
+    label: "MODEL",
+    value: task.harness === "claude-code" ? task.model?.id ?? "default" : modelLabel(task.model),
+    color: COLORS.muted,
+  };
   const type: MetaRow = { label: "TYPE", value: task.type ?? "agent", color: COLORS.muted };
   const assigned: MetaRow = { label: "ASSIGN", value: task.assignedTo ?? "unassigned", color: COLORS.muted };
 
@@ -2040,6 +2061,9 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   }
   if (task.type === "manual") {
     return [type, assigned];
+  }
+  if (task.harness === "claude-code") {
+    return [{ label: "PERMS", value: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE, color: COLORS.muted }, model];
   }
   if (task.column === "done" && task.completionSource === "reported") {
     const second = task.worktreeBranch
@@ -2114,7 +2138,19 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
     ...(task.type === "manual"
       ? [{ label: "ASSIGNED TO", value: task.assignedTo ?? "unassigned", color: COLORS.text }]
       : [
-          { label: "AGENT", value: agentLabel(task, state.agents), color: COLORS.text },
+          { label: task.harness === "claude-code" ? "HARNESS" : "AGENT", value: agentLabel(task, state.agents), color: COLORS.text },
+          ...(task.harness === "claude-code"
+            ? [
+                { label: "PERMS", value: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE, color: COLORS.text },
+                ...(task.harnessWarning ? [{ label: "WARN", value: task.harnessWarning, color: COLORS.bright }] : []),
+                ...(task.harnessCwd && task.harnessCwd !== task.directory
+                  ? [{ label: "RUN DIR", value: shortPath(task.harnessCwd), color: COLORS.bright }]
+                  : []),
+                ...(task.harnessBranch ? [{ label: "RUN BRANCH", value: `⑃ ${task.harnessBranch}`, color: COLORS.muted }] : []),
+                ...(task.harnessCommit ? [{ label: "RUN COMMIT", value: task.harnessCommit, color: COLORS.muted }] : []),
+                ...(task.completionLocation ? [{ label: "RESULT", value: resultLocationLabel(task.completionLocation), color: COLORS.text }] : []),
+              ]
+            : []),
           { label: "MODEL", value: modelLabel(task.model), color: COLORS.text },
           { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
           { label: "ISO", value: task.isolation ?? "board default", color: COLORS.text },
@@ -2155,6 +2191,21 @@ function worktreeId(task: Pick<Task, "id" | "worktreePath" | "worktreeBranch">):
   if (task.worktreePath) return task.worktreePath.split("/").filter(Boolean).at(-1) ?? task.id;
   if (task.worktreeBranch) return task.worktreeBranch.split("/").filter(Boolean).at(-1) ?? task.id;
   return task.id;
+}
+
+function resultLocationLabel(location: NonNullable<Task["completionLocation"]>): string {
+  switch (location) {
+    case "task-directory":
+      return "task dir";
+    case "harness-directory":
+      return "harness dir";
+    case "mixed":
+      return "mixed";
+    case "missing":
+      return "not found";
+    case "none":
+      return "no file changes";
+  }
 }
 
 function lifecycleRowColor(role: string | undefined, task: Task): TuiColor {
@@ -2524,7 +2575,7 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
         ...boxBg(COLORS.panel),
       },
       renderSelectField(ui, "CARD TYPE", draft.type, draft.field === "type"),
-      renderInputField(ui, "TITLE", draft.title, draft.field === "title", "", 1),
+      renderInputField(ui, "TITLE", draft.title, draft.field === "title", "", 1, COLORS.text, draft, "title"),
       renderInputField(
         ui,
         draft.type === "manual" ? "NOTES" : "PROMPT",
@@ -2532,13 +2583,19 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
         draft.field === "description",
         draft.type === "manual" ? "Notes for the PM/manual card..." : "Describe the task for the agent...",
         4,
+        COLORS.text,
+        draft,
+        "description",
       ),
       ...(draft.type === "manual"
         ? [
-            renderInputField(ui, "ASSIGNED TO", draft.assignedTo, draft.field === "assignedTo", "Name or role", 1),
+            renderInputField(ui, "ASSIGNED TO", draft.assignedTo, draft.field === "assignedTo", "Name or role", 1, COLORS.text, draft, "assignedTo"),
           ]
         : [
-            renderSelectField(ui, "AGENT", currentAgentLabel(draft), draft.field === "agent"),
+            renderSelectField(ui, "HARNESS", currentHarnessLabel(draft), draft.field === "harness"),
+            draft.harness === "claude-code"
+              ? renderSelectField(ui, "PERMS", currentPermissionModeLabel(draft), draft.field === "permissionMode")
+              : renderSelectField(ui, "AGENT", currentAgentLabel(draft), draft.field === "agent"),
             renderSelectField(ui, "MODEL", currentModelLabel(draft), draft.field === "model"),
             renderInputField(
               ui,
@@ -2548,6 +2605,8 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
               state.cwd,
               1,
               COLORS.muted,
+              draft,
+              "directory",
             ),
             renderIsolationField(ui, draft),
           ]),
@@ -2580,11 +2639,14 @@ function renderInputField(
   placeholder: string,
   contentHeight: number,
   valueColor = COLORS.text,
+  draft?: NewTaskDraft,
+  field?: TextInputField,
 ) {
   // Focused fields carry the block cursor in accent-bright (per the design
   // kit) as a styled chunk, so it keeps its color inside wrapped text.
+  const viewport = focused && draft && field ? draftTextViewport(draft, field, contentHeight) : { text: value, cursorOffset: value.length };
   const content = focused
-    ? ui.t`${ui.fg(valueColor)(value)}${ui.fg(COLORS.accentBright)("▍")}`
+    ? ui.t`${ui.fg(valueColor)(viewport.text.slice(0, viewport.cursorOffset))}${ui.fg(COLORS.accentBright)("▍")}${ui.fg(valueColor)(viewport.text.slice(viewport.cursorOffset))}`
     : value.length > 0
       ? value
       : placeholder;
@@ -2603,6 +2665,25 @@ function renderInputField(
       truncate: contentHeight === 1,
     }),
   );
+}
+
+function draftTextViewport(draft: NewTaskDraft, field: TextInputField, contentHeight: number): { text: string; cursorOffset: number } {
+  const value = readDraftText(draft, field);
+  const visibleChars = Math.max(1, TEXT_INPUT_COLUMNS * contentHeight);
+  const cursor = getDraftCursor(draft, field);
+  const rawScroll = draft.textScrolls?.[field] ?? 0;
+  const maxScroll = Math.max(0, value.length - visibleChars);
+  let scroll = Math.max(0, Math.min(rawScroll, maxScroll));
+
+  if (cursor < scroll) scroll = cursor;
+  if (cursor > scroll + visibleChars) scroll = Math.max(0, cursor - visibleChars);
+  if (scroll !== rawScroll) setDraftScroll(draft, field, scroll);
+
+  const text = value.slice(scroll, scroll + visibleChars);
+  return {
+    text,
+    cursorOffset: Math.max(0, Math.min(cursor - scroll, text.length)),
+  };
 }
 
 function renderSelectField(ui: OpenTui, label: string, value: string, focused: boolean) {
@@ -2857,6 +2938,48 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
   }
 }
 
+export function handlePaste(event: PasteEvent, state: TuiState, actions: Pick<TuiActions, "render">): void {
+  const text = decodePastedText(event.bytes);
+  if (!text) return;
+
+  if ((state.overlay === "newTask" || state.newTask) && state.viewState.view === "board") {
+    const draft = state.newTask ?? createNewTaskDraft(state);
+    state.newTask = draft;
+    if (!isTextInputField(draft.field)) return;
+
+    replaceDraftSelection(draft, draft.field, normalizePastedText(text, draft.field));
+    draft.error = undefined;
+    event.preventDefault();
+    actions.render();
+    return;
+  }
+
+  if (state.viewState.view === "workspaceGate" && !state.workspaceGateSubmitting) {
+    state.workspaceGateInput += normalizeSingleLinePaste(text);
+    state.workspaceGateError = undefined;
+    event.preventDefault();
+    actions.render();
+    return;
+  }
+
+  if (state.overlay === "addInstance" && state.addInstance && !state.addInstance.submitting) {
+    const paste = normalizeSingleLinePaste(text);
+    if (state.addInstance.field === "name") state.addInstance.name += paste;
+    else state.addInstance.workspace += paste;
+    state.addInstance.error = undefined;
+    event.preventDefault();
+    actions.render();
+    return;
+  }
+
+  if (state.overlay === "renameInstance" && state.renameInstance && !state.renameInstance.submitting && state.renameInstance.field === "newName") {
+    state.renameInstance.newName += normalizeSingleLinePaste(text);
+    state.renameInstance.error = undefined;
+    event.preventDefault();
+    actions.render();
+  }
+}
+
 async function handleConfirmableCardAction(
   action: ConfirmableAction,
   state: TuiState,
@@ -2943,6 +3066,12 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
     return;
   }
 
+  if (handleDraftTextKey(draft, key)) {
+    draft.error = undefined;
+    actions.render();
+    return;
+  }
+
   if ((key.name === "left" || key.name === "up") && cycleFocusedField(draft, state, -1)) {
     actions.render();
     return;
@@ -2953,10 +3082,7 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
     return;
   }
 
-  if (applyTextInput(draft, key)) {
-    draft.error = undefined;
-    actions.render();
-  }
+  if (applyTextInput(draft, key)) actions.render();
 }
 
 async function createDraftTask(state: TuiState, actions: TuiActions): Promise<void> {
@@ -2990,10 +3116,12 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
       assignedTo: draft.assignedTo.trim() || undefined,
     } : {
       type: "agent",
+      harness: draft.harness,
       title,
       description: draft.description,
       directory,
-      agent: draft.agentId || undefined,
+      agent: draft.harness === "claude-code" ? undefined : draft.agentId || undefined,
+      claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : undefined,
       model: draft.model,
       isolation: draft.isolation,
     });
@@ -3020,11 +3148,15 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
     title: "",
     description: "",
     directory: state.cwd,
+    harness: "opencode",
     agentId,
+    claudePermissionMode: DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
     assignedTo: "",
     model: agent?.model,
     isolation: "worktree",
     field: "type",
+    textCursors: {},
+    textScrolls: {},
     submitting: false,
   };
 }
@@ -3042,8 +3174,16 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       draft.type = draft.type === "agent" ? "manual" : "agent";
       if (!newTaskFieldOrder(draft).includes(draft.field)) draft.field = "type";
       return true;
+    case "harness":
+      draft.harness = draft.harness === "opencode" ? "claude-code" : "opencode";
+      draft.model = defaultModelForHarness(draft, state.agents);
+      if (!newTaskFieldOrder(draft).includes(draft.field)) draft.field = "type";
+      return true;
     case "agent":
       cycleAgent(draft, state.agents, delta);
+      return true;
+    case "permissionMode":
+      cyclePermissionMode(draft, delta);
       return true;
     case "model":
       cycleModel(draft, state.agents, delta);
@@ -3060,12 +3200,16 @@ function cycleAgent(draft: NewTaskDraft, agents: RosterAgent[], delta: number): 
   const ids = ["", ...agents.map((agent) => agent.id)];
   const current = Math.max(0, ids.indexOf(draft.agentId));
   draft.agentId = ids[(current + delta + ids.length) % ids.length] ?? "";
-  const agent = agents.find((item) => item.id === draft.agentId);
-  draft.model = agent?.model;
+  draft.model = defaultModelForHarness(draft, agents);
+}
+
+function cyclePermissionMode(draft: NewTaskDraft, delta: number): void {
+  const current = Math.max(0, CLAUDE_CODE_PERMISSION_MODES.indexOf(draft.claudePermissionMode));
+  draft.claudePermissionMode = CLAUDE_CODE_PERMISSION_MODES[(current + delta + CLAUDE_CODE_PERMISSION_MODES.length) % CLAUDE_CODE_PERMISSION_MODES.length];
 }
 
 function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], delta: number): void {
-  const options = [undefined, ...uniqueModels(agents)];
+  const options = modelOptions(draft, agents);
   const current = Math.max(
     0,
     options.findIndex((model) => sameModel(model, draft.model)),
@@ -3073,21 +3217,104 @@ function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], delta: number): 
   draft.model = options[(current + delta + options.length) % options.length];
 }
 
-function applyTextInput(draft: NewTaskDraft, key: KeyEvent): boolean {
-  if (draft.field !== "title" && draft.field !== "description" && draft.field !== "directory" && draft.field !== "assignedTo") return false;
+function handleDraftTextKey(draft: NewTaskDraft, key: KeyEvent): boolean {
+  if (!isTextInputField(draft.field)) return false;
+  const field = draft.field;
 
-  if (key.name === "backspace" || key.sequence === "\u007f" || key.sequence === "\b") {
-    setDraftText(draft, readDraftText(draft).slice(0, -1));
+  if (isSelectAllKey(key)) {
+    const value = readDraftText(draft, field);
+    draft.textSelection = { field, start: 0, end: value.length };
+    setDraftCursor(draft, field, value.length);
     return true;
   }
 
+  if (isLineDeleteKey(key)) {
+    deleteDraftLine(draft, field);
+    return true;
+  }
+
+  if (key.name === "left") {
+    moveDraftCursor(draft, field, -1);
+    return true;
+  }
+
+  if (key.name === "right") {
+    moveDraftCursor(draft, field, 1);
+    return true;
+  }
+
+  if (key.name === "home") {
+    setDraftCursor(draft, field, 0);
+    clearDraftSelection(draft);
+    return true;
+  }
+
+  if (key.name === "end") {
+    setDraftCursor(draft, field, readDraftText(draft, field).length);
+    clearDraftSelection(draft);
+    return true;
+  }
+
+  if (field === "description" && key.name === "up") {
+    scrollDraftText(draft, field, -TEXT_INPUT_COLUMNS);
+    return true;
+  }
+
+  if (field === "description" && key.name === "down") {
+    scrollDraftText(draft, field, TEXT_INPUT_COLUMNS);
+    return true;
+  }
+
+  if (key.name === "backspace" || key.sequence === "\u007f" || key.sequence === "\b") {
+    deleteDraftText(draft, field, "backward");
+    return true;
+  }
+
+  if (key.name === "delete" || key.sequence === "\u001b[3~") {
+    deleteDraftText(draft, field, "forward");
+    return true;
+  }
+
+  return applyTextInput(draft, key);
+}
+
+function applyTextInput(draft: NewTaskDraft, key: KeyEvent): boolean {
+  if (!isTextInputField(draft.field)) return false;
+
   if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
-  setDraftText(draft, `${readDraftText(draft)}${key.sequence}`);
+  replaceDraftSelection(draft, draft.field, key.sequence);
   return true;
 }
 
-function readDraftText(draft: NewTaskDraft): string {
-  switch (draft.field) {
+function decodePastedText(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes).replace(/\r\n?/g, "\n");
+}
+
+function normalizePastedText(text: string, field: TextInputField): string {
+  return field === "description" ? text : normalizeSingleLinePaste(text);
+}
+
+function normalizeSingleLinePaste(text: string): string {
+  return text.replace(/\n+/g, " ").trimEnd();
+}
+
+function isTextInputField(field: NewTaskField): field is TextInputField {
+  return field === "title" || field === "description" || field === "directory" || field === "assignedTo";
+}
+
+function isSelectAllKey(key: KeyEvent): boolean {
+  return (key.ctrl || key.meta) && (key.name === "a" || key.sequence === "\u0001");
+}
+
+function isLineDeleteKey(key: KeyEvent): boolean {
+  return (
+    (key.ctrl && (key.name === "u" || key.sequence === "\u0015")) ||
+    (key.meta && (key.name === "backspace" || key.name === "delete" || key.sequence === "\u007f" || key.sequence === "\b" || key.sequence === "\u001b[3~"))
+  );
+}
+
+function readDraftText(draft: NewTaskDraft, field = draft.field): string {
+  switch (field) {
     case "title":
       return draft.title;
     case "description":
@@ -3101,25 +3328,140 @@ function readDraftText(draft: NewTaskDraft): string {
   }
 }
 
-function setDraftText(draft: NewTaskDraft, value: string): void {
-  switch (draft.field) {
+function setDraftText(draft: NewTaskDraft, field: TextInputField, value: string): void {
+  switch (field) {
     case "title":
       draft.title = value;
-      return;
+      break;
     case "description":
       draft.description = value;
-      return;
+      break;
     case "directory":
       draft.directory = value;
-      return;
+      break;
     case "assignedTo":
       draft.assignedTo = value;
-      return;
+      break;
   }
+  setDraftCursor(draft, field, Math.min(getDraftCursor(draft, field), value.length));
+  clampDraftScroll(draft, field);
+}
+
+function getDraftCursor(draft: NewTaskDraft, field: TextInputField): number {
+  const value = readDraftText(draft, field);
+  return Math.max(0, Math.min(draft.textCursors?.[field] ?? value.length, value.length));
+}
+
+function setDraftCursor(draft: NewTaskDraft, field: TextInputField, cursor: number): void {
+  const value = readDraftText(draft, field);
+  draft.textCursors ??= {};
+  draft.textCursors[field] = Math.max(0, Math.min(cursor, value.length));
+  keepDraftCursorVisible(draft, field);
+}
+
+function setDraftScroll(draft: NewTaskDraft, field: TextInputField, scroll: number): void {
+  draft.textScrolls ??= {};
+  draft.textScrolls[field] = Math.max(0, scroll);
+}
+
+function clampDraftScroll(draft: NewTaskDraft, field: TextInputField): void {
+  const value = readDraftText(draft, field);
+  const current = draft.textScrolls?.[field] ?? 0;
+  setDraftScroll(draft, field, Math.min(current, Math.max(0, value.length - TEXT_INPUT_COLUMNS)));
+}
+
+function keepDraftCursorVisible(draft: NewTaskDraft, field: TextInputField): void {
+  const cursor = getDraftCursor(draft, field);
+  const height = field === "description" ? 4 : 1;
+  const visibleChars = Math.max(1, TEXT_INPUT_COLUMNS * height);
+  const rawScroll = draft.textScrolls?.[field] ?? 0;
+  if (cursor < rawScroll) setDraftScroll(draft, field, cursor);
+  else if (cursor > rawScroll + visibleChars) setDraftScroll(draft, field, cursor - visibleChars);
+}
+
+function moveDraftCursor(draft: NewTaskDraft, field: TextInputField, delta: number): void {
+  setDraftCursor(draft, field, getDraftCursor(draft, field) + delta);
+  clearDraftSelection(draft);
+}
+
+function scrollDraftText(draft: NewTaskDraft, field: TextInputField, delta: number): void {
+  const value = readDraftText(draft, field);
+  const height = field === "description" ? 4 : 1;
+  const visibleChars = Math.max(1, TEXT_INPUT_COLUMNS * height);
+  const maxScroll = Math.max(0, value.length - visibleChars);
+  const nextScroll = Math.max(0, Math.min((draft.textScrolls?.[field] ?? 0) + delta, maxScroll));
+  setDraftScroll(draft, field, nextScroll);
+  setDraftCursor(draft, field, Math.min(value.length, nextScroll));
+  clearDraftSelection(draft);
+}
+
+function clearDraftSelection(draft: NewTaskDraft): void {
+  draft.textSelection = undefined;
+}
+
+function selectedDraftRange(draft: NewTaskDraft, field: TextInputField): { start: number; end: number } | undefined {
+  if (!draft.textSelection || draft.textSelection.field !== field) return undefined;
+  const start = Math.min(draft.textSelection.start, draft.textSelection.end);
+  const end = Math.max(draft.textSelection.start, draft.textSelection.end);
+  return start === end ? undefined : { start, end };
+}
+
+function replaceDraftSelection(draft: NewTaskDraft, field: TextInputField, insertion: string): void {
+  const value = readDraftText(draft, field);
+  const selection = selectedDraftRange(draft, field);
+  const start = selection?.start ?? getDraftCursor(draft, field);
+  const end = selection?.end ?? start;
+  const next = `${value.slice(0, start)}${insertion}${value.slice(end)}`;
+  clearDraftSelection(draft);
+  setDraftText(draft, field, next);
+  setDraftCursor(draft, field, start + insertion.length);
+}
+
+function deleteDraftText(draft: NewTaskDraft, field: TextInputField, direction: "backward" | "forward"): void {
+  const value = readDraftText(draft, field);
+  const selection = selectedDraftRange(draft, field);
+  if (selection) {
+    replaceDraftSelection(draft, field, "");
+    return;
+  }
+
+  const cursor = getDraftCursor(draft, field);
+  if (direction === "backward") {
+    if (cursor === 0) return;
+    setDraftText(draft, field, `${value.slice(0, cursor - 1)}${value.slice(cursor)}`);
+    setDraftCursor(draft, field, cursor - 1);
+    return;
+  }
+
+  if (cursor >= value.length) return;
+  setDraftText(draft, field, `${value.slice(0, cursor)}${value.slice(cursor + 1)}`);
+  setDraftCursor(draft, field, cursor);
+}
+
+function deleteDraftLine(draft: NewTaskDraft, field: TextInputField): void {
+  const value = readDraftText(draft, field);
+  const cursor = getDraftCursor(draft, field);
+  const { start, end, nextCursor } = lineRangeAtCursor(value, cursor);
+  setDraftText(draft, field, `${value.slice(0, start)}${value.slice(end)}`);
+  setDraftCursor(draft, field, nextCursor);
+  clearDraftSelection(draft);
+}
+
+function lineRangeAtCursor(value: string, cursor: number): { start: number; end: number; nextCursor: number } {
+  if (!value) return { start: 0, end: 0, nextCursor: 0 };
+  const boundedCursor = Math.max(0, Math.min(cursor, value.length));
+  const cursorForLine = boundedCursor > 0 && boundedCursor === value.length ? boundedCursor - 1 : boundedCursor;
+  const previousNewline = value.lastIndexOf("\n", Math.max(0, cursorForLine - 1));
+  const start = previousNewline + 1;
+  const nextNewline = value.indexOf("\n", cursorForLine);
+  const end = nextNewline === -1 ? value.length : nextNewline + 1;
+  const nextCursor = Math.min(start, Math.max(0, value.length - (end - start)));
+  return { start, end, nextCursor };
 }
 
 function newTaskFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
-  return draft.type === "manual" ? MANUAL_FIELD_ORDER : AGENT_FIELD_ORDER;
+  if (draft.type === "manual") return MANUAL_FIELD_ORDER;
+  return draft.harness === "claude-code" ? CLAUDE_FIELD_ORDER : AGENT_FIELD_ORDER;
 }
 
 async function handleWorkspaceGateKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
@@ -3132,6 +3474,13 @@ async function handleWorkspaceGateKey(key: KeyEvent, state: TuiState, actions: T
 
   if (isEnterKey(key)) {
     await actions.setupWorkspace();
+    return;
+  }
+
+  if (isLineDeleteKey(key)) {
+    state.workspaceGateInput = "";
+    state.workspaceGateError = undefined;
+    actions.render();
     return;
   }
 
@@ -3309,6 +3658,14 @@ async function handleAddInstanceKey(key: KeyEvent, state: TuiState, actions: Tui
     return;
   }
 
+  if (isLineDeleteKey(key)) {
+    if (draft.field === "name") draft.name = "";
+    else draft.workspace = "";
+    draft.error = undefined;
+    actions.render();
+    return;
+  }
+
   if (key.name === "backspace" || key.sequence === "\u007f" || key.sequence === "\b") {
     if (draft.field === "name") draft.name = draft.name.slice(0, -1);
     else draft.workspace = draft.workspace.slice(0, -1);
@@ -3347,6 +3704,13 @@ async function handleRenameInstanceKey(key: KeyEvent, state: TuiState, actions: 
     draft.error = undefined;
     actions.render();
     await actions.renameInstance(draft.oldName, name.value);
+    return;
+  }
+
+  if (isLineDeleteKey(key)) {
+    draft.newName = "";
+    draft.error = undefined;
+    actions.render();
     return;
   }
 
@@ -3513,7 +3877,18 @@ function currentAgentLabel(draft: NewTaskDraft): string {
   return draft.agentId || "default";
 }
 
+function currentHarnessLabel(draft: NewTaskDraft): string {
+  return draft.harness === "claude-code" ? "Claude Code" : "OpenCode";
+}
+
+function currentPermissionModeLabel(draft: NewTaskDraft): string {
+  return draft.claudePermissionMode;
+}
+
 function currentModelLabel(draft: NewTaskDraft): string {
+  if (draft.harness === "claude-code") {
+    return draft.model?.id ?? "Claude default";
+  }
   return draft.model ? modelLabel(draft.model) : "agent default";
 }
 
@@ -3529,6 +3904,17 @@ function uniqueModels(agents: RosterAgent[]): ModelRef[] {
     }
   }
   return models;
+}
+
+function modelOptions(draft: NewTaskDraft, agents: RosterAgent[]): Array<ModelRef | undefined> {
+  return draft.harness === "claude-code"
+    ? [...CLAUDE_CODE_MODELS]
+    : [undefined, ...uniqueModels(agents)];
+}
+
+function defaultModelForHarness(draft: Pick<NewTaskDraft, "harness" | "agentId">, agents: RosterAgent[]): ModelRef | undefined {
+  if (draft.harness === "claude-code") return CLAUDE_CODE_MODELS[0];
+  return agents.find((item) => item.id === draft.agentId)?.model;
 }
 
 function sameModel(left: ModelRef | undefined, right: ModelRef | undefined): boolean {

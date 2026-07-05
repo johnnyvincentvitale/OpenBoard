@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { registerCompletionRoutes } from "../../../src/server/routes/completion";
@@ -18,14 +22,45 @@ function appFor(store: SqliteTaskStore): Hono {
 
 describe("completion routes", () => {
   let store: SqliteTaskStore;
+  let tempDirs: string[];
 
   beforeEach(() => {
     store = new SqliteTaskStore(":memory:");
+    tempDirs = [];
   });
 
   afterEach(() => {
     store.close();
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   });
+
+  function git(cwd: string, args: string[]): string {
+    return execFileSync("git", args, {
+      cwd,
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+      encoding: "utf8",
+    }).trim();
+  }
+
+  function gitRepoWithClaudeWorktree(): { repo: string; worktree: string; branch: string; commit: string } {
+    const root = mkdtempSync(join(tmpdir(), "openboard-completion-"));
+    tempDirs.push(root);
+    const repo = join(root, "repo");
+    const worktree = join(root, "claude-worktree");
+    mkdirSync(repo);
+    git(repo, ["init"]);
+    git(repo, ["config", "user.email", "openboard@example.test"]);
+    git(repo, ["config", "user.name", "OpenBoard Test"]);
+    git(repo, ["checkout", "-b", "main"]);
+    writeFileSync(join(repo, "README.md"), "before\n");
+    git(repo, ["add", "README.md"]);
+    git(repo, ["commit", "-m", "initial"]);
+    git(repo, ["worktree", "add", "-b", "worktree-readme", worktree, "HEAD"]);
+    writeFileSync(join(worktree, "README.md"), "after\n");
+    git(worktree, ["add", "README.md"]);
+    git(worktree, ["commit", "-m", "claude edit"]);
+    return { repo, worktree, branch: git(worktree, ["rev-parse", "--abbrev-ref", "HEAD"]), commit: git(worktree, ["rev-parse", "--short", "HEAD"]) };
+  }
 
   it("POST /complete on a running task stores a reported completion and moves to review/idle", async () => {
     const task = store.create({ title: "A", description: "do it", directory: "/repo" });
@@ -46,6 +81,63 @@ describe("completion routes", () => {
     expect(body.completionSource).toBe("reported");
     expect(body.completion).toMatchObject({ ...validBody, outcome: "complete" });
     expect(typeof body.completion.reportedAt).toBe("number");
+  });
+
+  it("POST /complete clears busy Claude harness status when the report lands", async () => {
+    const task = store.create({
+      harness: "claude-code",
+      title: "Claude",
+      description: "do it",
+      directory: "/repo",
+    });
+    store.update(task.id, { runState: "running", harnessStatus: "busy" });
+    store.move(task.id, "in_progress", 0);
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(validBody),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.runState).toBe("idle");
+    expect(body.harnessStatus).toBe("idle");
+    expect(body.completionSource).toBe("reported");
+  });
+
+  it("POST /complete records Claude worktree result metadata when edits land outside the task directory", async () => {
+    const { repo, worktree, branch, commit } = gitRepoWithClaudeWorktree();
+    const task = store.create({
+      harness: "claude-code",
+      title: "Claude",
+      description: "edit readme",
+      directory: repo,
+    });
+    store.update(task.id, {
+      runState: "running",
+      harnessStatus: "busy",
+      harnessCwd: worktree,
+    });
+    store.move(task.id, "in_progress", 0);
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, changedFiles: ["README.md"] }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.completionLocation).toBe("harness-directory");
+    expect(body.harnessCwd).toBe(worktree);
+    expect(body.harnessBranch).toBe(branch);
+    expect(body.harnessCommit).toBe(commit);
+    expect(body.worktreePath).toBe(worktree);
+    expect(body.worktreeBranch).toBe(branch);
+    expect(body.baseBranch).toBe("main");
   });
 
   it("POST /block on a running task stores a reported block and moves to review/error", async () => {
