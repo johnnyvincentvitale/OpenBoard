@@ -27,3 +27,4 @@ data/
 
 # Ephemeral worktree artifacts created by git-worktree isolation runs.
 .opencode-board-worktrees/
+.claude/worktrees/
