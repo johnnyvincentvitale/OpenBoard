@@ -76,7 +76,10 @@ export interface CreateBoardTaskInput {
   isolation?: string;
 }
 
-export type UpdateBoardTaskInput = Partial<Omit<CreateBoardTaskInput, "model">> & {
+export type UpdateBoardTaskInput = Omit<
+  Partial<CreateBoardTaskInput>,
+  "agent" | "claudePermissionMode" | "assignedTo" | "model" | "isolation"
+> & {
   agent?: string | null;
   claudePermissionMode?: string | null;
   assignedTo?: string | null;

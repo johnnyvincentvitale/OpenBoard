@@ -6,7 +6,10 @@ import {
   TUI_LAYOUT,
   archiveListCapacity,
   archiveListWindow,
+  boardFilterCategories,
+  boardFilterOptions,
   closeSwitcher,
+  filterTasks,
   formatElapsed,
   initialViewState,
   laneCapacity,
@@ -23,6 +26,7 @@ import {
   selectInstanceInSwitcher,
   shortPath,
   sidebarDetailMode,
+  taskMatchesBoardFilter,
   tasksByColumn,
   truncateText,
   transitionView,
@@ -292,5 +296,85 @@ describe("workspace gate validation", () => {
   it("derives a safe instance name from the workspace path", () => {
     expect(workspaceToInstanceName("/Users/example/code/My Repo")).toBe("my-repo");
     expect(workspaceToInstanceName("/")).toBe("openboard");
+  });
+});
+
+describe("board filter helpers", () => {
+  function agentTask(id: string, overrides: Partial<Task> = {}): Task {
+    return {
+      id,
+      title: id,
+      description: "",
+      directory: "/repo",
+      type: "agent",
+      column: "todo",
+      position: 0,
+      runState: "unstarted",
+      createdAt: 0,
+      updatedAt: 0,
+      ...overrides,
+    };
+  }
+
+  it("lists the fixed filter categories in a stable order", () => {
+    expect(boardFilterCategories()).toEqual([
+      { kind: "worktree", label: "Worktree" },
+      { kind: "manual", label: "Manual" },
+      { kind: "agent", label: "Agent" },
+    ]);
+  });
+
+  it("derives deduped, sorted worktree values from live cards", () => {
+    const tasks = [
+      agentTask("a", { worktreeBranch: "feature/b" }),
+      agentTask("b", { worktreeBranch: "feature/a" }),
+      agentTask("c", { worktreeBranch: "feature/a" }),
+      agentTask("d"),
+    ];
+
+    expect(boardFilterOptions(tasks, "worktree")).toEqual(["feature/a", "feature/b"]);
+  });
+
+  it("falls back to worktree path when no branch is recorded", () => {
+    const tasks = [agentTask("a", { worktreePath: "/repo/.worktrees/a" })];
+    expect(boardFilterOptions(tasks, "worktree")).toEqual(["/repo/.worktrees/a"]);
+  });
+
+  it("groups manual cards by assignee, defaulting to unassigned", () => {
+    const tasks = [
+      { ...agentTask("m1"), type: "manual" as const, assignedTo: "Priya" },
+      { ...agentTask("m2"), type: "manual" as const, assignedTo: undefined },
+      agentTask("a1"),
+    ];
+
+    expect(boardFilterOptions(tasks, "manual")).toEqual(["Priya", "unassigned"]);
+  });
+
+  it("groups agent cards by harness or roster agent id", () => {
+    const tasks = [
+      agentTask("a1", { harness: "opencode", agent: "build" }),
+      agentTask("a2", { harness: "claude-code" }),
+      agentTask("a3", { harness: "opencode" }),
+      { ...agentTask("m1"), type: "manual" as const, assignedTo: "Priya" },
+    ];
+
+    expect(boardFilterOptions(tasks, "agent")).toEqual(["build", "claude-code", "unassigned"]);
+  });
+
+  it("matches and filters tasks by the selected filter value", () => {
+    const tasks = [
+      agentTask("a1", { harness: "claude-code" }),
+      agentTask("a2", { harness: "opencode", agent: "build" }),
+    ];
+    const filter = { kind: "agent" as const, value: "claude-code" };
+
+    expect(taskMatchesBoardFilter(tasks[0], filter)).toBe(true);
+    expect(taskMatchesBoardFilter(tasks[1], filter)).toBe(false);
+    expect(filterTasks(tasks, filter)).toEqual([tasks[0]]);
+  });
+
+  it("returns every task unfiltered when no filter is set", () => {
+    const tasks = [agentTask("a1"), agentTask("a2")];
+    expect(filterTasks(tasks, undefined)).toBe(tasks);
   });
 });

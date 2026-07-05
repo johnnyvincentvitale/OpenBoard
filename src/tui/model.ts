@@ -612,6 +612,69 @@ export function formatElapsed(ms: number): string {
   return `${seconds}s`;
 }
 
+// ── Board filter (F/f) ───────────────────────────────────────────────────────────
+
+/** Filter categories offered by the selected-column filter picker. */
+export type BoardFilterKind = "worktree" | "manual" | "agent";
+
+export interface BoardFilter {
+  kind: BoardFilterKind;
+  value: string;
+}
+
+export function boardFilterCategories(): Array<{ kind: BoardFilterKind; label: string }> {
+  return [
+    { kind: "worktree", label: "Worktree" },
+    { kind: "manual", label: "Manual" },
+    { kind: "agent", label: "Agent" },
+  ];
+}
+
+/** The worktree identity a card filters by: prefer the branch, fall back to the path. Unset for cards with no worktree. */
+export function taskWorktreeFilterValue(task: Pick<Task, "worktreeBranch" | "worktreePath">): string | undefined {
+  return task.worktreeBranch || task.worktreePath || undefined;
+}
+
+/** The manual assignee a card filters by. Manual cards with no assignee still group under "unassigned". */
+export function taskManualFilterValue(task: Pick<Task, "type" | "assignedTo">): string | undefined {
+  if (task.type !== "manual") return undefined;
+  return task.assignedTo?.trim() || "unassigned";
+}
+
+/** The agent/harness label a card filters by. Claude Code cards group by harness; OpenCode cards by roster agent id. */
+export function taskAgentFilterValue(task: Pick<Task, "type" | "harness" | "agent">): string | undefined {
+  if (task.type === "manual") return undefined;
+  if (task.harness === "claude-code") return "claude-code";
+  return task.agent?.trim() || "unassigned";
+}
+
+function taskFilterValue(task: Task, kind: BoardFilterKind): string | undefined {
+  switch (kind) {
+    case "worktree":
+      return taskWorktreeFilterValue(task);
+    case "manual":
+      return taskManualFilterValue(task);
+    case "agent":
+      return taskAgentFilterValue(task);
+  }
+}
+
+/** Live, deduped, sorted values for a filter category, gathered from the current cards/sessions. */
+export function boardFilterOptions(tasks: Task[], kind: BoardFilterKind): string[] {
+  const values = tasks.map((task) => taskFilterValue(task, kind)).filter((value): value is string => Boolean(value));
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+}
+
+export function taskMatchesBoardFilter(task: Task, filter: BoardFilter | undefined): boolean {
+  if (!filter) return true;
+  return taskFilterValue(task, filter.kind) === filter.value;
+}
+
+export function filterTasks(tasks: Task[], filter: BoardFilter | undefined): Task[] {
+  if (!filter) return tasks;
+  return tasks.filter((task) => taskMatchesBoardFilter(task, filter));
+}
+
 export function modelLabel(model: ModelRef | undefined): string {
   if (!model) return "agent default";
   return `${model.providerID}/${model.id}${model.variant ? `:${model.variant}` : ""}`;

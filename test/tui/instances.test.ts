@@ -1255,18 +1255,25 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(s.detailTab).toBe("prompt");
   });
 
-  it("inline detail tab toggles with tab key", async () => {
+  it("inline detail tab cycles forward through all four tabs with tab key", async () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [task("todo-card", "todo")],
       selectedTaskId: "todo-card",
       detailTab: "prompt",
     });
+    const a = actions();
 
-    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
     expect(s.detailTab).toBe("handoff");
 
-    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
+    expect(s.detailTab).toBe("output");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
+    expect(s.detailTab).toBe("comments");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
     expect(s.detailTab).toBe("prompt");
   });
 
@@ -1409,6 +1416,354 @@ describe("TUI worktree metadata", () => {
     expect(text).toContain("WORKTREE");
     expect(text).toContain("example_reported_complete");
     expect(text.indexOf("WORKTREE")).toBeLessThan(text.indexOf("SESSION"));
+  });
+});
+
+describe("TUI edit mode (e)", () => {
+  it("e on a selected To Do card opens the task form pre-populated for editing", async () => {
+    const todoTask = { ...task("todo-card", "todo"), title: "Fix the login bug", description: "Investigate the 500", agent: "build" };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [todoTask],
+      selectedTaskId: "todo-card",
+    });
+
+    await handleKeypress({ name: "e", sequence: "e" } as any, s, actions());
+
+    expect(s.newTask?.editingTaskId).toBe("todo-card");
+    expect(s.newTask?.title).toBe("Fix the login bug");
+    expect(s.newTask?.description).toBe("Investigate the 500");
+    expect(s.overlay).toBe("none");
+  });
+
+  it.each(["in_progress", "review", "done"] as const)("e on a selected %s card does not open edit mode", async (column) => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("card-1", column)],
+      selectedTaskId: "card-1",
+    });
+
+    await handleKeypress({ name: "e", sequence: "e" } as any, s, actions());
+
+    expect(s.newTask).toBeUndefined();
+    expect(s.status).toBe("only To Do cards can be edited");
+  });
+
+  it("saving an edit calls updateTask (not createTask) and does not create a new card", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: {
+        type: "agent",
+        title: "Renamed title",
+        description: "desc",
+        directory: "/repo",
+        harness: "opencode",
+        agentId: "build",
+        claudePermissionMode: "bypassPermissions",
+        assignedTo: "",
+        isolation: "worktree",
+        field: "title",
+        submitting: false,
+        editingTaskId: "todo-card",
+      },
+    });
+    const updateTask = vi.fn(async (id: string) => task(id, "todo"));
+    const createTask = vi.fn(async () => task("new-card", "todo"));
+    const a = actions({ client: { moveTask: vi.fn(), updateTask, createTask, listComments: vi.fn(), addComment: vi.fn() } });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+
+    expect(updateTask).toHaveBeenCalledWith("todo-card", expect.objectContaining({ title: "Renamed title" }));
+    expect(createTask).not.toHaveBeenCalled();
+    expect(s.newTask).toBeUndefined();
+  });
+});
+
+describe("TUI filter mode (f)", () => {
+  it("f opens the category picker in the selected card's lane", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    });
+
+    await handleKeypress({ name: "f", sequence: "f" } as any, s, actions());
+
+    expect(s.filterMode).toEqual({ column: "todo", step: "category", selectedIndex: 0 });
+  });
+
+  it("selecting a category then a value applies the board filter and exits filter mode", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [
+        { ...task("a1", "todo"), harness: "claude-code" },
+        { ...task("a2", "in_progress"), harness: "opencode", agent: "build" },
+      ],
+      selectedTaskId: "a1",
+      filterMode: { column: "todo", step: "category", selectedIndex: 0 },
+    });
+    const a = actions();
+
+    // categories are [worktree, manual, agent]; move down twice to "agent"
+    await handleKeypress({ name: "down", sequence: "[B" } as any, s, a);
+    await handleKeypress({ name: "down", sequence: "[B" } as any, s, a);
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+    expect(s.filterMode?.step).toBe("value");
+    expect(s.filterMode?.category).toBe("agent");
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+
+    expect(s.filterMode).toBeUndefined();
+    expect(s.boardFilter).toEqual({ kind: "agent", value: "build" });
+  });
+
+  it("pressing f again while a filter is active clears it", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+      boardFilter: { kind: "agent", value: "build" },
+    });
+
+    await handleKeypress({ name: "f", sequence: "f" } as any, s, actions());
+
+    expect(s.boardFilter).toBeUndefined();
+    expect(s.filterMode).toBeUndefined();
+    expect(s.status).toBe("filter cleared");
+  });
+
+  it("esc steps back from value to category, then cancels filter mode entirely", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+      filterMode: { column: "todo", step: "value", category: "agent", selectedIndex: 0 },
+    });
+
+    await handleKeypress({ name: "escape", sequence: "" } as any, s, actions());
+    expect(s.filterMode).toEqual({ column: "todo", step: "category", selectedIndex: 0 });
+
+    await handleKeypress({ name: "escape", sequence: "" } as any, s, actions());
+    expect(s.filterMode).toBeUndefined();
+  });
+
+  it("filtered board only renders matching cards", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [
+        { ...task("claude-card", "todo"), harness: "claude-code" },
+        { ...task("opencode-card", "todo"), harness: "opencode", agent: "build" },
+      ],
+      boardFilter: { kind: "agent", value: "claude-code" },
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("claude-card");
+    expect(text).not.toContain("opencode-card");
+  });
+
+  it("applying a filter that hides the current selection reselects a visible card", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [
+        { ...task("a1", "todo"), harness: "claude-code" },
+        { ...task("a2", "in_progress"), harness: "opencode", agent: "build" },
+      ],
+      selectedTaskId: "a1",
+      filterMode: { column: "todo", step: "value", category: "agent", selectedIndex: 0 },
+    });
+    // "agent" values sorted: ["build", "claude-code"] — index 0 is "build", which a1 (claude-code) does not match.
+    const a = actions();
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+
+    expect(s.boardFilter).toEqual({ kind: "agent", value: "build" });
+    expect(s.selectedTaskId).toBe("a2");
+  });
+
+  it("arrow-key navigation skips cards hidden by the active filter", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [
+        { ...task("a1", "todo"), harness: "claude-code" },
+        { ...task("a2", "in_progress"), harness: "opencode", agent: "build" },
+        { ...task("a3", "review"), harness: "opencode", agent: "build" },
+      ],
+      selectedTaskId: "a1",
+      boardFilter: { kind: "agent", value: "claude-code" },
+    });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
+
+    // a2/a3 are hidden by the filter (opencode/"build"), so a1 (the only visible
+    // card, claude-code) is the only valid target and selection stays put.
+    expect(s.selectedTaskId).toBe("a1");
+  });
+});
+
+describe("TUI comments tab", () => {
+  it("cycling to the comments tab loads the thread for the selected task", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("review-card", "review")],
+      selectedTaskId: "review-card",
+      detailTab: "output",
+    });
+    const listComments = vi.fn(async () => [
+      { id: "c1", taskId: "review-card", author: "User", body: "Looks good", createdAt: 1, parentCommentId: null },
+    ]);
+    const a = actions({ client: { moveTask: vi.fn(), updateTask: vi.fn(), listComments, addComment: vi.fn() } });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, a);
+
+    expect(s.detailTab).toBe("comments");
+    expect(listComments).toHaveBeenCalledWith("review-card");
+    expect(s.comments?.items).toHaveLength(1);
+  });
+
+  it("c on a Review card starts a new top-level comment draft", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("review-card", "review")],
+      selectedTaskId: "review-card",
+      detailTab: "comments",
+      comments: { taskId: "review-card", items: [], loading: false, selectedIndex: 0 },
+    });
+
+    await handleKeypress({ name: "c", sequence: "c" } as any, s, actions());
+
+    expect(s.commentDraft).toEqual({ taskId: "review-card", parentCommentId: null, text: "" });
+  });
+
+  it("c on a To Do card is refused since comments require Review or Done", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+      detailTab: "comments",
+      comments: { taskId: "todo-card", items: [], loading: false, selectedIndex: 0 },
+    });
+
+    await handleKeypress({ name: "c", sequence: "c" } as any, s, actions());
+
+    expect(s.commentDraft).toBeUndefined();
+    expect(s.status).toBe("comments are only available on Review or Done cards");
+  });
+
+  it("submitting a comment draft persists it through addComment and reloads the thread", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("done-card", "done")],
+      selectedTaskId: "done-card",
+      detailTab: "comments",
+      commentDraft: { taskId: "done-card", parentCommentId: null, text: "Shipped it" },
+    });
+    const addComment = vi.fn(async () => ({ id: "c2", taskId: "done-card", author: "User", body: "Shipped it", createdAt: 2, parentCommentId: null }));
+    const listComments = vi.fn(async () => [{ id: "c2", taskId: "done-card", author: "User", body: "Shipped it", createdAt: 2, parentCommentId: null }]);
+    const a = actions({ client: { moveTask: vi.fn(), updateTask: vi.fn(), listComments, addComment } });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+
+    expect(addComment).toHaveBeenCalledWith("done-card", "User", "Shipped it", null);
+    expect(s.commentDraft).toBeUndefined();
+    expect(listComments).toHaveBeenCalledWith("done-card");
+  });
+
+  it("r replies to the selected comment, threading it under the parent", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("done-card", "done")],
+      selectedTaskId: "done-card",
+      detailTab: "comments",
+      comments: {
+        taskId: "done-card",
+        items: [{ id: "c1", taskId: "done-card", author: "User", body: "first", createdAt: 1, parentCommentId: null }],
+        loading: false,
+        selectedIndex: 0,
+      },
+    });
+
+    await handleKeypress({ name: "r", sequence: "r" } as any, s, actions());
+
+    expect(s.commentDraft).toEqual({ taskId: "done-card", parentCommentId: "c1", text: "" });
+  });
+
+  it("esc while composing cancels the draft without closing the detail view", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("done-card", "done")],
+      selectedTaskId: "done-card",
+      detailTab: "comments",
+      commentDraft: { taskId: "done-card", parentCommentId: null, text: "wip" },
+    });
+
+    await handleKeypress({ name: "escape", sequence: "" } as any, s, actions());
+
+    expect(s.commentDraft).toBeUndefined();
+    expect(s.detailTab).toBe("comments");
+  });
+
+  it("replying to a reply attaches the new comment to the root, not the reply", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("done-card", "done")],
+      selectedTaskId: "done-card",
+      detailTab: "comments",
+      comments: {
+        taskId: "done-card",
+        items: [
+          { id: "c1", taskId: "done-card", author: "User", body: "root", createdAt: 1, parentCommentId: null },
+          { id: "c2", taskId: "done-card", author: "User", body: "reply", createdAt: 2, parentCommentId: "c1" },
+        ],
+        loading: false,
+        selectedIndex: 1, // flattened order is [c1, c2] -- index 1 is the reply c2
+      },
+    });
+
+    await handleKeypress({ name: "r", sequence: "r" } as any, s, actions());
+
+    // Threading is one level deep, so replying to c2 (itself a reply to c1) must
+    // attach to the root c1 -- otherwise it renders detached at the end of the thread.
+    expect(s.commentDraft).toEqual({ taskId: "done-card", parentCommentId: "c1", text: "" });
+  });
+
+  it("q quits while browsing (not composing) the Comments tab", async () => {
+    const shutdown = vi.fn(async () => undefined);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("done-card", "done")],
+      selectedTaskId: "done-card",
+      detailTab: "comments",
+      comments: { taskId: "done-card", items: [], loading: false, selectedIndex: 0 },
+    });
+
+    await handleKeypress({ name: "q", sequence: "q" } as any, s, actions({ shutdown }));
+
+    expect(shutdown).toHaveBeenCalled();
+  });
+});
+
+describe("TUI output tab", () => {
+  it("shows the task's final session output", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("done-card", "done"), finalSessionOutput: "Ran the tests, all green." }],
+      selectedTaskId: "done-card",
+      detailTab: "output",
+    }));
+
+    expect(textOf(app)).toContain("Ran the tests, all green.");
+  });
+
+  it("shows a placeholder when no final session output is available", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("done-card", "done")],
+      selectedTaskId: "done-card",
+      detailTab: "output",
+    }));
+
+    expect(textOf(app)).toContain("No final session output available");
   });
 });
 
@@ -1836,10 +2191,14 @@ describe("TUI handoff text wrapping", () => {
     expect(text).toContain("npm run typecheck → passed");
     expect(text).toContain("RESIDUAL RISK");
 
+    // Sections grow to their content instead of clipping at a fixed few rows (no
+    // nested tiny scrollers) — the single outer ScrollBox handles all scrolling.
     const changedFilesText = textNodesContaining(app, "src/client/board-client.ts")[0];
     const verificationText = textNodesContaining(app, "npm run typecheck")[0];
-    expect(changedFilesText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1, height: 3 });
-    expect(verificationText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1, height: 4 });
+    expect(changedFilesText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1 });
+    expect(changedFilesText.props.height).toBeUndefined();
+    expect(verificationText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1 });
+    expect(verificationText.props.height).toBeUndefined();
 
     expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).toContain("board-detail-handoff-done-card");
   });
@@ -2012,7 +2371,12 @@ function actions(overrides: Record<string, unknown> = {}) {
     render: vi.fn(),
     shutdown: vi.fn(),
     runAction: vi.fn(async () => undefined),
-    client: { moveTask: vi.fn(async () => []) },
+    client: {
+      moveTask: vi.fn(async () => []),
+      updateTask: vi.fn(async (id: string) => ({ ...task(id, "todo"), id })),
+      listComments: vi.fn(async () => []),
+      addComment: vi.fn(async () => ({ id: "comment-1", taskId: "todo-card", author: "User", body: "", createdAt: 1 })),
+    },
     archiveTask: vi.fn(async () => undefined),
     attachInstance: vi.fn(async () => undefined),
     detachInstance: vi.fn(async () => undefined),

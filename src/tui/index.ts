@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type RosterAgent, type Task, type TaskHarness, type TaskIsolationMode, type TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type RosterAgent, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskType } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
 import {
@@ -22,6 +22,11 @@ import {
   shortPath,
   sidebarDetailMode,
   tasksByColumn,
+  boardFilterCategories,
+  boardFilterOptions,
+  filterTasks,
+  type BoardFilter,
+  type BoardFilterKind,
   // Instance-related exports
   InstanceLifecycleProvider,
   createRealInstanceProvider,
@@ -309,6 +314,8 @@ interface NewTaskDraft {
   textSelection?: { field: TextInputField; start: number; end: number };
   submitting: boolean;
   error?: string;
+  /** Set when this draft edits an existing To Do card rather than creating a new one. */
+  editingTaskId?: string;
 }
 
 interface AddInstanceDraft {
@@ -336,6 +343,33 @@ interface ArchiveState {
   laneFilter: string | null;
   refreshing: boolean;
   detailTab: "prompt" | "handoff";
+}
+
+/** Detail tabs shown for a selected card via Enter. */
+export type TaskDetailTab = "prompt" | "handoff" | "output" | "comments";
+
+/** State for the two-step selected-column filter picker opened with f/F. */
+interface FilterModeState {
+  column: Column;
+  step: "category" | "value";
+  category?: BoardFilterKind;
+  selectedIndex: number;
+}
+
+/** Cached comment thread for the Comments detail tab, keyed to the task currently viewed. */
+interface CommentsPanelState {
+  taskId: string;
+  items: TaskComment[];
+  loading: boolean;
+  error?: string;
+  selectedIndex: number;
+}
+
+/** In-progress compose state for a new top-level comment or a reply. */
+interface CommentDraftState {
+  taskId: string;
+  parentCommentId: string | null;
+  text: string;
 }
 
 interface TuiState {
@@ -368,12 +402,18 @@ interface TuiState {
   switcherSelectedIndex: number;
   instanceActionState: Record<string, "starting" | "stopping" | undefined>;
   confirmRemoveName?: string;
-  detailTab?: "prompt" | "handoff";
+  detailTab?: TaskDetailTab;
   moveTargetColumn?: Column;
   pendingConfirmation?: PendingConfirmation;
   workspaceGateInput: string;
   workspaceGateError?: string;
   workspaceGateSubmitting: boolean;
+  // Selected-column filter (f/F)
+  boardFilter?: BoardFilter;
+  filterMode?: FilterModeState;
+  // Comments detail tab
+  comments?: CommentsPanelState;
+  commentDraft?: CommentDraftState;
 }
 
 interface TuiActions {
@@ -1113,6 +1153,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
   let healthLabel = boardHealthLabel(state);
   let instanceLabel = "";
   let workspaceLabel = "";
+  let filterLabel = "";
 
   if (state.viewState.view === "board") {
     const currentInstance = currentInstanceItem(state);
@@ -1122,6 +1163,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     } else {
       workspaceLabel = `WORKSPACE ${shortPath(state.cwd)}`;
     }
+    if (state.boardFilter) filterLabel = `FILTER ${state.boardFilter.kind}:${state.boardFilter.value}`;
   } else if (state.viewState.view === "launch") {
     connection = "";
     host = "";
@@ -1163,7 +1205,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     },
     ui.Box({ flexGrow: 1 }),
     ui.Text({
-      content: [connection, host, instanceLabel.replace(/^ · /, ""), workspaceLabel, taskLabel, refreshed, healthLabel].filter(Boolean).join(" · "),
+      content: [connection, host, instanceLabel.replace(/^ · /, ""), workspaceLabel, filterLabel, taskLabel, refreshed, healthLabel].filter(Boolean).join(" · "),
       fg: state.error ? COLORS.bright : COLORS.muted,
       height: 1,
       truncate: true,
@@ -1487,43 +1529,6 @@ function archiveFilterLabel(archive: ArchiveState | undefined): string {
   return filters.length ? filters.join(" · ") : "all archived tasks";
 }
 
-function renderBoardHandoffTab(ui: OpenTui, completion: CompletionReport | null, scrollId: string) {
-  if (!completion) {
-    return ui.ScrollBox(
-      scrollBoxProps(scrollId),
-      ui.Text({ content: "No completion report available", fg: COLORS.muted, height: 1 }),
-    );
-  }
-
-  const changedFiles = completion.changedFiles.length ? completion.changedFiles : ["none"];
-  const verification = completion.verification.length
-    ? completion.verification.map((item) => `${item.command} → ${item.result}`)
-    : ["none"];
-
-  return ui.ScrollBox(
-    scrollBoxProps(scrollId),
-    ui.Box(
-      { width: "100%", flexDirection: "column", gap: 0 },
-      ui.Text({ content: "SUMMARY", fg: COLORS.dim, height: 1 }),
-      ui.Text({ content: completion.summary, fg: COLORS.text, width: "100%", minWidth: 0, flexShrink: 1, wrapMode: "word", height: 3 }),
-    ),
-    ui.Box(
-      { width: "100%", flexDirection: "column", gap: 0 },
-      ui.Text({ content: "CHANGED FILES", fg: COLORS.dim, height: 1 }),
-      ui.Text({ content: changedFiles.join(", "), fg: COLORS.muted, width: "100%", minWidth: 0, flexShrink: 1, wrapMode: "char", height: 3 }),
-    ),
-    ui.Box(
-      { width: "100%", flexDirection: "column", gap: 0 },
-      ui.Text({ content: "VERIFICATION", fg: COLORS.dim, height: 1 }),
-      ui.Text({ content: verification.join("; "), fg: COLORS.muted, width: "100%", minWidth: 0, flexShrink: 1, wrapMode: "char", height: 4 }),
-    ),
-    ui.Box(
-      { width: "100%", flexGrow: 1, flexDirection: "column", gap: 0 },
-      ui.Text({ content: "RESIDUAL RISK", fg: COLORS.dim, height: 1 }),
-      ui.Text({ content: completion.residualRisk ?? "none", fg: COLORS.text, width: "100%", minWidth: 0, flexShrink: 1, wrapMode: "word", flexGrow: 1 }),
-    ),
-  );
-}
 
 function renderInlineMoveDetail(ui: OpenTui, state: TuiState, task: Task) {
   const target = state.moveTargetColumn ?? task.column;
@@ -1904,7 +1909,7 @@ function renderRenameInstanceOverlay(ui: OpenTui, state: TuiState) {
 }
 
 function renderBoard(ui: OpenTui, state: TuiState) {
-  const grouped = tasksByColumn(state.tasks);
+  const grouped = tasksByColumn(filterTasks(state.tasks, state.boardFilter));
 
   return ui.Box(
     {
@@ -1921,6 +1926,10 @@ function renderBoard(ui: OpenTui, state: TuiState) {
 }
 
 function renderColumn(ui: OpenTui, state: TuiState, column: Column, tasks: Task[]) {
+  if (state.filterMode && state.filterMode.column === column) {
+    return renderColumnFilterPicker(ui, state, column, state.filterMode);
+  }
+
   // Arrow keys move selection, not a scrollbar — the lane renders the window of
   // cards around the selection and marks what's clipped in either direction.
   const innerHeight = laneInnerHeight(state.terminalRows);
@@ -1979,6 +1988,58 @@ function renderLaneOverflow(ui: OpenTui, count: number, arrow: string) {
     height: 1,
     truncate: true,
   });
+}
+
+// Filter mode replaces one lane's card list with a two-step picker (category, then
+// live values) so filtering never leaves the normal 4-column board layout.
+function renderColumnFilterPicker(ui: OpenTui, state: TuiState, column: Column, mode: NonNullable<TuiState["filterMode"]>) {
+  const items = mode.step === "category"
+    ? boardFilterCategories().map((category) => category.label)
+    : boardFilterOptions(state.tasks, mode.category as BoardFilterKind);
+
+  return ui.Box(
+    {
+      flexGrow: 1,
+      flexShrink: 1,
+      flexBasis: 0,
+      minWidth: LANE_MIN_WIDTH,
+      height: "100%",
+      flexDirection: "column",
+      border: true,
+      borderStyle: "single",
+      borderColor: COLORS.borderHot,
+      ...boxBg(COLORS.panel),
+      padding: TUI_LAYOUT.lanePadding,
+      gap: TUI_LAYOUT.laneGap,
+      title: `${TUI_COLUMN_LABELS[column]} · filter`,
+      titleColor: COLORS.text,
+    },
+    ui.Text({
+      content: mode.step === "category" ? "Filter by:" : `Filter · ${boardFilterCategories().find((c) => c.kind === mode.category)?.label}:`,
+      fg: COLORS.muted,
+      height: 1,
+      truncate: true,
+    }),
+    items.length === 0
+      ? ui.Text({ content: "No values available", fg: COLORS.muted, height: 1 })
+      : ui.Box(
+          { flexGrow: 1, flexDirection: "column", gap: 0, overflow: "hidden" },
+          ...items.map((label, index) =>
+            ui.Text({
+              content: `${index === mode.selectedIndex ? "▸ " : "  "}${label}`,
+              fg: index === mode.selectedIndex ? COLORS.bright : COLORS.text,
+              height: 1,
+              truncate: true,
+            }),
+          ),
+        ),
+    ui.Text({
+      content: mode.step === "category" ? "↑/↓ select · enter next · esc cancel" : "↑/↓ select · enter apply · esc back",
+      fg: COLORS.dim,
+      height: 1,
+      truncate: true,
+    }),
+  );
 }
 
 interface MetaRow {
@@ -2216,13 +2277,33 @@ function lifecycleRowColor(role: string | undefined, task: Task): TuiColor {
   return COLORS.text;
 }
 
+const DETAIL_TABS: readonly TaskDetailTab[] = ["prompt", "handoff", "output", "comments"];
+const DETAIL_TAB_LABELS: Record<TaskDetailTab, string> = {
+  prompt: "Prompt",
+  handoff: "Handoff",
+  output: "Output",
+  comments: "Comments",
+};
+
+function nextDetailTab(tab: TaskDetailTab, delta: number): TaskDetailTab {
+  const index = DETAIL_TABS.indexOf(tab);
+  return DETAIL_TABS[(index + delta + DETAIL_TABS.length) % DETAIL_TABS.length];
+}
+
 function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
   const tab = state.detailTab ?? "prompt";
   const content: VChild =
     tab === "prompt"
       ? renderScrollableDetailText(ui, `board-detail-prompt-${task.id}`, task.description || "(empty prompt)")
-      : renderBoardHandoffTab(ui, task.completion ?? null, `board-detail-handoff-${task.id}`);
+      : tab === "handoff"
+        ? renderHandoffTab(ui, task.completion ?? null, `board-detail-handoff-${task.id}`)
+        : tab === "output"
+          ? renderOutputTab(ui, task)
+          : renderCommentsTab(ui, state, task);
   const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY"].includes(row.label));
+  const footer = tab === "comments"
+    ? (state.commentDraft ? "enter submit · esc cancel" : "esc details · ←/→ tabs · c comment · r reply")
+    : "esc details · ←/→ tabs · m move card";
 
   return ui.Box(
     {
@@ -2245,26 +2326,100 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
     ...(task.error ? [renderErrorBox(ui, task.error, inlineErrorMode(state.terminalRows))] : []),
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 2 },
-      ui.Text({
-        content: "Prompt",
-        fg: tab === "prompt" ? COLORS.accentBright : COLORS.dim,
-        attributes: tab === "prompt" ? ui.TextAttributes.BOLD : undefined,
-        height: 1,
-      }),
-      ui.Text({
-        content: "Handoff",
-        fg: tab === "handoff" ? COLORS.accentBright : COLORS.dim,
-        attributes: tab === "handoff" ? ui.TextAttributes.BOLD : undefined,
-        height: 1,
-      }),
+      ...DETAIL_TABS.map((candidate) =>
+        ui.Text({
+          content: DETAIL_TAB_LABELS[candidate],
+          fg: tab === candidate ? COLORS.accentBright : COLORS.dim,
+          attributes: tab === candidate ? ui.TextAttributes.BOLD : undefined,
+          height: 1,
+        }),
+      ),
     ),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     ui.Box(
       { flexGrow: 1, flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
       content,
     ),
-    ui.Text({ content: "esc details · ←/→ tabs · m move card", fg: COLORS.muted, height: 1, truncate: true }),
+    ui.Text({ content: footer, fg: COLORS.muted, height: 1, truncate: true }),
   );
+}
+
+function renderOutputTab(ui: OpenTui, task: Task) {
+  const output = task.finalSessionOutput?.trim();
+  return renderScrollableDetailText(
+    ui,
+    `board-detail-output-${task.id}`,
+    output && output.length > 0 ? output : "No final session output available",
+  );
+}
+
+function renderCommentsTab(ui: OpenTui, state: TuiState, task: Task) {
+  const panel = state.comments?.taskId === task.id ? state.comments : undefined;
+  const items = panel ? flattenComments(panel.items) : [];
+  const canCompose = task.column === "review" || task.column === "done";
+  const draft = state.commentDraft?.taskId === task.id ? state.commentDraft : undefined;
+
+  const rows: VChild[] = [];
+  if (panel?.loading) {
+    rows.push(ui.Text({ content: "Loading comments...", fg: COLORS.muted, height: 1 }));
+  } else if (panel?.error) {
+    rows.push(ui.Text({ content: `Failed to load comments: ${panel.error}`, fg: COLORS.bright, wrapMode: "word" }));
+  } else if (items.length === 0) {
+    rows.push(ui.Text({ content: "No comments yet", fg: COLORS.muted, height: 1 }));
+  } else {
+    items.forEach((comment, index) => {
+      const selected = panel?.selectedIndex === index;
+      const isReply = Boolean(comment.parentCommentId);
+      rows.push(
+        ui.Box(
+          { width: "100%", flexDirection: "column", gap: 0, paddingLeft: isReply ? 2 : 0, ...boxBg(selected ? COLORS.panelRaised : COLORS.panel) },
+          ui.Text({
+            content: `${selected ? "▸ " : "  "}${isReply ? "↳ " : ""}${comment.author} · ${formatArchiveDate(comment.createdAt)}`,
+            fg: selected ? COLORS.bright : COLORS.muted,
+            height: 1,
+            truncate: true,
+          }),
+          ui.Text({ content: comment.body, fg: COLORS.text, wrapMode: "word", width: "100%", minWidth: 0, flexShrink: 1 }),
+        ),
+      );
+    });
+  }
+
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    ui.ScrollBox(scrollBoxProps(`board-detail-comments-${task.id}`), ...rows),
+    draft
+      ? ui.Box(
+          { width: "100%", flexDirection: "column", gap: 0 },
+          ui.Text({ content: draft.parentCommentId ? "Reply" : "New comment", fg: COLORS.dim, height: 1 }),
+          ui.Box(
+            { width: "100%", height: 3, border: true, borderStyle: "single", borderColor: COLORS.borderHot, ...boxBg(COLORS.bg), paddingX: 1 },
+            ui.Text({ content: `${draft.text}▍`, fg: COLORS.text, height: 1, wrapMode: "none", truncate: true }),
+          ),
+        )
+      : ui.Text({
+          content: canCompose ? "c new comment · r reply to selected · ↑/↓ select" : "Comments are only available on Review or Done cards",
+          fg: COLORS.muted,
+          height: 1,
+          truncate: true,
+          wrapMode: "word",
+        }),
+  );
+}
+
+/** Flatten a comment thread into display order: each root comment followed by its replies (oldest first). */
+function flattenComments(items: TaskComment[]): TaskComment[] {
+  const roots = items.filter((comment) => !comment.parentCommentId).sort((a, b) => a.createdAt - b.createdAt);
+  const result: TaskComment[] = [];
+  for (const root of roots) {
+    result.push(root);
+    result.push(...items.filter((comment) => comment.parentCommentId === root.id).sort((a, b) => a.createdAt - b.createdAt));
+  }
+  const seen = new Set(result.map((comment) => comment.id));
+  for (const comment of items) {
+    if (!seen.has(comment.id)) result.push(comment);
+  }
+  return result;
 }
 
 function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Task, action: ConfirmableAction) {
@@ -2452,7 +2607,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? "type absolute path · enter confirm · esc quit"
             : state.viewState.view === "launch"
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
-            : "↑/↓ cards · ←/→ lanes · esc instances · b switch board · n new task · m move card · u refresh · ? help · q quit · A global archive",
+            : "↑/↓ cards · ←/→ lanes · esc instances · b switch board · n new task · e edit · f filter · m move card · u refresh · ? help · q quit · A global archive",
         fg: COLORS.text,
         height: 1,
         flexGrow: 1,
@@ -2473,7 +2628,11 @@ function renderHelpOverlay(ui: OpenTui) {
   const rows = [
     ["↑/↓", "move between cards"],
     ["←/→", "jump between lanes"],
-    ["enter", "show Prompt/Handoff in Selected"],
+    ["enter", "open Prompt/Handoff/Output/Comments"],
+    ["←/→/tab", "switch detail tabs"],
+    ["c / r", "comment / reply (Comments tab)"],
+    ["e", "edit selected To Do card"],
+    ["f", "filter selected lane (again to clear)"],
     ["r", "run selected task"],
     ["R", "retry failed run"],
     ["a", "archive task"],
@@ -2513,8 +2672,8 @@ function renderHelpOverlay(ui: OpenTui) {
     },
     ui.Box(
       {
-        width: 48,
-        height: 30,
+        width: 52,
+        height: 38,
         flexDirection: "column",
         border: true,
         borderStyle: "single",
@@ -2550,6 +2709,7 @@ function renderHelpOverlay(ui: OpenTui) {
 
 function renderInlineNewTask(ui: OpenTui, state: TuiState) {
   const draft = state.newTask ?? createNewTaskDraft(state);
+  const isEditing = Boolean(draft.editingTaskId);
 
   return ui.Box(
     {
@@ -2560,7 +2720,7 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
       ...boxBg(COLORS.panel),
     },
     ui.Text({
-      content: "New Task",
+      content: isEditing ? "Edit Task" : "New Task",
       fg: COLORS.text,
       attributes: ui.TextAttributes.BOLD,
       height: 1,
@@ -2618,7 +2778,11 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 1 },
       ui.Text({
-        content: draft.submitting ? "Creating..." : draft.type === "manual" ? "Create manual task" : "Create agent task",
+        content: draft.submitting
+          ? (isEditing ? "Saving..." : "Creating...")
+          : isEditing
+            ? "Save changes"
+            : draft.type === "manual" ? "Create manual task" : "Create agent task",
         fg: COLORS.bright,
         ...textBg(COLORS.accent),
         height: 1,
@@ -2627,7 +2791,14 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
       }),
       ui.Text({ content: "esc cancel", fg: COLORS.muted, height: 1, flexGrow: 1, truncate: true }),
     ),
-    ui.Text({ content: "tab next field · shift+tab previous · enter create", fg: COLORS.dim, height: 1, truncate: true }),
+    ui.Text({
+      content: isEditing
+        ? "tab next field · shift+tab previous · enter save"
+        : "tab next field · shift+tab previous · enter create",
+      fg: COLORS.dim,
+      height: 1,
+      truncate: true,
+    }),
   );
 }
 
@@ -2811,14 +2982,31 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.filterMode) {
+    await handleFilterModeKey(key, state, actions);
+    return;
+  }
+
+  if (state.detailTab === "comments") {
+    await handleCommentsTabKey(key, state, actions);
+    return;
+  }
+
   if (state.detailTab) {
     if (isEscapeKey(key)) {
-      state.detailTab = undefined;
+      closeInlineDetail(state);
       actions.render();
       return;
     }
-    if ((key.name || key.sequence) === "left" || (key.name || key.sequence) === "right" || key.sequence === "\t") {
-      state.detailTab = state.detailTab === "prompt" ? "handoff" : "prompt";
+    if ((key.name || key.sequence) === "left") {
+      state.detailTab = nextDetailTab(state.detailTab, -1);
+      if (state.detailTab === "comments") await loadCommentsForTask(state, actions, selectedTask(state));
+      actions.render();
+      return;
+    }
+    if ((key.name || key.sequence) === "right" || key.sequence === "\t") {
+      state.detailTab = nextDetailTab(state.detailTab, 1);
+      if (state.detailTab === "comments") await loadCommentsForTask(state, actions, selectedTask(state));
       actions.render();
       return;
     }
@@ -2839,10 +3027,18 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       clearPendingConfirmation(state);
       state.newTask = createNewTaskDraft(state);
       state.overlay = "none";
-      state.detailTab = undefined;
+      closeInlineDetail(state);
       state.moveTargetColumn = undefined;
       state.error = undefined;
       actions.render();
+      return;
+    case "e":
+    case "E":
+      handleEditRequested(state, actions);
+      return;
+    case "f":
+    case "F":
+      handleFilterKeyEntry(state, actions);
       return;
     case "u":
       clearPendingConfirmation(state);
@@ -2886,7 +3082,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
         actions.render();
         return;
       }
-      state.detailTab = undefined;
+      closeInlineDetail(state);
       state.moveTargetColumn = selectedTask(state)?.column;
       actions.render();
       return;
@@ -2914,25 +3110,20 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
 
   if (isEnterKey(key) && state.selectedTaskId) {
     clearPendingConfirmation(state);
-    state.detailTab = state.detailTab ? undefined : "prompt";
+    if (state.detailTab) closeInlineDetail(state);
+    else state.detailTab = "prompt";
     actions.render();
     return;
   }
 
-  if (keyName === "down") {
-    state.selectedTaskId = nextTaskId(state.tasks, state.selectedTaskId, 1);
-    state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
-    actions.render();
-  } else if (keyName === "up") {
-    state.selectedTaskId = nextTaskId(state.tasks, state.selectedTaskId, -1);
-    state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
-    actions.render();
-  } else if (keyName === "left") {
-    state.selectedTaskId = nearestTaskInColumn(state.tasks, state.selectedTaskId, -1);
-    state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
-    actions.render();
-  } else if (keyName === "right") {
-    state.selectedTaskId = nearestTaskInColumn(state.tasks, state.selectedTaskId, 1);
+  if (keyName === "down" || keyName === "up" || keyName === "left" || keyName === "right") {
+    // Navigate within the filtered set — otherwise selection could land on a card
+    // hidden by an active board filter, and every action would silently target it.
+    const visibleTasks = filterTasks(state.tasks, state.boardFilter);
+    if (keyName === "down") state.selectedTaskId = nextTaskId(visibleTasks, state.selectedTaskId, 1);
+    else if (keyName === "up") state.selectedTaskId = nextTaskId(visibleTasks, state.selectedTaskId, -1);
+    else if (keyName === "left") state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, -1);
+    else state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, 1);
     state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
     actions.render();
   }
@@ -3006,7 +3197,7 @@ async function handleConfirmableCardAction(
 
   const result = requestConfirmation(state, action, task.id);
   state.pendingConfirmation = result.state.pendingConfirmation;
-  state.detailTab = undefined;
+  closeInlineDetail(state);
   state.moveTargetColumn = undefined;
   state.error = undefined;
 
@@ -3042,6 +3233,290 @@ function clearPendingConfirmation(state: TuiState): void {
 function clearPendingForSelection(state: Pick<TuiState, "pendingConfirmation">, selectedTaskId: string | undefined): PendingConfirmation | undefined {
   if (!state.pendingConfirmation || state.pendingConfirmation.taskId === selectedTaskId) return state.pendingConfirmation;
   return undefined;
+}
+
+/** Close the selected-card detail view and drop any comments state tied to it. */
+function closeInlineDetail(state: TuiState): void {
+  state.detailTab = undefined;
+  state.comments = undefined;
+  state.commentDraft = undefined;
+}
+
+// ── Edit mode (E/e) ─────────────────────────────────────────────────────────────
+
+function handleEditRequested(state: TuiState, actions: TuiActions): void {
+  clearPendingConfirmation(state);
+  const task = selectedTask(state);
+  if (!task) {
+    state.status = "no task selected";
+    actions.render();
+    return;
+  }
+  if (task.column !== "todo") {
+    state.status = "only To Do cards can be edited";
+    actions.render();
+    return;
+  }
+
+  state.newTask = createEditTaskDraft(task, state);
+  state.overlay = "none";
+  closeInlineDetail(state);
+  state.moveTargetColumn = undefined;
+  state.error = undefined;
+  actions.render();
+}
+
+function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
+  return {
+    type: task.type ?? "agent",
+    title: task.title,
+    description: task.description,
+    directory: task.directory,
+    harness: task.harness ?? "opencode",
+    agentId: task.agent ?? defaultAgentId(state.agents),
+    claudePermissionMode: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
+    assignedTo: task.assignedTo ?? "",
+    model: task.model ?? undefined,
+    isolation: task.isolation ?? "worktree",
+    field: "title",
+    textCursors: {},
+    textScrolls: {},
+    submitting: false,
+    editingTaskId: task.id,
+  };
+}
+
+// ── Filter mode (F/f) ────────────────────────────────────────────────────────────
+
+function handleFilterKeyEntry(state: TuiState, actions: TuiActions): void {
+  clearPendingConfirmation(state);
+  if (state.boardFilter) {
+    state.boardFilter = undefined;
+    state.status = "filter cleared";
+    actions.render();
+    return;
+  }
+
+  const column = selectedTask(state)?.column ?? TUI_COLUMNS[0];
+  closeInlineDetail(state);
+  state.moveTargetColumn = undefined;
+  state.error = undefined;
+  state.filterMode = { column, step: "category", selectedIndex: 0 };
+  actions.render();
+}
+
+async function handleFilterModeKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const mode = state.filterMode;
+  if (!mode) return;
+  const keyName = key.name || key.sequence;
+
+  if (isEscapeKey(key)) {
+    if (mode.step === "value") {
+      state.filterMode = { column: mode.column, step: "category", selectedIndex: 0 };
+    } else {
+      state.filterMode = undefined;
+    }
+    actions.render();
+    return;
+  }
+
+  if (mode.step === "category") {
+    const categories = boardFilterCategories();
+    if (keyName === "down") {
+      mode.selectedIndex = (mode.selectedIndex + 1) % categories.length;
+      actions.render();
+      return;
+    }
+    if (keyName === "up") {
+      mode.selectedIndex = (mode.selectedIndex - 1 + categories.length) % categories.length;
+      actions.render();
+      return;
+    }
+    if (isEnterKey(key)) {
+      const category = categories[mode.selectedIndex]?.kind;
+      if (!category) return;
+      state.filterMode = { column: mode.column, step: "value", category, selectedIndex: 0 };
+      actions.render();
+      return;
+    }
+    return;
+  }
+
+  const category = mode.category as BoardFilterKind;
+  const options = boardFilterOptions(state.tasks, category);
+  if (keyName === "down") {
+    if (options.length) mode.selectedIndex = (mode.selectedIndex + 1) % options.length;
+    actions.render();
+    return;
+  }
+  if (keyName === "up") {
+    if (options.length) mode.selectedIndex = (mode.selectedIndex - 1 + options.length) % options.length;
+    actions.render();
+    return;
+  }
+  if (isEnterKey(key)) {
+    const value = options[mode.selectedIndex];
+    state.filterMode = undefined;
+    if (value === undefined) {
+      state.status = "no values available for that filter";
+    } else {
+      state.boardFilter = { kind: category, value };
+      state.status = `filtering by ${category}: ${value}`;
+      // The current selection may now be hidden by the filter — reselect the
+      // nearest visible card so on-screen highlight and actions stay in sync.
+      const visibleTasks = filterTasks(state.tasks, state.boardFilter);
+      if (!visibleTasks.some((task) => task.id === state.selectedTaskId)) {
+        state.selectedTaskId = visibleTasks[0]?.id;
+        clearPendingConfirmation(state);
+      }
+    }
+    actions.render();
+  }
+}
+
+// ── Comments tab (Review/Done cards) ─────────────────────────────────────────────
+
+async function loadCommentsForTask(state: TuiState, actions: TuiActions, task: Task | undefined): Promise<void> {
+  if (!task) return;
+  if (state.comments?.taskId === task.id && !state.comments.error) return;
+
+  state.comments = { taskId: task.id, items: [], loading: true, selectedIndex: 0 };
+  actions.render();
+  try {
+    const items = await actions.client.listComments(task.id);
+    if (state.comments?.taskId === task.id) {
+      state.comments = { taskId: task.id, items, loading: false, selectedIndex: 0 };
+    }
+  } catch (error) {
+    if (state.comments?.taskId === task.id) {
+      state.comments = { taskId: task.id, items: [], loading: false, error: errorMessage(error), selectedIndex: 0 };
+    }
+  }
+  actions.render();
+}
+
+async function submitCommentDraft(state: TuiState, actions: TuiActions): Promise<void> {
+  const draft = state.commentDraft;
+  if (!draft) return;
+  const body = draft.text.trim();
+  if (!body) {
+    state.status = "comment body is required";
+    actions.render();
+    return;
+  }
+
+  state.status = "adding comment...";
+  actions.render();
+  try {
+    await actions.client.addComment(draft.taskId, USER_COMPLETED_BY, body, draft.parentCommentId);
+    state.commentDraft = undefined;
+    state.status = "comment added";
+    const task = state.tasks.find((item) => item.id === draft.taskId);
+    state.comments = undefined;
+    await loadCommentsForTask(state, actions, task);
+  } catch (error) {
+    state.error = errorMessage(error);
+    state.status = "add comment failed";
+    actions.render();
+  }
+}
+
+async function handleCommentsTabKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const task = selectedTask(state);
+
+  if (state.commentDraft) {
+    if (isEscapeKey(key)) {
+      state.commentDraft = undefined;
+      actions.render();
+      return;
+    }
+    if (isEnterKey(key)) {
+      await submitCommentDraft(state, actions);
+      return;
+    }
+    if (isLineDeleteKey(key)) {
+      state.commentDraft.text = "";
+      actions.render();
+      return;
+    }
+    if (key.name === "backspace" || key.sequence === "\u007f" || key.sequence === "\b") {
+      state.commentDraft.text = state.commentDraft.text.slice(0, -1);
+      actions.render();
+      return;
+    }
+    if (!key.ctrl && !key.meta && key.sequence.length === 1 && key.sequence >= " ") {
+      state.commentDraft.text += key.sequence;
+      actions.render();
+    }
+    return;
+  }
+
+  if (isEscapeKey(key)) {
+    closeInlineDetail(state);
+    actions.render();
+    return;
+  }
+
+  // q always quits, even while just browsing (not composing) the Comments tab.
+  if (key.sequence === "q") {
+    actions.shutdown();
+    return;
+  }
+
+  const keyName = key.name || key.sequence;
+  if (keyName === "left") {
+    state.detailTab = nextDetailTab("comments", -1);
+    actions.render();
+    return;
+  }
+  if (keyName === "right" || key.sequence === "\t") {
+    state.detailTab = nextDetailTab("comments", 1);
+    actions.render();
+    return;
+  }
+
+  const items = task && state.comments?.taskId === task.id ? flattenComments(state.comments.items) : [];
+  if (keyName === "down") {
+    if (items.length && state.comments) state.comments.selectedIndex = Math.min(state.comments.selectedIndex + 1, items.length - 1);
+    actions.render();
+    return;
+  }
+  if (keyName === "up") {
+    if (items.length && state.comments) state.comments.selectedIndex = Math.max(state.comments.selectedIndex - 1, 0);
+    actions.render();
+    return;
+  }
+
+  if (key.sequence === "c") {
+    if (!task || (task.column !== "review" && task.column !== "done")) {
+      state.status = "comments are only available on Review or Done cards";
+      actions.render();
+      return;
+    }
+    state.commentDraft = { taskId: task.id, parentCommentId: null, text: "" };
+    actions.render();
+    return;
+  }
+
+  if (key.sequence === "r") {
+    if (!task || (task.column !== "review" && task.column !== "done")) {
+      state.status = "comments are only available on Review or Done cards";
+      actions.render();
+      return;
+    }
+    const selected = items[state.comments?.selectedIndex ?? -1];
+    if (!selected) {
+      state.status = "no comment selected to reply to";
+      actions.render();
+      return;
+    }
+    // Threading is a single level deep (flattenComments only nests root → its
+    // replies), so replying to a reply attaches to its root, not the reply itself
+    // — otherwise the new comment would render detached at the end of the thread.
+    const parentCommentId = selected.parentCommentId ?? selected.id;
+    state.commentDraft = { taskId: task.id, parentCommentId, text: "" };
+    actions.render();
+  }
 }
 
 async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
@@ -3102,40 +3577,59 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
     return;
   }
 
+  const isEditing = Boolean(draft.editingTaskId);
   draft.submitting = true;
   draft.error = undefined;
-  state.status = `creating task: ${title}`;
+  state.status = isEditing ? `saving task: ${title}` : `creating task: ${title}`;
   actions.render();
 
   try {
-    const task = await actions.client.createTask(draft.type === "manual" ? {
-      type: "manual",
-      title,
-      description: draft.description,
-      directory,
-      assignedTo: draft.assignedTo.trim() || undefined,
-    } : {
-      type: "agent",
-      harness: draft.harness,
-      title,
-      description: draft.description,
-      directory,
-      agent: draft.harness === "claude-code" ? undefined : draft.agentId || undefined,
-      claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : undefined,
-      model: draft.model,
-      isolation: draft.isolation,
-    });
+    const task = isEditing
+      ? await actions.client.updateTask(draft.editingTaskId as string, draft.type === "manual" ? {
+          type: "manual",
+          title,
+          description: draft.description,
+          directory,
+          assignedTo: draft.assignedTo.trim() || null,
+        } : {
+          type: "agent",
+          harness: draft.harness,
+          title,
+          description: draft.description,
+          directory,
+          agent: draft.harness === "claude-code" ? null : draft.agentId || null,
+          claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : null,
+          model: draft.model ?? null,
+          isolation: draft.isolation,
+        })
+      : await actions.client.createTask(draft.type === "manual" ? {
+          type: "manual",
+          title,
+          description: draft.description,
+          directory,
+          assignedTo: draft.assignedTo.trim() || undefined,
+        } : {
+          type: "agent",
+          harness: draft.harness,
+          title,
+          description: draft.description,
+          directory,
+          agent: draft.harness === "claude-code" ? undefined : draft.agentId || undefined,
+          claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : undefined,
+          model: draft.model,
+          isolation: draft.isolation,
+        });
     state.overlay = "none";
     state.newTask = undefined;
     state.error = undefined;
-    state.status = `created task: ${task.title}`;
+    state.status = isEditing ? `saved task: ${task.title}` : `created task: ${task.title}`;
     await actions.refresh(true);
     state.selectedTaskId = task.id;
     actions.render();
   } catch (error) {
     draft.submitting = false;
     draft.error = errorMessage(error);
-    state.status = "create task failed";
+    state.status = isEditing ? "save task failed" : "create task failed";
     actions.render();
   }
 }
