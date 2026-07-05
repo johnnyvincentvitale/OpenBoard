@@ -190,28 +190,28 @@ describe("archive list windowing", () => {
 });
 
 describe("sidebar detail mode", () => {
-  // Expanded needs 3 rows per detail + 8 fixed (title 3, hints 2, gaps).
+  // Expanded needs 3 rows per detail + 7 fixed (title 2, hints 2, gaps).
   it("stays expanded when the two-line style fits", () => {
-    expect(sidebarDetailMode(26, 6, false)).toBe("expanded");
-    // 80-row terminal (inner 63) fits even 8 details + an error box.
-    expect(sidebarDetailMode(63, 8, true)).toBe("expanded");
+    expect(sidebarDetailMode(25, 6, false)).toBe("expanded");
+    // 80-row terminal (inner 63) fits even 9 details + an error box.
+    expect(sidebarDetailMode(63, 9, true)).toBe("expanded");
   });
 
   it("compacts one row short of fitting", () => {
-    expect(sidebarDetailMode(25, 6, false)).toBe("compact");
+    expect(sidebarDetailMode(24, 6, false)).toBe("compact");
   });
 
   it("compacts a worktree card with an error at 40 terminal rows", () => {
     // The live crowding case: inner 23, 8 details (BRANCH+BASE) — expanded
-    // needs 32 rows (43 with an error) and used to clip labels into values.
+    // still does not fit and should fall back to single-line rows.
     expect(sidebarDetailMode(23, 8, false)).toBe("compact");
     expect(sidebarDetailMode(23, 8, true)).toBe("compact");
   });
 
   it("charges the error box against the expanded budget", () => {
-    // 6 details fit at inner 26 (26 rows) but not with the 11-row error box.
-    expect(sidebarDetailMode(26, 6, true)).toBe("compact");
-    expect(sidebarDetailMode(37, 6, true)).toBe("expanded");
+    // 6 details fit at inner 25 (25 rows) but not with the 7-row error box.
+    expect(sidebarDetailMode(31, 6, true)).toBe("compact");
+    expect(sidebarDetailMode(32, 6, true)).toBe("expanded");
   });
 });
 

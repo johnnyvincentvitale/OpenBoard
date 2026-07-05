@@ -821,7 +821,7 @@ describe("TUI Enter key shows inline selected-card details", () => {
     }));
 
     const metadataBox = boxesContaining(app, "STATE")
-      .find((node) => textOf(node).includes("TYPE") && textOf(node).includes("LANE") && textOf(node).includes("AGENT") && node.props?.height === 4);
+      .find((node) => textOf(node).includes("TASK ID") && textOf(node).includes("TYPE") && textOf(node).includes("LANE") && textOf(node).includes("AGENT") && node.props?.height === 5);
 
     expect(metadataBox).toBeTruthy();
   });
@@ -852,6 +852,48 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(text.indexOf("STATE")).toBeGreaterThan(-1);
     expect(text.indexOf("INSTANCE")).toBeGreaterThan(-1);
     expect(text.indexOf("STATE")).toBeLessThan(text.indexOf("INSTANCE"));
+  });
+
+  it("Selected column shows TASK ID for normal and inline detail views", () => {
+    const normal = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 56,
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    }));
+    const inline = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 56,
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+      detailTab: "prompt",
+    }));
+
+    expect(textOf(normal)).toContain("TASK ID");
+    expect(textOf(normal)).toContain("todo-card");
+    expect(textOf(inline)).toContain("TASK ID");
+    expect(textOf(inline)).toContain("todo-card");
+  });
+
+  it("Selected column places TASK ID at the bottom of metadata", () => {
+    const selectedTask = {
+      ...task("task-bottom", "done"),
+      isolation: "worktree" as const,
+      worktreePath: "/repo/.worktrees/task-bottom",
+      sessionId: "ses_bottom",
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 80,
+      tasks: [selectedTask],
+      selectedTaskId: "task-bottom",
+    }));
+    const text = textOf(app);
+
+    expect(text.indexOf("WORKTREE")).toBeGreaterThan(-1);
+    expect(text.indexOf("SESSION")).toBeGreaterThan(-1);
+    expect(text.indexOf("TASK ID")).toBeGreaterThan(text.indexOf("WORKTREE"));
+    expect(text.indexOf("TASK ID")).toBeGreaterThan(text.indexOf("SESSION"));
   });
 
   it("Selected column compact metadata has a wider gutter and white values", () => {
@@ -908,6 +950,33 @@ describe("TUI Enter key shows inline selected-card details", () => {
       .find((node) => node.props?.id === "selected-error-box");
 
     expect(errorBox?.props.height).toBe(5);
+  });
+
+  it("error card selected view uses expanded label-over-value metadata at normal heights", () => {
+    const errorTask = {
+      ...task("error-card", "review"),
+      runState: "error" as const,
+      error: "long prompt layout smoke failure",
+      isolation: "worktree" as const,
+      worktreePath: "/repo/.worktrees/error-card",
+      sessionId: "ses_error_card",
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 56,
+      tasks: [errorTask],
+      selectedTaskId: "error-card",
+    }));
+
+    const stateLabel = textNodesContaining(app, "STATE")[0];
+    const taskIdLabel = textNodesContaining(app, "TASK ID")[0];
+    const errorText = textOf(app);
+
+    expect(stateLabel?.props.width).toBeUndefined();
+    expect(taskIdLabel?.props.width).toBeUndefined();
+    expect(errorText).toContain("error-card");
+    expect(errorText).toContain("long prompt layout smoke failure");
+    expect(nodesByType(app, "Box").some((node) => node.props?.id === "selected-error-box")).toBe(false);
   });
 
   it("inline detail mode closes with esc key", async () => {

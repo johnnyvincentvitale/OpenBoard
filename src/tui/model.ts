@@ -547,9 +547,9 @@ export function archiveListWindow(
 
 /**
  * Whether the sidebar can afford its two-line label-over-value detail style.
- * Expanded spends 3 rows on the title, 2 per detail, 2 on the key hints, and a
+ * Expanded spends 2 rows on the title, 2 per detail, 2 on the key hints, and a
  * 1-row gap between every child (details, spacer, hints); an error adds the
- * 10-row error box plus its gap. When that doesn't fit, compact mode drops to
+ * compact red error notice plus its gap. When that doesn't fit, compact mode drops to
  * single-line `LABEL value` rows grouped without gaps — the card-meta style —
  * so labels and values can't collide at short terminal heights.
  */
@@ -558,7 +558,7 @@ export function sidebarDetailMode(
   detailCount: number,
   hasError: boolean,
 ): "expanded" | "compact" {
-  const expandedRows = 3 * detailCount + 8 + (hasError ? 11 : 0);
+  const expandedRows = 3 * detailCount + 7 + (hasError ? 7 : 0);
   return expandedRows <= innerHeight ? "expanded" : "compact";
 }
 

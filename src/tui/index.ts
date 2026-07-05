@@ -2126,6 +2126,7 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   if (task.sessionId) rows.push({ label: "SESSION", value: task.sessionId, color: COLORS.muted });
   if (task.worktreeBranch) rows.push({ label: "BRANCH", value: `⑃ ${task.worktreeBranch}`, color: COLORS.muted });
   if (task.baseBranch) rows.push({ label: "BASE", value: `⑃ ${task.baseBranch}`, color: COLORS.muted });
+  rows.push({ label: "TASK ID", value: task.id, color: COLORS.text });
 
   if (state.moveTargetColumn) {
     return renderInlineMoveDetail(ui, state, task);
@@ -2142,7 +2143,9 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   // The sidebar shares the lane chrome (border + padding), so lane inner height
   // is its inner height too. When the two-line detail style can't fit, fall back
   // to single-line card-meta rows instead of letting labels and values collide.
-  const mode = sidebarDetailMode(laneInnerHeight(state.terminalRows), rows.length, Boolean(task.error));
+  // Error cards represent the failure as normal metadata here; the red error
+  // notice is reserved for the inline Prompt/Handoff detail view.
+  const mode = sidebarDetailMode(laneInnerHeight(state.terminalRows), rows.length, false);
   return mode === "expanded"
     ? renderExpandedDetails(ui, task, rows)
     : renderCompactDetails(ui, task, rows);
@@ -2168,7 +2171,7 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
     tab === "prompt"
       ? renderScrollableDetailText(ui, `board-detail-prompt-${task.id}`, task.description || "(empty prompt)")
       : renderBoardHandoffTab(ui, task.completion ?? null, `board-detail-handoff-${task.id}`);
-  const inlineRows = rows.filter((row) => ["TYPE", "STATE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY"].includes(row.label));
+  const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY"].includes(row.label));
 
   return ui.Box(
     {
@@ -2250,7 +2253,6 @@ function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Ta
 
 function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
   const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, COLORS.bright));
-  if (task.error) details.push(renderErrorBox(ui, task.error));
 
   return ui.Box(
     {
@@ -2264,7 +2266,7 @@ function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
       fg: COLORS.text,
       attributes: ui.TextAttributes.BOLD,
       wrapMode: "word",
-      height: 3,
+      height: 2,
     }),
     ...details,
     ui.Box({ flexGrow: 1 }),
@@ -2274,7 +2276,9 @@ function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
 
 function renderCompactDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
   const compactRows = [...rows];
-  if (task.error) compactRows.push({ label: "ERR", value: task.error, color: COLORS.text });
+  if (task.error && !compactRows.some((row) => row.label === "ERROR")) {
+    compactRows.push({ label: "ERR", value: task.error, color: COLORS.text });
+  }
 
   return ui.Box(
     {
