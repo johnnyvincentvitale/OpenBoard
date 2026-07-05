@@ -6,15 +6,15 @@ description: >
   "choose models for my agents", "which OpenCode agents should I use", or wants
   to design a multi-agent run before dispatching. Use after startup and any
   requested readiness report, before the orchestrator dispatches cards, to lock
-  the run shape, the card contracts, the agent profiles, and the OpenCode
-  model/provider setup.
+  the run shape, the card contracts, the worker harnesses, the agent profiles,
+  and the model/provider setup.
 ---
 
 # Board Plan
 
 Design the multi-agent run before anything dispatches. The output of this skill
-is a run plan the user approves: workflow shape, waves, card contracts, agent
-profiles, model assignments, and a verified-green baseline. OpenBoard has no
+is a run plan the user approves: workflow shape, waves, card contracts, worker
+harness choices, agent profiles, model assignments, and a verified-green baseline. OpenBoard has no
 dependency links, completion contracts, or failure caps natively — the
 orchestrator session enforces all of them procedurally, and this plan is where
 they get defined.
@@ -63,17 +63,34 @@ shared contracts serially before fan-out, and give every shared file (root
 wiring, package manifest) exactly one owner — usually the integration pass.
 Install dependencies once, before fan-out, never per-agent.
 
-## Design The Agent Profiles
+## Design Worker Harnesses And Agent Profiles
 
-Count roles, not workers. Create one profile per distinct behavior; parallel
-lanes are cards, not identities. The live OpenCode roster is the board's
-model/provider source of truth: each assignable agent must appear in
-`/api/agents` with a concrete model, and OpenBoard materializes that roster
-model onto `task.model` when the card is created. Planned runs normally use
-custom profiles so role behavior, provider, and model are explicit and
-roster-verifiable before dispatch.
+Count roles, not workers, but choose the worker harness before choosing profiles.
+OpenBoard has more than one execution path:
 
-**One role, N lanes** (fan-out/waves — e.g. eight coders on disjoint features):
+- `harness: "opencode"` — dispatches through OpenCode's agent roster. Use this
+  when the worker should be an OpenCode agent profile with a roster-visible
+  provider/model.
+- `harness: "claude-code"` — dispatches through Claude Code. Use this when the
+  worker should be Claude Code itself, with a Claude Code model selection and
+  `claudePermissionMode` such as `bypassPermissions`. Do **not** create an
+  OpenCode profile pretending to be Anthropic when the intended executor is
+  Claude Code.
+
+Create one profile per distinct OpenCode behavior; parallel lanes are cards,
+not identities. The live OpenCode roster is the board's model/provider source
+of truth only for `harness: "opencode"` cards: each assignable OpenCode agent
+must appear in `/api/agents` with a concrete model, and OpenBoard materializes
+that roster model onto `task.model` when the card is created. Planned OpenCode
+runs normally use custom profiles so role behavior, provider, and model are
+explicit and roster-verifiable before dispatch.
+
+Claude Code harness cards do not use OpenCode agent profiles. They must declare
+their harness, Claude Code model, and permission mode in the card/task plan, and
+the created task must be inspected before dispatch to prove those fields were
+stored.
+
+**One OpenCode role, N lanes** (fan-out/waves — e.g. eight coders on disjoint features):
 
 - Generate N named profiles from a single prompt template so the prompts
   cannot drift. The profiles differ only in `name`, `color`, and `model`.
@@ -83,7 +100,7 @@ roster-verifiable before dispatch.
   stronger models to hard ones, then verify those models appear in the live
   roster before any cards are created.
 
-**Multiple roles** (role loop — e.g. coder + auditor):
+**Multiple OpenCode roles** (role loop — e.g. coder + auditor):
 
 - One profile per role, each with its own system prompt encoding its behavior:
   the coder implements and hands off evidence; the auditor reviews
@@ -99,7 +116,7 @@ roster-verifiable before dispatch.
   with no findings), and cap the loop (e.g. three round trips) so two agents
   cannot volley forever.
 
-Profile hygiene, regardless of case:
+OpenCode profile hygiene, regardless of case:
 
 - Give every profile a distinct `color` in its config so the board's agent
   badges are scannable at a glance during concurrent runs.
@@ -127,6 +144,7 @@ This manifest is the contract that `create-profile` and
 PROFILE MANIFEST
 - id: <profile filename/id>
   role: <coder | auditor | fixer | planner | ...>
+  harness: opencode
   provider: <openai | openrouter | ...>
   model: <provider/model-id as written in profile frontmatter>
   expectedMode: primary
@@ -136,12 +154,30 @@ PROFILE MANIFEST
   overwrite: none | backup-required | approved-durable-update
 ```
 
-If multiple lanes share one behavior, use one prompt template and one manifest
-row per profile id/model/color. Do not let later phases infer profile intent
-from prose; the manifest is the source of truth for installation, roster proof,
-task model materialization, dispatch eligibility, and cleanup.
+For Claude Code cards, write a separate **Harness Manifest** row instead of a
+Profile Manifest row:
 
-OpenCode config is not hot-reloaded. After edits, the selected OpenBoard
+```text
+HARNESS MANIFEST
+- id: <lane/card role id>
+  role: <coder | auditor | fixer | ...>
+  harness: claude-code
+  model: <claude-code model id supported by the product, such as claude-code/sonnet>
+  claudePermissionMode: <acceptEdits | auto | bypassPermissions | manual | dontAsk | plan>
+  expectedStoredHarness: claude-code
+  expectedStoredModel: <model id exactly as task.model should report>
+  expectedStoredPermissionMode: <permission mode exactly as task should report>
+  lifecycle: card-scoped
+  restartRequired: false
+```
+
+If multiple OpenCode lanes share one behavior, use one prompt template and one
+Profile Manifest row per profile id/model/color. Do not let later phases infer
+profile or harness intent from prose; the manifests are the source of truth for
+profile installation, roster proof, task model materialization, task harness
+proof, dispatch eligibility, and cleanup.
+
+OpenCode config is not hot-reloaded. After OpenCode profile edits, the selected OpenBoard
 instance or external OpenCode server must be restarted, then `GET /api/agents`
 (or MCP `list_agents`) must show every planned profile with the expected
 `mode` and `model` before creating any card. Verify the roster from the
@@ -149,6 +185,11 @@ manifest; do not assume it. During card creation, the assigned agent's roster
 model is copied onto the task as `task.model`; if a card intentionally uses an
 explicit model override, record that override in the plan and verify the stored
 task model after creation.
+
+Claude Code harness setup is different: profile creation and OpenCode roster
+proof are not the gate. The gate is that the selected OpenBoard build supports
+Claude Code cards and the created task record stores `harness: "claude-code"`,
+the intended Claude Code model, and the intended `claudePermissionMode`.
 
 ## Establish The Green Baseline
 
@@ -168,9 +209,14 @@ whole contract:
 
 - Title with the run's namespace prefix.
 - Absolute working directory; `isolation: "worktree"` for anything concurrent.
-- Assigned agent, whose verified roster model is materialized onto `task.model`
-  at creation time. Use an explicit model override only when the run plan calls
-  for it, and make that override visible in the card record.
+- Worker harness: `opencode` for OpenCode profile workers, or `claude-code` for
+  Claude Code workers.
+- For OpenCode cards: assigned agent, whose verified roster model is
+  materialized onto `task.model` at creation time. Use an explicit model
+  override only when the run plan calls for it, and make that override visible
+  in the card record.
+- For Claude Code cards: no OpenCode agent profile; store the Claude Code model
+  and `claudePermissionMode` explicitly on the task.
 - The boundary, restated: which files/directories this card may touch.
 - Acceptance criteria concrete enough for the orchestrator to judge Review
   against them — the board's first idle means "end of turn," not "done."
@@ -219,7 +265,10 @@ turn, state that approval before continuing.
 
 - Planning a run in a repo with no self-verifiable build/test command.
 - Creating cards before the selected agent roster has been verified with a
-  concrete model, or failing to confirm the created task stores that model.
+  concrete model for OpenCode harness cards, or failing to confirm the created
+  task stores the intended harness/model/permission fields.
+- Creating OpenCode profiles for work that was supposed to run through the
+  Claude Code harness.
 - N same-role profiles with hand-written (driftable) prompts instead of one
   template.
 - Role prompts that assume they extend the default prompt when they may
