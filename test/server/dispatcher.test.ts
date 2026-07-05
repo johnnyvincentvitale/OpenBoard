@@ -730,7 +730,7 @@ describe("TaskDispatcher", () => {
       vi.useRealTimers();
     });
 
-    it("persists finalSessionOutput when OpenCode session finishes with assistant text", async () => {
+    it("persists the latest useful text-ended event as finalSessionOutput", async () => {
       vi.useFakeTimers();
       const task = createTask();
       client.nextSessionId = "ses_output_cap";
@@ -738,9 +738,70 @@ describe("TaskDispatcher", () => {
         [
           {
             info: { role: "assistant" },
+            parts: [{ type: "step-finish", reason: "stop" }],
+          },
+        ],
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      client.queueScript([
+        {
+          id: "evt_text_1",
+          type: "session.next.text.ended",
+          properties: {
+            sessionID: "ses_output_cap",
+            assistantMessageID: "msg_useful",
+            textID: "txt_useful",
+            text: "The bug was in foo.ts line 42.\nI fixed it by updating the parameter type.",
+          },
+        } as unknown as OpencodeEvent,
+        {
+          id: "evt_text_2",
+          type: "session.next.text.ended",
+          properties: {
+            sessionID: "ses_output_cap",
+            assistantMessageID: "msg_report",
+            textID: "txt_report",
+            text: "Task complete. Here's the handoff:\n\n---\nSTEP COMPLETE: implementation",
+          },
+        } as unknown as OpencodeEvent,
+        {
+          id: "evt_1",
+          type: "session.idle",
+          properties: { sessionID: "ses_output_cap" },
+        } as unknown as OpencodeEvent,
+      ]);
+
+      dispatcher.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const updated = store.get(task.id);
+      expect(updated?.runState).toBe("idle");
+      expect(updated?.finalSessionOutput).toBe(
+        "The bug was in foo.ts line 42.\nI fixed it by updating the parameter type.",
+      );
+      vi.useRealTimers();
+    });
+
+    it("falls back to the latest useful assistant message when the final message is a report wrapper", async () => {
+      vi.useFakeTimers();
+      const task = createTask();
+      client.nextSessionId = "ses_output_scan";
+      client.messageResponses = [
+        [
+          {
+            info: { role: "assistant" },
             parts: [
-              { type: "text", text: "The bug was in foo.ts line 42." },
-              { type: "text", text: "I fixed it by updating the parameter type." },
+              { type: "text", text: "I found the issue in dispatcher.ts and verified the fix." },
+              { type: "step-finish", reason: "stop" },
+            ],
+          },
+          {
+            info: { role: "assistant" },
+            parts: [
+              { type: "text", text: "Audit complete. Reported via `/complete`.\n\n## Summary\nHandoff metadata." },
               { type: "step-finish", reason: "stop" },
             ],
           },
@@ -753,17 +814,15 @@ describe("TaskDispatcher", () => {
         {
           id: "evt_1",
           type: "session.idle",
-          properties: { sessionID: "ses_output_cap" },
+          properties: { sessionID: "ses_output_scan" },
         } as unknown as OpencodeEvent,
       ]);
 
       dispatcher.start();
       await vi.advanceTimersByTimeAsync(1000);
 
-      const updated = store.get(task.id);
-      expect(updated?.runState).toBe("idle");
-      expect(updated?.finalSessionOutput).toBe(
-        "The bug was in foo.ts line 42.\nI fixed it by updating the parameter type.",
+      expect(store.get(task.id)?.finalSessionOutput).toBe(
+        "I found the issue in dispatcher.ts and verified the fix.",
       );
       vi.useRealTimers();
     });

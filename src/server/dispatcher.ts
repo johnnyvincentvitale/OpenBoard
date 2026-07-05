@@ -6,8 +6,9 @@
  * the task's description, links the session id onto the task, and moves it to
  * `in_progress`. `start()` consumes the global `/event` stream and reacts to
  * live-state changes on any session linked to a task: `running` keeps the task in
- * sync, `idle` triggers a message-based completion check, and `error` records the
- * failure without moving the card. `retry()` re-prompts an existing session and
+ * sync, text-ended events cache the latest useful assistant output, `idle`
+ * triggers a completion check, and `error` records the failure without moving the
+ * card. `retry()` re-prompts an existing session and
  * moves the task back to `in_progress`. `abort()` stops the task's session.
  * `shutdown()` stops consuming the event stream.
  */
@@ -176,25 +177,49 @@ function hasAssistantTurnFinished(messages: unknown): boolean {
   });
 }
 
-/**
- * Extract the final meaningful assistant text output from an OpenCode session
- * message list. Returns the concatenated text of all `type: "text"` parts in the
- * assistant's final message, or null when no text is available.
- */
-function extractFinalOutput(messages: unknown): string | null {
-  if (!Array.isArray(messages)) return null;
+function looksLikeCompletionReport(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized.startsWith("task complete. here's the handoff") ||
+    normalized.startsWith("audit complete. reported via") ||
+    normalized.startsWith("reported via `/complete`") ||
+    normalized.startsWith("reported via /complete") ||
+    normalized.includes("let me submit the completion report") ||
+    normalized.includes("submit the completion report") ||
+    normalized.includes("call /complete") ||
+    normalized.includes("called /complete") ||
+    normalized.includes("reported via `/block`") ||
+    normalized.includes("reported via /block")
+  );
+}
 
-  const latest = messages[messages.length - 1];
-  if (latest === null || typeof latest !== "object") return null;
+function usefulOutput(text: string | null | undefined): string | null {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!trimmed || looksLikeCompletionReport(trimmed)) return null;
+  return trimmed;
+}
 
-  const info = (latest as { info?: unknown }).info;
+function extractTextEndedOutput(event: OpencodeEvent): string | null {
+  if ((event as { type?: unknown }).type !== "session.next.text.ended") return null;
+  const properties = (event as { properties?: unknown }).properties;
+  if (properties === null || typeof properties !== "object") return null;
+  const text = (properties as Record<string, unknown>).text;
+  return usefulOutput(typeof text === "string" ? text : null);
+}
+
+function assistantMessageText(message: unknown): string | null {
+  if (message === null || typeof message !== "object") return null;
+
+  const info = (message as { info?: unknown }).info;
   const role =
     info !== null && typeof info === "object"
       ? (info as Record<string, unknown>).role
       : undefined;
   if (role !== "assistant") return null;
 
-  const parts = (latest as { parts?: unknown }).parts;
+  const parts = (message as { parts?: unknown }).parts;
   if (!Array.isArray(parts)) return null;
 
   const textParts: string[] = [];
@@ -206,7 +231,23 @@ function extractFinalOutput(messages: unknown): string | null {
     }
   }
 
-  return textParts.length > 0 ? textParts.join("\n") : null;
+  return usefulOutput(textParts.join("\n"));
+}
+
+/**
+ * Extract the final useful assistant text output from an OpenCode session
+ * message list. Completion-report wrapper messages are skipped so the Output tab
+ * does not duplicate the structured Handoff tab.
+ */
+function extractFinalOutput(messages: unknown): string | null {
+  if (!Array.isArray(messages)) return null;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = assistantMessageText(messages[index]);
+    if (text) return text;
+  }
+
+  return null;
 }
 
 /** Position value that always lands a move at the end of the target column. */
@@ -249,6 +290,7 @@ export class TaskDispatcher implements Dispatcher {
   private generation = 0;
   private consumeLoopPromise: Promise<void> | null = null;
   private readonly completionWatchers = new Map<string, { cancelled: boolean }>();
+  private readonly outputCandidates = new Map<string, string>();
 
   constructor(deps: TaskDispatcherDeps) {
     this.client = deps.client;
@@ -601,6 +643,7 @@ export class TaskDispatcher implements Dispatcher {
     }
     this.assertParentsSatisfied(task);
     this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
+    this.outputCandidates.delete(task.sessionId);
 
     const runStartedAt = Date.now();
     const promptError = await this.prompt(
@@ -673,6 +716,7 @@ export class TaskDispatcher implements Dispatcher {
     }
     await this.client.session.abort({ sessionID: task.sessionId });
     this.cancelCompletionWatcher(task.sessionId);
+    this.outputCandidates.delete(task.sessionId);
     this.store.update(taskId, { runState: "idle" });
   }
 
@@ -696,6 +740,7 @@ export class TaskDispatcher implements Dispatcher {
       watcher.cancelled = true;
     }
     this.completionWatchers.clear();
+    this.outputCandidates.clear();
   }
 
   // ---- internals ----
@@ -756,7 +801,7 @@ export class TaskDispatcher implements Dispatcher {
 
         if (!hasAssistantTurnFinished(messages)) continue;
 
-        const finalOutput = extractFinalOutput(messages);
+        const finalOutput = this.outputCandidates.get(sessionId) ?? extractFinalOutput(messages);
 
         const beforeFallback = this.getTaskForWatcher(taskId);
         if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
@@ -784,6 +829,7 @@ export class TaskDispatcher implements Dispatcher {
     } finally {
       if (this.completionWatchers.get(sessionId) === watcher) {
         this.completionWatchers.delete(sessionId);
+        this.outputCandidates.delete(sessionId);
       }
     }
   }
@@ -920,6 +966,11 @@ export class TaskDispatcher implements Dispatcher {
     const task = this.store.list().find((t) => t.sessionId === sessionId);
     if (!task) return;
 
+    const textOutput = extractTextEndedOutput(event);
+    if (textOutput) {
+      this.outputCandidates.set(sessionId, textOutput);
+    }
+
     const liveState = eventLiveState(event);
     if (liveState === null) return;
 
@@ -944,6 +995,7 @@ export class TaskDispatcher implements Dispatcher {
       case "error": {
         const message = this.extractErrorMessage(event);
         this.store.update(task.id, { runState: "error", error: message });
+        this.outputCandidates.delete(sessionId);
         break;
       }
 

@@ -1,11 +1,14 @@
 # OpenBoard
 
-A local, Devin/Hermes-style **multi-agent command center for [OpenCode](https://opencode.ai)**.
+A local **multi-agent command center for [OpenCode](https://opencode.ai)**.
 OpenBoard ships the **TUI + named-instance CLI** workflow. Post a task, assign it an OpenCode agent,
 hit **Run** — the board dispatches a real session that **autonomously does the work**, and
 the card **auto-advances To Do → In Progress → Review** as the agent runs. Moving to Done is
 manual until OpenCode exposes a stronger task-complete signal. It's the named-agent,
-multi-agent workflow OpenCode doesn't ship, and a free alternative to Devin Desktop's Kanban.
+multi-agent workflow OpenCode doesn't ship.
+
+New here? Start with the **[User Guide](GUIDE.md)** — a walkthrough from a fresh
+clone to orchestrated multi-agent runs. This README is the reference.
 
 ## Scope
 

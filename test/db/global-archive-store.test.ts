@@ -155,12 +155,14 @@ describe("GlobalArchiveStore", () => {
           archived: true,
           parentIds: [],
           completion: null,
+          finalSessionOutput: "final output snapshot",
           completionSource: null,
           createdAt: 11,
           updatedAt: 22,
         },
         { name: "src-inst", port: 4099, workspace: "/ws", dbPath: "/db/cols.sqlite" },
         99,
+        [{ id: "comment_1", taskId: "task_columns", parentCommentId: null, author: "User", body: "archive this note", createdAt: 33 }],
       );
 
       const rows = store.listAll();
@@ -169,6 +171,8 @@ describe("GlobalArchiveStore", () => {
       expect(row.title).toBe("Columns check");
       expect(row.source_instance_name).toBe("src-inst");
       expect(row.task_type).toBe("agent");
+      expect(row.final_session_output).toBe("final output snapshot");
+      expect(row.comments).toContain("archive this note");
       expect(row.completed_by).toBe("User");
       expect(row.archived_at).toBe(99);
       expect(row.task_id).toBe("task_columns");
@@ -215,6 +219,8 @@ describe("GlobalArchiveStore", () => {
       const columns = new Set((db.prepare("PRAGMA table_info(global_archive)").all() as Array<{ name: string }>).map((column) => column.name));
       expect(columns.has("task_type")).toBe(true);
       expect(columns.has("assigned_to")).toBe(true);
+      expect(columns.has("final_session_output")).toBe(true);
+      expect(columns.has("comments")).toBe(true);
       expect(columns.has("completed_by")).toBe(true);
     } finally {
       store.close();

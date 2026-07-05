@@ -91,6 +91,7 @@ function state(overrides: Record<string, unknown> = {}) {
     terminalCols: 180,
     terminalRows: 80,
     laneOffsets: { todo: 0, in_progress: 0, review: 0, done: 0 },
+    detailScrollTop: {},
     viewState: initialViewState,
     instanceProvider: createMockInstanceProvider(),
     instanceList: [],
@@ -678,12 +679,17 @@ describe("TUI archive detail cleanup", () => {
     expect(text).not.toContain("src/a.ts");
     expect(text).not.toContain("npm test → passed");
 
-    // The detail labels: INSTANCE, WORKSPACE, LANE, AGENT, MODEL, ARCHIVED should still appear
+    // The detail labels should include the selected-card fields plus archive context.
+    expect(text).toContain("STATE");
     expect(text).toContain("INSTANCE");
-    expect(text).toContain("WORKSPACE");
+    expect(text).toContain("TYPE");
     expect(text).toContain("LANE");
     expect(text).toContain("AGENT");
     expect(text).toContain("MODEL");
+    expect(text).toContain("DIR");
+    expect(text).toContain("ISO");
+    expect(text).toContain("TASK ID");
+    expect(text).toContain("WORKSPACE");
     expect(text).toContain("ARCHIVED");
   });
 
@@ -712,6 +718,11 @@ describe("TUI archive detail cleanup", () => {
   });
 
   it("archive detail tabs render in stable scroll containers", () => {
+    const s = state({
+      detailScrollTop: { "archive-detail-prompt-task-1": 9 },
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt"),
+    });
     const promptApp = renderApp(fakeUi(), state({
       viewState: { view: "archive", previousView: "launch" },
       archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt"),
@@ -729,8 +740,26 @@ describe("TUI archive detail cleanup", () => {
 
     expect(nodesByType(promptApp, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-prompt-task-1");
     expect(nodesByType(handoffApp, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-handoff-task-1");
+    expect(textOf(promptApp)).toContain("Output");
+    expect(textOf(promptApp)).toContain("Comments");
     expect(nodesByType(promptApp, "ScrollBox").find((node) => node.props.id === "archive-detail-prompt-task-1")?.props)
       .toMatchObject({ scrollY: true, scrollX: false, stickyScroll: false, minHeight: 0 });
+    expect(nodesByType(renderApp(fakeUi(), s), "ScrollBox").find((node) => node.props.id === "archive-detail-prompt-task-1")?.scrollTop)
+      .toBe(9);
+  });
+
+  it("archive detail scroll containers save wheel offsets for remounts", async () => {
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt"),
+    });
+    const app = renderApp(fakeUi(), s);
+    const scrollBox = nodesByType(app, "ScrollBox").find((node) => node.props.id === "archive-detail-prompt-task-1");
+
+    scrollBox?.props.onMouseScroll.call({ scrollTop: 14 });
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    expect(s.detailScrollTop["archive-detail-prompt-task-1"]).toBe(14);
   });
 
   it("handoff tab renders empty state when completion is null", () => {
@@ -771,10 +800,12 @@ describe("TUI archive detail cleanup", () => {
         completed_by: "User",
         session_id: "ses_123",
         worktree_path: "/repo/.openboard-worktrees/example_123_reported_complete",
+        worktree_branch: "board/task-1",
+        base_branch: "main",
       }), "prompt"),
     }));
 
-    for (const label of ["INSTANCE", "TYPE", "ACCEPTED BY", "LANE", "AGENT", "MODEL", "DIR", "ISO", "WORKTREE", "SESSION"]) {
+    for (const label of ["STATE", "INSTANCE", "TYPE", "ACCEPTED BY", "LANE", "AGENT", "MODEL", "DIR", "ISO", "WORKTREE", "SESSION", "BRANCH", "BASE", "TASK ID"]) {
       const row = metaRowByLabel(app, label);
       expect(row?.children[0].props.width).toBe(13);
       expect(row?.children[1].props.fg).toBe("#ffffff");
@@ -785,6 +816,39 @@ describe("TUI archive detail cleanup", () => {
     expect(text).toContain("User");
     expect(text).toContain("example_123_reported_complete");
     expect(text).toContain("ses_123");
+    expect(text).toContain("board/task-1");
+    expect(text).toContain("main");
+    expect(text).toContain("task-1");
+  });
+
+  it("output tab renders archived final session output", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null, {
+        final_session_output: "archived assistant output",
+      }), "output"),
+    }));
+
+    expect(textOf(app)).toContain("archived assistant output");
+    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-output-task-1");
+  });
+
+  it("comments tab renders archived comments and replies", () => {
+    const comments = [
+      { id: "c1", taskId: "task-1", parentCommentId: null, author: "User", body: "top-level note", createdAt: 1 },
+      { id: "c2", taskId: "task-1", parentCommentId: "c1", author: "Agent", body: "reply note", createdAt: 2 },
+    ];
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null, {
+        comments: JSON.stringify(comments),
+      }), "comments"),
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("top-level note");
+    expect(text).toContain("reply note");
+    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-comments-task-1");
   });
 
   it("prompt tab renders empty prompt message when description is empty", () => {
@@ -883,9 +947,11 @@ describe("TUI archive tab navigation", () => {
     }));
 
     const text = textOf(app);
-    // Both tabs should render
+    // All detail tabs should render.
     expect(text).toContain("Prompt");
     expect(text).toContain("Handoff");
+    expect(text).toContain("Output");
+    expect(text).toContain("Comments");
     // Prompt should be active (showing the description)
     expect(text).toContain("Fix the login bug");
   });
@@ -905,7 +971,7 @@ describe("TUI archive tab navigation", () => {
     expect(s.archive.detailTab).toBe("prompt");
   });
 
-  it("tab key toggles between Prompt and Handoff", async () => {
+  it("tab key cycles through all archive detail tabs", async () => {
     const s = state({
       viewState: { view: "archive", previousView: "launch" },
       archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt"),
@@ -915,6 +981,12 @@ describe("TUI archive tab navigation", () => {
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
     expect(s.archive.detailTab).toBe("handoff");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    expect(s.archive.detailTab).toBe("output");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    expect(s.archive.detailTab).toBe("comments");
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
     expect(s.archive.detailTab).toBe("prompt");
@@ -2217,6 +2289,13 @@ describe("TUI handoff text wrapping", () => {
 
   it("board detail prompt tab renders task description", () => {
     const theTask = { ...task("todo-card", "todo"), description: "Fix the login bug" };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [theTask],
+      selectedTaskId: "todo-card",
+      detailTab: "prompt",
+      detailScrollTop: { "board-detail-prompt-todo-card": 11 },
+    });
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [theTask],
@@ -2228,6 +2307,25 @@ describe("TUI handoff text wrapping", () => {
     expect(text).toContain("Fix the login bug");
     const scrollBox = nodesByType(app, "ScrollBox").find((node) => node.props.id === "board-detail-prompt-todo-card");
     expect(scrollBox?.props).toMatchObject({ scrollY: true, scrollX: false, stickyScroll: false, minHeight: 0 });
+    expect(nodesByType(renderApp(fakeUi(), s), "ScrollBox").find((node) => node.props.id === "board-detail-prompt-todo-card")?.scrollTop)
+      .toBe(11);
+  });
+
+  it("board detail scroll containers save wheel offsets for remounts", async () => {
+    const theTask = { ...task("todo-card", "todo"), description: "Fix the login bug" };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [theTask],
+      selectedTaskId: "todo-card",
+      detailTab: "prompt",
+    });
+    const app = renderApp(fakeUi(), s);
+    const scrollBox = nodesByType(app, "ScrollBox").find((node) => node.props.id === "board-detail-prompt-todo-card");
+
+    scrollBox?.props.onMouseScroll.call({ scrollTop: 17 });
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    expect(s.detailScrollTop["board-detail-prompt-todo-card"]).toBe(17);
   });
 
   it("board detail prompt tab shows empty state when description is empty", () => {
@@ -2341,7 +2439,9 @@ function archiveRecord(
     worktree_branch: null,
     base_branch: null,
     completion,
+    final_session_output: null,
     completion_source: null,
+    comments: null,
     completed_by: null,
     archived_at: new Date(archivedAt).getTime(),
     task_created_at: 1,
@@ -2351,7 +2451,7 @@ function archiveRecord(
   };
 }
 
-function archiveState(records: ReturnType<typeof archiveRecord> | ReturnType<typeof archiveRecord>[], detailTab: "prompt" | "handoff" = "prompt") {
+function archiveState(records: ReturnType<typeof archiveRecord> | ReturnType<typeof archiveRecord>[], detailTab: "prompt" | "handoff" | "output" | "comments" = "prompt") {
   const list = Array.isArray(records) ? records : [records];
   return {
     records: list,

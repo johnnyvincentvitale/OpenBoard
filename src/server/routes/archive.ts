@@ -43,7 +43,7 @@ export function registerArchiveRoutes(app: Hono, deps: ArchiveRouteDeps): void {
       // This is best-effort — a mirroring failure is logged but does not undo
       // the successful local archive.
       try {
-        globalArchiveStore.mirrorTask(updated, sourceInstance, Date.now());
+        globalArchiveStore.mirrorTask(updated, sourceInstance, Date.now(), store.listComments(id));
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("failed to mirror archived task to global archive", { taskId: id, err });

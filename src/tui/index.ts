@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type RosterAgent, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type RosterAgent, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
 import {
@@ -21,6 +21,7 @@ import {
   reconcileLaneOffset,
   shortPath,
   sidebarDetailMode,
+  taskStatus,
   tasksByColumn,
   boardFilterCategories,
   boardFilterOptions,
@@ -283,7 +284,9 @@ interface GlobalArchiveRecord {
   worktree_branch: string | null;
   base_branch: string | null;
   completion: string | null;
+  final_session_output?: string | null;
   completion_source: string | null;
+  comments?: string | null;
   completed_by?: string | null;
   archived_at: number;
   task_created_at: number;
@@ -342,7 +345,7 @@ interface ArchiveState {
   instanceFilter: string | null;
   laneFilter: string | null;
   refreshing: boolean;
-  detailTab: "prompt" | "handoff";
+  detailTab: TaskDetailTab;
 }
 
 /** Detail tabs shown for a selected card via Enter. */
@@ -393,6 +396,7 @@ interface TuiState {
   terminalCols: number;
   terminalRows: number;
   laneOffsets: Record<Column, number>;
+  detailScrollTop: Record<string, number>;
   // Instance management
   viewState: ViewState;
   instanceProvider: InstanceLifecycleProvider;
@@ -471,6 +475,7 @@ export async function runOpenBoardTui(
     terminalCols: renderer.terminalWidth,
     terminalRows: renderer.terminalHeight,
     laneOffsets: { todo: 0, in_progress: 0, review: 0, done: 0 },
+    detailScrollTop: {},
     viewState: initialAttach ? transitionView(initialViewState, "board") : initialViewState,
     instanceProvider: provider,
     instanceList: [],
@@ -1371,13 +1376,15 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
 
   const activeTabFg = COLORS.accentBright;
   const inactiveTabFg = COLORS.dim;
-  const promptActive = tab === "prompt";
-  const handoffActive = tab === "handoff";
 
   const tabContent: VChild =
     tab === "prompt"
-      ? renderScrollableDetailText(ui, `archive-detail-prompt-${record.task_id}`, record.description || "(empty prompt)")
-      : renderHandoffTab(ui, completion, `archive-detail-handoff-${record.task_id}`);
+      ? renderScrollableDetailText(ui, state, `archive-detail-prompt-${record.task_id}`, record.description || "(empty prompt)")
+      : tab === "handoff"
+        ? renderHandoffTab(ui, state, completion, `archive-detail-handoff-${record.task_id}`)
+        : tab === "output"
+          ? renderFinalOutputTab(ui, state, `archive-detail-output-${record.task_id}`, record.final_session_output)
+          : renderArchiveCommentsTab(ui, state, record);
 
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
@@ -1390,18 +1397,14 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
     // Tab headers
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 2 },
-      ui.Text({
-        content: "Prompt",
-        fg: promptActive ? activeTabFg : inactiveTabFg,
-        attributes: promptActive ? ui.TextAttributes.BOLD : undefined,
-        height: 1,
-      }),
-      ui.Text({
-        content: "Handoff",
-        fg: handoffActive ? activeTabFg : inactiveTabFg,
-        attributes: handoffActive ? ui.TextAttributes.BOLD : undefined,
-        height: 1,
-      }),
+      ...DETAIL_TABS.map((candidate) =>
+        ui.Text({
+          content: DETAIL_TAB_LABELS[candidate],
+          fg: tab === candidate ? activeTabFg : inactiveTabFg,
+          attributes: tab === candidate ? ui.TextAttributes.BOLD : undefined,
+          height: 1,
+        }),
+      ),
     ),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     tabContent,
@@ -1410,7 +1413,9 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
 
 function archiveDetailRows(record: GlobalArchiveRecord, model: ModelRef | null): MetaRow[] {
   const taskType = record.task_type === "manual" ? "manual" : "agent";
+  const state = archiveTaskStatus(record);
   return [
+    { label: "STATE", value: `${state.glyph} ${state.label}`, color: COLORS.text },
     { label: "INSTANCE", value: `${record.source_instance_name ?? "unknown"}:${record.source_port}`, color: COLORS.text },
     { label: "TYPE", value: taskType, color: COLORS.text },
     ...(record.completed_by ? [{ label: "ACCEPTED BY", value: record.completed_by, color: COLORS.text }] : []),
@@ -1427,9 +1432,19 @@ function archiveDetailRows(record: GlobalArchiveRecord, model: ModelRef | null):
             : []),
         ]),
     ...(record.session_id ? [{ label: "SESSION", value: record.session_id, color: COLORS.text }] : []),
+    ...(record.worktree_branch ? [{ label: "BRANCH", value: `⑃ ${record.worktree_branch}`, color: COLORS.text }] : []),
+    ...(record.base_branch ? [{ label: "BASE", value: `⑃ ${record.base_branch}`, color: COLORS.text }] : []),
+    { label: "TASK ID", value: record.task_id, color: COLORS.text },
     { label: "WORKSPACE", value: shortPath(record.source_workspace), color: COLORS.text },
     { label: "ARCHIVED", value: formatArchiveDate(record.archived_at), color: COLORS.text },
   ];
+}
+
+function archiveTaskStatus(record: Pick<GlobalArchiveRecord, "run_state" | "column_name">): { glyph: string; label: string } {
+  const runState = ["running", "idle", "error", "unstarted"].includes(record.run_state)
+    ? record.run_state as TaskRunState
+    : "idle";
+  return taskStatus({ runState, column: archiveColumn(record.column_name) });
 }
 
 function archiveColumn(column: string): Column {
@@ -1442,14 +1457,22 @@ function archiveWorktreeId(record: Pick<GlobalArchiveRecord, "task_id" | "worktr
   return record.task_id;
 }
 
-function renderScrollableDetailText(ui: OpenTui, id: string, content: string) {
-  return ui.ScrollBox(
-    scrollBoxProps(id),
+function renderScrollableDetailText(ui: OpenTui, state: TuiState, id: string, content: string) {
+  return renderDetailScrollBox(
+    ui,
+    state,
+    id,
     ui.Text({ content, fg: COLORS.text, width: "100%", minWidth: 0, flexShrink: 1, wrapMode: "word" }),
   );
 }
 
-function scrollBoxProps(id: string): ScrollBoxOptions {
+function renderDetailScrollBox(ui: OpenTui, state: TuiState, id: string, ...children: VChild[]) {
+  const scrollBox = ui.ScrollBox(scrollBoxProps(state, id), ...children);
+  (scrollBox as unknown as { scrollTop: number }).scrollTop = state.detailScrollTop[id] ?? 0;
+  return scrollBox;
+}
+
+function scrollBoxProps(state: TuiState, id: string): ScrollBoxOptions {
   return {
     id,
     flexGrow: 1,
@@ -1469,13 +1492,21 @@ function scrollBoxProps(id: string): ScrollBoxOptions {
     wrapperOptions: {
       ...boxBg(COLORS.panel),
     },
+    onMouseScroll(this: { scrollTop: number }) {
+      const scrollBox = this;
+      process.nextTick(() => {
+        state.detailScrollTop[id] = Math.max(0, Math.trunc(scrollBox.scrollTop));
+      });
+    },
   };
 }
 
-function renderHandoffTab(ui: OpenTui, completion: CompletionReport | null, scrollId: string) {
+function renderHandoffTab(ui: OpenTui, state: TuiState, completion: CompletionReport | null, scrollId: string) {
   if (!completion) {
-    return ui.ScrollBox(
-      scrollBoxProps(scrollId),
+    return renderDetailScrollBox(
+      ui,
+      state,
+      scrollId,
       ui.Text({ content: "No completion report available", fg: COLORS.muted, height: 1 }),
     );
   }
@@ -1485,8 +1516,10 @@ function renderHandoffTab(ui: OpenTui, completion: CompletionReport | null, scro
     ? completion.verification.map((item) => `${item.command} → ${item.result}`)
     : ["none"];
 
-  return ui.ScrollBox(
-    scrollBoxProps(scrollId),
+  return renderDetailScrollBox(
+    ui,
+    state,
+    scrollId,
     ui.Box(
       { width: "100%", flexDirection: "column", gap: 0 },
       ui.Text({ content: "SUMMARY", fg: COLORS.dim, height: 1 }),
@@ -1510,13 +1543,60 @@ function renderHandoffTab(ui: OpenTui, completion: CompletionReport | null, scro
   );
 }
 
+function renderArchiveCommentsTab(ui: OpenTui, state: TuiState, record: GlobalArchiveRecord) {
+  const items = parseArchiveComments(record.comments);
+  const rows: VChild[] = [];
+  if (items.length === 0) {
+    rows.push(ui.Text({ content: "No archived comments available", fg: COLORS.muted, height: 1 }));
+  } else {
+    flattenComments(items).forEach((comment) => {
+      const isReply = Boolean(comment.parentCommentId);
+      rows.push(
+        ui.Box(
+          { width: "100%", flexDirection: "column", gap: 0, paddingLeft: isReply ? 2 : 0, ...boxBg(COLORS.panel) },
+          ui.Text({
+            content: `${isReply ? "↳ " : ""}${comment.author} · ${formatArchiveDate(comment.createdAt)}`,
+            fg: COLORS.muted,
+            height: 1,
+            truncate: true,
+          }),
+          ui.Text({ content: comment.body, fg: COLORS.text, wrapMode: "word", width: "100%", minWidth: 0, flexShrink: 1 }),
+        ),
+      );
+    });
+  }
+
+  return renderDetailScrollBox(ui, state, `archive-detail-comments-${record.task_id}`, ...rows);
+}
+
+function parseArchiveComments(raw: string | null | undefined): TaskComment[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is TaskComment =>
+      Boolean(
+        item &&
+        typeof item === "object" &&
+        typeof (item as TaskComment).id === "string" &&
+        typeof (item as TaskComment).taskId === "string" &&
+        typeof (item as TaskComment).author === "string" &&
+        typeof (item as TaskComment).body === "string" &&
+        typeof (item as TaskComment).createdAt === "number",
+      ),
+    );
+  } catch {
+    return [];
+  }
+}
+
 function filteredArchiveRecords(archive: ArchiveState): GlobalArchiveRecord[] {
   const query = archive.searchQuery.trim().toLowerCase();
   return archive.records.filter((record) => {
     if (archive.instanceFilter && record.source_instance_name !== archive.instanceFilter) return false;
     if (archive.laneFilter && record.column_name !== archive.laneFilter) return false;
     if (!query) return true;
-    return [record.title, record.description, record.agent ?? "", record.source_instance_name ?? "", record.column_name]
+    return [record.title, record.description, record.agent ?? "", record.source_instance_name ?? "", record.column_name, record.final_session_output ?? "", record.comments ?? ""]
       .join("\n")
       .toLowerCase()
       .includes(query);
@@ -2294,11 +2374,11 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
   const tab = state.detailTab ?? "prompt";
   const content: VChild =
     tab === "prompt"
-      ? renderScrollableDetailText(ui, `board-detail-prompt-${task.id}`, task.description || "(empty prompt)")
+      ? renderScrollableDetailText(ui, state, `board-detail-prompt-${task.id}`, task.description || "(empty prompt)")
       : tab === "handoff"
-        ? renderHandoffTab(ui, task.completion ?? null, `board-detail-handoff-${task.id}`)
+        ? renderHandoffTab(ui, state, task.completion ?? null, `board-detail-handoff-${task.id}`)
         : tab === "output"
-          ? renderOutputTab(ui, task)
+          ? renderOutputTab(ui, state, task)
           : renderCommentsTab(ui, state, task);
   const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY"].includes(row.label));
   const footer = tab === "comments"
@@ -2344,11 +2424,16 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
   );
 }
 
-function renderOutputTab(ui: OpenTui, task: Task) {
-  const output = task.finalSessionOutput?.trim();
+function renderOutputTab(ui: OpenTui, state: TuiState, task: Task) {
+  return renderFinalOutputTab(ui, state, `board-detail-output-${task.id}`, task.finalSessionOutput);
+}
+
+function renderFinalOutputTab(ui: OpenTui, state: TuiState, scrollId: string, finalSessionOutput: string | null | undefined) {
+  const output = finalSessionOutput?.trim();
   return renderScrollableDetailText(
     ui,
-    `board-detail-output-${task.id}`,
+    state,
+    scrollId,
     output && output.length > 0 ? output : "No final session output available",
   );
 }
@@ -2387,7 +2472,7 @@ function renderCommentsTab(ui: OpenTui, state: TuiState, task: Task) {
 
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    ui.ScrollBox(scrollBoxProps(`board-detail-comments-${task.id}`), ...rows),
+    renderDetailScrollBox(ui, state, `board-detail-comments-${task.id}`, ...rows),
     draft
       ? ui.Box(
           { width: "100%", flexDirection: "column", gap: 0 },
@@ -4330,7 +4415,7 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
     return;
   }
   if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
-    archive.detailTab = archive.detailTab === "prompt" ? "handoff" : "prompt";
+    archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
     actions.render();
     return;
   }

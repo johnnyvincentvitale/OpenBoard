@@ -96,7 +96,8 @@ describe("archive routes", () => {
       agent: "build",
       isolation: "worktree",
     });
-    store.update(task.id, { completedBy: "User" });
+    store.update(task.id, { completedBy: "User", finalSessionOutput: "final assistant archive output" });
+    store.addComment({ taskId: task.id, author: "User", body: "archive note" });
     store.move(task.id, "review", 0);
 
     expect(globalArchiveStore.countMirrored()).toBe(0);
@@ -114,6 +115,8 @@ describe("archive routes", () => {
     expect(mirrored!.source_db_path).toBe("/db/test-tasks.sqlite");
     expect(mirrored!.task_type).toBe("agent");
     expect(mirrored!.completed_by).toBe("User");
+    expect(mirrored!.final_session_output).toBe("final assistant archive output");
+    expect(mirrored!.comments).toContain("archive note");
     expect(mirrored!.task_id).toBe(task.id);
   });
 
