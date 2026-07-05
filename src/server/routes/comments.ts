@@ -30,11 +30,20 @@ export function registerTaskCommentRoutes(app: Hono, deps: { store: TaskStore })
 
       const author = typeof body.author === "string" ? body.author.trim() : "";
       const commentBody = typeof body.body === "string" ? body.body.trim() : "";
+      const parentCommentId = body.parentCommentId;
       if (!author) throw AdapterError.validation("author must be a non-empty string");
       if (!commentBody) throw AdapterError.validation("body must be a non-empty string");
+      if (parentCommentId !== undefined && parentCommentId !== null && typeof parentCommentId !== "string") {
+        throw AdapterError.validation("parentCommentId must be a string or null");
+      }
 
-      const comment = store.addComment({ taskId, author, body: commentBody });
-      store.addEvent({ taskId, type: "comment_added", body: { commentId: comment.id, author } });
+      const task = store.get(taskId);
+      if (task?.column !== "review" && task?.column !== "done") {
+        throw AdapterError.validation("Comments can only be added to Review or Done tasks");
+      }
+
+      const comment = store.addComment({ taskId, author, body: commentBody, parentCommentId: parentCommentId ?? null });
+      store.addEvent({ taskId, type: "comment_added", body: { commentId: comment.id, author, parentCommentId: comment.parentCommentId ?? null } });
       return c.json(comment, 201);
     } catch (err) {
       return respondWithError(c, err);

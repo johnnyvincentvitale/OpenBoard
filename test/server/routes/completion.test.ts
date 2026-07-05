@@ -83,6 +83,32 @@ describe("completion routes", () => {
     expect(typeof body.completion.reportedAt).toBe("number");
   });
 
+  it("stores optional final OpenCode session output but reports null for Claude Code", async () => {
+    const openCode = store.create({ title: "OpenCode", description: "do it", directory: "/repo" });
+    store.update(openCode.id, { runState: "running" });
+    store.move(openCode.id, "in_progress", 0);
+    const claude = store.create({ harness: "claude-code", title: "Claude", description: "do it", directory: "/repo" });
+    store.update(claude.id, { runState: "running" });
+    store.move(claude.id, "in_progress", 0);
+    const app = appFor(store);
+
+    const openCodeRes = await app.request(`/api/tasks/${openCode.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, finalSessionOutput: "final assistant output" }),
+    });
+    const claudeRes = await app.request(`/api/tasks/${claude.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, finalSessionOutput: "not available from claude" }),
+    });
+
+    expect(openCodeRes.status).toBe(200);
+    expect((await openCodeRes.json()).finalSessionOutput).toBe("final assistant output");
+    expect(claudeRes.status).toBe(200);
+    expect((await claudeRes.json()).finalSessionOutput).toBeNull();
+  });
+
   it("POST /complete clears busy Claude harness status when the report lands", async () => {
     const task = store.create({
       harness: "claude-code",

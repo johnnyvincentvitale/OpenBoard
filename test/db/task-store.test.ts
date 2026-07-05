@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import Database from "better-sqlite3";
 import type { CompletionReport, CreateTaskInput, ModelRef } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
 
@@ -65,6 +66,7 @@ describe("SqliteTaskStore", () => {
       expect(task.archived).toBe(false);
       expect(task.parentIds).toEqual([]);
       expect(task.completion).toBeNull();
+      expect(task.finalSessionOutput).toBeNull();
       expect(task.completionSource).toBeNull();
       expect(task.completedBy).toBeNull();
       expect(task.createdAt).toBe(1_000);
@@ -449,6 +451,16 @@ describe("SqliteTaskStore", () => {
       expect(store.get(task.id)?.completionSource).toBe("reported");
     });
 
+    it("persists final session output separately from the completion report", () => {
+      const task = store.create(input());
+
+      const updated = store.update(task.id, { finalSessionOutput: "last assistant turn" });
+
+      expect(updated?.finalSessionOutput).toBe("last assistant turn");
+      expect(store.get(task.id)?.finalSessionOutput).toBe("last assistant turn");
+      expect(store.get(task.id)?.completion).toBeNull();
+    });
+
     it("setCompletion returns undefined for an unknown task", () => {
       expect(store.setCompletion("task_missing", report, "reported")).toBeUndefined();
     });
@@ -536,6 +548,48 @@ describe("SqliteTaskStore", () => {
       expect(event).toMatchObject({ taskId: task.id, type: "comment_added", body: { commentId: comment.id }, createdAt: 2_000 });
       expect(store.listComments(task.id)).toEqual([comment]);
       expect(store.listEvents(task.id)).toEqual([event]);
+    });
+
+    it("persists reply comments and keeps comments across Review to Done moves", () => {
+      const task = store.create(input());
+      store.move(task.id, "review", 0);
+      const parent = store.addComment({ taskId: task.id, author: "reviewer", body: "Please fix" });
+      const reply = store.addComment({ taskId: task.id, author: "worker", body: "Fixed", parentCommentId: parent.id });
+
+      store.move(task.id, "done", 0);
+
+      expect(store.listComments(task.id)).toEqual([parent, reply]);
+      expect(store.listComments(task.id)[1].parentCommentId).toBe(parent.id);
+    });
+
+    it("rejects replies whose parent comment belongs to another task", () => {
+      const a = store.create(input({ title: "A" }));
+      const b = store.create(input({ title: "B" }));
+      const parent = store.addComment({ taskId: a.id, author: "reviewer", body: "A" });
+
+      expect(() => store.addComment({ taskId: b.id, author: "worker", body: "B", parentCommentId: parent.id })).toThrow(/unknown parent comment/);
+    });
+
+    it("migrates final output and parent comment columns into existing sqlite DBs", () => {
+      const db = new Database(":memory:");
+      db.exec(`
+        CREATE TABLE task (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL, directory TEXT NOT NULL,
+          column TEXT NOT NULL, position INTEGER NOT NULL, session_id TEXT, run_state TEXT NOT NULL,
+          error TEXT, agent TEXT, model TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          UNIQUE(column, position)
+        );
+        CREATE TABLE task_comments (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL);
+      `);
+
+      const migrated = new SqliteTaskStore(db);
+      const taskColumns = new Set((db.prepare("PRAGMA table_info(task)").all() as Array<{ name: string }>).map((row) => row.name));
+      const commentColumns = new Set((db.prepare("PRAGMA table_info(task_comments)").all() as Array<{ name: string }>).map((row) => row.name));
+
+      expect(taskColumns.has("final_session_output")).toBe(true);
+      expect(commentColumns.has("parent_comment_id")).toBe(true);
+      migrated.close();
+      db.close();
     });
 
     it("rejects comments and events for unknown tasks", () => {

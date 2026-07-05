@@ -6,7 +6,7 @@
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, TASK_ROUTE_PATTERNS, TASK_HARNESSES, TASK_ISOLATION_MODES, TASK_TYPES, USER_COMPLETED_BY, isColumn } from "../../shared";
-import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore } from "../../shared";
+import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
@@ -170,6 +170,33 @@ export function registerTaskRoutes(
     }
   });
 
+  app.patch(TASK_ROUTE_PATTERNS.update, async (c) => {
+    const id = c.req.param("id");
+
+    try {
+      const existing = store.get(id);
+      if (!existing) throw AdapterError.notFound(`Task not found: ${id}`);
+      if (existing.column !== "todo") {
+        throw AdapterError.validation("Only To Do tasks can be edited");
+      }
+
+      let body: Record<string, unknown>;
+      try {
+        body = (await c.req.json()) ?? {};
+      } catch {
+        throw AdapterError.validation("Request body must be valid JSON");
+      }
+
+      const patch = await validateUpdateBody(body, existing);
+      const updated = store.update(id, patch);
+      if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
+      store.addEvent({ taskId: id, type: "task_updated", body: { fields: Object.keys(patch) } });
+      return c.json(updated, 200);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
   app.post(TASK_ROUTE_PATTERNS.run, async (c) => {
     const id = c.req.param("id");
 
@@ -270,6 +297,117 @@ export function registerTaskRoutes(
       return respondWithError(c, err);
     }
   });
+
+  async function validateUpdateBody(body: Record<string, unknown>, existing: ReturnType<TaskStore["get"]>): Promise<UpdateTaskInput> {
+    const allowed = new Set([
+      "title",
+      "description",
+      "directory",
+      "agent",
+      "model",
+      "type",
+      "assignedTo",
+      "isolation",
+      "harness",
+      "claudePermissionMode",
+    ]);
+    for (const key of Object.keys(body)) {
+      if (!allowed.has(key)) throw AdapterError.validation(`Unsupported task update field: ${key}`);
+    }
+    if (!existing) throw AdapterError.notFound("Task not found");
+
+    const nextType = body.type === undefined ? (existing.type ?? "agent") : body.type;
+    const nextHarness = body.harness === undefined ? (existing.harness ?? "opencode") : body.harness;
+    if (!isTaskType(nextType)) throw AdapterError.validation("type must be 'manual' or 'agent'");
+    if (!isTaskHarness(nextHarness)) throw AdapterError.validation("harness must be 'opencode' or 'claude-code'");
+
+    const patch: UpdateTaskInput = {};
+    if (body.title !== undefined) {
+      if (typeof body.title !== "string" || body.title.trim().length === 0) {
+        throw AdapterError.validation("title must be a non-empty string");
+      }
+      patch.title = body.title.trim();
+    }
+    if (body.description !== undefined) {
+      if (typeof body.description !== "string") throw AdapterError.validation("description must be a string");
+      patch.description = body.description;
+    }
+    if (body.directory !== undefined) {
+      if (typeof body.directory !== "string" || body.directory.trim().length === 0) {
+        throw AdapterError.validation("directory must be a non-empty string");
+      }
+      patch.directory = resolveTaskDirectory(body.directory, resolveBoardWorkspace(), {
+        allowExternal: isExternalDirectoriesAllowed(),
+      });
+    }
+
+    patch.type = nextType;
+    patch.harness = nextType === "agent" ? nextHarness : "opencode";
+
+    if (body.assignedTo !== undefined) {
+      if (body.assignedTo !== null && typeof body.assignedTo !== "string") {
+        throw AdapterError.validation("assignedTo must be a string or null when provided");
+      }
+      patch.assignedTo = typeof body.assignedTo === "string" && body.assignedTo.trim() ? body.assignedTo.trim() : null;
+    } else if (nextType === "agent") {
+      patch.assignedTo = null;
+    }
+
+    if (body.isolation !== undefined) {
+      if (body.isolation !== null && !isIsolationMode(body.isolation)) {
+        throw AdapterError.validation("isolation must be 'worktree' or 'in-place' or null");
+      }
+      patch.isolation = body.isolation ?? null;
+    } else if (nextType === "manual") {
+      patch.isolation = null;
+    }
+
+    if (body.claudePermissionMode !== undefined) {
+      if (body.claudePermissionMode !== null && !isClaudePermissionMode(body.claudePermissionMode)) {
+        throw AdapterError.validation("claudePermissionMode must be a supported Claude Code permission mode or null");
+      }
+      patch.claudePermissionMode = body.claudePermissionMode ?? null;
+    }
+
+    if (nextType === "manual") {
+      if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation("manual tasks cannot define agent");
+      if (body.model !== undefined && body.model !== null) throw AdapterError.validation("manual tasks cannot define model");
+      if (nextHarness !== "opencode") throw AdapterError.validation("manual tasks cannot define harness");
+      if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
+        throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
+      }
+      patch.agent = null;
+      patch.model = null;
+      patch.claudePermissionMode = null;
+      return patch;
+    }
+
+    if (patch.claudePermissionMode !== undefined && patch.claudePermissionMode !== null && patch.harness !== "claude-code") {
+      throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
+    }
+
+    if (patch.harness === "claude-code") {
+      if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation("claude-code tasks cannot define agent");
+      patch.agent = null;
+      patch.model = body.model === undefined ? existing.model : body.model === null ? null : resolveClaudeModel(body.model);
+    } else {
+      if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
+        throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
+      }
+      patch.claudePermissionMode = null;
+      if (body.agent !== undefined) {
+        if (body.agent !== null && typeof body.agent !== "string") throw AdapterError.validation("agent must be a string or null");
+        const agent = typeof body.agent === "string" ? body.agent.trim() : "";
+        patch.agent = agent || null;
+      }
+      if (body.model !== undefined) {
+        patch.model = body.model === null ? null : validateExplicitModel(body.model);
+      } else if (typeof patch.agent === "string") {
+        patch.model = await resolveModel(patch.agent, undefined);
+      }
+    }
+    return patch;
+  }
 
   // Answer the "make this directory a git repo?" prompt: init + commit, then run.
   app.post(TASK_ROUTE_PATTERNS.initGit, async (c) => {

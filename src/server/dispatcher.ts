@@ -296,8 +296,8 @@ export class TaskDispatcher implements Dispatcher {
     // model when task.model is unset; the v2 prompt route can admit input
     // without producing a message turn.
     const createInput = {
-      agent: task.agent,
-      model: task.model,
+      agent: task.agent ?? undefined,
+      model: task.model ?? undefined,
       directory: execDirectory,
       permission: UNATTENDED_PERMISSION.map((rule) => ({ ...rule })),
     };
@@ -317,8 +317,8 @@ export class TaskDispatcher implements Dispatcher {
     const promptError = await this.prompt(
       sessionId,
       this.withCompletionContract(task.id, this.withParentHandoffs(task, task.description), runStartedAt),
-      task.agent,
-      task.model,
+      task.agent ?? undefined,
+      task.model ?? undefined,
     );
     if (promptError) {
       const updated = this.store.update(taskId, {
@@ -573,8 +573,8 @@ export class TaskDispatcher implements Dispatcher {
     const promptError = await this.prompt(
       task.sessionId,
       this.withCompletionContract(task.id, this.withParentHandoffs(task, feedback ?? task.description), runStartedAt),
-      task.agent,
-      task.model,
+      task.agent ?? undefined,
+      task.model ?? undefined,
     );
     if (promptError) {
       const updated = this.store.update(taskId, { runState: "error", error: promptError });

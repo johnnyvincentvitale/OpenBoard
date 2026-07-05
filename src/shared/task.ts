@@ -56,6 +56,7 @@ export interface CompletionReport {
 export interface TaskComment {
   id: string;
   taskId: string;
+  parentCommentId?: string | null;
   author: string;
   body: string;
   createdAt: number;
@@ -112,15 +113,15 @@ export interface Task {
   /** Working directory the dispatched session runs in. */
   directory: string;
   /** Which OpenCode agent (roster entry) executes this task. */
-  agent?: string;
+  agent?: string | null;
   /** Worker harness that launches agent tasks. Defaults to OpenCode for older rows. */
   harness?: TaskHarness;
   /** Claude Code permission mode for Claude-harness agent tasks. */
-  claudePermissionMode?: ClaudeCodePermissionMode;
+  claudePermissionMode?: ClaudeCodePermissionMode | null;
   /** Human assignee for manual/PM cards. */
-  assignedTo?: string;
+  assignedTo?: string | null;
   /** Model the dispatched session runs on. For new tasks with an assigned agent and no explicit model, the create route resolves this from the live roster. */
-  model?: ModelRef;
+  model?: ModelRef | null;
   column: Column;
   /** Dense integer, unique within a column. */
   position: number;
@@ -142,7 +143,7 @@ export interface Task {
   runStartedAt?: number;
   error?: string;
   /** Per-task isolation override. Unset → the board-level default applies. */
-  isolation?: TaskIsolationMode;
+  isolation?: TaskIsolationMode | null;
   /** Absolute path of the git worktree this task's session runs in (worktree mode, once run). */
   worktreePath?: string;
   /** The branch created for the worktree. */
@@ -157,6 +158,8 @@ export interface Task {
   parentIds?: string[];
   /** Structured final report from the task run, or null before completion/blocking is reported. */
   completion?: CompletionReport | null;
+  /** Final OpenCode session output captured for task detail; null when unavailable (including Claude Code). */
+  finalSessionOutput?: string | null;
   /** Whether completion was agent-reported or synthesized from idle fallback. */
   completionSource?: CompletionSource | null;
   /** Where the reported changed files were found when the completion report landed. */
@@ -199,6 +202,19 @@ export interface CreateTaskInput {
   assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
+}
+
+export interface UpdateTaskInput {
+  type?: TaskType;
+  harness?: TaskHarness;
+  title?: string;
+  description?: string;
+  directory?: string;
+  agent?: string | null;
+  claudePermissionMode?: ClaudeCodePermissionMode | null;
+  assignedTo?: string | null;
+  model?: ModelRef | null;
+  isolation?: TaskIsolationMode | null;
 }
 
 /** Board-level settings (persisted). */
@@ -248,7 +264,7 @@ export interface TaskStore {
   getSettings(): BoardSettings;
   /** Patch and persist board settings; returns the merged result. */
   updateSettings(patch: Partial<BoardSettings>): BoardSettings;
-  addComment(input: { taskId: string; author: string; body: string }): TaskComment;
+  addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment;
   listComments(taskId: string): TaskComment[];
   addEvent(input: { taskId: string; type: string; body?: Record<string, unknown> }): TaskEvent;
   listEvents(taskId: string): TaskEvent[];
@@ -288,6 +304,7 @@ export interface MergeOutcome {
 export const TASK_ROUTE_PATTERNS = {
   list: "/api/tasks",
   create: "/api/tasks",
+  update: "/api/tasks/:id",
   events: "/api/tasks/events",
   run: "/api/tasks/:id/run",
   retry: "/api/tasks/:id/retry",
@@ -309,6 +326,7 @@ export const buildTaskPath = {
   retry: (id: string) => `/api/tasks/${encodeURIComponent(id)}/retry`,
   abort: (id: string) => `/api/tasks/${encodeURIComponent(id)}/abort`,
   move: (id: string) => `/api/tasks/${encodeURIComponent(id)}/move`,
+  update: (id: string) => `/api/tasks/${encodeURIComponent(id)}`,
   remove: (id: string) => `/api/tasks/${encodeURIComponent(id)}`,
   initGit: (id: string) => `/api/tasks/${encodeURIComponent(id)}/init-git`,
   sync: (id: string) => `/api/tasks/${encodeURIComponent(id)}/sync`,

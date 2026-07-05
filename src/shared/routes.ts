@@ -35,11 +35,16 @@ export interface PromptBody {
   text: string;
 }
 
+export interface FinalSessionOutputBody {
+  /** Optional final OpenCode session output; null/omitted when unavailable. */
+  finalSessionOutput?: string | null;
+}
+
 /** POST /api/tasks/:id/complete body. Server supplies outcome="complete" and reportedAt. */
-export type CompleteTaskBody = Omit<CompletionReport, "reportedAt" | "outcome">;
+export type CompleteTaskBody = Omit<CompletionReport, "reportedAt" | "outcome"> & FinalSessionOutputBody;
 
 /** POST /api/tasks/:id/block body. Server supplies outcome="blocked" and reportedAt. */
-export type BlockTaskBody = Omit<CompletionReport, "reportedAt" | "outcome">;
+export type BlockTaskBody = Omit<CompletionReport, "reportedAt" | "outcome"> & FinalSessionOutputBody;
 
 /** POST /api/tasks/:id/archive body. */
 export type ArchiveTaskBody = Record<string, never>;

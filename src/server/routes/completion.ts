@@ -56,7 +56,8 @@ async function handleCompletion(
     }
 
     const payload = parseCompletionBody(body);
-    const report: CompletionReport = { ...payload, outcome, reportedAt: Date.now() };
+    const { finalSessionOutput, ...reportPayload } = payload;
+    const report: CompletionReport = { ...reportPayload, outcome, reportedAt: Date.now() };
     const stored = store.setCompletion(id, report, "reported");
     if (!stored) throw AdapterError.notFound(`Task not found: ${id}`);
 
@@ -64,6 +65,7 @@ async function handleCompletion(
     const updated = store.update(id, {
       runState: outcome === "complete" ? "idle" : "error",
       error: outcome === "complete" ? undefined : payload.residualRisk,
+      finalSessionOutput: task.harness === "claude-code" ? null : finalSessionOutput ?? null,
       ...completionMetadata,
       ...(task.harness === "claude-code"
         ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }
@@ -135,11 +137,21 @@ function parseCompletionBody(body: unknown): CompletionBody {
   ) {
     throw AdapterError.validation("residualRisk must be a string");
   }
+  if (
+    Object.prototype.hasOwnProperty.call(record, "finalSessionOutput") &&
+    record.finalSessionOutput !== null &&
+    typeof record.finalSessionOutput !== "string"
+  ) {
+    throw AdapterError.validation("finalSessionOutput must be a string or null");
+  }
   return {
     summary: record.summary,
     changedFiles: record.changedFiles,
     verification: record.verification,
     residualRisk: record.residualRisk,
+    ...(Object.prototype.hasOwnProperty.call(record, "finalSessionOutput")
+      ? { finalSessionOutput: record.finalSessionOutput as string | null }
+      : {}),
   };
 }
 

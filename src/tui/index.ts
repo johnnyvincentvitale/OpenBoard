@@ -2050,7 +2050,7 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   };
   const model: MetaRow = {
     label: "MODEL",
-    value: task.harness === "claude-code" ? task.model?.id ?? "default" : modelLabel(task.model),
+    value: task.harness === "claude-code" ? task.model?.id ?? "default" : modelLabel(task.model ?? undefined),
     color: COLORS.muted,
   };
   const type: MetaRow = { label: "TYPE", value: task.type ?? "agent", color: COLORS.muted };
@@ -2151,7 +2151,7 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
                 ...(task.completionLocation ? [{ label: "RESULT", value: resultLocationLabel(task.completionLocation), color: COLORS.text }] : []),
               ]
             : []),
-          { label: "MODEL", value: modelLabel(task.model), color: COLORS.text },
+          { label: "MODEL", value: modelLabel(task.model ?? undefined), color: COLORS.text },
           { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
           { label: "ISO", value: task.isolation ?? "board default", color: COLORS.text },
           ...(task.isolation === "worktree"

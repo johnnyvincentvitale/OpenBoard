@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS task (
   pending         TEXT,
   archived        INTEGER NOT NULL DEFAULT 0,
   completion      TEXT,
+  final_session_output TEXT,
   completion_source TEXT,
   completion_location TEXT,
   completed_by    TEXT,
@@ -80,6 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_task_links_parent ON task_links(parent_id);
 CREATE TABLE IF NOT EXISTS task_comments (
   id         TEXT PRIMARY KEY,
   task_id    TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  parent_comment_id TEXT REFERENCES task_comments(id) ON DELETE CASCADE,
   author     TEXT NOT NULL,
   body       TEXT NOT NULL,
   created_at INTEGER NOT NULL
@@ -119,6 +121,7 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["run_started_at", "INTEGER"],
   ["archived", "INTEGER NOT NULL DEFAULT 0"],
   ["completion", "TEXT"],
+  ["final_session_output", "TEXT"],
   ["completion_source", "TEXT"],
   ["completion_location", "TEXT"],
   ["completed_by", "TEXT"],
@@ -157,6 +160,7 @@ interface TaskRowRecord {
   pending: string | null;
   archived: number;
   completion: string | null;
+  final_session_output: string | null;
   completion_source: string | null;
   completion_location: string | null;
   completed_by: string | null;
@@ -167,6 +171,7 @@ interface TaskRowRecord {
 interface TaskCommentRowRecord {
   id: string;
   task_id: string;
+  parent_comment_id: string | null;
   author: string;
   body: string;
   created_at: number;
@@ -199,6 +204,7 @@ function toTask(record: TaskRowRecord): Task {
     archived: record.archived === 1,
     parentIds: [],
     completion: record.completion ? (JSON.parse(record.completion) as CompletionReport) : null,
+    finalSessionOutput: record.final_session_output,
     completionSource: record.completion_source as CompletionSource | null,
     completionLocation: record.completion_location as TaskCompletionLocation | null,
     completedBy: record.completed_by ?? null,
@@ -226,6 +232,7 @@ function toTaskComment(record: TaskCommentRowRecord): TaskComment {
   return {
     id: record.id,
     taskId: record.task_id,
+    parentCommentId: record.parent_comment_id,
     author: record.author,
     body: record.body,
     createdAt: record.created_at,
@@ -275,6 +282,7 @@ export class SqliteTaskStore implements TaskStore {
     bootstrap(this.db);
     this.db.exec(TASK_SCHEMA_SQL);
     this.migrateTaskColumns();
+    this.migrateTaskCommentColumns();
 
     this.stmts = {
       listTasks: this.db.prepare(
@@ -287,8 +295,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, completion_source, completion_location, completed_by, created_at, updated_at)
-         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @completionSource, @completionLocation, @completedBy, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, created_at, updated_at)
+         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -321,6 +329,7 @@ export class SqliteTaskStore implements TaskStore {
            pending = @pending,
            archived = @archived,
            completion = @completion,
+           final_session_output = @finalSessionOutput,
            completion_source = @completionSource,
            completion_location = @completionLocation,
            completed_by = @completedBy,
@@ -351,10 +360,11 @@ export class SqliteTaskStore implements TaskStore {
         "INSERT INTO board_setting (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
       ),
       insertComment: this.db.prepare(
-        "INSERT INTO task_comments (id, task_id, author, body, created_at) VALUES (@id, @taskId, @author, @body, @createdAt)",
+        "INSERT INTO task_comments (id, task_id, parent_comment_id, author, body, created_at) VALUES (@id, @taskId, @parentCommentId, @author, @body, @createdAt)",
       ),
+      getComment: this.db.prepare("SELECT * FROM task_comments WHERE id = ?"),
       listComments: this.db.prepare(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at, id",
+        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at, CASE WHEN parent_comment_id IS NULL THEN 0 ELSE 1 END, id",
       ),
       insertEvent: this.db.prepare(
         "INSERT INTO task_events (id, task_id, type, body, created_at) VALUES (@id, @taskId, @type, @body, @createdAt)",
@@ -379,6 +389,17 @@ export class SqliteTaskStore implements TaskStore {
     }
   }
 
+  private migrateTaskCommentColumns(): void {
+    const existing = new Set(
+      (this.db.prepare("PRAGMA table_info(task_comments)").all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      ),
+    );
+    if (!existing.has("parent_comment_id")) {
+      this.db.exec("ALTER TABLE task_comments ADD COLUMN parent_comment_id TEXT REFERENCES task_comments(id) ON DELETE CASCADE");
+    }
+  }
+
   private readonly stmts: {
     listTasks: Database.Statement;
     listAllTasks: Database.Statement;
@@ -399,6 +420,7 @@ export class SqliteTaskStore implements TaskStore {
     getParentIds: Database.Statement;
     getChildIds: Database.Statement;
     insertComment: Database.Statement;
+    getComment: Database.Statement;
     listComments: Database.Statement;
     insertEvent: Database.Statement;
     listEvents: Database.Statement;
@@ -458,6 +480,7 @@ export class SqliteTaskStore implements TaskStore {
         pending: null,
         archived: 0,
         completion: null,
+        finalSessionOutput: null,
         completionSource: null,
         completionLocation: null,
         completedBy: null,
@@ -510,6 +533,7 @@ export class SqliteTaskStore implements TaskStore {
         pending: merged.pending ?? null,
         archived: merged.archived ? 1 : 0,
         completion: merged.completion ? JSON.stringify(merged.completion) : null,
+        finalSessionOutput: merged.finalSessionOutput ?? null,
         completionSource: merged.completionSource ?? null,
         completionLocation: merged.completionLocation ?? null,
         completedBy: merged.completedBy ?? null,
@@ -607,11 +631,18 @@ export class SqliteTaskStore implements TaskStore {
     return next;
   }
 
-  addComment(input: { taskId: string; author: string; body: string }): TaskComment {
+  addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment {
     if (!this.get(input.taskId)) throw new Error(`SqliteTaskStore: unknown task ${input.taskId}`);
+    if (input.parentCommentId != null) {
+      const parent = this.stmts.getComment.get(input.parentCommentId) as TaskCommentRowRecord | undefined;
+      if (!parent || parent.task_id !== input.taskId) {
+        throw new Error(`SqliteTaskStore: unknown parent comment ${input.parentCommentId}`);
+      }
+    }
     const comment: TaskComment = {
       id: `comment_${crypto.randomUUID()}`,
       taskId: input.taskId,
+      parentCommentId: input.parentCommentId ?? null,
       author: input.author,
       body: input.body,
       createdAt: this.now(),

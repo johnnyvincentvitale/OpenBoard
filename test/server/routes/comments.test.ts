@@ -24,6 +24,7 @@ describe("task comment and event routes", () => {
 
   it("creates/list comments and records a durable task event", async () => {
     const task = store.create({ title: "A", description: "", directory: "/repo" });
+    store.move(task.id, "review", 0);
     const app = appFor(store);
 
     const created = await app.request(`/api/tasks/${task.id}/comments`, {

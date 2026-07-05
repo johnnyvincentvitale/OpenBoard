@@ -15,6 +15,7 @@ import type {
   TaskIsolationMode,
   TaskType,
   ClaudeCodePermissionMode,
+  UpdateTaskInput,
 } from "../shared";
 import { buildTaskPath, CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, TASK_HARNESSES, TASK_ISOLATION_MODES } from "../shared";
 
@@ -75,6 +76,14 @@ export interface CreateBoardTaskInput {
   isolation?: string;
 }
 
+export type UpdateBoardTaskInput = Partial<Omit<CreateBoardTaskInput, "model">> & {
+  agent?: string | null;
+  claudePermissionMode?: string | null;
+  assignedTo?: string | null;
+  model?: string | ModelRef | null;
+  isolation?: string | null;
+};
+
 /** GET /api/health response — adapter + OpenCode reachability and version. */
 export interface BoardIdentity {
   instanceName?: string;
@@ -92,6 +101,7 @@ export interface BoardHealth {
 }
 
 export type CompletionInput = Omit<CompletionReport, "outcome" | "reportedAt">;
+export type CompletionWithOutputInput = CompletionInput & { finalSessionOutput?: string | null };
 
 export interface BoardClient {
   readonly boardUrl: string;
@@ -101,6 +111,7 @@ export interface BoardClient {
   listAgents(): Promise<RosterAgent[]>;
   createTask(input: CreateBoardTaskInput): Promise<Task>;
   createTasks(input: CreateBoardTaskInput[]): Promise<Task[]>;
+  updateTask(id: string, input: UpdateBoardTaskInput): Promise<Task>;
   runTask(id: string): Promise<Task>;
   retryTask(id: string, feedback?: string): Promise<Task>;
   abortTask(id: string): Promise<Task>;
@@ -111,9 +122,9 @@ export interface BoardClient {
   integrateTask(id: string, targetBranch?: string): Promise<MergeOutcome>;
   linkTasks(parentId: string, childId: string): Promise<Task>;
   unlinkTasks(parentId: string, childId: string): Promise<Task>;
-  completeTask(id: string, report: CompletionInput, runStartedAt?: number): Promise<Task>;
-  blockTask(id: string, report: CompletionInput, runStartedAt?: number): Promise<Task>;
-  addComment(id: string, author: string, body: string): Promise<TaskComment>;
+  completeTask(id: string, report: CompletionWithOutputInput, runStartedAt?: number): Promise<Task>;
+  blockTask(id: string, report: CompletionWithOutputInput, runStartedAt?: number): Promise<Task>;
+  addComment(id: string, author: string, body: string, parentCommentId?: string | null): Promise<TaskComment>;
   listComments(id: string): Promise<TaskComment[]>;
   listTaskEvents(id: string): Promise<TaskEvent[]>;
   getSettings(): Promise<BoardSettings>;
@@ -162,6 +173,15 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       }
       return created;
     },
+    updateTask: async (id, input) => {
+      const task = normalizeUpdateTaskInput(input, resolved.cwd);
+      if (task.directory !== undefined) await assertExistingDirectory(task.directory, resolved.stat);
+      return requestJson<Task>(resolved, buildTaskPath.update(id), {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(task),
+      });
+    },
     runTask: (id) => postJson<Task>(resolved, buildTaskPath.run(id), {}),
     retryTask: (id, feedback) =>
       postJson<Task>(resolved, buildTaskPath.retry(id), feedback === undefined ? {} : { feedback }),
@@ -190,7 +210,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       postJson<Task>(resolved, withRunStartedAt(`/api/tasks/${encodeURIComponent(id)}/complete`, runStartedAt), report),
     blockTask: (id, report, runStartedAt) =>
       postJson<Task>(resolved, withRunStartedAt(`/api/tasks/${encodeURIComponent(id)}/block`, runStartedAt), report),
-    addComment: (id, author, body) => postJson<TaskComment>(resolved, buildTaskPath.comments(id), { author, body }),
+    addComment: (id, author, body, parentCommentId) => postJson<TaskComment>(resolved, buildTaskPath.comments(id), { author, body, ...(parentCommentId !== undefined ? { parentCommentId } : {}) }),
     listComments: (id) => requestJson<TaskComment[]>(resolved, buildTaskPath.comments(id), { method: "GET" }),
     listTaskEvents: (id) => requestJson<TaskEvent[]>(resolved, buildTaskPath.taskEvents(id), { method: "GET" }),
     getSettings: () => requestJson<BoardSettings>(resolved, buildTaskPath.settings(), { method: "GET" }),
@@ -204,8 +224,40 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
   };
 }
 
+function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): UpdateTaskInput {
+  const payload: UpdateTaskInput = {};
+  if (task.type !== undefined) payload.type = task.type;
+  if (task.harness !== undefined) {
+    if (!VALID_HARNESS.has(task.harness)) throw new Error("harness must be 'opencode' or 'claude-code'");
+    payload.harness = task.harness;
+  }
+  if (task.title !== undefined) {
+    const title = task.title.trim();
+    if (!title) throw new Error("title must be a non-empty string");
+    payload.title = title;
+  }
+  if (task.description !== undefined) payload.description = task.description;
+  if (task.directory !== undefined) payload.directory = resolveTaskDirectory(task.directory, cwd);
+  if (task.agent !== undefined) payload.agent = typeof task.agent === "string" ? task.agent.trim() || null : null;
+  if (task.assignedTo !== undefined) payload.assignedTo = typeof task.assignedTo === "string" ? task.assignedTo.trim() || null : null;
+  if (task.claudePermissionMode !== undefined) {
+    if (task.claudePermissionMode !== null && !VALID_CLAUDE_PERMISSION_MODE.has(task.claudePermissionMode as ClaudeCodePermissionMode)) {
+      throw new Error("claudePermissionMode must be a supported Claude Code permission mode");
+    }
+    payload.claudePermissionMode = task.claudePermissionMode as ClaudeCodePermissionMode | null;
+  }
+  if (task.model !== undefined) payload.model = task.model === null ? null : typeof task.model === "string" ? parseModelRef(task.model) : task.model;
+  if (task.isolation !== undefined) {
+    if (task.isolation !== null && !VALID_ISOLATION.has(task.isolation as TaskIsolationMode)) throw new Error("isolation must be 'worktree' or 'in-place'");
+    payload.isolation = task.isolation as TaskIsolationMode | null;
+  }
+  return payload;
+}
+
 export function resolveBoardUrl(options: BoardClientOptions = {}): string {
-  const raw = options.boardUrl ?? options.env?.OPENCODE_BOARD_URL ?? process.env.OPENCODE_BOARD_URL;
+  const raw =
+    options.boardUrl ??
+    (options.env === undefined ? process.env.OPENCODE_BOARD_URL : options.env.OPENCODE_BOARD_URL);
   if (options.requireExplicitBoardUrl && !raw?.trim()) {
     throw new Error(BOARD_URL_REQUIRED_MESSAGE);
   }
@@ -234,11 +286,11 @@ export function toTaskSummary(task: Task): TaskSummary {
     directory: task.directory,
     column: task.column,
     runState: task.runState,
-    ...(task.agent !== undefined ? { agent: task.agent } : {}),
-    ...(task.claudePermissionMode !== undefined ? { claudePermissionMode: task.claudePermissionMode } : {}),
-    ...(task.assignedTo !== undefined ? { assignedTo: task.assignedTo } : {}),
-    ...(task.model !== undefined ? { model: task.model } : {}),
-    ...(task.isolation !== undefined ? { isolation: task.isolation } : {}),
+    ...(task.agent != null ? { agent: task.agent } : {}),
+    ...(task.claudePermissionMode != null ? { claudePermissionMode: task.claudePermissionMode } : {}),
+    ...(task.assignedTo != null ? { assignedTo: task.assignedTo } : {}),
+    ...(task.model != null ? { model: task.model } : {}),
+    ...(task.isolation != null ? { isolation: task.isolation } : {}),
     ...(task.sessionId !== undefined ? { sessionId: task.sessionId } : {}),
     ...(task.harnessSessionId !== undefined ? { harnessSessionId: task.harnessSessionId } : {}),
     ...(task.harnessSessionName !== undefined ? { harnessSessionName: task.harnessSessionName } : {}),
