@@ -23,6 +23,7 @@ export function registerTaskLinkRoutes(app: Hono, deps: { store: TaskStore }): v
 
       validateLink(store, parentId, childId);
       store.addLink(parentId, childId);
+      store.addEvent({ taskId: childId, type: "task_linked", body: { parentId } });
 
       const updated = store.get(childId);
       if (!updated) throw AdapterError.notFound(`Task not found: ${childId}`);
@@ -40,6 +41,7 @@ export function registerTaskLinkRoutes(app: Hono, deps: { store: TaskStore }): v
       if (!store.get(parentId)) throw AdapterError.notFound(`Task not found: ${parentId}`);
 
       store.removeLink(parentId, childId);
+      store.addEvent({ taskId: childId, type: "task_unlinked", body: { parentId } });
       const updated = store.get(childId);
       if (!updated) throw AdapterError.notFound(`Task not found: ${childId}`);
       return c.json(updated, 200);

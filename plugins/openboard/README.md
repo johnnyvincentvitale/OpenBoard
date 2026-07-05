@@ -83,10 +83,11 @@ profiles, then dispatch and verify.
 ## Components
 
 - **Bundled MCP server** (`.mcp.json`) — a local `openboard` server that auto-connects to the
-  board and exposes create/read tools (`add_tasks`, `list_tasks`, `list_agents`). Intake-only;
-  run/integrate stay on the board API/GUI. Reads `OPENCODE_BOARD_URL`; in multi-instance
-  workflows, select an instance first and set that URL explicitly. It does not assume a
-  default board port.
+  board and exposes guarded orchestrator tools for task create/list, dependencies, run/retry/
+  abort/move, structured complete/block reports, sync/integrate, comments, and task events.
+  Reads `OPENCODE_BOARD_URL`; in multi-instance workflows, select an instance first and set
+  that URL explicitly. It does not assume a default board port. `integrate_task` requires
+  `confirmReviewed: true`; Done moves require explicit `completedBy`.
 - **SessionStart hook** (`hooks/`) — frames a fresh session as the orchestrator
   cockpit and injects the flow in SessionStart-capable harnesses. Claude Code uses
   this path, and Codex CLI plugin sessions have been observed to follow it too.

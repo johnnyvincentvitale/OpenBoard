@@ -467,4 +467,25 @@ describe("SqliteTaskStore", () => {
       expect(store.getParentIds(child.id)).toEqual([]);
     });
   });
+
+  describe("comments and task events", () => {
+    it("persists scoped task comments and events in creation order", () => {
+      const task = store.create(input());
+      const comment = store.addComment({ taskId: task.id, author: "orchestrator", body: "reviewed" });
+      clock = 2_000;
+      const event = store.addEvent({ taskId: task.id, type: "comment_added", body: { commentId: comment.id } });
+
+      expect(comment).toMatchObject({ taskId: task.id, author: "orchestrator", body: "reviewed", createdAt: 1_000 });
+      expect(event).toMatchObject({ taskId: task.id, type: "comment_added", body: { commentId: comment.id }, createdAt: 2_000 });
+      expect(store.listComments(task.id)).toEqual([comment]);
+      expect(store.listEvents(task.id)).toEqual([event]);
+    });
+
+    it("rejects comments and events for unknown tasks", () => {
+      expect(() => store.addComment({ taskId: "missing", author: "a", body: "b" })).toThrow(/unknown task/);
+      expect(() => store.listComments("missing")).toThrow(/unknown task/);
+      expect(() => store.addEvent({ taskId: "missing", type: "x" })).toThrow(/unknown task/);
+      expect(() => store.listEvents("missing")).toThrow(/unknown task/);
+    });
+  });
 });

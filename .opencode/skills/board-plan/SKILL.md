@@ -179,8 +179,8 @@ whole contract:
   changed, what was run, and what passed, so the orchestrator, the next wave,
   or the opposing role inherits evidence instead of re-deriving it.
 
-Create cards through MCP `add_tasks` (create-only); check `list_tasks` first to
-avoid duplicates.
+Create cards through MCP `create_task`/`add_tasks`; check `list_tasks` first to
+avoid duplicates. Use guarded MCP control tools only from the orchestrator flow.
 
 ## Set The Failure Policy
 

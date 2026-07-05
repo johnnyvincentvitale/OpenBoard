@@ -106,12 +106,16 @@ Label all evidence from this surface as browser/dev-server evidence.
 The plugin bundles a local `openboard` MCP server (`.mcp.json`) that auto-connects
 to the board named by `OPENCODE_BOARD_URL`. In multi-instance workflows, MCP is
 usable only after `OPENCODE_BOARD_URL` points at the selected instance's adapter
-URL. It exposes exactly three create/read tools — it is intake-only and never
-runs, aborts, or integrates work:
+URL. It exposes guarded orchestrator tools for board control:
 
 - `list_agents` — should match `GET /api/agents` (the assignable roster).
 - `list_tasks` — should match `GET /api/tasks` (avoid duplicate cards).
-- `add_tasks` — creates To Do cards visible in the GUI without manual form entry.
+- `create_task` / `add_tasks` — create manual or agent cards visible in the GUI.
+- `link_tasks` / `unlink_tasks` — manage task dependencies.
+- `run_task`, `retry_task`, `abort_task`, `move_task` — control task execution and placement.
+- `complete_task` / `block_task` — submit structured worker reports.
+- `sync_task` / `integrate_task` — worktree merge controls; integrate requires `confirmReviewed: true`.
+- `comment_task` / `add_note`, `task_events` — scoped comments and durable task events.
 
 Verify the MCP client points at the same selected board the user is viewing:
 `list_tasks` over MCP must match the visible cards and the selected instance's
@@ -120,10 +124,8 @@ OPENCODE_BOARD_URL" while a named instance is running on another port, do not
 fall back to `4097`; set `OPENCODE_BOARD_URL` for the selected instance or use
 the adapter API directly and state that MCP was not the control path. The MCP
 server requires the board to be running and the built `dist/mcp/server.mjs`
-bundle.
-
-Run, retry, abort, move, and integrate are not on the MCP surface. For those, use
-the board's HTTP API or GUI, and say MCP was not the control path.
+bundle. MCP Done moves require explicit `completedBy`; the tool layer must not
+silently default completion attribution.
 
 If MCP is unavailable, use the adapter API directly and state that MCP was not the control path.
 

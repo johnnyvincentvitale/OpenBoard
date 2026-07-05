@@ -5,10 +5,12 @@
  * and pushes a fresh snapshot frame whenever the serialized task list
  * changes, plus periodic heartbeats to keep the connection alive.
  */
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { streamSSE } from "hono/streaming";
 import type { TaskFrame, TaskStore } from "../../shared";
 import { TASK_ROUTE_PATTERNS } from "../../shared";
+import { AdapterError } from "../../shared/errors";
 
 const POLL_INTERVAL_MS = 800;
 const HEARTBEAT_AFTER_UNCHANGED = 15; // ~15 * 800ms ≈ 12s of no changes before a heartbeat
@@ -67,4 +69,19 @@ export function registerTaskEventsRoutes(app: Hono, deps: TaskEventsRouteDeps): 
       }
     });
   });
+
+  app.get(TASK_ROUTE_PATTERNS.taskEvents, (c) => {
+    const taskId = c.req.param("id");
+    try {
+      if (!store.get(taskId)) throw AdapterError.notFound(`Task not found: ${taskId}`);
+      return c.json(store.listEvents(taskId), 200);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+}
+
+function respondWithError(c: Context, err: unknown): Response {
+  const adapterError = err instanceof AdapterError ? err : AdapterError.internal("Unexpected error", err);
+  return c.json(adapterError.toEnvelope(), adapterError.status as ContentfulStatusCode);
 }

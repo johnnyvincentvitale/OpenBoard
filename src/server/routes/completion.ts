@@ -63,6 +63,7 @@ async function handleCompletion(
       error: outcome === "complete" ? undefined : payload.residualRisk,
     });
     if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
+    store.addEvent({ taskId: id, type: outcome === "complete" ? "task_completed" : "task_blocked", body: { ...report } });
     if (!isLateIdleFallbackUpgrade && (updated.column === "todo" || updated.column === "in_progress")) {
       store.move(id, "review", END_OF_COLUMN);
     }

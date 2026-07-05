@@ -8,6 +8,8 @@ import type {
   CreateTaskInput,
   ModelRef,
   Task,
+  TaskComment,
+  TaskEvent,
   TaskIsolationMode,
   TaskPending,
   TaskRunState,
@@ -62,6 +64,26 @@ CREATE TABLE IF NOT EXISTS task_links (
 
 CREATE INDEX IF NOT EXISTS idx_task_links_child ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_task_links_parent ON task_links(parent_id);
+
+CREATE TABLE IF NOT EXISTS task_comments (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  author     TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_comments_task_created ON task_comments(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS task_events (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  type       TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_events_task_created ON task_events(task_id, created_at);
 `;
 
 /** Columns added after the initial task schema — ALTER-in for pre-existing DBs. */
@@ -110,6 +132,22 @@ interface TaskRowRecord {
   updated_at: number;
 }
 
+interface TaskCommentRowRecord {
+  id: string;
+  task_id: string;
+  author: string;
+  body: string;
+  created_at: number;
+}
+
+interface TaskEventRowRecord {
+  id: string;
+  task_id: string;
+  type: string;
+  body: string;
+  created_at: number;
+}
+
 function toTask(record: TaskRowRecord): Task {
   const task: Task = {
     id: record.id,
@@ -140,6 +178,26 @@ function toTask(record: TaskRowRecord): Task {
   if (record.base_branch !== null) task.baseBranch = record.base_branch;
   if (record.pending !== null) task.pending = record.pending as TaskPending;
   return task;
+}
+
+function toTaskComment(record: TaskCommentRowRecord): TaskComment {
+  return {
+    id: record.id,
+    taskId: record.task_id,
+    author: record.author,
+    body: record.body,
+    createdAt: record.created_at,
+  };
+}
+
+function toTaskEvent(record: TaskEventRowRecord): TaskEvent {
+  return {
+    id: record.id,
+    taskId: record.task_id,
+    type: record.type,
+    body: JSON.parse(record.body) as Record<string, unknown>,
+    createdAt: record.created_at,
+  };
 }
 
 /**
@@ -240,6 +298,18 @@ export class SqliteTaskStore implements TaskStore {
       putSetting: this.db.prepare(
         "INSERT INTO board_setting (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
       ),
+      insertComment: this.db.prepare(
+        "INSERT INTO task_comments (id, task_id, author, body, created_at) VALUES (@id, @taskId, @author, @body, @createdAt)",
+      ),
+      listComments: this.db.prepare(
+        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at, id",
+      ),
+      insertEvent: this.db.prepare(
+        "INSERT INTO task_events (id, task_id, type, body, created_at) VALUES (@id, @taskId, @type, @body, @createdAt)",
+      ),
+      listEvents: this.db.prepare(
+        "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at, id",
+      ),
     };
   }
 
@@ -276,6 +346,10 @@ export class SqliteTaskStore implements TaskStore {
     deleteLink: Database.Statement;
     getParentIds: Database.Statement;
     getChildIds: Database.Statement;
+    insertComment: Database.Statement;
+    listComments: Database.Statement;
+    insertEvent: Database.Statement;
+    listEvents: Database.Statement;
   };
 
   list(filter: { archived?: "exclude" | "only" | "all" } = {}): Task[] {
@@ -459,6 +533,42 @@ export class SqliteTaskStore implements TaskStore {
     const next = { ...this.getSettings(), ...patch };
     this.stmts.putSetting.run({ key: "worktreeDefault", value: next.worktreeDefault ? "true" : "false" });
     return next;
+  }
+
+  addComment(input: { taskId: string; author: string; body: string }): TaskComment {
+    if (!this.get(input.taskId)) throw new Error(`SqliteTaskStore: unknown task ${input.taskId}`);
+    const comment: TaskComment = {
+      id: `comment_${crypto.randomUUID()}`,
+      taskId: input.taskId,
+      author: input.author,
+      body: input.body,
+      createdAt: this.now(),
+    };
+    this.stmts.insertComment.run(comment);
+    return comment;
+  }
+
+  listComments(taskId: string): TaskComment[] {
+    if (!this.get(taskId)) throw new Error(`SqliteTaskStore: unknown task ${taskId}`);
+    return (this.stmts.listComments.all(taskId) as TaskCommentRowRecord[]).map(toTaskComment);
+  }
+
+  addEvent(input: { taskId: string; type: string; body?: Record<string, unknown> }): TaskEvent {
+    if (!this.get(input.taskId)) throw new Error(`SqliteTaskStore: unknown task ${input.taskId}`);
+    const event: TaskEvent = {
+      id: `event_${crypto.randomUUID()}`,
+      taskId: input.taskId,
+      type: input.type,
+      body: input.body ?? {},
+      createdAt: this.now(),
+    };
+    this.stmts.insertEvent.run({ ...event, body: JSON.stringify(event.body) });
+    return event;
+  }
+
+  listEvents(taskId: string): TaskEvent[] {
+    if (!this.get(taskId)) throw new Error(`SqliteTaskStore: unknown task ${taskId}`);
+    return (this.stmts.listEvents.all(taskId) as TaskEventRowRecord[]).map(toTaskEvent);
   }
 
   /** Close the underlying connection. Only meaningful when this store opened it (path constructor). */

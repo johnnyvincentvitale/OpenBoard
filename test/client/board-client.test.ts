@@ -149,6 +149,8 @@ describe("board client", () => {
       const path = new URL(String(url)).pathname;
       if (path.endsWith("/move")) return jsonResponse([task]);
       if (path.endsWith("/sync") || path.endsWith("/integrate")) return jsonResponse(outcome);
+      if (path.endsWith("/comments")) return jsonResponse([{ id: "comment-1", taskId: "task-1", author: "me", body: "note", createdAt: 1 }]);
+      if (path.endsWith("/events")) return jsonResponse([{ id: "event-1", taskId: "task-1", type: "task_run", body: {}, createdAt: 1 }]);
       if (path === "/api/settings") return jsonResponse(settings);
       if (path === "/api/tasks/task-1") return jsonResponse({ ok: true });
       return jsonResponse(task);
@@ -159,9 +161,16 @@ describe("board client", () => {
     await client.retryTask("task-1", "try again");
     await client.abortTask("task-1");
     await client.moveTask("task-1", "review", 0);
+    await client.linkTasks("task-0", "task-1");
+    await client.unlinkTasks("task-0", "task-1");
+    await client.completeTask("task-1", { summary: "done", changedFiles: [], verification: [], residualRisk: "none" }, 10);
+    await client.blockTask("task-1", { summary: "blocked", changedFiles: [], verification: [], residualRisk: "risk" });
     await client.initGitAndRun("task-1");
     await client.syncTask("task-1");
     await client.integrateTask("task-1", "main");
+    await client.addComment("task-1", "me", "note");
+    await client.listComments("task-1");
+    await client.listTaskEvents("task-1");
     await client.getSettings();
     await client.updateSettings({ worktreeDefault: true });
     await client.deleteTask("task-1");
@@ -173,15 +182,23 @@ describe("board client", () => {
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/retry`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/abort`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/move`, "POST"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/links`, "POST"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/links/task-0`, "DELETE"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/complete?runStartedAt=10`, "POST"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/block`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/init-git`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/sync`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/integrate`, "POST"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/comments`, "POST"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/comments`, "GET"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/events`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/settings`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/settings`, "PUT"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1`, "DELETE"],
     ]);
     expect(JSON.parse(String(calls[1][1]?.body))).toEqual({ feedback: "try again" });
-    expect(JSON.parse(String(calls[6][1]?.body))).toEqual({ targetBranch: "main" });
+    expect(JSON.parse(String(calls[4][1]?.body))).toEqual({ parentId: "task-0" });
+    expect(JSON.parse(String(calls[10][1]?.body))).toEqual({ targetBranch: "main" });
   });
 
   it("rejects bad task input before POSTing", async () => {

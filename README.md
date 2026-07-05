@@ -216,6 +216,14 @@ started with no OpenCode port configured never fight over the same spawned backe
 To point an MCP client (or the TUI) at a specific instance, set `OPENCODE_BOARD_URL` to that
 instance's adapter URL, e.g. `OPENCODE_BOARD_URL=http://127.0.0.1:4197`.
 
+The MCP server requires an explicit `OPENCODE_BOARD_URL`; it does not silently control the
+legacy `4097` fallback when a named instance is selected. Its tools are an orchestrator control
+surface for the existing task API: `create_task`, `add_tasks`, `list_tasks`, `list_agents`,
+`link_tasks`, `unlink_tasks`, `run_task`, `retry_task`, `abort_task`, `move_task`,
+`complete_task`, `block_task`, `sync_task`, `integrate_task`, `comment_task`, `add_note`, and
+`task_events`. `move_task` requires `completedBy` when moving to Done, and `integrate_task`
+requires `confirmReviewed: true`.
+
 ## BoardV3 task lifecycle
 Beyond Run/Retry/Stop, a Task carries an explicit completion contract, optional
 parent/child dependencies, and an archive flag — all exposed on `/api/tasks`.

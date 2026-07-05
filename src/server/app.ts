@@ -18,6 +18,7 @@ import { registerAgentRoutes } from "./routes/agents";
 import { registerCompletionRoutes } from "./routes/completion";
 import { registerArchiveRoutes } from "./routes/archive";
 import { registerTaskLinkRoutes } from "./routes/links";
+import { registerTaskCommentRoutes } from "./routes/comments";
 
 export interface AppDeps {
   client: OpencodeHandle["client"];
@@ -64,6 +65,7 @@ export function createApp(deps: AppDeps): Hono {
   registerAgentRoutes(app, { baseUrl: deps.opencodeBaseUrl });
   registerCompletionRoutes(app, { store: deps.taskStore });
   registerTaskLinkRoutes(app, { store: deps.taskStore });
+  registerTaskCommentRoutes(app, { store: deps.taskStore });
   registerTaskRoutes(app, {
     store: deps.taskStore,
     dispatcher: deps.dispatcher,

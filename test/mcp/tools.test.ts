@@ -2,10 +2,23 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BOARD_UNAVAILABLE_MESSAGE,
   DEFAULT_BOARD_URL,
+  abortTask,
   addTasks,
+  blockTask,
+  commentTask,
+  completeTask,
+  createTask,
+  integrateTask,
+  linkTasks,
   listAgents,
   listTasks,
+  moveTask,
   resolveBoardUrl,
+  retryTask,
+  runTask,
+  syncTask,
+  taskEvents,
+  unlinkTasks,
 } from "../../src/mcp/tools";
 import type { McpToolOptions } from "../../src/mcp/tools";
 import type { RosterAgent, Task } from "../../src/shared";
@@ -27,10 +40,12 @@ function directoryStat(isDirectory = true): { isDirectory(): boolean } {
 function createdTask(id: string, input: Record<string, unknown>): Task {
   return {
     id,
+    type: input.type as Task["type"],
     title: input.title as string,
     description: input.description as string,
     directory: input.directory as string,
     agent: input.agent as string | undefined,
+    assignedTo: input.assignedTo as string | undefined,
     model: input.model as Task["model"],
     isolation: input.isolation as Task["isolation"],
     column: "todo",
@@ -75,6 +90,37 @@ function makeOptions(
 }
 
 describe("MCP add_tasks", () => {
+  it("creates a manual task through create_task", async () => {
+    const options = makeOptions([CWD]);
+
+    const result = await createTask(
+      {
+        type: "manual",
+        title: " Triage bug ",
+        description: "Manual QA",
+        directory: CWD,
+        assignedTo: " Johnny ",
+      },
+      options,
+    );
+
+    expect(result.task).toMatchObject({
+      id: "task-1",
+      type: "manual",
+      title: "Triage bug",
+      assignedTo: "Johnny",
+      column: "todo",
+      runState: "unstarted",
+    });
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      type: "manual",
+      title: "Triage bug",
+      description: "Manual QA",
+      directory: CWD,
+      assignedTo: "Johnny",
+    });
+  });
+
   it("creates one task through POST /api/tasks with parsed model and valid isolation", async () => {
     const options = makeOptions([`${CWD}/app`]);
 
@@ -205,7 +251,7 @@ describe("MCP add_tasks", () => {
     const options = makeOptions([CWD]);
 
     await expect(addTasks({ tasks: [{ title: "Bad isolation", isolation: "container" }] }, options)).rejects.toThrow(
-      "isolation must be 'worktree' or 'in-place'",
+      "Invalid option",
     );
     expect(options.fetchMock).not.toHaveBeenCalled();
   });
@@ -221,6 +267,88 @@ describe("MCP add_tasks", () => {
     await expect(addTasks({ tasks: [{ title: "Needs board" }] }, options)).rejects.toThrow(
       BOARD_UNAVAILABLE_MESSAGE,
     );
+  });
+});
+
+describe("MCP orchestrator tools", () => {
+  const task: Task = {
+    id: "task-1",
+    title: "A",
+    description: "",
+    directory: CWD,
+    column: "in_progress",
+    position: 0,
+    runState: "running",
+    sessionId: "ses_1",
+    runStartedAt: 10,
+    parentIds: ["task-0"],
+    createdAt: 1,
+    updatedAt: 2,
+  };
+
+  it("wraps run/retry/abort/link/unlink/complete/block/sync/integrate/comment/event endpoints", async () => {
+    const outcome = { task, ok: true, conflict: false, message: "merged" };
+    const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      if (path.endsWith("/sync") || path.endsWith("/integrate")) return jsonResponse(outcome);
+      if (path.endsWith("/comments")) return jsonResponse({ id: "comment_1", taskId: "task-1", author: "me", body: "note", createdAt: 3 }, 201);
+      if (path.endsWith("/events")) return jsonResponse([{ id: "event_1", taskId: "task-1", type: "task_run", body: {}, createdAt: 4 }]);
+      return jsonResponse(task);
+    });
+    const options = makeOptions([CWD], fetchMock);
+    const report = { summary: "done", changedFiles: [], verification: [], residualRisk: "none" };
+
+    await runTask({ taskId: "task-1" }, options);
+    await retryTask({ taskId: "task-1", feedback: "again" }, options);
+    await abortTask({ taskId: "task-1" }, options);
+    await linkTasks({ parentId: "task-0", childId: "task-1" }, options);
+    await unlinkTasks({ parentId: "task-0", childId: "task-1" }, options);
+    await completeTask({ taskId: "task-1", runStartedAt: 10, report }, options);
+    await blockTask({ taskId: "task-1", report }, options);
+    await syncTask({ taskId: "task-1" }, options);
+    await integrateTask({ taskId: "task-1", confirmReviewed: true, targetBranch: "main" }, options);
+    await commentTask({ taskId: "task-1", author: "me", body: "note" }, options);
+    const events = await taskEvents({ taskId: "task-1" }, options);
+
+    expect(events.count).toBe(1);
+    expect(fetchMock.mock.calls.map((call: unknown[]) => new URL(String(call[0])).pathname)).toEqual([
+      "/api/tasks/task-1/run",
+      "/api/tasks/task-1/retry",
+      "/api/tasks/task-1/abort",
+      "/api/tasks/task-1/links",
+      "/api/tasks/task-1/links/task-0",
+      "/api/tasks/task-1/complete",
+      "/api/tasks/task-1/block",
+      "/api/tasks/task-1/sync",
+      "/api/tasks/task-1/integrate",
+      "/api/tasks/task-1/comments",
+      "/api/tasks/task-1/events",
+    ]);
+    expect(new URL(String(fetchMock.mock.calls[5][0])).search).toBe("?runStartedAt=10");
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ feedback: "again" });
+    expect(JSON.parse(String(fetchMock.mock.calls[8][1]?.body))).toEqual({ targetBranch: "main" });
+  });
+
+  it("requires completedBy for MCP moves to done", async () => {
+    const options = makeOptions([CWD], vi.fn(async () => jsonResponse([task])));
+
+    await expect(moveTask({ taskId: "task-1", column: "done", position: 0 }, options)).rejects.toThrow(
+      "completedBy is required",
+    );
+
+    await moveTask({ taskId: "task-1", column: "done", position: 0, completedBy: "orchestrator" }, options);
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      column: "done",
+      position: 0,
+      completedBy: "orchestrator",
+    });
+  });
+
+  it("requires explicit review confirmation before integrate_task", async () => {
+    const options = makeOptions([CWD]);
+
+    await expect(integrateTask({ taskId: "task-1", targetBranch: "main" }, options)).rejects.toThrow();
+    expect(options.fetchMock).not.toHaveBeenCalled();
   });
 });
 

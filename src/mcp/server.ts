@@ -1,6 +1,6 @@
 /**
- * OpenBoard MCP server — exposes `add_tasks`, `list_tasks`, and `list_agents`
- * tools backed by the board's REST API (see `../client/board-client.ts`).
+ * OpenBoard MCP server — exposes orchestrator-safe board control tools backed
+ * by the board's REST API (see `../client/board-client.ts`).
  *
  * Multi-instance: this server always talks to exactly one selected OpenBoard
  * adapter, resolved from `OPENCODE_BOARD_URL`. It does not fall back to a
@@ -16,9 +16,31 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   AddTasksInputSchema,
+  CommentTaskInputSchema,
+  CompleteTaskInputSchema,
+  CreateTaskInputSchema,
+  IntegrateTaskInputSchema,
+  LinkTasksInputSchema,
+  MoveTaskInputSchema,
+  RetryTaskInputSchema,
+  TaskIdInputSchema,
+  abortTask,
+  addNote,
   addTasks,
+  blockTask,
+  commentTask,
+  completeTask,
+  createTask,
+  integrateTask,
+  linkTasks,
   listAgents,
   listTasks,
+  moveTask,
+  retryTask,
+  runTask,
+  syncTask,
+  taskEvents,
+  unlinkTasks,
   type McpToolOptions,
 } from "./tools";
 
@@ -32,6 +54,16 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
   });
 
   server.registerTool(
+    "create_task",
+    {
+      title: "Create OpenBoard task",
+      description: "Create one manual or agent task in OpenBoard through POST /api/tasks. This never runs tasks.",
+      inputSchema: CreateTaskInputSchema,
+    },
+    async (args) => toToolResult(await createTask(args, toolOptions)),
+  );
+
+  server.registerTool(
     "add_tasks",
     {
       title: "Add OpenBoard tasks",
@@ -39,6 +71,136 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
       inputSchema: AddTasksInputSchema,
     },
     async (args) => toToolResult(await addTasks(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "link_tasks",
+    {
+      title: "Link OpenBoard tasks",
+      description: "Make childId depend on parentId through POST /api/tasks/:id/links.",
+      inputSchema: LinkTasksInputSchema,
+    },
+    async (args) => toToolResult(await linkTasks(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "unlink_tasks",
+    {
+      title: "Unlink OpenBoard tasks",
+      description: "Remove a parent dependency from a child task through DELETE /api/tasks/:id/links/:parentId.",
+      inputSchema: LinkTasksInputSchema,
+    },
+    async (args) => toToolResult(await unlinkTasks(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "run_task",
+    {
+      title: "Run OpenBoard task",
+      description: "Dispatch an agent task through POST /api/tasks/:id/run.",
+      inputSchema: TaskIdInputSchema,
+    },
+    async (args) => toToolResult(await runTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "retry_task",
+    {
+      title: "Retry OpenBoard task",
+      description: "Retry an agent task through POST /api/tasks/:id/retry. Optional feedback is sent to the session.",
+      inputSchema: RetryTaskInputSchema,
+    },
+    async (args) => toToolResult(await retryTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "abort_task",
+    {
+      title: "Abort OpenBoard task",
+      description: "Abort a running task through POST /api/tasks/:id/abort.",
+      inputSchema: TaskIdInputSchema,
+    },
+    async (args) => toToolResult(await abortTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "move_task",
+    {
+      title: "Move OpenBoard task",
+      description: "Move a task by column/position. Moving to done requires explicit completedBy.",
+      inputSchema: MoveTaskInputSchema,
+    },
+    async (args) => toToolResult(await moveTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "complete_task",
+    {
+      title: "Complete OpenBoard task",
+      description: "Submit a structured completion report through POST /api/tasks/:id/complete.",
+      inputSchema: CompleteTaskInputSchema,
+    },
+    async (args) => toToolResult(await completeTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "block_task",
+    {
+      title: "Block OpenBoard task",
+      description: "Submit a structured blocked report through POST /api/tasks/:id/block.",
+      inputSchema: CompleteTaskInputSchema,
+    },
+    async (args) => toToolResult(await blockTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "sync_task",
+    {
+      title: "Sync OpenBoard task",
+      description: "Merge upstream into a task worktree branch through POST /api/tasks/:id/sync.",
+      inputSchema: TaskIdInputSchema,
+    },
+    async (args) => toToolResult(await syncTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "integrate_task",
+    {
+      title: "Integrate OpenBoard task",
+      description: "Integrate a task worktree into a target branch. Requires confirmReviewed: true.",
+      inputSchema: IntegrateTaskInputSchema,
+    },
+    async (args) => toToolResult(await integrateTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "comment_task",
+    {
+      title: "Comment on OpenBoard task",
+      description: "Persist a scoped task comment. This is not chat.",
+      inputSchema: CommentTaskInputSchema,
+    },
+    async (args) => toToolResult(await commentTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "add_note",
+    {
+      title: "Add OpenBoard task note",
+      description: "Alias for comment_task; persists a scoped task note/comment.",
+      inputSchema: CommentTaskInputSchema,
+    },
+    async (args) => toToolResult(await addNote(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "task_events",
+    {
+      title: "List OpenBoard task events",
+      description: "List durable events recorded for one task. This is not run history.",
+      inputSchema: TaskIdInputSchema,
+    },
+    async (args) => toToolResult(await taskEvents(args, toolOptions)),
   );
 
   server.registerTool(

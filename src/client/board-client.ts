@@ -4,10 +4,13 @@ import type {
   BoardSettings,
   Column,
   CreateTaskInput,
+  CompletionReport,
   MergeOutcome,
   ModelRef,
   RosterAgent,
   Task,
+  TaskComment,
+  TaskEvent,
   TaskIsolationMode,
   TaskType,
 } from "../shared";
@@ -42,6 +45,9 @@ export interface TaskSummary {
   model?: ModelRef;
   isolation?: TaskIsolationMode;
   sessionId?: string;
+  runStartedAt?: number;
+  parentIds?: string[];
+  completedBy?: string | null;
 }
 
 export interface CreateBoardTaskInput {
@@ -61,6 +67,8 @@ export interface BoardHealth {
   opencode: { status: "ok"; version: string } | { status: "unreachable" };
 }
 
+export type CompletionInput = Omit<CompletionReport, "outcome" | "reportedAt">;
+
 export interface BoardClient {
   readonly boardUrl: string;
   readonly cwd: string;
@@ -77,6 +85,13 @@ export interface BoardClient {
   initGitAndRun(id: string): Promise<Task>;
   syncTask(id: string): Promise<MergeOutcome>;
   integrateTask(id: string, targetBranch?: string): Promise<MergeOutcome>;
+  linkTasks(parentId: string, childId: string): Promise<Task>;
+  unlinkTasks(parentId: string, childId: string): Promise<Task>;
+  completeTask(id: string, report: CompletionInput, runStartedAt?: number): Promise<Task>;
+  blockTask(id: string, report: CompletionInput, runStartedAt?: number): Promise<Task>;
+  addComment(id: string, author: string, body: string): Promise<TaskComment>;
+  listComments(id: string): Promise<TaskComment[]>;
+  listTaskEvents(id: string): Promise<TaskEvent[]>;
   getSettings(): Promise<BoardSettings>;
   updateSettings(patch: Pick<BoardSettings, "worktreeDefault">): Promise<BoardSettings>;
   getHealth(): Promise<BoardHealth>;
@@ -140,6 +155,18 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
         buildTaskPath.integrate(id),
         targetBranch === undefined ? {} : { targetBranch },
       ),
+    linkTasks: (parentId, childId) => postJson<Task>(resolved, buildTaskPath.links(childId), { parentId }),
+    unlinkTasks: (parentId, childId) =>
+      requestJson<Task>(resolved, buildTaskPath.unlink(childId, parentId), {
+        method: "DELETE",
+      }),
+    completeTask: (id, report, runStartedAt) =>
+      postJson<Task>(resolved, withRunStartedAt(`/api/tasks/${encodeURIComponent(id)}/complete`, runStartedAt), report),
+    blockTask: (id, report, runStartedAt) =>
+      postJson<Task>(resolved, withRunStartedAt(`/api/tasks/${encodeURIComponent(id)}/block`, runStartedAt), report),
+    addComment: (id, author, body) => postJson<TaskComment>(resolved, buildTaskPath.comments(id), { author, body }),
+    listComments: (id) => requestJson<TaskComment[]>(resolved, buildTaskPath.comments(id), { method: "GET" }),
+    listTaskEvents: (id) => requestJson<TaskEvent[]>(resolved, buildTaskPath.taskEvents(id), { method: "GET" }),
     getSettings: () => requestJson<BoardSettings>(resolved, buildTaskPath.settings(), { method: "GET" }),
     updateSettings: (patch) =>
       requestJson<BoardSettings>(resolved, buildTaskPath.settings(), {
@@ -185,7 +212,14 @@ export function toTaskSummary(task: Task): TaskSummary {
     ...(task.model !== undefined ? { model: task.model } : {}),
     ...(task.isolation !== undefined ? { isolation: task.isolation } : {}),
     ...(task.sessionId !== undefined ? { sessionId: task.sessionId } : {}),
+    ...(task.runStartedAt !== undefined ? { runStartedAt: task.runStartedAt } : {}),
+    ...(task.parentIds !== undefined ? { parentIds: task.parentIds } : {}),
+    ...(task.completedBy !== undefined ? { completedBy: task.completedBy } : {}),
   };
+}
+
+function withRunStartedAt(path: string, runStartedAt: number | undefined): string {
+  return runStartedAt === undefined ? path : `${path}?runStartedAt=${encodeURIComponent(String(runStartedAt))}`;
 }
 
 function resolveOptions(options: BoardClientOptions): ResolvedOptions {

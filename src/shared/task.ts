@@ -39,6 +39,22 @@ export interface CompletionReport {
   reportedAt: number;
 }
 
+export interface TaskComment {
+  id: string;
+  taskId: string;
+  author: string;
+  body: string;
+  createdAt: number;
+}
+
+export interface TaskEvent {
+  id: string;
+  taskId: string;
+  type: string;
+  body: Record<string, unknown>;
+  createdAt: number;
+}
+
 export type CompletionSource = "reported" | "idle-fallback";
 
 export interface InstanceConfig {
@@ -194,6 +210,10 @@ export interface TaskStore {
   getSettings(): BoardSettings;
   /** Patch and persist board settings; returns the merged result. */
   updateSettings(patch: Partial<BoardSettings>): BoardSettings;
+  addComment(input: { taskId: string; author: string; body: string }): TaskComment;
+  listComments(taskId: string): TaskComment[];
+  addEvent(input: { taskId: string; type: string; body?: Record<string, unknown> }): TaskEvent;
+  listEvents(taskId: string): TaskEvent[];
 }
 
 /**
@@ -239,6 +259,8 @@ export const TASK_ROUTE_PATTERNS = {
   initGit: "/api/tasks/:id/init-git",
   sync: "/api/tasks/:id/sync",
   integrate: "/api/tasks/:id/integrate",
+  comments: "/api/tasks/:id/comments",
+  taskEvents: "/api/tasks/:id/events",
   settings: "/api/settings",
 } as const;
 
@@ -253,5 +275,10 @@ export const buildTaskPath = {
   initGit: (id: string) => `/api/tasks/${encodeURIComponent(id)}/init-git`,
   sync: (id: string) => `/api/tasks/${encodeURIComponent(id)}/sync`,
   integrate: (id: string) => `/api/tasks/${encodeURIComponent(id)}/integrate`,
+  links: (id: string) => `/api/tasks/${encodeURIComponent(id)}/links`,
+  unlink: (id: string, parentId: string) =>
+    `/api/tasks/${encodeURIComponent(id)}/links/${encodeURIComponent(parentId)}`,
+  comments: (id: string) => `/api/tasks/${encodeURIComponent(id)}/comments`,
+  taskEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/events`,
   settings: () => "/api/settings",
 } as const;

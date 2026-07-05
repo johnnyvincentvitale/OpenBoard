@@ -108,6 +108,7 @@ export function registerTaskRoutes(
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
       });
+      store.addEvent({ taskId: task.id, type: "task_created", body: { type: task.type ?? "agent" } });
 
       return c.json(task, 201);
     } catch (err) {
@@ -136,6 +137,7 @@ export function registerTaskRoutes(
     try {
       assertRunnableActiveTask(store, id, "run");
       const task = await dispatcher.run(id);
+      store.addEvent({ taskId: id, type: "task_run", body: { sessionId: task.sessionId, runStartedAt: task.runStartedAt } });
       return c.json(task, 202);
     } catch (err) {
       return respondWithError(c, err);
@@ -158,6 +160,7 @@ export function registerTaskRoutes(
       const feedback = typeof body.feedback === "string" ? body.feedback : undefined;
 
       const task = await dispatcher.retry(id, feedback);
+      store.addEvent({ taskId: id, type: "task_retried", body: { sessionId: task.sessionId, runStartedAt: task.runStartedAt, feedbackProvided: feedback !== undefined } });
       return c.json(task, 202);
     } catch (err) {
       return respondWithError(c, err);
@@ -173,6 +176,7 @@ export function registerTaskRoutes(
       if (!task) {
         throw AdapterError.notFound(`Task not found: ${id}`);
       }
+      store.addEvent({ taskId: id, type: "task_aborted", body: { sessionId: task.sessionId } });
       return c.json(task, 200);
     } catch (err) {
       return respondWithError(c, err);
@@ -208,6 +212,7 @@ export function registerTaskRoutes(
         completedBy !== undefined ? (completedBy as string | null) : column === "done" ? USER_COMPLETED_BY : null;
 
       store.update(id, { completedBy: nextCompletedBy });
+      store.addEvent({ taskId: id, type: "task_moved", body: { column, position, completedBy: nextCompletedBy } });
 
       const tasks = store.list();
       return c.json(tasks, 200);
@@ -243,6 +248,7 @@ export function registerTaskRoutes(
     const id = c.req.param("id");
     try {
       const outcome = await dispatcher.syncUpstream(id);
+      store.addEvent({ taskId: id, type: "task_synced", body: { ok: outcome.ok, conflict: outcome.conflict, message: outcome.message } });
       return c.json(outcome, outcome.ok ? 200 : 409);
     } catch (err) {
       return respondWithError(c, err);
@@ -261,6 +267,7 @@ export function registerTaskRoutes(
         // Body optional — integrate falls back to the task's recorded base branch.
       }
       const outcome = await dispatcher.integrate(id, target);
+      store.addEvent({ taskId: id, type: "task_integrated", body: { ok: outcome.ok, conflict: outcome.conflict, message: outcome.message, targetBranch: target } });
       return c.json(outcome, outcome.ok ? 200 : 409);
     } catch (err) {
       return respondWithError(c, err);
