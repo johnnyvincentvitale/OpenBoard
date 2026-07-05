@@ -404,6 +404,16 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)?.completionSource).toBeNull();
     });
 
+    it("clears stale finalSessionOutput when dispatching a task again", async () => {
+      const task = createTask();
+      store.update(task.id, { finalSessionOutput: "old output text" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      expect(store.get(task.id)?.finalSessionOutput).toBeNull();
+    });
+
     it("lands the task at the end of in_progress when other tasks are already there", async () => {
       const other = createTask({ title: "Other task" });
       store.move(other.id, "in_progress", 0);
@@ -719,6 +729,94 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)?.column).toBe("review");
       vi.useRealTimers();
     });
+
+    it("persists finalSessionOutput when OpenCode session finishes with assistant text", async () => {
+      vi.useFakeTimers();
+      const task = createTask();
+      client.nextSessionId = "ses_output_cap";
+      client.messageResponses = [
+        [
+          {
+            info: { role: "assistant" },
+            parts: [
+              { type: "text", text: "The bug was in foo.ts line 42." },
+              { type: "text", text: "I fixed it by updating the parameter type." },
+              { type: "step-finish", reason: "stop" },
+            ],
+          },
+        ],
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      client.queueScript([
+        {
+          id: "evt_1",
+          type: "session.idle",
+          properties: { sessionID: "ses_output_cap" },
+        } as unknown as OpencodeEvent,
+      ]);
+
+      dispatcher.start();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const updated = store.get(task.id);
+      expect(updated?.runState).toBe("idle");
+      expect(updated?.finalSessionOutput).toBe(
+        "The bug was in foo.ts line 42.\nI fixed it by updating the parameter type.",
+      );
+      vi.useRealTimers();
+    });
+
+    it("stores null finalSessionOutput when the last assistant message has no text parts", async () => {
+      vi.useFakeTimers();
+      const task = createTask();
+      client.nextSessionId = "ses_no_text";
+      client.messageResponses = [
+        [
+          {
+            info: { role: "assistant" },
+            parts: [{ type: "step-finish", reason: "stop" }],
+          },
+        ],
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      client.queueScript([
+        {
+          id: "evt_1",
+          type: "session.idle",
+          properties: { sessionID: "ses_no_text" },
+        } as unknown as OpencodeEvent,
+      ]);
+
+      dispatcher.start();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(store.get(task.id)?.finalSessionOutput).toBeNull();
+      vi.useRealTimers();
+    });
+
+    it("leaves finalSessionOutput as null for claude-code tasks", async () => {
+      const task = store.create({
+        title: "Claude output",
+        description: "Claude work",
+        directory: projectDir,
+        harness: "claude-code",
+      });
+      const claudeRunner = makeClaudeRunner();
+      claudeRunner.poll.mockResolvedValue({ status: "idle", error: undefined, terminal: true });
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+      await dispatcher.run(task.id);
+
+      // Give the Claude watcher one poll cycle.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      const updated = store.get(task.id);
+      expect(updated?.runState).toBe("idle");
+      expect(updated?.finalSessionOutput).toBeNull();
+    });
   });
 
   describe("retry()", () => {
@@ -775,11 +873,13 @@ describe("TaskDispatcher", () => {
         },
         "reported",
       );
+      store.update(task.id, { finalSessionOutput: "old output text" });
 
       await dispatcher.retry(task.id, "try again");
 
       expect(store.get(task.id)?.completion).toBeNull();
       expect(store.get(task.id)?.completionSource).toBeNull();
+      expect(store.get(task.id)?.finalSessionOutput).toBeNull();
     });
 
     it("relaunches claude-code tasks through the Claude runner retry hook", async () => {

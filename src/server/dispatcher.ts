@@ -176,6 +176,39 @@ function hasAssistantTurnFinished(messages: unknown): boolean {
   });
 }
 
+/**
+ * Extract the final meaningful assistant text output from an OpenCode session
+ * message list. Returns the concatenated text of all `type: "text"` parts in the
+ * assistant's final message, or null when no text is available.
+ */
+function extractFinalOutput(messages: unknown): string | null {
+  if (!Array.isArray(messages)) return null;
+
+  const latest = messages[messages.length - 1];
+  if (latest === null || typeof latest !== "object") return null;
+
+  const info = (latest as { info?: unknown }).info;
+  const role =
+    info !== null && typeof info === "object"
+      ? (info as Record<string, unknown>).role
+      : undefined;
+  if (role !== "assistant") return null;
+
+  const parts = (latest as { parts?: unknown }).parts;
+  if (!Array.isArray(parts)) return null;
+
+  const textParts: string[] = [];
+  for (const part of parts) {
+    if (part === null || typeof part !== "object") continue;
+    const record = part as Record<string, unknown>;
+    if (record.type === "text" && typeof record.text === "string") {
+      textParts.push(record.text);
+    }
+  }
+
+  return textParts.length > 0 ? textParts.join("\n") : null;
+}
+
 /** Position value that always lands a move at the end of the target column. */
 const END_OF_COLUMN = Number.POSITIVE_INFINITY;
 
@@ -263,7 +296,7 @@ export class TaskDispatcher implements Dispatcher {
     }
     this.assertNotArchived(task, "run");
     this.assertParentsSatisfied(task);
-    this.store.update(taskId, { completion: null, completionSource: null });
+    this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
 
     // Resolve and contain the execution directory before doing any git or
     // session work. This canonicalizes symlinks and rejects escapes from the
@@ -558,7 +591,7 @@ export class TaskDispatcher implements Dispatcher {
     this.assertNotArchived(task, "retry");
     if (task.harness === "claude-code") {
       this.assertParentsSatisfied(task);
-      this.store.update(taskId, { completion: null, completionSource: null });
+      this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
       const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
       return this.runClaudeTask(task, execDirectory, feedback ?? task.description, "retry");
     }
@@ -567,7 +600,7 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
     }
     this.assertParentsSatisfied(task);
-    this.store.update(taskId, { completion: null, completionSource: null });
+    this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
 
     const runStartedAt = Date.now();
     const promptError = await this.prompt(
@@ -723,6 +756,8 @@ export class TaskDispatcher implements Dispatcher {
 
         if (!hasAssistantTurnFinished(messages)) continue;
 
+        const finalOutput = extractFinalOutput(messages);
+
         const beforeFallback = this.getTaskForWatcher(taskId);
         if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
           return;
@@ -733,6 +768,7 @@ export class TaskDispatcher implements Dispatcher {
             error: undefined,
             completion: null,
             completionSource: "idle-fallback",
+            finalSessionOutput: finalOutput,
           })
         ) {
           return;
@@ -821,6 +857,7 @@ export class TaskDispatcher implements Dispatcher {
             error: undefined,
             completion: null,
             completionSource: "idle-fallback",
+            finalSessionOutput: null,
           })
         ) {
           return;
