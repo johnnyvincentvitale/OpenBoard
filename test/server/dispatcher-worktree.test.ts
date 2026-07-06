@@ -209,3 +209,126 @@ describe("TaskDispatcher — worktree isolation", () => {
     expect(store.get(task.id)?.worktreePath).toBeUndefined();
   });
 });
+
+describe("TaskDispatcher — sandbox fail-closed gating", () => {
+  let tmp: string;
+  let store: SqliteTaskStore;
+
+  function buildDispatcher(
+    client: ReturnType<typeof makeFakeClient>,
+    sandbox?: { expected: boolean; enabled: boolean; wrapperPath?: string; reason?: string },
+  ) {
+    return new TaskDispatcher({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      client: client as any,
+      store,
+      worktrees: new GitWorktreeManager(),
+      worktreeBaseDir: () => join(tmp, "worktrees"),
+      sandbox,
+    });
+  }
+
+  beforeEach(() => {
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), "ocb-sandbox-")));
+    process.env.BOARD_WORKSPACE = tmp;
+    store = new SqliteTaskStore(":memory:");
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(tmp, { recursive: true, force: true });
+    delete process.env.BOARD_WORKSPACE;
+  });
+
+  it("blocks a worktree-isolated run with runState error when sandboxing is expected but unavailable (no session, no worktree)", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const client = makeFakeClient();
+    const dispatcher = buildDispatcher(client, {
+      expected: true,
+      enabled: false,
+      reason: "sandbox-exec not found at /usr/bin/sandbox-exec",
+    });
+
+    const task = store.create({
+      title: "t",
+      description: "d",
+      directory: repo,
+      isolation: "worktree",
+    });
+    const blocked = await dispatcher.run(task.id);
+
+    expect(blocked.runState).toBe("error");
+    expect(blocked.error).toContain("sandbox wrapper");
+    expect(blocked.error).toContain("sandbox-exec not found at /usr/bin/sandbox-exec");
+    expect(client.createCalls).toHaveLength(0);
+    // No worktree should have been created either — the gate fires before ensureWorktree().
+    expect(existsSync(join(tmp, "worktrees", task.id))).toBe(false);
+  });
+
+  it("proceeds normally when sandbox.expected is true and sandbox.enabled is also true", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const client = makeFakeClient();
+    const dispatcher = buildDispatcher(client, {
+      expected: true,
+      enabled: true,
+      wrapperPath: "/repo/scripts/sandbox-wrapper.sh",
+    });
+
+    const task = store.create({
+      title: "t",
+      description: "d",
+      directory: repo,
+      isolation: "worktree",
+    });
+    const ran = await dispatcher.run(task.id);
+
+    expect(ran.runState).toBe("running");
+    expect(client.createCalls).toHaveLength(1);
+  });
+
+  it("proceeds normally (no gating at all) when sandbox is undefined — the safe default for existing callers", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const client = makeFakeClient();
+    const dispatcher = buildDispatcher(client); // no sandbox dep passed at all
+
+    const task = store.create({
+      title: "t",
+      description: "d",
+      directory: repo,
+      isolation: "worktree",
+    });
+    const ran = await dispatcher.run(task.id);
+
+    expect(ran.runState).toBe("running");
+    expect(client.createCalls).toHaveLength(1);
+  });
+
+  it("never fail-closes an in-place task, even when sandboxing is expected but unavailable", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const client = makeFakeClient();
+    const dispatcher = buildDispatcher(client, {
+      expected: true,
+      enabled: false,
+      reason: "sandbox-exec not found at /usr/bin/sandbox-exec",
+    });
+
+    const task = store.create({
+      title: "t",
+      description: "d",
+      directory: repo,
+      isolation: "in-place",
+    });
+    const ran = await dispatcher.run(task.id);
+
+    // In-place tasks never depended on the wrapper for their write scope
+    // (UNATTENDED_PERMISSION already grants full access to their own
+    // directory), so the fail-closed gate — which only guards the isolation
+    // guarantee worktree tasks rely on — must not block them.
+    expect(ran.runState).toBe("running");
+    expect(client.createCalls[0]?.directory).toBe(repo);
+  });
+});

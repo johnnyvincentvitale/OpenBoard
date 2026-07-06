@@ -17,6 +17,7 @@ import type { MergeOutcome, OpencodeEvent, Task, TaskStore } from "../shared";
 import { AdapterError, UNATTENDED_PERMISSION, WRITE_FENCED_PERMISSION } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
+import type { SandboxStatus } from "./sandbox";
 import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "./escape-detector";
 import { eventLiveState, eventSessionId } from "./events/session-status";
 import { createPermissionResponderPool, type PermissionResponderPool } from "./permission-responder";
@@ -94,6 +95,13 @@ export interface TaskDispatcherDeps {
   instanceName?: string;
   /** Override the stall-detection threshold (tests only; default DEFAULT_STALL_THRESHOLD_MS). */
   stallThresholdMs?: number;
+  /**
+   * Resolved macOS sandbox-wrapper status (see ./sandbox), threaded through
+   * from `startOrConnect()`. Defaults to `{expected: false, enabled: false}`
+   * — no fail-closed gating — so existing tests/callers that don't pass it
+   * are unaffected.
+   */
+  sandbox?: SandboxStatus;
 }
 
 /** Resolve the effective isolation for a task: its override, else the board default. */
@@ -347,6 +355,7 @@ export class TaskDispatcher implements Dispatcher {
   private readonly allowExternalDirectories: boolean;
   private readonly resolveDirectory: (raw: string) => string;
   private readonly stallThresholdMs: number;
+  private readonly sandbox: SandboxStatus;
 
   private running = false;
   /** Bumped on every stop()/restart so a stale consume loop knows to exit. */
@@ -402,6 +411,7 @@ export class TaskDispatcher implements Dispatcher {
           allowExternal: this.allowExternalDirectories,
         }));
     this.stallThresholdMs = deps.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+    this.sandbox = deps.sandbox ?? { expected: false, enabled: false };
   }
 
   async run(taskId: string): Promise<Task> {
@@ -425,6 +435,24 @@ export class TaskDispatcher implements Dispatcher {
     // runs in a dedicated `git worktree`; a non-repo directory can't be isolated,
     // so we block the run and surface the "make it a git repo?" decision instead.
     if (wantsWorktree(task, this.store)) {
+      // Fail closed: a worktree-isolated task's write protection depends on
+      // the sandbox wrapper being wired into OpenCode's `shell` at server
+      // startup (macOS-only, see ./sandbox). If this process is responsible
+      // for enabling it (`expected`) but couldn't (`!enabled`), never
+      // silently dispatch — that would run bash unsandboxed while implying
+      // it's protected. Per-task retry/blocked state mirrors the pending
+      // "git-init" precedent below, but as a plain error since there is no
+      // board-driven action that resolves it (unlike git-init).
+      if (this.sandbox.expected && !this.sandbox.enabled) {
+        const blocked = this.store.update(taskId, {
+          runState: "error",
+          error:
+            `Worktree isolation requires the macOS sandbox wrapper, which is unavailable: ` +
+            `${this.sandbox.reason ?? "unknown reason"}`,
+        });
+        if (!blocked) throw AdapterError.notFound(`Task not found: ${taskId}`);
+        return blocked;
+      }
       if (!(await this.worktrees.isGitRepo(execDirectory))) {
         const blocked = this.store.update(taskId, {
           pending: "git-init",

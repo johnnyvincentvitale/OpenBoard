@@ -9,11 +9,19 @@ import { createOpencodeServer } from "@opencode-ai/sdk/v2/server";
 import { AdapterError } from "../shared/errors";
 import { assertPortFree, ConfigError } from "./config";
 import type { AdapterConfig } from "./config";
+import { resolveSandboxStatus, type SandboxStatus } from "./sandbox";
 
 export interface OpencodeHandle {
   client: OpencodeClient;
   baseUrl: string;
+  /** Resolved macOS sandbox-wrapper status (see ./sandbox). */
+  sandbox: SandboxStatus;
   shutdown(): Promise<void>;
+}
+
+export interface StartOrConnectDeps {
+  /** Override for tests — defaults to the real resolveSandboxStatus. */
+  resolveSandboxStatus?: typeof resolveSandboxStatus;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -58,7 +66,12 @@ async function waitForHealthy(
  * Start (spawn mode) or connect to (connect mode) the OpenCode server,
  * verify it is reachable, and return a handle with a ready client.
  */
-export async function startOrConnect(config: AdapterConfig): Promise<OpencodeHandle> {
+export async function startOrConnect(
+  config: AdapterConfig,
+  deps: StartOrConnectDeps = {},
+): Promise<OpencodeHandle> {
+  const resolveSandbox = deps.resolveSandboxStatus ?? resolveSandboxStatus;
+
   if (config.mode === "connect") {
     const baseUrl = config.baseUrl;
     if (!baseUrl) {
@@ -71,6 +84,7 @@ export async function startOrConnect(config: AdapterConfig): Promise<OpencodeHan
     return {
       client,
       baseUrl,
+      sandbox: resolveSandbox({ mode: "connect" }),
       // Connect mode never owns the remote process's lifecycle.
       shutdown: async () => {},
     };
@@ -89,11 +103,14 @@ export async function startOrConnect(config: AdapterConfig): Promise<OpencodeHan
     throw err;
   }
 
+  const sandbox = resolveSandbox({ mode: "spawn" });
+
   let server: { url: string; close(): void };
   try {
     server = await createOpencodeServer({
       hostname: config.hostname,
       port: config.port,
+      ...(sandbox.enabled ? { config: { shell: sandbox.wrapperPath } } : {}),
     });
   } catch (err) {
     throw AdapterError.unreachable("Failed to spawn OpenCode server", err);
@@ -111,6 +128,7 @@ export async function startOrConnect(config: AdapterConfig): Promise<OpencodeHan
   return {
     client,
     baseUrl: server.url,
+    sandbox,
     shutdown: async () => {
       if (config.manageProcess) {
         server.close();

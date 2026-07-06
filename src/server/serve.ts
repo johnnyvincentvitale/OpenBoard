@@ -57,6 +57,7 @@ export async function main(): Promise<void> {
     adapterBaseUrl: `http://${config.hostname}:${config.boardPort}`,
     boardToken,
     instanceName: process.env.OPENBOARD_INSTANCE_NAME?.trim() || undefined,
+    sandbox: handle.sandbox,
   });
   dispatcher.start();
   const terminalManager = new PtyManager({ taskStore });
