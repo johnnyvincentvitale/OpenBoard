@@ -144,4 +144,31 @@ describe("detectBaseCheckoutEscape", () => {
     expect(result.escaped).toBe(true);
     expect(result.changedPaths).toEqual(["weird -> name2.txt"]);
   });
+
+  it("does not flag a sibling task's own worktree created after this task's snapshot (nested layout)", async () => {
+    const nestDir = join(repo, ".opencode-board-worktrees", "repo");
+    g(repo, ["worktree", "add", "-b", "board/taskA", join(nestDir, "taskA"), "HEAD"]);
+    const snapshot = await snapshotBaseCheckout(repo);
+
+    // A concurrent sibling card's worktree is created afterward, in the same repo.
+    g(repo, ["worktree", "add", "-b", "board/taskB", join(nestDir, "taskB"), "HEAD"]);
+
+    const result = await detectBaseCheckoutEscape(repo, snapshot);
+    expect(result).toEqual({ escaped: false, changedPaths: [] });
+  });
+
+  it("still catches a fake directory that merely shares the worktree naming convention but isn't a real worktree", async () => {
+    const nestDir = join(repo, ".opencode-board-worktrees", "repo");
+    g(repo, ["worktree", "add", "-b", "board/taskA", join(nestDir, "taskA"), "HEAD"]);
+    const snapshot = await snapshotBaseCheckout(repo);
+
+    // Not a real `git worktree add` — just a directory sharing the naming
+    // convention. Must not be swallowed by the same-shaped exclusion above.
+    mkdirSync(join(nestDir, "fake-task"), { recursive: true });
+    writeFileSync(join(nestDir, "fake-task", "evil.txt"), "escape disguised as a worktree\n");
+
+    const result = await detectBaseCheckoutEscape(repo, snapshot);
+    expect(result.escaped).toBe(true);
+    expect(result.changedPaths).toEqual([".opencode-board-worktrees/repo/fake-task/evil.txt"]);
+  });
 });

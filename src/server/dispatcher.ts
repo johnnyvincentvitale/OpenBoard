@@ -92,6 +92,8 @@ export interface TaskDispatcherDeps {
   resolveDirectory?: (raw: string) => string;
   /** Named OpenBoard instance to expose to spawned Claude Code sessions. */
   instanceName?: string;
+  /** Override the stall-detection threshold (tests only; default DEFAULT_STALL_THRESHOLD_MS). */
+  stallThresholdMs?: number;
 }
 
 /** Resolve the effective isolation for a task: its override, else the board default. */
@@ -116,6 +118,12 @@ const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 15000;
 const COMPLETION_POLL_INTERVAL_MS = 1000;
 const COMPLETION_WATCH_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+/** How long a session may sit at isStalledAfterToolCalls() with no new messages before nudging. */
+const DEFAULT_STALL_THRESHOLD_MS = 45_000;
+/** Consecutive nudges producing no new message before giving up — resets to 0 on any progress. */
+const MAX_CONSECUTIVE_FUTILE_NUDGES = 2;
+/** A denial older than this is treated as unrelated to the current stall (avoids citing stale info). */
+const DENIAL_RECENCY_WINDOW_MS = 2 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -177,6 +185,58 @@ function hasAssistantTurnFinished(messages: unknown): boolean {
     const record = part as Record<string, unknown>;
     return record.type === "step-finish" && record.reason !== "tool-calls";
   });
+}
+
+/**
+ * True when the assistant's last step ended specifically because of a tool
+ * call — the state OpenCode is supposed to auto-continue from within the
+ * same turn, but a fenced denial has been observed to leave the session
+ * sitting here indefinitely (Phase 0/live-proof finding). Deliberately the
+ * mirror image of `hasAssistantTurnFinished`'s exclusions: a tool call still
+ * actively running (`pending`/`running`) is a normal, possibly long-running
+ * step and must never be mistaken for this — only a step that has already
+ * *finished* with reason "tool-calls" and nothing new following it counts.
+ */
+function isStalledAfterToolCalls(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false;
+
+  const latest = messages[messages.length - 1];
+  if (latest === null || typeof latest !== "object") return false;
+
+  const info = (latest as { info?: unknown }).info;
+  const role =
+    info !== null && typeof info === "object"
+      ? (info as Record<string, unknown>).role
+      : undefined;
+  if (role !== "assistant") return false;
+
+  const parts = (latest as { parts?: unknown }).parts;
+  if (!Array.isArray(parts)) return false;
+
+  const hasActiveTool = parts.some((part) => {
+    if (part === null || typeof part !== "object") return false;
+    const record = part as Record<string, unknown>;
+    if (record.type !== "tool") return false;
+    const state = record.state;
+    if (state === null || typeof state !== "object") return false;
+    const status = (state as Record<string, unknown>).status;
+    return status === "pending" || status === "running";
+  });
+  if (hasActiveTool) return false;
+
+  return parts.some((part) => {
+    if (part === null || typeof part !== "object") return false;
+    const record = part as Record<string, unknown>;
+    return record.type === "step-finish" && record.reason === "tool-calls";
+  });
+}
+
+/** Per-session progress tracking used by trackStallAndMaybeNudge(), scoped to one watchCompletion call. */
+interface StallTrackingState {
+  lastMessageCount: number;
+  lastProgressAt: number;
+  /** Resets to 0 on any observed progress — a cap means "N in a row with nothing between them." */
+  consecutiveFutileNudges: number;
 }
 
 function looksLikeCompletionReport(text: string): boolean {
@@ -286,6 +346,7 @@ export class TaskDispatcher implements Dispatcher {
   private readonly workspace: string;
   private readonly allowExternalDirectories: boolean;
   private readonly resolveDirectory: (raw: string) => string;
+  private readonly stallThresholdMs: number;
 
   private running = false;
   /** Bumped on every stop()/restart so a stale consume loop knows to exit. */
@@ -340,6 +401,7 @@ export class TaskDispatcher implements Dispatcher {
         resolveTaskDirectory(raw, this.workspace, {
           allowExternal: this.allowExternalDirectories,
         }));
+    this.stallThresholdMs = deps.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
   }
 
   async run(taskId: string): Promise<Task> {
@@ -862,6 +924,11 @@ export class TaskDispatcher implements Dispatcher {
     watcher: { cancelled: boolean },
   ): Promise<void> {
     const startedAt = Date.now();
+    const stallState: StallTrackingState = {
+      lastMessageCount: 0,
+      lastProgressAt: startedAt,
+      consecutiveFutileNudges: 0,
+    };
 
     try {
       while (!watcher.cancelled) {
@@ -888,7 +955,11 @@ export class TaskDispatcher implements Dispatcher {
           continue;
         }
 
-        if (!hasAssistantTurnFinished(messages)) continue;
+        if (!hasAssistantTurnFinished(messages)) {
+          const gaveUp = await this.trackStallAndMaybeNudge(taskId, sessionId, task, messages, stallState);
+          if (gaveUp) return;
+          continue;
+        }
 
         const finalOutput = this.outputCandidates.get(sessionId) ?? extractFinalOutput(messages);
 
@@ -935,6 +1006,88 @@ export class TaskDispatcher implements Dispatcher {
       // observes every completion path for this sessionId).
       this.stopPermissionResponder(sessionId);
     }
+  }
+
+  /**
+   * A fenced permission denial can leave a session sitting with its last
+   * step finished for reason "tool-calls" and never continuing on its own
+   * (live-proof finding — recovery-language in the original prompt did not
+   * help). Detects that specific stall shape and sends up to
+   * MAX_CONSECUTIVE_FUTILE_NUDGES automatic recovery nudges, giving the
+   * agent denial-aware guidance when the responder pool recorded one.
+   * `consecutiveFutileNudges` resets to 0 on any observed forward progress,
+   * so the cap is "N nudges in a row with nothing in between," not a
+   * lifetime budget — a prompt with several fenced paths should be able to
+   * recover from each denial in turn without exhausting the budget on the
+   * second one. Returns true when it gives up and transitions the task to
+   * `runState: "error"`; the caller must stop watching in that case.
+   */
+  private async trackStallAndMaybeNudge(
+    taskId: string,
+    sessionId: string,
+    task: Task,
+    messages: unknown,
+    stallState: StallTrackingState,
+  ): Promise<boolean> {
+    const currentCount = Array.isArray(messages) ? messages.length : 0;
+    const now = Date.now();
+
+    if (currentCount !== stallState.lastMessageCount) {
+      stallState.lastMessageCount = currentCount;
+      stallState.lastProgressAt = now;
+      stallState.consecutiveFutileNudges = 0;
+      return false;
+    }
+
+    // Not the specific stuck-after-tool-calls shape — e.g. a legitimately
+    // long-running tool call (hasActiveTool) is still normal progress in
+    // disguise, not a stall, and must never be nudged into.
+    if (!isStalledAfterToolCalls(messages)) return false;
+
+    if (now - stallState.lastProgressAt < this.stallThresholdMs) return false;
+
+    const denial = this.permissionResponderPool.getLastDenial(sessionId);
+    const recentDenial = denial && now - denial.deniedAt < DENIAL_RECENCY_WINDOW_MS ? denial : null;
+
+    if (stallState.consecutiveFutileNudges >= MAX_CONSECUTIVE_FUTILE_NUDGES) {
+      const error = recentDenial
+        ? `Session stalled after ${MAX_CONSECUTIVE_FUTILE_NUDGES} automatic recovery nudges following a permission denial (tool: ${recentDenial.tool}); it did not recover on its own.`
+        : `Session stalled after ${MAX_CONSECUTIVE_FUTILE_NUDGES} automatic recovery nudges with no progress; no permission denial was recorded as the cause.`;
+      this.updateTaskForWatcher(taskId, { runState: "error", error });
+      return true;
+    }
+
+    const nudgeText = recentDenial
+      ? `Your last write was denied because it targeted a path outside your assigned working directory (tool: ${recentDenial.tool}). Redo it using a relative path inside your current working directory, or report via /block if you can't proceed.`
+      : `You appear to have stalled. If your last action didn't complete, report what happened now and continue, or report via /complete or /block if you're done.`;
+
+    const attempt = stallState.consecutiveFutileNudges + 1;
+    const promptError = await this.prompt(sessionId, nudgeText, task.agent ?? undefined, task.model ?? undefined);
+    stallState.consecutiveFutileNudges = attempt;
+    stallState.lastProgressAt = now;
+
+    // Re-baseline the message count to include the nudge's own injected
+    // message, so the next tick's progress check requires the assistant to
+    // actually respond beyond the nudge itself before resetting the streak.
+    try {
+      const result = await this.client.session.messages({ sessionID: sessionId });
+      if (!(result as { error?: unknown }).error) {
+        const freshMessages = (result as { data?: unknown }).data;
+        if (Array.isArray(freshMessages)) stallState.lastMessageCount = freshMessages.length;
+      }
+    } catch {
+      // Worst case the nudge's own message is mistaken for progress once —
+      // costs one extra stall-threshold wait, not a correctness problem.
+    }
+
+    const warning = promptError
+      ? `Auto-nudge attempt ${attempt}/${MAX_CONSECUTIVE_FUTILE_NUDGES} failed to send: ${promptError}`
+      : recentDenial
+        ? `Auto-nudged after a stall following a denied write (tool: ${recentDenial.tool}), attempt ${attempt}/${MAX_CONSECUTIVE_FUTILE_NUDGES}.`
+        : `Auto-nudged after ${Math.round(this.stallThresholdMs / 1000)}s with no progress (no known denial cause), attempt ${attempt}/${MAX_CONSECUTIVE_FUTILE_NUDGES}.`;
+    this.store.addEvent({ taskId, type: "task_warning", body: { warning } });
+
+    return false;
   }
 
   /**

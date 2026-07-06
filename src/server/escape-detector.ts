@@ -16,6 +16,8 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
@@ -85,6 +87,55 @@ function parsePorcelainPaths(porcelain: string): Set<string> {
   return paths;
 }
 
+/**
+ * List the absolute paths of every *linked* git worktree registered against
+ * `baseRepoDir` (via `git worktree list --porcelain`, the authoritative,
+ * unspoofable source — unlike matching on a naming convention, a path can't
+ * fake its way into this list without actually being a real linked worktree).
+ * `git worktree list` also reports the main checkout itself as its first
+ * entry with no distinguishing marker, so it's explicitly excluded here —
+ * otherwise every changed path would resolve "inside" it and nothing would
+ * ever be flagged. Empty array if the command fails (e.g. git too old)
+ * rather than throwing.
+ */
+async function listActiveWorktrees(baseRepoDir: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], {
+      cwd: baseRepoDir,
+      env: cleanGitEnv(),
+      maxBuffer: 1024 * 1024 * 16,
+    });
+    const mainWorktree = realOrResolved(baseRepoDir);
+    return stdout
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => realOrResolved(line.slice("worktree ".length).trim()))
+      .filter((worktreePath) => worktreePath.length > 0 && worktreePath !== mainWorktree);
+  } catch {
+    return [];
+  }
+}
+
+/** True if `absolutePath` is `worktreeDir` itself or falls inside it. */
+function isInsideWorktree(absolutePath: string, worktreeDir: string): boolean {
+  const rel = relative(worktreeDir, absolutePath);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * Resolve symlinks so path comparisons are reliable (e.g. macOS's /tmp ->
+ * /private/tmp: `git worktree list` reports the real path, so anything
+ * compared against it must be real-pathed too, or every comparison silently
+ * fails). Falls back to a plain resolve() if the path doesn't exist yet.
+ */
+function realOrResolved(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 export interface EscapeDetectionResult {
   escaped: boolean;
   changedPaths: string[];
@@ -127,9 +178,21 @@ export async function detectBaseCheckoutEscape(
   // report just the path portion back to callers/operators — the leading
   // status code is diffing-internal, not something a human triaging a
   // blocked task needs to see.
-  const changedPaths = [...afterPaths]
-    .filter((path) => !beforePaths.has(path))
-    .map((entry) => entry.slice(3))
+  const rawChangedPaths = [...afterPaths].filter((path) => !beforePaths.has(path)).map((entry) => entry.slice(3));
+
+  // A sibling task's own worktree can legitimately appear mid-run when
+  // worktrees nest inside the base repo (the isUnderWorkspace fallback
+  // layout) — that's not a content escape, it's another card's checkout.
+  // Exclude paths that fall inside a *currently registered* git worktree
+  // (verified via `git worktree list`, not a naming-convention guess — a
+  // path merely named like a worktree but not a real one is still caught).
+  const activeWorktrees = await listActiveWorktrees(baseRepoDir);
+  const realBaseRepoDir = realOrResolved(baseRepoDir);
+  const changedPaths = rawChangedPaths
+    .filter((path) => {
+      const absolute = resolve(realBaseRepoDir, path);
+      return !activeWorktrees.some((worktreeDir) => isInsideWorktree(absolute, worktreeDir));
+    })
     .sort();
 
   return { escaped: changedPaths.length > 0, changedPaths };

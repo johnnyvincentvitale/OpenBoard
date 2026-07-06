@@ -70,6 +70,9 @@ class FakeOpencodeClient {
   promptCalls: Array<{ sessionID: string; agent?: string; model?: unknown; parts: unknown }> = [];
   abortCalls: Array<{ sessionID: string }> = [];
   messageResponses: unknown[] = [];
+  /** When set, every messages() call returns this same value (not consumed) — for simulating
+   * many polling ticks observing an unchanged, stable session state (e.g. a stall). */
+  stableMessagesResponse: unknown[] | null = null;
 
   nextSessionId = "ses_x";
   createShouldError: { error: unknown } | null = null;
@@ -115,6 +118,9 @@ class FakeOpencodeClient {
       return { data: {}, error: undefined };
     },
     messages: async () => {
+      if (this.stableMessagesResponse !== null) {
+        return { data: this.stableMessagesResponse, error: undefined };
+      }
       return { data: this.messageResponses.shift() ?? [], error: undefined };
     },
   };
@@ -130,6 +136,9 @@ class FakeOpencodeClient {
   permissionListCalls: Array<{ directory?: string }> = [];
   permissionReplyCalls: Array<{ requestID: string; directory?: string; reply: string }> = [];
   permissionListShouldErrorCount = 0;
+  /** Pending requests permission.list() returns every call (not consumed) — for
+   * making the real permission-responder pool actually deny something in a test. */
+  pendingPermissionRequests: unknown[] = [];
 
   permission = {
     list: async (params: { directory?: string }) => {
@@ -138,7 +147,7 @@ class FakeOpencodeClient {
         this.permissionListShouldErrorCount -= 1;
         return { data: undefined, error: { message: "opencode unreachable" } };
       }
-      return { data: [], error: undefined };
+      return { data: this.pendingPermissionRequests, error: undefined };
     },
     reply: async (params: { requestID: string; directory?: string; reply: string }) => {
       this.permissionReplyCalls.push(params);
@@ -786,6 +795,195 @@ describe("TaskDispatcher", () => {
       const okOutcome = await dispatcher.integrate(task.id);
       expect(okOutcome.ok).toBe(true);
       expect(store.get(task.id)?.worktreePath).toBeUndefined();
+    });
+
+    it("a sibling worktree task created after this task's dispatch does not falsely block it (concurrent nested worktrees)", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const taskA = createTask({ directory: gitProjectDir, title: "Task A" });
+      // Nest worktrees inside the repo (the isUnderWorkspace fallback layout,
+      // not the sibling-outside-the-repo default) — the real bug only fires
+      // in this layout.
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(gitProjectDir, ".opencode-board-worktrees", "repo"),
+      });
+
+      client.nextSessionId = "ses_task_a";
+      await dispatcher.run(taskA.id); // taskA's baseCheckoutSnapshot is captured now.
+
+      const taskB = createTask({ directory: gitProjectDir, title: "Task B" });
+      client.nextSessionId = "ses_task_b";
+      await dispatcher.run(taskB.id); // taskB's worktree appears after A's snapshot.
+
+      // Both sessions finish their turn; whichever poll consumes an entry
+      // first, both get an equivalent finished response.
+      const finishedTurn = { info: { role: "assistant" }, parts: [{ type: "step-finish", reason: "stop" }] };
+      client.messageResponses = [[finishedTurn], [finishedTurn]];
+
+      await waitFor(() => store.get(taskA.id)?.runState !== "running" && store.get(taskB.id)?.runState !== "running", 3000);
+
+      expect(store.get(taskA.id)?.column).toBe("review");
+      expect(store.get(taskA.id)?.pending).toBeUndefined();
+      expect(store.get(taskB.id)?.column).toBe("review");
+      expect(store.get(taskB.id)?.pending).toBeUndefined();
+    });
+  });
+
+  describe("stall detection and recovery nudges", () => {
+    let gitProjectDir: string;
+
+    beforeEach(() => {
+      gitProjectDir = join(workspace, "git-project-stall");
+      makeGitRepo(gitProjectDir);
+    });
+
+    const toolRunning = {
+      info: { role: "assistant" },
+      parts: [{ type: "tool", tool: "bash", state: { status: "running" } }],
+    };
+    const stuckAfterToolCalls = {
+      info: { role: "assistant" },
+      parts: [
+        { type: "tool", tool: "bash", state: { status: "success" } },
+        { type: "step-finish", reason: "tool-calls" },
+      ],
+    };
+    const finishedTurn = {
+      info: { role: "assistant" },
+      parts: [{ type: "step-finish", reason: "stop" }],
+    };
+
+    it("never nudges a genuinely still-running tool call (no false positive on a long tool execution)", async () => {
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_running_tool";
+      client.stableMessagesResponse = [toolRunning];
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-stall"),
+        stallThresholdMs: 10,
+      });
+
+      await dispatcher.run(task.id);
+      await new Promise((r) => setTimeout(r, 2500));
+
+      expect(client.promptCalls).toHaveLength(1); // only the original dispatch prompt
+      expect(store.get(task.id)?.runState).toBe("running");
+    });
+
+    it("nudges with denial-aware guidance when the permission-responder recorded a recent deny", async () => {
+      store.updateSettings({ worktreeDefault: true }); // permission-responder only registers for worktree-isolated tasks
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_stall_denial";
+      // A tool part the permission-responder can resolve (call_1 -> apply_patch)
+      // and deny (not read-class), matched by the same messages() the
+      // completion watcher's stall check observes.
+      client.stableMessagesResponse = [
+        {
+          info: { id: "msg_1", role: "assistant" },
+          parts: [
+            { type: "tool", callID: "call_1", tool: "apply_patch", state: { status: "error" } },
+            { type: "step-finish", reason: "tool-calls" },
+          ],
+        },
+      ];
+      client.pendingPermissionRequests = [
+        { id: "req_1", sessionID: "ses_stall_denial", tool: { messageID: "msg_1", callID: "call_1" } },
+      ];
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-stall"),
+        stallThresholdMs: 10,
+      });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => client.promptCalls.length > 1, 3000);
+
+      const nudgeText = String((client.promptCalls[1]?.parts as Array<{ text?: string }>)?.[0]?.text ?? "");
+      expect(nudgeText).toContain("apply_patch");
+      expect(nudgeText).toContain("outside your assigned working directory");
+
+      const warnings = store.listEvents(task.id).filter((e) => e.type === "task_warning");
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(String(warnings[0]?.body.warning)).toContain("apply_patch");
+    });
+
+    it("resets the futile-nudge streak on progress, so recovering after a nudge reaches review normally", async () => {
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_stall_recover";
+      client.stableMessagesResponse = [stuckAfterToolCalls];
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-stall"),
+        stallThresholdMs: 10,
+      });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => client.promptCalls.length > 1, 3000); // one nudge sent
+
+      // Simulate recovery: the agent continues and finishes normally.
+      client.stableMessagesResponse = null;
+      client.messageResponses = [[finishedTurn], [finishedTurn], [finishedTurn]];
+
+      await waitFor(() => store.get(task.id)?.column === "review", 3000);
+
+      expect(store.get(task.id)?.runState).not.toBe("error");
+      expect(client.promptCalls).toHaveLength(2); // dispatch + exactly one nudge, no more
+    });
+
+    it("gives up after MAX_CONSECUTIVE_FUTILE_NUDGES with a generic message when no denial was recorded", async () => {
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_stall_giveup";
+      client.stableMessagesResponse = [stuckAfterToolCalls]; // never changes — no recovery, no known denial
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-stall"),
+        stallThresholdMs: 10,
+      });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => store.get(task.id)?.runState === "error", 5000);
+
+      expect(client.promptCalls).toHaveLength(3); // dispatch + 2 nudges, then give up
+      expect(store.get(task.id)?.error).toContain("2 automatic recovery nudges");
+      expect(store.get(task.id)?.error).toContain("no permission denial was recorded");
+
+      const warnings = store.listEvents(task.id).filter((e) => e.type === "task_warning");
+      expect(warnings).toHaveLength(2);
+    });
+
+    it("gives up citing the denial when the session never recovers after a denial-aware nudge", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_stall_giveup_denial";
+      client.stableMessagesResponse = [
+        {
+          info: { id: "msg_1", role: "assistant" },
+          parts: [
+            { type: "tool", callID: "call_1", tool: "apply_patch", state: { status: "error" } },
+            { type: "step-finish", reason: "tool-calls" },
+          ],
+        },
+      ];
+      client.pendingPermissionRequests = [
+        { id: "req_1", sessionID: "ses_stall_giveup_denial", tool: { messageID: "msg_1", callID: "call_1" } },
+      ];
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-stall"),
+        stallThresholdMs: 10,
+      });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => store.get(task.id)?.runState === "error", 5000);
+
+      expect(store.get(task.id)?.error).toContain("apply_patch");
+      expect(store.get(task.id)?.error).toContain("did not recover on its own");
     });
   });
 

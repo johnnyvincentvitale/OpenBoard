@@ -279,4 +279,42 @@ describe("createPermissionResponderPool", () => {
     expect(client.replyCalls[0]).toMatchObject({ reply: "reject" });
     expect(errors).toHaveLength(0);
   });
+
+  it("getLastDenial reports the denied tool after a reject reply, and null before any denial / after unregister", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [
+      [{ id: "req_7", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    expect(pool.getLastDenial("ses_1")).toBeNull();
+
+    pool.register("ses_1", "/wt");
+    expect(pool.getLastDenial("ses_1")).toBeNull(); // registered, but nothing denied yet
+
+    await waitFor(() => client.replyCalls.length === 1);
+    const denial = pool.getLastDenial("ses_1");
+    expect(denial).not.toBeNull();
+    expect(denial?.tool).toBe("apply_patch");
+    expect(typeof denial?.deniedAt).toBe("number");
+
+    pool.unregister("ses_1");
+    expect(pool.getLastDenial("ses_1")).toBeNull();
+    pool.stop();
+  });
+
+  it("getLastDenial stays null for an approved (read-class) request", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "read")];
+    client.listResponses = [
+      [{ id: "req_8", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => client.replyCalls.length === 1);
+    pool.stop();
+
+    expect(pool.getLastDenial("ses_1")).toBeNull();
+  });
 });

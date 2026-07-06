@@ -23,6 +23,10 @@
  * The `permission.v2.asked` event exists but a bare subscribe-then-prompt
  * race can leave an ask unanswered indefinitely (proven in the Phase 0
  * probe), so polling is the only mechanism relied on here.
+ *
+ * `getLastDenial(sessionID)` exposes the most recent denial per session so a
+ * caller (the dispatcher's stall-recovery nudge) can tell the agent what was
+ * denied and how to proceed, instead of a generic "you seem stuck" prompt.
  */
 import type { OpencodeHandle } from "./opencode";
 
@@ -103,6 +107,12 @@ export interface PermissionResponderPoolOptions {
   onError?: (sessionID: string, context: PermissionResponderErrorContext, error: unknown) => void;
 }
 
+/** Info about the most recently denied ask for a session — lets a caller give recovery guidance. */
+export interface DenialInfo {
+  tool: string;
+  deniedAt: number;
+}
+
 export interface PermissionResponderPool {
   /** Start (or restart, discarding prior state) responding to asks for this session. */
   register(sessionID: string, directory: string): void;
@@ -110,6 +120,8 @@ export interface PermissionResponderPool {
   unregister(sessionID: string): void;
   /** Stop the pool's poll loop entirely and free all state. */
   stop(): void;
+  /** The most recent denial for this session, or null if none/not registered. */
+  getLastDenial(sessionID: string): DenialInfo | null;
 }
 
 interface TargetState {
@@ -118,6 +130,8 @@ interface TargetState {
   replied: Set<string>;
   /** Whether the most recent list/reply attempt for this target failed — gates onError de-dup. */
   failing: boolean;
+  /** Most recent denial for this target, so a caller can give the agent recovery guidance. */
+  lastDenial: DenialInfo | null;
 }
 
 /** Create a pool that polls `client.permission.list` once per tick for every registered session. */
@@ -176,6 +190,9 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
         });
         if ((result as { error?: unknown }).error) throw (result as { error?: unknown }).error;
         reportRecovery(state);
+        if (!approve) {
+          state.lastDenial = { tool: toolName ?? "unknown", deniedAt: Date.now() };
+        }
       } catch (err) {
         reportFailure(sessionID, "reply", state, err);
       }
@@ -211,7 +228,7 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
 
   return {
     register(sessionID: string, directory: string): void {
-      targets.set(sessionID, { directory, replied: new Set(), failing: false });
+      targets.set(sessionID, { directory, replied: new Set(), failing: false, lastDenial: null });
     },
     unregister(sessionID: string): void {
       targets.delete(sessionID);
@@ -219,6 +236,9 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
     stop(): void {
       stopped = true;
       targets.clear();
+    },
+    getLastDenial(sessionID: string): DenialInfo | null {
+      return targets.get(sessionID)?.lastDenial ?? null;
     },
   };
 }
