@@ -127,6 +127,7 @@ describe("confirmation copy builders", () => {
     ["move-to-done", "Move this card to Done?", "Press x again to move to Done."],
     ["archive", "Archiving this card?", "Press a again to archive."],
     ["delete", "Deleting this card?", "Press d again to delete."],
+    ["discard-worktree", "Discard this worktree?", "Press D again to discard worktree."],
   ] as const)("builds copy for %s", (action, expectedTitle, expectedHint) => {
     const copy = buildConfirmationCopy(action, { title: "Widget work" });
 
@@ -229,7 +230,7 @@ describe("confirmation status and action metadata", () => {
     expect(targetColumnForAction("move-to-done")).toBe("done");
   });
 
-  it.each(["run", "retry", "archive", "delete"] as const)("leaves target column undefined for %s", (action) => {
+  it.each(["run", "retry", "archive", "delete", "discard-worktree"] as const)("leaves target column undefined for %s", (action) => {
     expect(targetColumnForAction(action)).toBeUndefined();
   });
 });

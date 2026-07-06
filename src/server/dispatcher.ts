@@ -13,7 +13,7 @@
  * `shutdown()` stops consuming the event stream.
  */
 import { basename, dirname, join, resolve } from "node:path";
-import type { MergeOutcome, OpencodeEvent, Task, TaskStore } from "../shared";
+import type { MergeOutcome, OpencodeEvent, Task, TaskStore, WorktreeCleanupOutcome } from "../shared";
 import { AdapterError, UNATTENDED_PERMISSION, WRITE_FENCED_PERMISSION } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -339,6 +339,17 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function toCleanupOutcome(outcome: WorktreeCleanupOutcome): WorktreeCleanupOutcome {
+  return {
+    ok: outcome.ok,
+    removed: outcome.removed,
+    dirty: outcome.dirty,
+    kept: outcome.kept,
+    message: outcome.message,
+    ...(outcome.worktreePath ? { worktreePath: outcome.worktreePath } : {}),
+  };
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -650,6 +661,7 @@ export class TaskDispatcher implements Dispatcher {
     const branch = `board/${task.id}`;
     const worktreePath = join(this.worktreeBaseDir(repoRoot), task.id);
     const info = await this.worktrees.createWorktree(repoDir, branch, worktreePath);
+    this.store.rememberWorktreeRepoRoot(repoRoot);
     this.store.update(task.id, {
       worktreePath: info.worktreePath,
       worktreeBranch: info.branch,
@@ -733,11 +745,121 @@ export class TaskDispatcher implements Dispatcher {
       target,
       task.worktreePath,
     );
+    if (result.conflict) {
+      const paths = result.conflictPaths ?? [];
+      this.store.update(taskId, {
+        pending: "rebase-conflict",
+        rebaseConflictPaths: paths,
+        runState: "idle",
+      });
+      return {
+        task: this.store.get(taskId) ?? task,
+        ...result,
+        rebaseConflictPaths: paths,
+      };
+    }
     // On success the worktree is gone (branch kept) — drop the stale path.
     if (result.ok) {
-      this.store.update(taskId, { worktreePath: undefined });
+      this.store.update(taskId, {
+        worktreePath: undefined,
+        pending: undefined,
+        rebaseConflictPaths: undefined,
+      });
     }
     return { task: this.store.get(taskId) ?? task, ...result };
+  }
+
+  async removeTask(
+    taskId: string,
+    options: { force?: boolean; keepWorktree?: boolean } = {},
+  ): Promise<{ ok: boolean; worktree?: WorktreeCleanupOutcome; message?: string }> {
+    const task = this.store.get(taskId);
+    if (!task) return { ok: true };
+
+    let cleanup: WorktreeCleanupOutcome | undefined;
+    if (task.worktreePath) {
+      const repoDir = this.resolveDirectory(task.directory);
+      const repoRoot = await this.resolveRepoRoot(repoDir);
+      if (options.keepWorktree) {
+        const dirty = await this.worktrees.isWorktreeDirty(task.worktreePath);
+        this.store.rememberWorktreeRepoRoot(repoRoot);
+        cleanup = {
+          ok: true,
+          removed: false,
+          dirty,
+          kept: true,
+          message: dirty ? "worktree kept on disk for manual salvage" : "clean worktree kept on disk",
+          worktreePath: task.worktreePath,
+        };
+      } else {
+        cleanup = toCleanupOutcome(
+          await this.worktrees.cleanupWorktree(repoRoot, task.worktreePath, {
+            force: options.force,
+          }),
+        );
+        if (!cleanup.ok) return { ok: false, worktree: cleanup, message: cleanup.message };
+      }
+    }
+
+    this.store.remove(taskId);
+    return { ok: true, worktree: cleanup };
+  }
+
+  async discardWorktree(
+    taskId: string,
+    options: { force?: boolean } = {},
+  ): Promise<WorktreeCleanupOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (task.column !== "review") {
+      throw AdapterError.validation("Discard worktree is only available for Review cards");
+    }
+    if (!task.worktreePath) {
+      return {
+        ok: true,
+        removed: false,
+        dirty: false,
+        kept: false,
+        message: "task has no worktree to discard",
+      };
+    }
+
+    const repoDir = this.resolveDirectory(task.directory);
+    const repoRoot = await this.resolveRepoRoot(repoDir);
+    this.store.rememberWorktreeRepoRoot(repoRoot);
+    const cleanup = toCleanupOutcome(await this.worktrees.cleanupWorktree(repoRoot, task.worktreePath, options));
+    if (cleanup.ok && cleanup.removed) {
+      this.store.update(taskId, { worktreePath: undefined });
+    }
+    return cleanup;
+  }
+
+  async sweepOrphanedWorktrees(): Promise<WorktreeCleanupOutcome[]> {
+    const tasks = this.store.list();
+    const liveTaskIds = new Set(tasks.map((task) => task.id));
+    const liveWorktreePaths = new Set(
+      tasks.map((task) => task.worktreePath).filter((path): path is string => Boolean(path)),
+    );
+    const repoRoots = new Set<string>(this.store.listKnownWorktreeRepoRoots());
+
+    for (const task of tasks) {
+      try {
+        repoRoots.add(await this.resolveRepoRoot(this.resolveDirectory(task.directory)));
+      } catch {
+        // A stale task directory should not fail board startup.
+      }
+    }
+
+    const outcomes: WorktreeCleanupOutcome[] = [];
+    for (const repoRoot of repoRoots) {
+      const worktrees = await this.worktrees.listManagedWorktrees(repoRoot, this.worktreeBaseDir(repoRoot));
+      for (const worktreePath of worktrees) {
+        const id = basename(worktreePath);
+        if (liveTaskIds.has(id) || liveWorktreePaths.has(worktreePath)) continue;
+        outcomes.push(toCleanupOutcome(await this.worktrees.cleanupWorktree(repoRoot, worktreePath, { force: false })));
+      }
+    }
+    return outcomes;
   }
 
   private async prompt(
@@ -821,6 +943,14 @@ export class TaskDispatcher implements Dispatcher {
     return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nBase repo (READ-ONLY — do not write here): ${baseRepoPath}\nEdit only inside your worktree; use relative paths.\nUse the read tool, not shell commands, for base-repo context.\n---\n\n${prompt}`;
   }
 
+  private withRebaseConflictContext(task: Task, prompt: string): string {
+    if (task.pending !== "rebase-conflict") return prompt;
+    const paths = task.rebaseConflictPaths?.length
+      ? task.rebaseConflictPaths.map((path) => `- ${path}`).join("\n")
+      : "- unknown paths; inspect `git status`";
+    return `OPENBOARD REBASE CONFLICT RESOLUTION\nThis is the same session and worktree from the failed Integrate attempt. The worktree is already in the middle of a git rebase, with conflict markers on disk. Do not create a fresh commit. Resolve the conflicts below, stage the resolutions, then run git rebase --continue. Report via /complete when the rebase continues cleanly, or /block if it cannot be resolved.\nConflicted paths:\n${paths}\n---\n\n${prompt}`;
+  }
+
   private withClaudePreflightContext(prompt: string, warning: string | undefined): string {
     if (!warning) return prompt;
     return `${prompt}\n\n---\nOPENBOARD PREFLIGHT WARNING\n${warning}\nIf you avoid the dirty target by using a Claude-managed worktree or branch, report the actual cwd, branch, and commit in your final OpenBoard report.`;
@@ -850,13 +980,14 @@ export class TaskDispatcher implements Dispatcher {
     // retry() re-prompts an existing session — the worktree already exists from
     // run(), so its path comes off the task record rather than ensureWorktree().
     const isolatedRetry = wantsWorktree(task, this.store);
+    const baseRetryPrompt = this.withRebaseConflictContext(task, feedback ?? task.description);
     const retryPrompt = isolatedRetry
       ? this.withWorktreeIsolationPreamble(
           this.resolveDirectory(task.worktreePath ?? task.directory),
           this.resolveDirectory(task.directory),
-          feedback ?? task.description,
+          baseRetryPrompt,
         )
-      : feedback ?? task.description;
+      : baseRetryPrompt;
     const promptError = await this.prompt(
       task.sessionId,
       this.withCompletionContract(task.id, this.withParentHandoffs(task, retryPrompt), runStartedAt),
@@ -871,7 +1002,12 @@ export class TaskDispatcher implements Dispatcher {
       return updated;
     }
 
-    this.store.update(taskId, { runState: "running", runStartedAt, error: undefined });
+    this.store.update(taskId, {
+      runState: "running",
+      runStartedAt,
+      error: undefined,
+      pending: undefined,
+    });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
     this.startCompletionWatcher(taskId, task.sessionId);
     if (wantsWorktree(task, this.store)) {

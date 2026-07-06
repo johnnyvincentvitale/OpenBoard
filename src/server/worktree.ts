@@ -20,6 +20,7 @@
  * expected git failure modes (merge conflict, dirty tree) so callers can react.
  */
 import { execFile } from "node:child_process";
+import { readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -44,6 +45,17 @@ export interface MergeResult {
   /** True when the merge stopped on conflicts (left in the working tree to resolve). */
   conflict: boolean;
   message: string;
+  /** Files reported by git as unmerged/conflicted. */
+  conflictPaths?: string[];
+}
+
+export interface WorktreeCleanupResult {
+  ok: boolean;
+  removed: boolean;
+  dirty: boolean;
+  kept: boolean;
+  message: string;
+  worktreePath?: string;
 }
 
 export interface WorktreeManager {
@@ -69,6 +81,12 @@ export interface WorktreeManager {
     targetBranch: string,
     worktreePath: string,
   ): Promise<MergeResult>;
+  /** True when tracked/untracked worktree changes exist, including unmerged paths. */
+  isWorktreeDirty(worktreePath: string): Promise<boolean>;
+  /** Remove a worktree if clean, or when `force` is true. Keeps the branch. */
+  cleanupWorktree(repoDir: string, worktreePath: string, options?: { force?: boolean }): Promise<WorktreeCleanupResult>;
+  /** List immediate directories under the board-owned worktree root for `repoDir`. */
+  listManagedWorktrees(repoDir: string, worktreeBaseDir: string): Promise<string[]>;
   /** `git worktree remove` (force). The branch is left intact. */
   removeWorktree(repoDir: string, worktreePath: string): Promise<void>;
 }
@@ -119,6 +137,16 @@ function hasUnmergedPaths(status: string): boolean {
       const xy = line.slice(0, 2);
       return xy.includes("U") || xy === "AA" || xy === "DD";
     });
+}
+
+function conflictPaths(status: string): string[] {
+  const paths = new Set<string>();
+  for (const line of status.split("\n").filter(Boolean)) {
+    const xy = line.slice(0, 2);
+    if (!xy.includes("U") && xy !== "AA" && xy !== "DD") continue;
+    paths.add(line.slice(3).trim());
+  }
+  return [...paths].filter(Boolean).sort();
 }
 
 export class GitWorktreeManager implements WorktreeManager {
@@ -227,7 +255,23 @@ export class GitWorktreeManager implements WorktreeManager {
       }
     }
 
-    // Merge the worktree branch into the target branch inside the main repo.
+    const rebase = await git(worktreePath, ["rebase", targetBranch]);
+    if (rebase.code !== 0) {
+      const conflict = await git(worktreePath, ["status", "--porcelain"]);
+      const paths = conflict.code === 0 ? conflictPaths(conflict.stdout) : [];
+      return {
+        ok: false,
+        conflict: true,
+        conflictPaths: paths,
+        message: paths.length
+          ? `rebase ${branch} onto ${targetBranch}: conflict in ${paths.join(", ")}`
+          : `rebase ${branch} onto ${targetBranch}: ${errText(rebase)}`,
+      };
+    }
+
+    // Rebase succeeded inside the task worktree, so the base checkout is only
+    // touched by a fast-forward merge. Any non-ff result is unexpected and
+    // returns as a normal failure without leaving the base mid-conflict.
     const checkout = await git(repoDir, ["checkout", targetBranch]);
     if (checkout.code !== 0) {
       return { ok: false, conflict: false, message: `checkout ${targetBranch}: ${errText(checkout)}` };
@@ -238,8 +282,7 @@ export class GitWorktreeManager implements WorktreeManager {
       "-c",
       "user.email=openboard@localhost",
       "merge",
-      "--no-edit",
-      "--no-gpg-sign",
+      "--ff-only",
       branch,
     ]);
     const merged = toMergeResult(merge, `merge ${branch} into ${targetBranch}`);
@@ -247,6 +290,55 @@ export class GitWorktreeManager implements WorktreeManager {
     // Success → drop the worktree, keep the branch.
     await this.removeWorktree(repoDir, worktreePath);
     return merged;
+  }
+
+  async isWorktreeDirty(worktreePath: string): Promise<boolean> {
+    const status = await git(worktreePath, ["status", "--porcelain"]);
+    if (status.code !== 0) fail(status, "status worktree");
+    return status.stdout.trim().length > 0;
+  }
+
+  async cleanupWorktree(
+    repoDir: string,
+    worktreePath: string,
+    options: { force?: boolean } = {},
+  ): Promise<WorktreeCleanupResult> {
+    const dirty = await this.isWorktreeDirty(worktreePath);
+    if (dirty && !options.force) {
+      return {
+        ok: false,
+        removed: false,
+        dirty: true,
+        kept: true,
+        worktreePath,
+        message: "worktree has uncommitted changes; confirm removal or keep it for manual salvage",
+      };
+    }
+
+    await this.removeWorktree(repoDir, worktreePath);
+    return {
+      ok: true,
+      removed: true,
+      dirty,
+      kept: false,
+      worktreePath,
+      message: dirty ? "dirty worktree removed; branch kept" : "clean worktree removed; branch kept",
+    };
+  }
+
+  async listManagedWorktrees(_repoDir: string, worktreeBaseDir: string): Promise<string[]> {
+    let entries;
+    try {
+      entries = await readdir(worktreeBaseDir, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "ENOENT") return [];
+      throw err;
+    }
+    return entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("task_"))
+      .map((entry) => `${worktreeBaseDir}/${entry.name}`)
+      .sort();
   }
 
   async removeWorktree(repoDir: string, worktreePath: string): Promise<void> {

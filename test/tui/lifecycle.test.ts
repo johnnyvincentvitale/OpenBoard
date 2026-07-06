@@ -251,6 +251,24 @@ describe("task lifecycle helpers", () => {
     });
   });
 
+  describe("rebase conflict pending", () => {
+    const task = baseTask({
+      column: "review",
+      runState: "idle",
+      pending: "rebase-conflict",
+      rebaseConflictPaths: ["file.txt"],
+    });
+
+    it("reports blocked phase and conflict detail rows", () => {
+      expect(taskLifecycleStatus(task).phase).toBe("blocked");
+      expect(compactTaskBoardLabel(task)).toBe("△ BLOCKED · rebase conflict in worktree");
+      expect(taskLifecycleDetailRows(task)).toEqual([
+        { label: "STATE", value: "△ BLOCKED", role: "state" },
+        { label: "PENDING", value: "rebase conflict: file.txt", role: "pending" },
+      ]);
+    });
+  });
+
   describe("review manual task", () => {
     const task = baseTask({ type: "manual", column: "review", runState: "idle", assignedTo: "Johnny" });
 

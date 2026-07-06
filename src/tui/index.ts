@@ -2816,6 +2816,7 @@ type SelectedCardAction =
   | "abort"
   | "view-diff"
   | "integrate"
+  | "discard-worktree"
   | "done"
   | "archive"
   | "delete"
@@ -2835,6 +2836,7 @@ const SELECTED_CARD_SHORTCUTS: Record<SelectedCardAction, SelectedCardShortcut> 
   abort: { action: "abort", key: "k", label: "abort" },
   "view-diff": { action: "view-diff", key: "v", label: "diff" },
   integrate: { action: "integrate", key: "i", label: "integrate" },
+  "discard-worktree": { action: "discard-worktree", key: "D", label: "discard" },
   done: { action: "done", key: "x", label: "done" },
   archive: { action: "archive", key: "a", label: "archive" },
   delete: { action: "delete", key: "d", label: "delete" },
@@ -2862,7 +2864,12 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
   }
 
   if (task.column === "review") {
-    return shortcutList("view-diff", "integrate", "done", "delete", "move", "details");
+    const actions: SelectedCardAction[] = ["view-diff"];
+    if (task.pending === "rebase-conflict") actions.push("retry");
+    actions.push("integrate");
+    if (task.worktreePath) actions.push("discard-worktree");
+    actions.push("done", "delete", "move", "details");
+    return shortcutList(...actions);
   }
 
   return shortcutList("details");
@@ -2898,13 +2905,15 @@ function selectedCardActionUnavailableMessage(action: SelectedCardAction, task: 
     case "edit":
       return "edit is only available for To Do cards";
     case "retry":
-      return "retry is only available for error cards";
+      return "retry is only available for error cards or rebase-conflict Review cards";
     case "abort":
       return "abort is only available for In Progress cards";
     case "view-diff":
       return "diff view is only available for Review cards";
     case "integrate":
       return "integrate is only available for Review cards";
+    case "discard-worktree":
+      return "discard is only available for Review cards with worktrees";
     case "done":
       return "done is only available for Review cards";
     case "archive":
@@ -3134,6 +3143,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["a", "archive task"],
     ["A", "global archive browser"],
     ["d", "delete selected card"],
+    ["D", "discard Review worktree"],
     ["i", "integrate branch"],
     ["x", "move to Done (accepted by User)"],
     ["m", "manual move to lane"],
@@ -3576,7 +3586,23 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       return;
     case "d":
       if (!canUseSelectedCardAction(state, actions, "delete")) return;
-      await handleConfirmableCardAction("delete", state, actions, (task) => actions.client.deleteTask(task.id), "delete");
+      await handleConfirmableCardAction(
+        "delete",
+        state,
+        actions,
+        (task) => actions.client.deleteTask(task.id),
+        "delete",
+      );
+      return;
+    case "D":
+      if (!canUseSelectedCardAction(state, actions, "discard-worktree")) return;
+      await handleConfirmableCardAction(
+        "discard-worktree",
+        state,
+        actions,
+        (task) => actions.client.discardWorktree(task.id),
+        "discard worktree",
+      );
       return;
     case "v":
       await openDiffViewForSelection(state, actions);

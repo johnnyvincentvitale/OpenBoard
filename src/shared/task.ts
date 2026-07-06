@@ -201,6 +201,8 @@ export interface Task {
   pending?: TaskPending;
   /** Base-checkout paths the escape detector found changed outside the worktree, when `pending` is "base-checkout-escape". */
   escapeDetectedPaths?: string[];
+  /** Paths that stopped an integrate rebase inside the task worktree, when `pending` is "rebase-conflict". */
+  rebaseConflictPaths?: string[];
   /** Hidden from active boards/lists when true; default false. */
   archived?: boolean;
   /** IDs of tasks that must precede this task. */
@@ -237,7 +239,7 @@ export interface MoveTaskBody {
 }
 
 /** A decision a run is waiting on the user to resolve before it can proceed. */
-export const TASK_PENDING = ["git-init", "base-checkout-escape"] as const;
+export const TASK_PENDING = ["git-init", "base-checkout-escape", "rebase-conflict"] as const;
 export type TaskPending = (typeof TASK_PENDING)[number];
 
 export interface CreateTaskInput {
@@ -328,6 +330,10 @@ export interface TaskStore {
   getSettings(): BoardSettings;
   /** Patch and persist board settings; returns the merged result. */
   updateSettings(patch: Partial<BoardSettings>): BoardSettings;
+  /** Remember a repo root that has had OpenBoard-managed worktrees. */
+  rememberWorktreeRepoRoot(repoRoot: string): void;
+  /** Repo roots with OpenBoard-managed worktree history, used for startup orphan sweeps. */
+  listKnownWorktreeRepoRoots(): string[];
   addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment;
   listComments(taskId: string): TaskComment[];
   addEvent(input: { taskId: string; type: string; body?: Record<string, unknown> }): TaskEvent;
@@ -351,6 +357,12 @@ export interface Dispatcher {
   syncUpstream(taskId: string): Promise<MergeOutcome>;
   /** Merge the task's worktree branch into `targetBranch`, remove the worktree, keep the branch. */
   integrate(taskId: string, targetBranch?: string): Promise<MergeOutcome>;
+  /** Delete a task and, when safe/confirmed, remove its worktree while keeping the branch. */
+  removeTask(taskId: string, options?: { force?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; worktree?: WorktreeCleanupOutcome; message?: string }>;
+  /** Remove a Review card's worktree without merging; keeps the branch and card. */
+  discardWorktree(taskId: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
+  /** Best-effort startup sweep for board-owned worktrees no live task references. */
+  sweepOrphanedWorktrees(): Promise<WorktreeCleanupOutcome[]>;
   /** Begin event-driven auto-transitions (running → review on idle, → error on failure). */
   start(): void;
   shutdown(): void;
@@ -362,6 +374,17 @@ export interface MergeOutcome {
   ok: boolean;
   conflict: boolean;
   message: string;
+  rebaseConflictPaths?: string[];
+}
+
+/** Result of a non-integrate worktree cleanup path. */
+export interface WorktreeCleanupOutcome {
+  ok: boolean;
+  removed: boolean;
+  dirty: boolean;
+  kept: boolean;
+  message: string;
+  worktreePath?: string;
 }
 
 /** Canonical task REST + SSE routes. Namespace: /api/tasks. */
@@ -378,6 +401,7 @@ export const TASK_ROUTE_PATTERNS = {
   initGit: "/api/tasks/:id/init-git",
   sync: "/api/tasks/:id/sync",
   integrate: "/api/tasks/:id/integrate",
+  discardWorktree: "/api/tasks/:id/discard-worktree",
   diff: "/api/tasks/:id/diff",
   comments: "/api/tasks/:id/comments",
   taskEvents: "/api/tasks/:id/events",
@@ -396,6 +420,7 @@ export const buildTaskPath = {
   initGit: (id: string) => `/api/tasks/${encodeURIComponent(id)}/init-git`,
   sync: (id: string) => `/api/tasks/${encodeURIComponent(id)}/sync`,
   integrate: (id: string) => `/api/tasks/${encodeURIComponent(id)}/integrate`,
+  discardWorktree: (id: string) => `/api/tasks/${encodeURIComponent(id)}/discard-worktree`,
   diff: (id: string) => `/api/tasks/${encodeURIComponent(id)}/diff`,
   links: (id: string) => `/api/tasks/${encodeURIComponent(id)}/links`,
   unlink: (id: string, parentId: string) =>

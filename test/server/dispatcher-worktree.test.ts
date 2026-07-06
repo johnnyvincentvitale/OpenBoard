@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { TaskDispatcher } from "../../src/server/dispatcher";
-import { GitWorktreeManager } from "../../src/server/worktree";
+import { GitWorktreeManager, type WorktreeManager } from "../../src/server/worktree";
 
 function g(cwd: string, args: string[]): string {
   const env: NodeJS.ProcessEnv = {};
@@ -34,7 +34,7 @@ function makeRepo(root: string): void {
 /** Minimal fake OpenCode client: records session.create directory, always succeeds. */
 function makeFakeClient() {
   const createCalls: Array<{ directory?: string }> = [];
-  const promptCalls: Array<{ sessionID: string }> = [];
+  const promptCalls: Array<{ sessionID: string; text?: string }> = [];
   return {
     createCalls,
     promptCalls,
@@ -43,8 +43,8 @@ function makeFakeClient() {
         createCalls.push(params);
         return { data: { id: "ses_1" }, error: undefined };
       },
-      promptAsync: async (params: { sessionID: string }) => {
-        promptCalls.push({ sessionID: params.sessionID });
+      promptAsync: async (params: { sessionID: string; parts?: Array<{ text?: string }> }) => {
+        promptCalls.push({ sessionID: params.sessionID, text: params.parts?.[0]?.text });
         return { data: undefined, error: undefined };
       },
       abort: async () => ({ data: {}, error: undefined }),
@@ -57,12 +57,12 @@ describe("TaskDispatcher — worktree isolation", () => {
   let tmp: string;
   let store: SqliteTaskStore;
 
-  function buildDispatcher(client: ReturnType<typeof makeFakeClient>) {
+  function buildDispatcher(client: ReturnType<typeof makeFakeClient>, worktrees: WorktreeManager = new GitWorktreeManager()) {
     return new TaskDispatcher({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       client: client as any,
       store,
-      worktrees: new GitWorktreeManager(),
+      worktrees,
       // Keep worktrees inside the temp dir for the test.
       worktreeBaseDir: () => join(tmp, "worktrees"),
     });
@@ -207,6 +207,176 @@ describe("TaskDispatcher — worktree isolation", () => {
     expect(existsSync(wtPath)).toBe(false);
     expect(g(repo, ["branch", "--list", `board/${task.id}`])).toContain(`board/${task.id}`);
     expect(store.get(task.id)?.worktreePath).toBeUndefined();
+  });
+
+  it("maps integrate rebase conflicts to pending rebase-conflict without clearing the worktree", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const worktreePath = join(tmp, "worktrees", "task-conflict");
+    mkdirSync(worktreePath, { recursive: true });
+    const worktrees: WorktreeManager = {
+      isGitRepo: async () => true,
+      initRepo: async () => undefined,
+      repoRoot: async (dir) => dir,
+      currentBranch: async () => "main",
+      createWorktree: async () => ({ worktreePath, branch: "board/task-conflict", baseBranch: "main" }),
+      syncUpstream: async () => ({ ok: true, conflict: false, message: "synced" }),
+      integrate: async () => ({ ok: false, conflict: true, conflictPaths: ["file.txt"], message: "conflict" }),
+      isWorktreeDirty: async () => false,
+      cleanupWorktree: async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "removed", worktreePath }),
+      listManagedWorktrees: async () => [],
+      removeWorktree: async () => undefined,
+    };
+    const dispatcher = buildDispatcher(makeFakeClient(), worktrees);
+    const task = store.create({ title: "t", description: "d", directory: repo });
+    store.update(task.id, {
+      worktreePath,
+      worktreeBranch: "board/task-conflict",
+      baseBranch: "main",
+      runState: "idle",
+      baseCheckoutSnapshot: "",
+    });
+
+    const outcome = await dispatcher.integrate(task.id);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.conflict).toBe(true);
+    expect(outcome.rebaseConflictPaths).toEqual(["file.txt"]);
+    const blocked = store.get(task.id);
+    expect(blocked?.pending).toBe("rebase-conflict");
+    expect(blocked?.rebaseConflictPaths).toEqual(["file.txt"]);
+    expect(blocked?.worktreePath).toBe(worktreePath);
+  });
+
+  it("retry on a rebase-conflict task tells the existing session to continue the mid-rebase", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    store.updateSettings({ worktreeDefault: true });
+    const client = makeFakeClient();
+    const dispatcher = buildDispatcher(client);
+    const task = store.create({ title: "t", description: "finish it", directory: repo });
+    const ran = await dispatcher.run(task.id);
+    store.update(task.id, {
+      runState: "idle",
+      pending: "rebase-conflict",
+      rebaseConflictPaths: ["file.txt"],
+    });
+
+    await dispatcher.retry(task.id);
+
+    const retryPrompt = client.promptCalls.at(-1)?.text ?? "";
+    expect(retryPrompt).toContain("OPENBOARD REBASE CONFLICT RESOLUTION");
+    expect(retryPrompt).toContain("git rebase --continue");
+    expect(retryPrompt).toContain("- file.txt");
+    expect(retryPrompt).toContain(ran.worktreePath);
+    expect(store.get(task.id)?.pending).toBeUndefined();
+  });
+
+  it("removeTask removes a clean worktree before deleting the task", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    store.updateSettings({ worktreeDefault: true });
+    const dispatcher = buildDispatcher(makeFakeClient());
+    const task = store.create({ title: "t", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+    store.update(task.id, { runState: "idle" });
+
+    const outcome = await dispatcher.removeTask(task.id);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.worktree).toMatchObject({ removed: true, dirty: false });
+    expect(store.get(task.id)).toBeUndefined();
+    expect(existsSync(ran.worktreePath!)).toBe(false);
+    expect(g(repo, ["branch", "--list", `board/${task.id}`])).toContain(`board/${task.id}`);
+  });
+
+  it("removeTask keeps a dirty worktree until forced", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    store.updateSettings({ worktreeDefault: true });
+    const dispatcher = buildDispatcher(makeFakeClient());
+    const task = store.create({ title: "t", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+    writeFileSync(join(ran.worktreePath!, "scratch.txt"), "partial\n");
+
+    const blocked = await dispatcher.removeTask(task.id);
+    expect(blocked.ok).toBe(false);
+    expect(blocked.worktree).toMatchObject({ dirty: true, kept: true });
+    expect(store.get(task.id)).toBeTruthy();
+    expect(existsSync(ran.worktreePath!)).toBe(true);
+
+    const removed = await dispatcher.removeTask(task.id, { force: true });
+    expect(removed.ok).toBe(true);
+    expect(store.get(task.id)).toBeUndefined();
+    expect(existsSync(ran.worktreePath!)).toBe(false);
+  });
+
+  it("removeTask keepWorktree reports clean kept worktrees accurately", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    store.updateSettings({ worktreeDefault: true });
+    const dispatcher = buildDispatcher(makeFakeClient());
+    const task = store.create({ title: "t", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+
+    const kept = await dispatcher.removeTask(task.id, { keepWorktree: true });
+
+    expect(kept.ok).toBe(true);
+    expect(kept.worktree).toMatchObject({ removed: false, dirty: false, kept: true });
+    expect(store.get(task.id)).toBeUndefined();
+    expect(existsSync(ran.worktreePath!)).toBe(true);
+  });
+
+  it("discardWorktree removes a Review worktree without deleting the card", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    store.updateSettings({ worktreeDefault: true });
+    const dispatcher = buildDispatcher(makeFakeClient());
+    const task = store.create({ title: "t", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+    store.update(task.id, { column: "review", runState: "idle" });
+
+    const outcome = await dispatcher.discardWorktree(task.id);
+
+    expect(outcome).toMatchObject({ ok: true, removed: true });
+    expect(store.get(task.id)?.worktreePath).toBeUndefined();
+    expect(store.get(task.id)).toBeTruthy();
+    expect(existsSync(ran.worktreePath!)).toBe(false);
+    expect(g(repo, ["branch", "--list", `board/${task.id}`])).toContain(`board/${task.id}`);
+  });
+
+  it("sweepOrphanedWorktrees removes clean unreferenced worktrees and keeps live task worktrees", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    store.updateSettings({ worktreeDefault: true });
+    const dispatcher = buildDispatcher(makeFakeClient());
+    const task = store.create({ title: "live", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+
+    const orphanPath = join(tmp, "worktrees", "task_orphan");
+    const mgr = new GitWorktreeManager();
+    await mgr.createWorktree(repo, "board/task_orphan", orphanPath);
+
+    const outcomes = await dispatcher.sweepOrphanedWorktrees();
+
+    expect(outcomes).toContainEqual(expect.objectContaining({ worktreePath: orphanPath, removed: true }));
+    expect(existsSync(orphanPath)).toBe(false);
+    expect(existsSync(ran.worktreePath!)).toBe(true);
+  });
+
+  it("sweepOrphanedWorktrees removes remembered repo orphans even when no live task remains", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const dispatcher = buildDispatcher(makeFakeClient());
+    store.rememberWorktreeRepoRoot(repo);
+    const orphanPath = join(tmp, "worktrees", "task_orphan");
+    const mgr = new GitWorktreeManager();
+    await mgr.createWorktree(repo, "board/task_orphan", orphanPath);
+
+    const outcomes = await dispatcher.sweepOrphanedWorktrees();
+
+    expect(outcomes).toContainEqual(expect.objectContaining({ worktreePath: orphanPath, removed: true }));
+    expect(existsSync(orphanPath)).toBe(false);
   });
 });
 

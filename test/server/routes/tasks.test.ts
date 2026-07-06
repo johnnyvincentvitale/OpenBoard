@@ -38,6 +38,9 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
   initGitAndRun: ReturnType<typeof vi.fn>;
   syncUpstream: ReturnType<typeof vi.fn>;
   integrate: ReturnType<typeof vi.fn>;
+  removeTask: ReturnType<typeof vi.fn>;
+  discardWorktree: ReturnType<typeof vi.fn>;
+  sweepOrphanedWorktrees: ReturnType<typeof vi.fn>;
 } {
   return {
     run: vi.fn(async (taskId: string): Promise<Task> => {
@@ -72,6 +75,12 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
       if (!task) throw new Error(`unknown task ${taskId}`);
       return { task, ok: true, conflict: false, message: "integrated" };
     }),
+    removeTask: vi.fn(async (taskId: string) => {
+      store.remove(taskId);
+      return { ok: true };
+    }),
+    discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
+    sweepOrphanedWorktrees: vi.fn(async () => []),
     start: vi.fn(),
     shutdown: vi.fn(),
   };
@@ -161,6 +170,18 @@ class FakeWorktrees implements WorktreeManager {
 
   async integrate() {
     return { ok: true, conflict: false, message: "integrated" };
+  }
+
+  async isWorktreeDirty(): Promise<boolean> {
+    return false;
+  }
+
+  async cleanupWorktree(_repoDir: string, worktreePath: string) {
+    return { ok: true, removed: true, dirty: false, kept: false, message: "removed", worktreePath };
+  }
+
+  async listManagedWorktrees(): Promise<string[]> {
+    return [];
   }
 
   async removeWorktree(): Promise<void> {}
@@ -1140,6 +1161,45 @@ describe("DELETE /api/tasks/:id", () => {
     expect(store.get(task.id)).toBeUndefined();
     expect(store.list()).toHaveLength(0);
   });
+
+  it("passes worktree cleanup force and keep choices to the dispatcher", async () => {
+    const task = store.create({ title: "A", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}?forceWorktree=true&keepWorktree=true`, {
+      method: "DELETE",
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatcher.removeTask).toHaveBeenCalledWith(task.id, {
+      force: true,
+      keepWorktree: true,
+    });
+  });
+
+  it("returns 409 when dirty worktree cleanup needs confirmation", async () => {
+    const task = store.create({ title: "A", description: "", directory: repoDir });
+    dispatcher.removeTask.mockResolvedValueOnce({
+      ok: false,
+      message: "worktree has uncommitted changes",
+      worktree: {
+        ok: false,
+        removed: false,
+        dirty: true,
+        kept: true,
+        message: "worktree has uncommitted changes",
+        worktreePath: "/worktrees/a",
+      },
+    });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}`, { method: "DELETE" });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.worktree.dirty).toBe(true);
+    expect(body.worktree.kept).toBe(true);
+  });
 });
 
 // --- Worktree isolation endpoints -------------------------------------------
@@ -1238,6 +1298,41 @@ describe("worktree isolation routes", () => {
     });
     expect(res.status).toBe(200);
     expect(dispatcher.integrate).toHaveBeenCalledWith(task.id, "dev");
+  });
+
+  it("POST /discard-worktree delegates to dispatcher and records the outcome", async () => {
+    const task = store.create({ title: "A", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/discard-worktree`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatcher.discardWorktree).toHaveBeenCalledWith(task.id, { force: true });
+    const events = store.listEvents(task.id);
+    expect(events.at(-1)?.type).toBe("task_worktree_discarded");
+  });
+
+  it("POST /discard-worktree returns 409 for a dirty worktree when force is absent", async () => {
+    const task = store.create({ title: "A", description: "", directory: repoDir });
+    dispatcher.discardWorktree.mockResolvedValueOnce({
+      ok: false,
+      removed: false,
+      dirty: true,
+      kept: true,
+      message: "worktree has uncommitted changes",
+      worktreePath: "/worktrees/a",
+    });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}/discard-worktree`, { method: "POST" });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.dirty).toBe(true);
+    expect(body.kept).toBe(true);
   });
 
   it("GET /api/settings returns defaults; PUT updates them", async () => {

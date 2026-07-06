@@ -51,7 +51,7 @@ export interface LifecycleDetailRow {
 /** The minimal task shape the lifecycle helpers need to inspect. */
 export type TaskLifecycleInput = Pick<
   Task,
-  "type" | "runState" | "column" | "pending" | "escapeDetectedPaths" | "runStartedAt" | "completion" | "completionSource" | "completedBy" | "error" | "sessionId"
+  "type" | "runState" | "column" | "pending" | "escapeDetectedPaths" | "rebaseConflictPaths" | "runStartedAt" | "completion" | "completionSource" | "completedBy" | "error" | "sessionId"
 >;
 
 function normalizeOutcome(outcome: string | undefined): string {
@@ -95,6 +95,10 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
 
   if (task.pending === "base-checkout-escape") {
     return { phase: "blocked", ...base, detail: "base checkout changed outside worktree" };
+  }
+
+  if (task.pending === "rebase-conflict") {
+    return { phase: "blocked", ...base, detail: "rebase conflict in worktree" };
   }
 
   if (task.column === "review") {
@@ -200,6 +204,15 @@ export function taskLifecycleDetailRows(task: TaskLifecycleInput, now = Date.now
     rows.push({
       label: "PENDING",
       value: paths.length > 0 ? `base checkout escape: ${paths.join(", ")}` : "base checkout escape detected",
+      role: "pending",
+    });
+  }
+
+  if (task.pending === "rebase-conflict") {
+    const paths = task.rebaseConflictPaths ?? [];
+    rows.push({
+      label: "PENDING",
+      value: paths.length > 0 ? `rebase conflict: ${paths.join(", ")}` : "rebase conflict in worktree",
       role: "pending",
     });
   }

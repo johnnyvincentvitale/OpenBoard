@@ -181,6 +181,59 @@ describe("GitWorktreeManager", () => {
     expect(g(repo, ["log", "--oneline"])).toContain("openboard: save board/task-dirty");
   });
 
+  it("integrate rebases the task branch onto the target, fast-forwards base, and removes the worktree", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const wtPath = join(tmp, "wt");
+    await mgr.createWorktree(repo, "board/task-rebase", wtPath);
+
+    writeFileSync(join(wtPath, "feature.txt"), "agent work\n");
+    g(wtPath, ["add", "-A"]);
+    g(wtPath, ["commit", "--no-gpg-sign", "-m", "feature"]);
+
+    writeFileSync(join(repo, "upstream.txt"), "upstream work\n");
+    g(repo, ["add", "-A"]);
+    g(repo, ["commit", "--no-gpg-sign", "-m", "upstream"]);
+    const upstreamHead = g(repo, ["rev-parse", "HEAD"]);
+
+    const res = await mgr.integrate(repo, "board/task-rebase", "main", wtPath);
+
+    expect(res.ok).toBe(true);
+    expect(res.conflict).toBe(false);
+    expect(existsSync(wtPath)).toBe(false);
+    expect(readFileSync(join(repo, "feature.txt"), "utf8")).toBe("agent work\n");
+    expect(readFileSync(join(repo, "upstream.txt"), "utf8")).toBe("upstream work\n");
+    expect(g(repo, ["merge-base", upstreamHead, "board/task-rebase"])).toBe(upstreamHead);
+    expect(g(repo, ["rev-parse", "main"])).toBe(g(repo, ["rev-parse", "board/task-rebase"]));
+  });
+
+  it("integrate reports rebase conflicts without touching the base checkout and leaves the worktree mid-rebase", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const wtPath = join(tmp, "wt");
+    await mgr.createWorktree(repo, "board/task-conflict", wtPath);
+
+    writeFileSync(join(wtPath, "file.txt"), "agent edit\n");
+    g(wtPath, ["add", "-A"]);
+    g(wtPath, ["commit", "--no-gpg-sign", "-m", "agent edit"]);
+
+    writeFileSync(join(repo, "file.txt"), "upstream edit\n");
+    g(repo, ["add", "-A"]);
+    g(repo, ["commit", "--no-gpg-sign", "-m", "upstream edit"]);
+    const baseHead = g(repo, ["rev-parse", "HEAD"]);
+
+    const res = await mgr.integrate(repo, "board/task-conflict", "main", wtPath);
+
+    expect(res.ok).toBe(false);
+    expect(res.conflict).toBe(true);
+    expect(res.conflictPaths).toEqual(["file.txt"]);
+    expect(existsSync(wtPath)).toBe(true);
+    expect(g(repo, ["rev-parse", "HEAD"])).toBe(baseHead);
+    expect(readFileSync(join(repo, "file.txt"), "utf8")).toBe("upstream edit\n");
+    expect(g(repo, ["status", "--porcelain"])).toBe("");
+    expect(g(wtPath, ["status", "--porcelain"])).toContain("UU file.txt");
+  });
+
   it("removeWorktree drops the checkout but leaves the branch", async () => {
     const repo = join(tmp, "repo");
     makeRepo(repo);
@@ -190,6 +243,36 @@ describe("GitWorktreeManager", () => {
     await mgr.removeWorktree(repo, wtPath);
     expect(existsSync(wtPath)).toBe(false);
     expect(g(repo, ["branch", "--list", "board/task-1"])).toContain("board/task-1");
+  });
+
+  it("cleanupWorktree removes a clean checkout and keeps the branch", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const wtPath = join(tmp, "wt");
+    await mgr.createWorktree(repo, "board/task-cleanup", wtPath);
+
+    const result = await mgr.cleanupWorktree(repo, wtPath);
+
+    expect(result).toMatchObject({ ok: true, removed: true, dirty: false, kept: false });
+    expect(existsSync(wtPath)).toBe(false);
+    expect(g(repo, ["branch", "--list", "board/task-cleanup"])).toContain("board/task-cleanup");
+  });
+
+  it("cleanupWorktree keeps a dirty checkout until force is requested", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const wtPath = join(tmp, "wt");
+    await mgr.createWorktree(repo, "board/task-dirty-cleanup", wtPath);
+    writeFileSync(join(wtPath, "scratch.txt"), "partial work\n");
+
+    const kept = await mgr.cleanupWorktree(repo, wtPath);
+    expect(kept).toMatchObject({ ok: false, removed: false, dirty: true, kept: true });
+    expect(existsSync(wtPath)).toBe(true);
+
+    const removed = await mgr.cleanupWorktree(repo, wtPath, { force: true });
+    expect(removed).toMatchObject({ ok: true, removed: true, dirty: true, kept: false });
+    expect(existsSync(wtPath)).toBe(false);
+    expect(g(repo, ["branch", "--list", "board/task-dirty-cleanup"])).toContain("board/task-dirty-cleanup");
   });
 
   it("currentBranch falls back to a short sha on detached HEAD", async () => {

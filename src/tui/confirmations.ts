@@ -2,9 +2,9 @@ import type { Column, Task } from "../shared";
 
 /**
  * Card-level actions that require a second press to confirm before executing.
- * These are bound to single keys in board view (run/retry/abort/move-to-done/archive/delete).
+ * These are bound to single keys in board view (run/retry/abort/move-to-done/archive/delete/discard).
  */
-export type ConfirmableAction = "run" | "retry" | "abort" | "move-to-done" | "archive" | "delete";
+export type ConfirmableAction = "run" | "retry" | "abort" | "move-to-done" | "archive" | "delete" | "discard-worktree";
 
 /** Canonical display order for confirmable actions. */
 export const CONFIRMABLE_ACTIONS: readonly ConfirmableAction[] = [
@@ -14,6 +14,7 @@ export const CONFIRMABLE_ACTIONS: readonly ConfirmableAction[] = [
   "move-to-done",
   "archive",
   "delete",
+  "discard-worktree",
 ];
 
 /** A pending confirmation waiting for the same action/key on the same task. */
@@ -152,6 +153,8 @@ function actionKey(action: ConfirmableAction): string {
       return "a";
     case "delete":
       return "d";
+    case "discard-worktree":
+      return "D";
   }
 }
 
@@ -169,6 +172,8 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
       return presentParticiple ? "archiving" : "archive";
     case "delete":
       return presentParticiple ? "deleting" : "delete";
+    case "discard-worktree":
+      return presentParticiple ? "discarding worktree" : "discard worktree";
   }
 }
 
@@ -176,7 +181,11 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
  * Build the copy for the confirmation prompt shown in the Selected/details column.
  */
 export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task, "title" | "completion" | "completionSource">): ConfirmationCopy {
-  const title = action === "move-to-done" ? "Move this card to Done?" : `${capitalize(actionVerb(action, true))} this card?`;
+  const title = action === "move-to-done"
+    ? "Move this card to Done?"
+    : action === "discard-worktree"
+      ? "Discard this worktree?"
+      : `${capitalize(actionVerb(action, true))} this card?`;
 
   let body: string[];
   switch (action) {
@@ -227,6 +236,14 @@ export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task
       body = [
         `Permanently delete "${task.title}".`,
         "This cannot be undone; any running session will be detached.",
+        "If a task worktree exists, confirming also removes it and keeps the branch.",
+      ];
+      break;
+    case "discard-worktree":
+      body = [
+        `Remove the task worktree for "${task.title}".`,
+        "The Review card and board/* branch stay in place.",
+        "Use this for audit/review cards that should never integrate.",
       ];
       break;
   }

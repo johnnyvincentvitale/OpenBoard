@@ -147,6 +147,12 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
       const t = taskStore.get(taskId);
       return { task: t, ok: true, conflict: false, message: "integrated" };
     }),
+    removeTask: vi.fn(async (taskId: string) => {
+      taskStore.remove(taskId);
+      return { ok: true };
+    }),
+    discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
+    sweepOrphanedWorktrees: vi.fn(async () => []),
     start: vi.fn(),
     shutdown: vi.fn(),
   } as unknown as Parameters<typeof createApp>[0]["dispatcher"];

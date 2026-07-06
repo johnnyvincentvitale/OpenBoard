@@ -24,16 +24,20 @@ describe("SqliteTaskStore — isolation fields + settings", () => {
       worktreePath: "/repo/.wt/board-1",
       worktreeBranch: "board/task-1",
       baseBranch: "main",
-      pending: "git-init",
+      pending: "rebase-conflict",
+      rebaseConflictPaths: ["src/app.ts", "package.json"],
     });
     expect(updated?.worktreePath).toBe("/repo/.wt/board-1");
     expect(updated?.worktreeBranch).toBe("board/task-1");
     expect(updated?.baseBranch).toBe("main");
-    expect(updated?.pending).toBe("git-init");
+    expect(updated?.pending).toBe("rebase-conflict");
+    expect(updated?.rebaseConflictPaths).toEqual(["src/app.ts", "package.json"]);
+    expect(store.get(task.id)?.rebaseConflictPaths).toEqual(["src/app.ts", "package.json"]);
 
     // Clearing a field back to undefined persists as absent.
-    const cleared = store.update(task.id, { pending: undefined });
+    const cleared = store.update(task.id, { pending: undefined, rebaseConflictPaths: undefined });
     expect(cleared?.pending).toBeUndefined();
+    expect(cleared?.rebaseConflictPaths).toBeUndefined();
     expect(store.get(task.id)?.pending).toBeUndefined();
     store.close();
   });
@@ -55,6 +59,17 @@ describe("SqliteTaskStore — isolation fields + settings", () => {
     const b = new SqliteTaskStore(path);
     expect(b.getSettings().worktreeDefault).toBe(true);
     b.close();
+  });
+
+  it("persists known worktree repo roots for orphan sweeps", () => {
+    const store = new SqliteTaskStore(":memory:");
+
+    store.rememberWorktreeRepoRoot("/repo/b");
+    store.rememberWorktreeRepoRoot("/repo/a");
+    store.rememberWorktreeRepoRoot("/repo/b");
+
+    expect(store.listKnownWorktreeRepoRoots()).toEqual(["/repo/a", "/repo/b"]);
+    store.close();
   });
 
   it("migrates a pre-BoardV3 task table in place with data intact", () => {

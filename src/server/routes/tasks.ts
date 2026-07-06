@@ -298,12 +298,18 @@ export function registerTaskRoutes(
     }
   });
 
-  app.delete(TASK_ROUTE_PATTERNS.remove, (c) => {
+  app.delete(TASK_ROUTE_PATTERNS.remove, async (c) => {
     const id = c.req.param("id");
 
     try {
-      store.remove(id);
-      return c.json({ ok: true }, 200);
+      const outcome = await dispatcher.removeTask(id, {
+        force: c.req.query("forceWorktree") === "true",
+        keepWorktree: c.req.query("keepWorktree") === "true",
+      });
+      if (!outcome.ok) {
+        return c.json(outcome, 409);
+      }
+      return c.json(outcome, 200);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -456,6 +462,24 @@ export function registerTaskRoutes(
       }
       const outcome = await dispatcher.integrate(id, target);
       store.addEvent({ taskId: id, type: "task_integrated", body: { ok: outcome.ok, conflict: outcome.conflict, message: outcome.message, targetBranch: target } });
+      return c.json(outcome, outcome.ok ? 200 : 409);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
+  app.post(TASK_ROUTE_PATTERNS.discardWorktree, async (c) => {
+    const id = c.req.param("id");
+    try {
+      let force = false;
+      try {
+        const body = (await c.req.json()) as { force?: unknown };
+        force = body?.force === true;
+      } catch {
+        // Body optional.
+      }
+      const outcome = await dispatcher.discardWorktree(id, { force });
+      store.addEvent({ taskId: id, type: "task_worktree_discarded", body: { ...outcome } });
       return c.json(outcome, outcome.ok ? 200 : 409);
     } catch (err) {
       return respondWithError(c, err);

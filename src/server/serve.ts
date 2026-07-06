@@ -59,6 +59,12 @@ export async function main(): Promise<void> {
     instanceName: process.env.OPENBOARD_INSTANCE_NAME?.trim() || undefined,
     sandbox: handle.sandbox,
   });
+  try {
+    await dispatcher.sweepOrphanedWorktrees();
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`openboard orphan worktree sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
   dispatcher.start();
   const terminalManager = new PtyManager({ taskStore });
 

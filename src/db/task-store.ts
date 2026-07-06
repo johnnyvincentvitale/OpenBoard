@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS task (
   dirty_at_dispatch INTEGER NOT NULL DEFAULT 0,
   base_checkout_snapshot TEXT,
   escape_detected_paths TEXT,
+  rebase_conflict_paths TEXT,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   UNIQUE(column, position)
@@ -133,9 +134,11 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["dirty_at_dispatch", "INTEGER NOT NULL DEFAULT 0"],
   ["base_checkout_snapshot", "TEXT"],
   ["escape_detected_paths", "TEXT"],
+  ["rebase_conflict_paths", "TEXT"],
 ];
 
 const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
+const WORKTREE_REPO_ROOTS_SETTING = "worktreeRepoRoots";
 
 interface TaskRowRecord {
   id: string;
@@ -176,6 +179,7 @@ interface TaskRowRecord {
   dirty_at_dispatch: number;
   base_checkout_snapshot: string | null;
   escape_detected_paths: string | null;
+  rebase_conflict_paths: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -243,7 +247,21 @@ function toTask(record: TaskRowRecord): Task {
   if (record.escape_detected_paths !== null) {
     task.escapeDetectedPaths = JSON.parse(record.escape_detected_paths) as string[];
   }
+  if (record.rebase_conflict_paths !== null) {
+    task.rebaseConflictPaths = JSON.parse(record.rebase_conflict_paths) as string[];
+  }
   return task;
+}
+
+function parseStringArraySetting(row: { value: string } | undefined): string[] {
+  if (!row) return [];
+  try {
+    const parsed = JSON.parse(row.value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+  } catch {
+    return [];
+  }
 }
 
 function toTaskComment(record: TaskCommentRowRecord): TaskComment {
@@ -313,8 +331,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, base_checkout_snapshot, escape_detected_paths, created_at, updated_at)
-         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
+         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -355,6 +373,7 @@ export class SqliteTaskStore implements TaskStore {
            dirty_at_dispatch = @dirtyAtDispatch,
            base_checkout_snapshot = @baseCheckoutSnapshot,
            escape_detected_paths = @escapeDetectedPaths,
+           rebase_conflict_paths = @rebaseConflictPaths,
            updated_at = @updatedAt
          WHERE id = @id`,
       ),
@@ -510,6 +529,7 @@ export class SqliteTaskStore implements TaskStore {
         dirtyAtDispatch: 0,
         baseCheckoutSnapshot: null,
         escapeDetectedPaths: null,
+        rebaseConflictPaths: null,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -567,6 +587,7 @@ export class SqliteTaskStore implements TaskStore {
         dirtyAtDispatch: merged.dirtyAtDispatch ? 1 : 0,
         baseCheckoutSnapshot: merged.baseCheckoutSnapshot ?? null,
         escapeDetectedPaths: merged.escapeDetectedPaths ? JSON.stringify(merged.escapeDetectedPaths) : null,
+        rebaseConflictPaths: merged.rebaseConflictPaths ? JSON.stringify(merged.rebaseConflictPaths) : null,
         updatedAt: this.now(),
       });
 
@@ -659,6 +680,19 @@ export class SqliteTaskStore implements TaskStore {
     const next = { ...this.getSettings(), ...patch };
     this.stmts.putSetting.run({ key: "worktreeDefault", value: next.worktreeDefault ? "true" : "false" });
     return next;
+  }
+
+  rememberWorktreeRepoRoot(repoRoot: string): void {
+    const roots = new Set(this.listKnownWorktreeRepoRoots());
+    roots.add(repoRoot);
+    this.stmts.putSetting.run({
+      key: WORKTREE_REPO_ROOTS_SETTING,
+      value: JSON.stringify([...roots].sort()),
+    });
+  }
+
+  listKnownWorktreeRepoRoots(): string[] {
+    return parseStringArraySetting(this.stmts.getSetting.get(WORKTREE_REPO_ROOTS_SETTING) as { value: string } | undefined);
   }
 
   addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment {

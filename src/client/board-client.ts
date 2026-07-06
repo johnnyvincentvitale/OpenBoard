@@ -17,6 +17,7 @@ import type {
   TaskType,
   ClaudeCodePermissionMode,
   UpdateTaskInput,
+  WorktreeCleanupOutcome,
 } from "../shared";
 import { buildTaskPath, CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, TASK_HARNESSES, TASK_ISOLATION_MODES } from "../shared";
 
@@ -120,10 +121,11 @@ export interface BoardClient {
   retryTask(id: string, feedback?: string): Promise<Task>;
   abortTask(id: string): Promise<Task>;
   moveTask(id: string, column: Column, position: number, completedBy?: string | null): Promise<Task[]>;
-  deleteTask(id: string): Promise<{ ok: true }>;
+  deleteTask(id: string, options?: { forceWorktree?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; message?: string }>;
   initGitAndRun(id: string): Promise<Task>;
   syncTask(id: string): Promise<MergeOutcome>;
   integrateTask(id: string, targetBranch?: string): Promise<MergeOutcome>;
+  discardWorktree(id: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
   linkTasks(parentId: string, childId: string): Promise<Task>;
   unlinkTasks(parentId: string, childId: string): Promise<Task>;
   completeTask(id: string, report: CompletionWithOutputInput, runStartedAt?: number): Promise<Task>;
@@ -196,8 +198,17 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       if (completedBy !== undefined) body.completedBy = completedBy;
       return postJson<Task[]>(resolved, buildTaskPath.move(id), body);
     },
-    deleteTask: (id) =>
-      requestJson<{ ok: true }>(resolved, buildTaskPath.remove(id), { method: "DELETE" }),
+    deleteTask: (id, options) => {
+      const params = new URLSearchParams();
+      if (options?.forceWorktree) params.set("forceWorktree", "true");
+      if (options?.keepWorktree) params.set("keepWorktree", "true");
+      const suffix = params.toString();
+      return requestJson<{ ok: boolean; message?: string }>(
+        resolved,
+        `${buildTaskPath.remove(id)}${suffix ? `?${suffix}` : ""}`,
+        { method: "DELETE" },
+      );
+    },
     initGitAndRun: (id) => postJson<Task>(resolved, buildTaskPath.initGit(id), {}),
     syncTask: (id) => postJson<MergeOutcome>(resolved, buildTaskPath.sync(id), {}),
     integrateTask: (id, targetBranch) =>
@@ -206,6 +217,8 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
         buildTaskPath.integrate(id),
         targetBranch === undefined ? {} : { targetBranch },
       ),
+    discardWorktree: (id, options) =>
+      postJson<WorktreeCleanupOutcome>(resolved, buildTaskPath.discardWorktree(id), options ?? {}),
     linkTasks: (parentId, childId) => postJson<Task>(resolved, buildTaskPath.links(childId), { parentId }),
     unlinkTasks: (parentId, childId) =>
       requestJson<Task>(resolved, buildTaskPath.unlink(childId, parentId), {
