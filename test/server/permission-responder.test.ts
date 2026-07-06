@@ -1,22 +1,34 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { startPermissionResponder } from "../../src/server/permission-responder";
+import { createPermissionResponderPool } from "../../src/server/permission-responder";
 
 /** Minimal fake matching the { permission, session } slice permission-responder.ts uses. */
 class FakePermissionClient {
   listResponses: unknown[][] = [];
+  listShouldThrowCount = 0;
   replyCalls: Array<{ requestID: string; directory?: string; reply: string }> = [];
-  replyShouldThrow = false;
+  replyShouldThrowCount = 0;
   listCallCount = 0;
+  listCallsByDirectory: Record<string, number> = {};
 
   permission = {
-    list: async (_params?: { directory?: string }) => {
-      const data = this.listResponses[this.listCallCount] ?? this.listResponses[this.listResponses.length - 1] ?? [];
+    list: async (params?: { directory?: string }) => {
       this.listCallCount += 1;
+      if (params?.directory) {
+        this.listCallsByDirectory[params.directory] = (this.listCallsByDirectory[params.directory] ?? 0) + 1;
+      }
+      if (this.listShouldThrowCount > 0) {
+        this.listShouldThrowCount -= 1;
+        throw new Error("list failed");
+      }
+      const data = this.listResponses[this.listCallCount - 1] ?? this.listResponses[this.listResponses.length - 1] ?? [];
       return { data, error: undefined };
     },
     reply: async (params: { requestID: string; directory?: string; reply: "once" | "always" | "reject" }) => {
       this.replyCalls.push(params);
-      if (this.replyShouldThrow) throw new Error("reply failed");
+      if (this.replyShouldThrowCount > 0) {
+        this.replyShouldThrowCount -= 1;
+        throw new Error("reply failed");
+      }
       return { data: true, error: undefined };
     },
   };
@@ -55,7 +67,7 @@ function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   });
 }
 
-describe("startPermissionResponder", () => {
+describe("createPermissionResponderPool", () => {
   let client: FakePermissionClient;
 
   beforeEach(() => {
@@ -72,15 +84,11 @@ describe("startPermissionResponder", () => {
       [{ id: "req_1", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
     ];
 
-    const watcher = startPermissionResponder({
-      client: client as never,
-      sessionID: "ses_1",
-      directory: "/wt",
-      pollIntervalMs: 5,
-    });
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
 
     await waitFor(() => client.replyCalls.length === 1);
-    watcher.cancel();
+    pool.stop();
 
     expect(client.replyCalls[0]).toMatchObject({ requestID: "req_1", directory: "/wt", reply: "once" });
   });
@@ -91,15 +99,11 @@ describe("startPermissionResponder", () => {
       [{ id: "req_2", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
     ];
 
-    const watcher = startPermissionResponder({
-      client: client as never,
-      sessionID: "ses_1",
-      directory: "/wt",
-      pollIntervalMs: 5,
-    });
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
 
     await waitFor(() => client.replyCalls.length === 1);
-    watcher.cancel();
+    pool.stop();
 
     expect(client.replyCalls[0]).toMatchObject({ requestID: "req_2", reply: "reject" });
   });
@@ -110,15 +114,11 @@ describe("startPermissionResponder", () => {
       [{ id: "req_3", sessionID: "ses_1", tool: { messageID: "msg_missing", callID: "call_missing" } }],
     ];
 
-    const watcher = startPermissionResponder({
-      client: client as never,
-      sessionID: "ses_1",
-      directory: "/wt",
-      pollIntervalMs: 5,
-    });
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
 
     await waitFor(() => client.replyCalls.length === 1);
-    watcher.cancel();
+    pool.stop();
 
     expect(client.replyCalls[0]).toMatchObject({ requestID: "req_3", reply: "reject" });
   });
@@ -126,15 +126,11 @@ describe("startPermissionResponder", () => {
   it("fails closed (reject) when the request has no tool identity at all", async () => {
     client.listResponses = [[{ id: "req_4", sessionID: "ses_1" }]];
 
-    const watcher = startPermissionResponder({
-      client: client as never,
-      sessionID: "ses_1",
-      directory: "/wt",
-      pollIntervalMs: 5,
-    });
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
 
     await waitFor(() => client.replyCalls.length === 1);
-    watcher.cancel();
+    pool.stop();
 
     expect(client.replyCalls[0]).toMatchObject({ requestID: "req_4", reply: "reject" });
   });
@@ -142,16 +138,12 @@ describe("startPermissionResponder", () => {
   it("ignores pending requests for a different sessionID", async () => {
     client.listResponses = [[{ id: "req_other", sessionID: "ses_other" }]];
 
-    const watcher = startPermissionResponder({
-      client: client as never,
-      sessionID: "ses_1",
-      directory: "/wt",
-      pollIntervalMs: 5,
-    });
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
 
     // Give it a few poll cycles; nothing should ever be replied to.
     await new Promise((r) => setTimeout(r, 60));
-    watcher.cancel();
+    pool.stop();
 
     expect(client.replyCalls).toHaveLength(0);
   });
@@ -166,35 +158,125 @@ describe("startPermissionResponder", () => {
       [{ id: "req_5", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
     ];
 
-    const watcher = startPermissionResponder({
-      client: client as never,
-      sessionID: "ses_1",
-      directory: "/wt",
-      pollIntervalMs: 5,
-    });
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
 
     await waitFor(() => client.listCallCount >= 3);
-    watcher.cancel();
+    pool.stop();
 
     expect(client.replyCalls).toHaveLength(1);
   });
 
-  it("stop()/cancel() halts the polling loop", async () => {
+  it("unregister() halts polling for that session only", async () => {
     client.listResponses = [[]];
 
-    const watcher = startPermissionResponder({
-      client: client as never,
-      sessionID: "ses_1",
-      directory: "/wt",
-      pollIntervalMs: 5,
-    });
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
 
     await waitFor(() => client.listCallCount >= 1);
-    watcher.cancel();
-    const countAtCancel = client.listCallCount;
+    pool.unregister("ses_1");
+    const countAtUnregister = client.listCallCount;
+
+    await new Promise((r) => setTimeout(r, 60));
+    pool.stop();
+
+    expect(client.listCallCount).toBe(countAtUnregister);
+  });
+
+  it("stop() halts the entire pool, including any still-registered sessions", async () => {
+    client.listResponses = [[]];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => client.listCallCount >= 1);
+    pool.stop();
+    const countAtStop = client.listCallCount;
 
     await new Promise((r) => setTimeout(r, 60));
 
-    expect(client.listCallCount).toBe(countAtCancel);
+    expect(client.listCallCount).toBe(countAtStop);
+  });
+
+  it("serves multiple registered sessions from a single shared poll loop", async () => {
+    client.listResponses = [[]];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 20 });
+    pool.register("ses_1", "/wt-1");
+    pool.register("ses_2", "/wt-2");
+
+    // A single loop visiting both targets each tick keeps their call counts
+    // in lockstep (never more than one tick apart). Two independently
+    // scheduled timers would drift apart instead.
+    await waitFor(() => (client.listCallsByDirectory["/wt-1"] ?? 0) >= 3 && (client.listCallsByDirectory["/wt-2"] ?? 0) >= 3);
+    const gap = Math.abs((client.listCallsByDirectory["/wt-1"] ?? 0) - (client.listCallsByDirectory["/wt-2"] ?? 0));
+    pool.stop();
+
+    expect(gap).toBeLessThanOrEqual(1);
+  });
+
+  it("calls onError once per failure streak for a persistently failing list(), not on every tick", async () => {
+    client.listShouldThrowCount = 3;
+    client.listResponses = [[]];
+    const errors: Array<{ sessionID: string; context: string }> = [];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      onError: (sessionID, context) => errors.push({ sessionID, context }),
+    });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => client.listCallCount >= 3);
+    // Let it recover (listShouldThrowCount is now exhausted) and confirm no
+    // further onError calls fire once list() starts succeeding again.
+    await waitFor(() => client.listCallCount >= 5);
+    pool.stop();
+
+    expect(errors).toEqual([{ sessionID: "ses_1", context: "list" }]);
+  });
+
+  it("calls onError again after a failure, a recovery, and a new failure", async () => {
+    client.listShouldThrowCount = 1;
+    client.listResponses = [[]];
+    const errors: Array<{ sessionID: string; context: string }> = [];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      onError: (sessionID, context) => errors.push({ sessionID, context }),
+    });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => errors.length === 1);
+    // Wait for an actual successful call after the failure (real recovery,
+    // not just the failure having happened) before failing it again.
+    await waitFor(() => client.listCallCount >= 2);
+    client.listShouldThrowCount = 1;
+    await waitFor(() => errors.length === 2);
+    pool.stop();
+
+    expect(errors).toEqual([
+      { sessionID: "ses_1", context: "list" },
+      { sessionID: "ses_1", context: "list" },
+    ]);
+  });
+
+  it("does not call onError for a fail-closed deny (tool name unresolvable)", async () => {
+    client.listResponses = [[{ id: "req_6", sessionID: "ses_1" }]];
+    const errors: unknown[] = [];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      onError: (...args) => errors.push(args),
+    });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => client.replyCalls.length === 1);
+    pool.stop();
+
+    expect(client.replyCalls[0]).toMatchObject({ reply: "reject" });
+    expect(errors).toHaveLength(0);
   });
 });

@@ -129,10 +129,15 @@ class FakeOpencodeClient {
 
   permissionListCalls: Array<{ directory?: string }> = [];
   permissionReplyCalls: Array<{ requestID: string; directory?: string; reply: string }> = [];
+  permissionListShouldErrorCount = 0;
 
   permission = {
     list: async (params: { directory?: string }) => {
       this.permissionListCalls.push(params);
+      if (this.permissionListShouldErrorCount > 0) {
+        this.permissionListShouldErrorCount -= 1;
+        return { data: undefined, error: { message: "opencode unreachable" } };
+      }
       return { data: [], error: undefined };
     },
     reply: async (params: { requestID: string; directory?: string; reply: string }) => {
@@ -544,6 +549,61 @@ describe("TaskDispatcher", () => {
 
       await waitFor(() => client.permissionListCalls.length > 0);
       expect(client.permissionListCalls[0]?.directory).toBe(store.get(task.id)?.worktreePath);
+    });
+
+    it("a persistently failing permission-responder list() call surfaces a task_warning event", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_fenced_failing";
+      client.permissionListShouldErrorCount = 3;
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+
+      await dispatcher.run(task.id);
+      // Let it fail a few times, then recover (permissionListShouldErrorCount
+      // is exhausted after 3 calls) and keep polling normally. Default poll
+      // interval is 250ms, so 5 ticks needs real time to elapse.
+      await waitFor(() => client.permissionListCalls.length >= 5, 3000);
+
+      const events = store.listEvents(task.id).filter((e) => e.type === "task_warning");
+      expect(events).toHaveLength(1);
+      expect(String(events[0]?.body.warning)).toContain("Permission auto-responder list call is failing");
+    });
+
+    it("dispatcher registers concurrent worktree-isolated tasks with the same responder pool", async () => {
+      // permission-responder.test.ts proves a single pool serves multiple
+      // registered targets from one shared loop; this proves the dispatcher
+      // actually registers both sessions with its one pool instance rather
+      // than needing (or creating) a second one.
+      store.updateSettings({ worktreeDefault: true });
+      const gitProjectDir2 = join(workspace, "git-project-2");
+      makeGitRepo(gitProjectDir2);
+      const taskA = createTask({ directory: gitProjectDir, title: "Task A" });
+      const taskB = createTask({ directory: gitProjectDir2, title: "Task B" });
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+
+      client.nextSessionId = "ses_a";
+      await dispatcher.run(taskA.id);
+      client.nextSessionId = "ses_b";
+      await dispatcher.run(taskB.id);
+
+      const dirA = store.get(taskA.id)?.worktreePath;
+      const dirB = store.get(taskB.id)?.worktreePath;
+      await waitFor(
+        () =>
+          client.permissionListCalls.some((c) => c.directory === dirA) &&
+          client.permissionListCalls.some((c) => c.directory === dirB),
+      );
+
+      expect(client.permissionListCalls.some((c) => c.directory === dirA)).toBe(true);
+      expect(client.permissionListCalls.some((c) => c.directory === dirB)).toBe(true);
     });
 
     it("abort() stops the permission responder for a worktree-isolated task", async () => {

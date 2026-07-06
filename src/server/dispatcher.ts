@@ -19,7 +19,7 @@ import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "./escape-detector";
 import { eventLiveState, eventSessionId } from "./events/session-status";
-import { startPermissionResponder, type PermissionResponderWatcher } from "./permission-responder";
+import { createPermissionResponderPool, type PermissionResponderPool } from "./permission-responder";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeCodeRunner, type ClaudeCodeRunnerLike } from "./claude-code-runner";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
@@ -293,11 +293,19 @@ export class TaskDispatcher implements Dispatcher {
   private consumeLoopPromise: Promise<void> | null = null;
   private readonly completionWatchers = new Map<string, { cancelled: boolean }>();
   private readonly outputCandidates = new Map<string, string>();
-  private readonly permissionResponders = new Map<string, PermissionResponderWatcher>();
+  private readonly permissionResponderPool: PermissionResponderPool;
 
   constructor(deps: TaskDispatcherDeps) {
     this.client = deps.client;
     this.store = deps.store;
+    // One shared poller for every worktree-isolated session, not one per
+    // session — see permission-responder.ts. onError surfaces a persistent
+    // list/reply failure as a task_warning event instead of retrying forever
+    // in silence.
+    this.permissionResponderPool = createPermissionResponderPool({
+      client: this.client,
+      onError: (sessionId, context, err) => this.handlePermissionResponderError(sessionId, context, err),
+    });
     this.worktrees = deps.worktrees ?? new GitWorktreeManager();
     this.adapterBaseUrl = deps.adapterBaseUrl ?? "http://127.0.0.1:0";
     this.boardToken = deps.boardToken;
@@ -800,10 +808,7 @@ export class TaskDispatcher implements Dispatcher {
     }
     this.completionWatchers.clear();
     this.outputCandidates.clear();
-    for (const responder of this.permissionResponders.values()) {
-      responder.cancel();
-    }
-    this.permissionResponders.clear();
+    this.permissionResponderPool.stop();
   }
 
   // ---- internals ----
@@ -832,17 +837,23 @@ export class TaskDispatcher implements Dispatcher {
 
   /** Start (or restart) the external_directory ask auto-responder for a worktree session. */
   private startPermissionResponder(sessionId: string, directory: string): void {
-    this.stopPermissionResponder(sessionId);
-    const responder = startPermissionResponder({ client: this.client, sessionID: sessionId, directory });
-    this.permissionResponders.set(sessionId, responder);
+    this.permissionResponderPool.register(sessionId, directory);
   }
 
   private stopPermissionResponder(sessionId: string): void {
-    const responder = this.permissionResponders.get(sessionId);
-    if (responder) {
-      responder.cancel();
-      this.permissionResponders.delete(sessionId);
-    }
+    this.permissionResponderPool.unregister(sessionId);
+  }
+
+  /** Surface a persistently failing permission-responder list/reply call against its task. */
+  private handlePermissionResponderError(
+    sessionId: string,
+    context: "list" | "reply",
+    err: unknown,
+  ): void {
+    const task = this.listTasksForWatcher().find((t) => t.sessionId === sessionId);
+    if (!task) return;
+    const warning = `Permission auto-responder ${context} call is failing for this session: ${errorMessage(err, "unknown error")}`;
+    this.store.addEvent({ taskId: task.id, type: "task_warning", body: { warning } });
   }
 
   private async watchCompletion(

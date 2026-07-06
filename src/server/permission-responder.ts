@@ -3,12 +3,22 @@
  *
  * `WRITE_FENCED_PERMISSION` (src/shared/task.ts) puts OpenCode's built-in
  * Location boundary into "ask" mode for a worktree session. Left unanswered,
- * that ask would hang the unattended run forever, so this watcher polls
- * `client.permission.list` for pending requests on the session's directory,
- * figures out which tool raised each one, and replies: read-class tools get
- * approved ("once"), everything else — including a tool we can't identify —
- * gets denied ("reject"). Denying-by-default is the fence; approving is the
- * carve-out for the reads OpenBoard has decided are safe to allow.
+ * that ask would hang the unattended run forever, so this pool polls
+ * `client.permission.list` for pending requests on each registered session's
+ * directory, figures out which tool raised each one, and replies: read-class
+ * tools get approved ("once"), everything else — including a tool we can't
+ * identify — gets denied ("reject"). Denying-by-default is the fence;
+ * approving is the carve-out for the reads OpenBoard has decided are safe.
+ *
+ * A single shared poll loop serves every currently-registered session — not
+ * one independent timer per session — so N concurrent worktree tasks cost
+ * one recurring tick that visits N targets, not N overlapping timers each
+ * hitting the OpenCode API on their own schedule.
+ *
+ * `list`/`reply` failures are reported via `onError` (once per failure
+ * streak, not on every failing tick) instead of being silently swallowed —
+ * a persistently unreachable OpenCode server should be visible, not just
+ * retried forever with no trace.
  *
  * The `permission.v2.asked` event exists but a bare subscribe-then-prompt
  * race can leave an ask unanswered indefinitely (proven in the Phase 0
@@ -28,17 +38,6 @@ function sleep(ms: number): Promise<void> {
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
   });
-}
-
-export interface PermissionResponderWatcher {
-  cancel(): void;
-}
-
-export interface StartPermissionResponderOptions {
-  client: { permission: PermissionClient; session: SessionClient };
-  sessionID: string;
-  directory: string;
-  pollIntervalMs?: number;
 }
 
 /** Pending permission request shape actually needed here (subset of the SDK's PermissionRequest). */
@@ -86,57 +85,119 @@ function findToolName(messages: unknown, messageID: string, callID: string): str
   return undefined;
 }
 
-/** Start polling for pending `external_directory` asks on `sessionID` and auto-reply to each. */
-export function startPermissionResponder(
-  options: StartPermissionResponderOptions,
-): PermissionResponderWatcher {
-  const { client, sessionID, directory } = options;
+export type PermissionResponderErrorContext = "list" | "reply";
+
+export interface PermissionResponderPoolOptions {
+  client: { permission: PermissionClient; session: SessionClient };
+  /** Default 250ms — proven reliable in the Phase 0 live probe. */
+  pollIntervalMs?: number;
+  /**
+   * Called on the first consecutive `list`/`reply` failure for a registered
+   * session (not on every failing tick, to avoid spamming a caller that logs
+   * or records a task event once per streak) and again if that session
+   * recovers and then fails again. Never called for a "tool name couldn't be
+   * resolved" fail-closed deny — that's a deliberate security decision, not
+   * an operational failure. Errors thrown by this callback are swallowed;
+   * they must never be able to break the poll loop.
+   */
+  onError?: (sessionID: string, context: PermissionResponderErrorContext, error: unknown) => void;
+}
+
+export interface PermissionResponderPool {
+  /** Start (or restart, discarding prior state) responding to asks for this session. */
+  register(sessionID: string, directory: string): void;
+  /** Stop responding to asks for this session and free its state. */
+  unregister(sessionID: string): void;
+  /** Stop the pool's poll loop entirely and free all state. */
+  stop(): void;
+}
+
+interface TargetState {
+  directory: string;
+  /** requestIDs already replied to, scoped to this target so it's freed on unregister(). */
+  replied: Set<string>;
+  /** Whether the most recent list/reply attempt for this target failed — gates onError de-dup. */
+  failing: boolean;
+}
+
+/** Create a pool that polls `client.permission.list` once per tick for every registered session. */
+export function createPermissionResponderPool(options: PermissionResponderPoolOptions): PermissionResponderPool {
+  const { client, onError } = options;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const watcher = { cancelled: false };
-  const replied = new Set<string>();
+  const targets = new Map<string, TargetState>();
+  let stopped = false;
 
   void runLoop();
 
   async function runLoop(): Promise<void> {
-    while (!watcher.cancelled) {
+    while (!stopped) {
       await sleep(pollIntervalMs);
-      if (watcher.cancelled) return;
+      if (stopped) return;
 
-      let pending: PendingRequest[];
-      try {
-        const result = await client.permission.list({ directory });
-        if ((result as { error?: unknown }).error) continue;
-        pending = asPendingRequests((result as { data?: unknown }).data);
-      } catch {
-        continue;
-      }
-
-      for (const request of pending) {
-        if (watcher.cancelled) return;
-        if (request.sessionID !== sessionID) continue;
-        if (replied.has(request.id)) continue;
-
-        const toolName = await resolveToolName(request);
-        const approve = toolName !== undefined && READ_TOOLS.has(toolName);
-
-        // Mark replied before the network call so a slow reply can't race a
-        // subsequent poll into double-replying the same request.
-        replied.add(request.id);
-        try {
-          await client.permission.reply({
-            requestID: request.id,
-            directory,
-            reply: approve ? "once" : "reject",
-          });
-        } catch {
-          // A failed reply leaves OpenCode's own ask timeout/deny behavior as
-          // the backstop; retrying would risk a double-reply, so don't.
-        }
+      // Snapshot so a register()/unregister() call triggered mid-tick (e.g.
+      // from a dispatcher event handler) can't mutate the map while it's
+      // being iterated.
+      for (const [sessionID, state] of [...targets.entries()]) {
+        if (stopped) return;
+        if (!targets.has(sessionID)) continue; // unregistered mid-tick
+        await processTarget(sessionID, state);
       }
     }
   }
 
-  async function resolveToolName(request: PendingRequest): Promise<string | undefined> {
+  async function processTarget(sessionID: string, state: TargetState): Promise<void> {
+    let pending: PendingRequest[];
+    try {
+      const result = await client.permission.list({ directory: state.directory });
+      if ((result as { error?: unknown }).error) throw (result as { error?: unknown }).error;
+      pending = asPendingRequests((result as { data?: unknown }).data);
+    } catch (err) {
+      reportFailure(sessionID, "list", state, err);
+      return;
+    }
+    reportRecovery(state);
+
+    for (const request of pending) {
+      if (stopped || !targets.has(sessionID)) return;
+      if (request.sessionID !== sessionID) continue;
+      if (state.replied.has(request.id)) continue;
+
+      const toolName = await resolveToolName(sessionID, state.directory, request);
+      const approve = toolName !== undefined && READ_TOOLS.has(toolName);
+
+      // Mark replied before the network call so a slow reply can't race a
+      // subsequent poll into double-replying the same request.
+      state.replied.add(request.id);
+      try {
+        const result = await client.permission.reply({
+          requestID: request.id,
+          directory: state.directory,
+          reply: approve ? "once" : "reject",
+        });
+        if ((result as { error?: unknown }).error) throw (result as { error?: unknown }).error;
+        reportRecovery(state);
+      } catch (err) {
+        reportFailure(sessionID, "reply", state, err);
+      }
+    }
+  }
+
+  function reportFailure(sessionID: string, context: PermissionResponderErrorContext, state: TargetState, err: unknown): void {
+    if (state.failing) return;
+    state.failing = true;
+    if (!onError) return;
+    try {
+      onError(sessionID, context, err);
+    } catch {
+      // A misbehaving handler must not be able to break the poll loop.
+    }
+  }
+
+  function reportRecovery(state: TargetState): void {
+    state.failing = false;
+  }
+
+  async function resolveToolName(sessionID: string, directory: string, request: PendingRequest): Promise<string | undefined> {
     if (!request.tool) return undefined;
     try {
       const result = await client.session.messages({ sessionID, directory });
@@ -149,8 +210,15 @@ export function startPermissionResponder(
   }
 
   return {
-    cancel(): void {
-      watcher.cancelled = true;
+    register(sessionID: string, directory: string): void {
+      targets.set(sessionID, { directory, replied: new Set(), failing: false });
+    },
+    unregister(sessionID: string): void {
+      targets.delete(sessionID);
+    },
+    stop(): void {
+      stopped = true;
+      targets.clear();
     },
   };
 }
