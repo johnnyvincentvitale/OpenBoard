@@ -13,12 +13,13 @@ Kanban board, and ends with what we'd most like you to test. The
 4. [Your first task in five minutes](#4-your-first-task-in-five-minutes)
 5. [Core concepts](#5-core-concepts)
 6. [Orchestration and multi-agent workflows](#6-orchestration-and-multi-agent-workflows)
-7. [Everyday use](#7-everyday-use)
-8. [Harnesses: OpenCode and Claude Code](#8-harnesses-opencode-and-claude-code)
-9. [Safety notes](#9-safety-notes)
-10. [Known issues and rough edges](#10-known-issues-and-rough-edges)
-11. [What to test and how to report](#11-what-to-test-and-how-to-report)
-12. [Troubleshooting](#12-troubleshooting)
+7. [The OpenBoard plugin and its skills](#7-the-openboard-plugin-and-its-skills)
+8. [Everyday use](#8-everyday-use)
+9. [Harnesses: OpenCode and Claude Code](#9-harnesses-opencode-and-claude-code)
+10. [Safety notes](#10-safety-notes)
+11. [Known issues and rough edges](#11-known-issues-and-rough-edges)
+12. [What to test and how to report](#12-what-to-test-and-how-to-report)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -164,26 +165,79 @@ changed files, and verification results are injected into the child's prompt
 as `PARENT HANDOFFS`. This is how multi-card runs stay coherent: downstream
 agents start from upstream context instead of rediscovering it.
 
-**The bundled plugin.** `plugins/openboard/` packages this workflow as
-installable skills for Claude Code, Codex, and OpenCode:
+**The bundled plugin.** This whole workflow — connect, assess, plan, validate
+profiles, dispatch, verify — is packaged as the OpenBoard plugin's skills for
+Claude Code, Codex, and OpenCode. The next section breaks down what each skill
+does; see [The OpenBoard plugin and its skills](#7-the-openboard-plugin-and-its-skills).
+
+## 7. The OpenBoard plugin and its skills
+
+Everything in the previous section runs through the **OpenBoard plugin** — a
+bundle of skills (plus a small MCP server) that turns a coding-agent session into
+an OpenBoard orchestrator cockpit. It lives in the repo at `plugins/openboard/`,
+which is the canonical copy; personal installs are synced from there. The same
+`skills/` tree is shared across **Claude Code**, **Codex**, and **OpenCode**
+native skills, so the workflow is identical whichever harness you drive from.
+Install steps are in
+[plugins/openboard/README.md](plugins/openboard/README.md) — in short: build and
+`npm link` the `openboard` CLI, then symlink or copy `plugins/openboard` into your
+harness's plugins directory.
+
+Two pieces ship in the plugin:
+
+- **Skills** (`skills/`) — the workflow as invokable steps. In Claude Code they
+  are slash commands (`/startup`, `/board-plan`, …). They're *opt-in*: a session
+  only enters orchestration mode when you invoke one, so unrelated work is never
+  forced onto the board.
+- **A bundled MCP server** (`.mcp.json`) — a local `openboard` server that binds
+  to the selected board and exposes the guarded control surface (see §6). It
+  starts unbound (`openboard mcp`) and is bound with `select_instance`; Done moves
+  require `completedBy` and `integrate_task` requires `confirmReviewed: true`, so
+  a cockpit can't silently accept or merge work.
+
+### The skill files
+
+Each skill is a `skills/<name>/SKILL.md` file. They're built to run in order, but
+you invoke whichever you need:
+
+1. **`startup`** — *run this first.* Connects to (or starts) the intended named
+   instance, proves the TUI / API / MCP are all pointed at the same board, and
+   hands the session the board facts (URL, agent roster, existing cards). Nothing
+   should dispatch or judge cards until startup has established the surface.
+2. **`agent-readiness`** — scores a repository's readiness for unattended agent
+   work and reports the gaps (a runnable build/test command, docs, structure).
+   Report-only — it never creates cards. Optional, but worth running before
+   pointing agents at an unfamiliar repo.
+3. **`board-plan`** — designs the run *before* anything dispatches: the workflow
+   shape (solo pipeline / fan-out / waves / role loop / arena), file-disjoint
+   decomposition, the agent profiles and their model/provider assignments,
+   cards-as-contracts, and the failure policy. Produces a plan you approve.
+4. **`create-profile`** — creates or repairs the custom OpenCode agent profiles a
+   plan calls for, with staged validation (real YAML + OpenCode parse checks away
+   from live config), safe install, an instance restart, and a live-roster proof
+   before any card uses them — so a malformed profile can't quietly break the
+   board.
+5. **`openboard-orchestrator`** — the execution driver: dispatches the planned
+   cards, watches each run past its crash window, reviews worktrees, integrates
+   safely, runs role loops, cleans up ephemeral profiles, and reports only
+   verified state (Review is a checkpoint; Done is your decision).
 
 ```
 startup → agent-readiness → board-plan → create-profile → openboard-orchestrator
 ```
 
-Connect to the board, optionally score the target repo's readiness for
-autonomous work, plan the run together, validate any custom agent profiles,
-then dispatch and verify. Install instructions:
-[plugins/openboard/README.md](plugins/openboard/README.md).
+You stay in the pilot seat throughout: the skills plan, dispatch, and verify, but
+nothing is dispatched, integrated, or accepted without your approval.
 
-## 7. Everyday use
+## 8. Everyday use
 
 **Named instances — one board per repo.** `npm run tui` is fine for a quick
 session, but the daily driver is the CLI, which runs each board as a
 background daemon with its own port, workspace, and database:
 
 ```sh
-openboard add my-repo --workspace /path/to/repo   # register (auto-starts)
+openboard add my-repo --workspace /path/to/repo   # register only (does not start)
+openboard start my-repo                           # start the daemon
 openboard attach my-repo                          # open the TUI
 openboard list                                    # status of all instances
 openboard stop my-repo / start my-repo / remove my-repo / rename old new
@@ -230,7 +284,7 @@ rides straight into the same Integrate — no separate PR round trip. Requires a
 an unset `$EDITOR` on a remote board fails loud with a status message instead
 of silently doing nothing.
 
-## 8. Harnesses: OpenCode and Claude Code
+## 9. Harnesses: OpenCode and Claude Code
 
 Every card has a `HARNESS` field.
 
@@ -255,7 +309,7 @@ What changes:
   `RUN BRANCH` / `RUN COMMIT` / `RESULT` rows show where the work actually
   landed, and harness-created worktrees feed the normal sync/integrate flow.
 
-## 9. Safety notes
+## 10. Safety notes
 
 Read [SECURITY.md](SECURITY.md) before running agents on anything sensitive.
 The short version:
@@ -271,7 +325,7 @@ The short version:
   doesn't delete them. Delete the data directories to actually dispose of
   board history.
 
-## 10. Known issues and rough edges
+## 11. Known issues and rough edges
 
 Things we already know about — no need to report these:
 
@@ -292,7 +346,7 @@ Things we already know about — no need to report these:
   `openrouter/anthropic/...`). Workaround: set the model on an agent profile
   instead.
 
-## 11. What to test and how to report
+## 12. What to test and how to report
 
 The flows we most want exercised, roughly in order:
 
@@ -317,7 +371,7 @@ detail (`enter` on the card) and the instance log
 (`~/.local/share/openboard/<name>/openboard.log`). Rough impressions are as
 welcome as bugs: if something felt confusing, that's a finding.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 **A card errors immediately on Run.** The prompt was never admitted. Check
 `openboard list`, then the instance's `openboard.log`; usually the agent or

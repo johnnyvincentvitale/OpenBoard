@@ -119,13 +119,19 @@ npm run tui            # starts a single self-owned TUI board
 For named-instance testing:
 
 ```sh
-openboard add my-repo --workspace /path/to/your/repo
-openboard attach my-repo
+openboard add my-repo --workspace /path/to/your/repo   # register only (does not start)
+openboard start my-repo                                # start the daemon
+openboard attach my-repo                               # open the TUI
 ```
 
+`openboard add` only registers the instance and `openboard attach` does not start a stopped
+one, so `start` goes between them — or use the one-step shortcut `openboard my-repo`, which
+starts the instance if needed and then attaches.
+
 The board spawns `opencode` and the adapter itself. Dispatched agents work in each task's
-requested directory. The adapter/OpenCode default workspace is your home dir unless you point
-the instance at a repo with `openboard add <name> --workspace <path>` or `BOARD_WORKSPACE`.
+requested directory. There is no home-directory default: named instances always set their
+workspace explicitly (`--workspace` is required), and the raw-env server refuses to start
+unless `BOARD_WORKSPACE` points at an existing directory.
 
 Browser fallback (two terminals):
 ```sh
@@ -175,8 +181,11 @@ Rules of the registry:
   daemon process.
 - `openboard list` reports `running`, `stopped`, `stale-pid`, or `unhealthy`.
   A stale pidfile is cleaned up the next time it is inspected.
-- `openboard attach` (or just `openboard <name>`) starts the instance if needed
-  and then opens the TUI with that instance's board URL.
+- `openboard <name>` (the bare shorthand) starts the instance if needed and then
+  opens the TUI with that instance's board URL.
+- `openboard attach <name>` opens the TUI for an already-running instance; it does
+  not start a stopped one — run `openboard start <name>` first, or use the bare
+  `openboard <name>` shorthand above.
 - When no name is given to `attach`, the default instance is used: the instance
   explicitly marked as default, or the only registered instance.
 
@@ -197,7 +206,7 @@ The instance-resolution env vars are resolved in `src/server/config.ts`:
 |-----------------------------|-----------------------------------------------|--------------------------------------|
 | `OPENBOARD_PORT`            | This instance's adapter (board) port          | `4097` (legacy fallback: `BOARD_PORT`) |
 | `OPENBOARD_DB`              | This instance's SQLite path (board + task DB derive from it) | `board.sqlite` / `board-tasks.sqlite` |
-| `BOARD_WORKSPACE`           | This instance's default workspace (dispatched agents' cwd) | your home directory |
+| `BOARD_WORKSPACE`           | This instance's default workspace (dispatched agents' cwd) | **Required** — the server refuses to start if unset, empty, or not an existing directory (no home-directory default) |
 | `OPENBOARD_OPENCODE_PORT`   | Port for this instance's spawned `opencode serve` | auto-selected free port (never hardcoded 4096) |
 | `OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES` | Allow task and terminal directories outside `BOARD_WORKSPACE` (unsafe for shared instances) | `false` |
 
