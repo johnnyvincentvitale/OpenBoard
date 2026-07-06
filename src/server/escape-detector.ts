@@ -163,6 +163,30 @@ export async function snapshotBaseCheckout(baseRepoDir: string): Promise<string 
  * stays dirty in the same way is not an escape. `snapshotBefore` of `null`
  * (not yet captured, or the base repo wasn't inspectable) is treated as an
  * empty baseline, so a clean-to-escaped repo is still caught.
+ *
+ * `baseRepoDir` must be the actual git repo root, not merely a directory
+ * inside it — see `TaskDispatcher.resolveRepoRoot()`. `git status`/
+ * `git worktree list` both report root-relative paths and the repo root
+ * itself regardless of invocation cwd, so a subdirectory passed here would
+ * make the main-checkout exclusion below compare against the wrong
+ * baseline and silently swallow every change.
+ *
+ * Accepted residual: a write that lands inside a *different, currently
+ * registered* sibling worktree (e.g. one task's bash escape reaching into
+ * another concurrent task's checkout) is excluded here by design, same as
+ * a legitimate sibling worktree appearing mid-run — see the exclusion
+ * below. This function genuinely can't see it either way: a linked
+ * worktree is a nested repository boundary, so `git status` on the base
+ * repo shows one unchanged collapsed line for it regardless of what
+ * changes inside — that's true for both the writing task's check and the
+ * victim task's own check, since both only ever inspect the *base* repo's
+ * status, never a worktree's internal one. The only place this kind of
+ * cross-card contamination becomes visible at all is the victim card's own
+ * Review diff (a `git status`/diff run *inside* that worktree, a different
+ * code path from this module) — deliberately out of scope here, since the
+ * worktree registration itself already assigns ownership and a dedicated
+ * cross-worktree write check would need to run against every other active
+ * worktree on every check, not just the base repo.
  */
 export async function detectBaseCheckoutEscape(
   baseRepoDir: string,

@@ -441,7 +441,7 @@ export class TaskDispatcher implements Dispatcher {
     // path swap above.
     const isolatedForSnapshot = wantsWorktree(task, this.store);
     const baseCommitDir = isolatedForSnapshot
-      ? this.resolveDirectory(task.directory)
+      ? await this.resolveRepoRoot(this.resolveDirectory(task.directory))
       : execDirectory;
     const [baseCommit, dirty, baseCheckoutSnapshot] = await Promise.all([
       resolveHeadCommit(baseCommitDir),
@@ -576,6 +576,26 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   /**
+   * Resolve `dir` to its actual git repo root before any escape-detection
+   * call. `git status`/`git worktree list` both report root-relative paths
+   * and the repo root itself regardless of which subdirectory they're
+   * invoked from — if a task's directory is a repo *subdirectory* rather
+   * than its root, escape-detector.ts's main-checkout exclusion compares
+   * against the wrong baseline, the real root leaks into its "registered
+   * worktree" list, and every changed path ends up "inside" it: a silent,
+   * unconditional `escaped: false` no matter what actually changed. Falls
+   * back to `dir` itself if repoRoot() fails — escape detection must never
+   * throw and hang a run because of this.
+   */
+  private async resolveRepoRoot(dir: string): Promise<string> {
+    try {
+      return await this.worktrees.repoRoot(dir);
+    } catch {
+      return dir;
+    }
+  }
+
+  /**
    * Get (or lazily create) the git worktree for an isolated task. Reuses an
    * already-created worktree so a re-run doesn't collide on the branch; otherwise
    * cuts `board/<taskId>` from the task directory's current branch and records the
@@ -654,8 +674,12 @@ export class TaskDispatcher implements Dispatcher {
     // Re-resolve the task directory to stay inside the workspace boundary even
     // after the worktree has been removed.
     const repoDir = this.resolveDirectory(task.directory);
+    // The escape check specifically needs the repo root, not just any
+    // directory inside it — see resolveRepoRoot(). git checkout/merge below
+    // work fine from a subdirectory, so repoDir itself is left unchanged.
+    const escapeCheckRoot = await this.resolveRepoRoot(repoDir);
 
-    const escapeCheck = await detectBaseCheckoutEscape(repoDir, task.baseCheckoutSnapshot ?? null);
+    const escapeCheck = await detectBaseCheckoutEscape(escapeCheckRoot, task.baseCheckoutSnapshot ?? null);
     if (escapeCheck.escaped) {
       this.store.update(taskId, {
         pending: "base-checkout-escape",
@@ -1100,7 +1124,7 @@ export class TaskDispatcher implements Dispatcher {
    */
   private async blockOnBaseCheckoutEscape(taskId: string, task: Task): Promise<boolean> {
     try {
-      const baseRepoDir = this.resolveDirectory(task.directory);
+      const baseRepoDir = await this.resolveRepoRoot(this.resolveDirectory(task.directory));
       const { escaped, changedPaths } = await detectBaseCheckoutEscape(
         baseRepoDir,
         task.baseCheckoutSnapshot ?? null,

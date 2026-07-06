@@ -828,6 +828,46 @@ describe("TaskDispatcher", () => {
       expect(store.get(taskB.id)?.column).toBe("review");
       expect(store.get(taskB.id)?.pending).toBeUndefined();
     });
+
+    it("still catches a base-checkout escape when the task's directory is a repo subdirectory, not the root", async () => {
+      // git status / git worktree list both report root-relative paths and
+      // the repo root itself regardless of invocation cwd — if the task's
+      // directory (a repo subdirectory here) is used unnormalized, the real
+      // root leaks into the "registered worktree" exclusion list and every
+      // changed path reads as "inside" it: escaped:false unconditionally,
+      // no matter what actually changed at the true root.
+      store.updateSettings({ worktreeDefault: true });
+      const subdir = join(gitProjectDir, "subdir");
+      mkdirSync(subdir, { recursive: true });
+      writeFileSync(join(subdir, "nested.txt"), "nested\n");
+      execFileSync("git", ["add", "-A"], { cwd: gitProjectDir });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "--no-gpg-sign", "-m", "add subdir"], {
+        cwd: gitProjectDir,
+      });
+
+      const task = createTask({ directory: subdir });
+      client.nextSessionId = "ses_subdir_escape";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-escape-subdir"),
+      });
+
+      await dispatcher.run(task.id);
+
+      // The escape lands at the true repo ROOT, not inside the task's
+      // subdirectory — exactly the shape a bash escape targeting an absolute
+      // base-checkout path would produce.
+      writeFileSync(join(gitProjectDir, "escaped-from-root.txt"), "escaped write at root\n");
+
+      queueFinishedTurn();
+      await waitFor(() => store.get(task.id)?.runState !== "running", 3000);
+
+      const blocked = store.get(task.id);
+      expect(blocked?.column).toBe("in_progress");
+      expect(blocked?.pending).toBe("base-checkout-escape");
+      expect(blocked?.escapeDetectedPaths).toEqual(["escaped-from-root.txt"]);
+    });
   });
 
   describe("stall detection and recovery nudges", () => {
