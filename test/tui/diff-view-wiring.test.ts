@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handleKeypress, renderApp, shouldAutoRefresh } from "../../src/tui/index";
+import { applyDiffScrollTop, captureDiffScrollTop, handleKeypress, renderApp, shouldAutoRefresh } from "../../src/tui/index";
 import { createMockInstanceProvider, openDiffView } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
 
@@ -251,12 +251,14 @@ describe("TUI diff view navigation and exit", () => {
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
     expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
-    expect(s.detailScrollTop["diff-patch"]).toBe(0);
+    // Hunk nav now targets the hunk's header row in the whole patch (hunk 1 header at row 2),
+    // which the viewport scrolls to — no longer a rotation-model 0.
+    expect(s.detailScrollTop["diff-patch"]).toBe(2);
 
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
     expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 2 });
-    expect(s.detailScrollTop["diff-patch"]).toBe(0);
+    expect(s.detailScrollTop["diff-patch"]).toBe(4); // hunk 2 header at row 4
 
     await handleKeypress({ sequence: "\u001b[D" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
@@ -353,7 +355,9 @@ describe("TUI diff view open-in-editor (e)", () => {
   it("terminal editor happy path (locked-scroll mode) uses the live scroll value", async () => {
     process.env.EDITOR = "vim";
     const s = openedState({ fileSelectionLocked: true });
-    s.detailScrollTop = { "diff-patch": 1 };
+    // detailScrollTop is now a whole-patch scroll row. a.ts hunk 0's header is row 0, so its
+    // body starts at row 1; row 2 (`-old`) is body offset 1 within the hunk.
+    s.detailScrollTop = { "diff-patch": 2 };
     const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
     const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() } });
 
@@ -548,5 +552,64 @@ describe("TUI diff view open-in-editor (e)", () => {
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
     expect(runTerminalEditor).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("diff scroll capture/apply against the live renderable", () => {
+  const DIFF_PATCH_SCROLL_ID = "diff-patch";
+
+  function fakeCode(scrollY: number, maxScrollY: number) {
+    return { scrollY, maxScrollY };
+  }
+
+  function fakeRenderer(byId: Record<string, unknown>) {
+    return { root: { findDescendantById: (id: string) => byId[id] } };
+  }
+
+  function diffState(detailScrollTop: Record<string, number> = {}) {
+    return { diffView: { kind: "diff" }, detailScrollTop } as any;
+  }
+
+  it("captures the live viewport scrollY into state (so mouse-wheel scroll survives a rebuild)", () => {
+    const s = diffState({ [DIFF_PATCH_SCROLL_ID]: 0 });
+    const renderer = fakeRenderer({ [`${DIFF_PATCH_SCROLL_ID}-left-code`]: fakeCode(7, 40) });
+    captureDiffScrollTop(s, renderer as any);
+    expect(s.detailScrollTop[DIFF_PATCH_SCROLL_ID]).toBe(7);
+  });
+
+  it("is a no-op when the diff pane is not mounted", () => {
+    const s = diffState({ [DIFF_PATCH_SCROLL_ID]: 3 });
+    captureDiffScrollTop(s, fakeRenderer({}) as any);
+    expect(s.detailScrollTop[DIFF_PATCH_SCROLL_ID]).toBe(3);
+  });
+
+  it("applies the tracked scroll onto the code pane, clamped to maxScrollY, and writes the clamp back", () => {
+    const code = fakeCode(0, 5);
+    const s = diffState({ [DIFF_PATCH_SCROLL_ID]: 99 });
+    applyDiffScrollTop(s, fakeRenderer({ [`${DIFF_PATCH_SCROLL_ID}-left-code`]: code }) as any);
+    expect(code.scrollY).toBe(5);
+    expect(s.detailScrollTop[DIFF_PATCH_SCROLL_ID]).toBe(5);
+  });
+
+  it("keeps split-view panes in sync by applying one position to both sides", () => {
+    const left = fakeCode(0, 20);
+    const right = fakeCode(0, 20);
+    const s = diffState({ [DIFF_PATCH_SCROLL_ID]: 4 });
+    applyDiffScrollTop(
+      s,
+      fakeRenderer({
+        [`${DIFF_PATCH_SCROLL_ID}-left-code`]: left,
+        [`${DIFF_PATCH_SCROLL_ID}-right-code`]: right,
+      }) as any,
+    );
+    expect(left.scrollY).toBe(4);
+    expect(right.scrollY).toBe(4);
+  });
+
+  it("skips non-diff views entirely", () => {
+    const code = fakeCode(0, 5);
+    const s = { diffView: { kind: "no-git" }, detailScrollTop: { [DIFF_PATCH_SCROLL_ID]: 2 } } as any;
+    applyDiffScrollTop(s, fakeRenderer({ [`${DIFF_PATCH_SCROLL_ID}-left-code`]: code }) as any);
+    expect(code.scrollY).toBe(0);
   });
 });

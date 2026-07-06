@@ -9,6 +9,8 @@ import {
   applyDiffResponse,
   canOpenDiffView,
   clampDiffPatchScrollTop,
+  clampFullPatchScrollTop,
+  fullPatchHunkBodyOffset,
   createLoadingDiffViewState,
   diffViewKeyHints,
   diffPatchScrollTop,
@@ -481,14 +483,16 @@ describe("renderDiffView", () => {
     expect(nodesByType(tree, "Diff")[0].props.id).toBe(DIFF_PATCH_SCROLL_ID);
   });
 
-  it("passes locked patch scroll state into the diff renderer", () => {
+  it("passes the whole patch to the diff renderer (scroll is applied to the live viewport, not the string)", () => {
     const state = applyDiffResponse(createLoadingDiffViewState(task()), {
       kind: "diff",
       files: [diffFile({ patch: "line0\nline1\nline2\n" })],
       capped: false,
     });
+    // A non-zero scroll value must NOT rewrite/rotate the rendered string — the DiffRenderable
+    // gets the full patch and scrolls its own viewport, keeping its gutter synced.
     const tree = renderDiffView(fakeUi(), fakeTheme(), { [DIFF_PATCH_SCROLL_ID]: 1 }, state, 200);
-    expect(nodesByType(tree, "Diff")[0].props.diff.startsWith("line1\nline2")).toBe(true);
+    expect(nodesByType(tree, "Diff")[0].props.diff).toBe("line0\nline1\nline2\n");
   });
 
   it("renders the patch header hunk count so one-hunk files do not look stuck", () => {
@@ -501,18 +505,21 @@ describe("renderDiffView", () => {
     expect(textOf(tree)).toContain("1 hunk");
   });
 
-  it("renders the selected hunk at the top of the patch pane", () => {
+  it("renders the whole patch in order and targets the selected hunk via scrollTop", () => {
+    const patch = "preamble\n@@ -1,1 +1,1 @@\n-a\n+b\n@@ -5,1 +5,1 @@\n-c\n+d\n@@ -9,1 +9,1 @@\n-e\n+f\n";
     const state = applyDiffResponse(createLoadingDiffViewState(task()), {
       kind: "diff",
-      files: [diffFile({ patch: "preamble\n@@ -1,1 +1,1 @@\n-a\n+b\n@@ -5,1 +5,1 @@\n-c\n+d\n@@ -9,1 +9,1 @@\n-e\n+f\n" })],
+      files: [diffFile({ patch })],
       capped: false,
     });
     const selected = moveHunkSelection(moveHunkSelection(state, 1), 1);
     const tree = renderDiffView(fakeUi(), fakeTheme(), {}, selected, 200);
     const diff = nodesByType(tree, "Diff")[0];
     expect(textOf(tree)).toContain("hunk 2/3");
-    expect(diff.props.diff.startsWith("preamble\n@@ -5,1 +5,1 @@")).toBe(true);
-    expect(diff.props.diff).toContain("-a");
+    // The patch is rendered whole and in original order; the selected hunk is brought to the
+    // top by scrolling the viewport, whose row target is the hunk-2 header line (index 4).
+    expect(diff.props.diff).toBe(patch);
+    expect(diffPatchScrollTop(selected)).toBe(4);
   });
 
   it("stays split below the old split width threshold", () => {
@@ -547,6 +554,47 @@ describe("renderDiffView", () => {
   it("shows a fallback message when no card has opened the view yet", () => {
     const tree = renderDiffView(fakeUi(), fakeTheme(), {}, undefined, 200);
     expect(textOf(tree)).toContain("Select a Review card");
+  });
+});
+
+describe("clampFullPatchScrollTop", () => {
+  const patch = "preamble\n@@ -1,1 +1,1 @@\n-a\n+b\n"; // 5 lines (trailing "\n" → empty last)
+
+  it("returns 0 for an undefined patch", () => {
+    expect(clampFullPatchScrollTop(undefined, 3)).toBe(0);
+  });
+
+  it("clamps to the full line count, header lines included (not just body lines)", () => {
+    // 5 lines → max index 4. The legacy body-only clamp would have stopped at 1.
+    expect(clampFullPatchScrollTop(patch, 99)).toBe(4);
+    expect(clampFullPatchScrollTop(patch, 4)).toBe(4);
+  });
+
+  it("floors negatives to 0 and truncates fractionals", () => {
+    expect(clampFullPatchScrollTop(patch, -5)).toBe(0);
+    expect(clampFullPatchScrollTop(patch, 2.9)).toBe(2);
+  });
+});
+
+describe("fullPatchHunkBodyOffset", () => {
+  // hunk 0 header at row 1, hunk 1 header at row 4.
+  const patch = "preamble\n@@ -1,1 +1,1 @@\n-a\n+b\n@@ -5,1 +5,1 @@\n-c\n+d\n";
+
+  it("returns 0 for rows at or above the hunk's first body line", () => {
+    expect(fullPatchHunkBodyOffset(patch, 0, 0)).toBe(0); // top of file
+    expect(fullPatchHunkBodyOffset(patch, 0, 1)).toBe(0); // on the header row
+    expect(fullPatchHunkBodyOffset(patch, 0, 2)).toBe(0); // first body line → offset 0
+  });
+
+  it("counts rows scrolled into the hunk body", () => {
+    expect(fullPatchHunkBodyOffset(patch, 0, 3)).toBe(1); // second body line of hunk 0
+    expect(fullPatchHunkBodyOffset(patch, 1, 5)).toBe(0); // first body line of hunk 1 (header row 4)
+    expect(fullPatchHunkBodyOffset(patch, 1, 6)).toBe(1);
+  });
+
+  it("returns 0 for an out-of-range hunk index or missing patch", () => {
+    expect(fullPatchHunkBodyOffset(patch, 9, 6)).toBe(0);
+    expect(fullPatchHunkBodyOffset(undefined, 0, 6)).toBe(0);
   });
 });
 

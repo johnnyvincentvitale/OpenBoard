@@ -63,7 +63,8 @@ import {
   toggleViewOverride as toggleDiffViewOverride,
   moveHunkSelection as moveDiffHunkSelection,
   diffPatchScrollTop,
-  clampDiffPatchScrollTop,
+  clampFullPatchScrollTop,
+  fullPatchHunkBodyOffset,
   toggleFileSelectionLock as toggleDiffFileSelectionLock,
   diffViewHeaderLabel,
   diffViewKeyHints,
@@ -452,6 +453,10 @@ interface TuiState {
   commentDraft?: CommentDraftState;
   // Full-screen diff view (v on a selected Review card)
   diffView?: DiffViewState;
+  // Set by diff keyboard scroll/hunk-nav so the next render() treats `detailScrollTop`
+  // as authoritative (applies it to the diff renderable) instead of capturing the live
+  // renderable's scrollY. Mouse-wheel scroll leaves it false so that scroll is captured.
+  diffScrollIntent?: boolean;
 }
 
 /** Result of running a terminal (foreground) editor to completion. */
@@ -531,6 +536,51 @@ interface TuiActions {
   setupWorkspace: () => Promise<void>;
   // Open-in-editor (e on a DiffView selection)
   editorSpawner: EditorSpawner;
+}
+
+/** Minimal shape of OpenTUI's scrollable code renderable (a TextBufferRenderable). */
+interface ScrollableCodeRenderable {
+  scrollY: number;
+  readonly maxScrollY: number;
+}
+
+/** Just the slice of the renderer the diff-scroll helpers touch. */
+interface DiffScrollRenderer {
+  root: { findDescendantById(id: string): unknown };
+}
+
+/** The DiffRenderable names its inner code panes `<id>-<side>-code`; unified view builds
+ * only the left one, split builds both. Returns whichever currently exist. */
+function findDiffCodeRenderables(renderer: DiffScrollRenderer): ScrollableCodeRenderable[] {
+  const found: ScrollableCodeRenderable[] = [];
+  for (const side of ["left", "right"] as const) {
+    const node = renderer.root.findDescendantById(`${DIFF_PATCH_SCROLL_ID}-${side}-code`);
+    if (node && typeof (node as { scrollY?: unknown }).scrollY === "number") {
+      found.push(node as ScrollableCodeRenderable);
+    }
+  }
+  return found;
+}
+
+/** Read the live viewport scrollY back into state so mouse-wheel scroll survives the next
+ * root-tree rebuild. No-op when the diff pane isn't mounted. */
+export function captureDiffScrollTop(state: TuiState, renderer: DiffScrollRenderer): void {
+  if (state.diffView?.kind !== "diff") return;
+  const [code] = findDiffCodeRenderables(renderer);
+  if (code) state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = code.scrollY;
+}
+
+/** Push the tracked scrollTop onto the freshly-built code pane(s), clamped to the real
+ * maxScrollY, and write the clamped value back so a held key can't run the counter past the
+ * bottom. Both panes share one position (split view keeps them in sync). */
+export function applyDiffScrollTop(state: TuiState, renderer: DiffScrollRenderer): void {
+  if (state.diffView?.kind !== "diff") return;
+  const codes = findDiffCodeRenderables(renderer);
+  if (codes.length === 0) return;
+  const desired = Math.max(0, Math.trunc(state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0));
+  const clamped = Math.min(desired, codes[0].maxScrollY);
+  for (const code of codes) code.scrollY = clamped;
+  state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clamped;
 }
 
 export async function runOpenBoardTui(
@@ -616,10 +666,23 @@ export async function runOpenBoardTui(
     if (shuttingDown) return;
 
     try {
+      // Diff scroll lives on the DiffRenderable's own viewport, but the root tree is
+      // destroyed and rebuilt on every render (see root-lifecycle.ts). Capture the live
+      // scrollY into state before teardown so mouse-wheel scroll survives the rebuild —
+      // unless a scroll key just set the position, in which case state is authoritative.
+      if (state.diffScrollIntent) {
+        state.diffScrollIntent = false;
+      } else {
+        captureDiffScrollTop(state, renderer);
+      }
       resetTerminalModes();
       state.terminalCols = renderer.terminalWidth;
       state.terminalRows = renderer.terminalHeight;
       mountRoot(renderApp(ui, state));
+      // Re-apply the tracked scroll onto the freshly-built renderable, clamped to its real
+      // maxScrollY (which reflects wrapping and viewport height). Keeps the line-number
+      // gutter synced with its code on keyboard scroll — the whole point of this pass.
+      applyDiffScrollTop(state, renderer);
       renderer.requestRender();
     } catch (error) {
       setError(error, "render failed");
@@ -3656,7 +3719,9 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
 
   if (isEnterKey(key)) {
     state.diffView = toggleDiffFileSelectionLock(state.diffView);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = 0;
+    // Landing in scroll-lock focuses the selected hunk (top of file when none selected).
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.diffScrollIntent = true;
     actions.render();
     return;
   }
@@ -3665,12 +3730,14 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
     if (state.diffView.fileSelectionLocked) {
       const selectedFile = state.diffView.files[state.diffView.selectedFileIndex];
       const current = state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0;
-      state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampDiffPatchScrollTop(selectedFile?.patch, current + 1);
+      state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampFullPatchScrollTop(selectedFile?.patch, current + 1);
+      state.diffScrollIntent = true;
       actions.render();
       return;
     }
     state.diffView = moveDiffFileSelection(state.diffView, 1);
     state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.diffScrollIntent = true;
     actions.render();
     return;
   }
@@ -3678,24 +3745,28 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
     if (state.diffView.fileSelectionLocked) {
       const selectedFile = state.diffView.files[state.diffView.selectedFileIndex];
       const current = state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0;
-      state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampDiffPatchScrollTop(selectedFile?.patch, current - 1);
+      state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampFullPatchScrollTop(selectedFile?.patch, current - 1);
+      state.diffScrollIntent = true;
       actions.render();
       return;
     }
     state.diffView = moveDiffFileSelection(state.diffView, -1);
     state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.diffScrollIntent = true;
     actions.render();
     return;
   }
   if (keyName === "right" || key.sequence === "\u001b[C") {
     state.diffView = moveDiffHunkSelection(state.diffView, 1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = 0;
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.diffScrollIntent = true;
     actions.render();
     return;
   }
   if (keyName === "left" || key.sequence === "\u001b[D") {
     state.diffView = moveDiffHunkSelection(state.diffView, -1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = 0;
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.diffScrollIntent = true;
     actions.render();
     return;
   }
@@ -3753,7 +3824,20 @@ async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): P
     return;
   }
 
-  const liveScrollTop = state.detailScrollTop[DIFF_PATCH_SCROLL_ID];
+  // `detailScrollTop` is now a whole-patch scroll row; `editorTargetForSelection` still wants a
+  // per-hunk body offset, so convert against the selected hunk. Only meaningful in scroll-lock
+  // (file-nav mode ignores liveScrollTop and jumps to the hunk's own start line).
+  const selectedFileForJump = diffView.files[diffView.selectedFileIndex];
+  const selectedHunkIndex = diffView.selectedHunk?.fileIndex === diffView.selectedFileIndex
+    ? diffView.selectedHunk.hunkIndex
+    : 0;
+  const liveScrollTop = diffView.fileSelectionLocked
+    ? fullPatchHunkBodyOffset(
+        selectedFileForJump?.patch,
+        selectedHunkIndex,
+        state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0,
+      )
+    : undefined;
   const target = editorTargetForSelection(diffView, liveScrollTop);
   if (!target.ok) {
     state.status = target.reason;

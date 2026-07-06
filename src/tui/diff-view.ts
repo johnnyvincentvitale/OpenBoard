@@ -173,13 +173,41 @@ export function diffPatchScrollTop(state: DiffViewState): number {
   return offsets[state.selectedHunk.hunkIndex] ?? 0;
 }
 
-/** Patch text presented to DiffRenderable. Selected hunks are rotated to the top
- * without changing the total line count, keeping the diff pane geometry stable.
+/** Legacy rotation-model clamp (bounds a scrollTop to the scrollable body-line count).
+ * Retained for the pure-string helpers/tests below; the live diff pane now scrolls the
+ * DiffRenderable's own viewport (see `clampFullPatchScrollTop`).
  */
 export function clampDiffPatchScrollTop(patch: string | undefined, value: number): number {
   if (!patch) return 0;
   const max = Math.max(0, countScrollablePatchLines(patch) - 1);
   return Math.max(0, Math.min(Math.trunc(value), max));
+}
+
+/** Clamp a full-patch scrollTop — a row index into the entire patch text, header lines
+ * included — into `[0, lineCount-1]`. This is the unit the DiffRenderable's native
+ * `scrollY` uses now that the pane renders the whole patch and scrolls its own viewport
+ * (the wiring layer re-clamps against the live `maxScrollY`, which also accounts for wrap).
+ */
+export function clampFullPatchScrollTop(patch: string | undefined, value: number): number {
+  if (!patch) return 0;
+  const max = Math.max(0, patch.split("\n").length - 1);
+  return Math.max(0, Math.min(Math.trunc(value), max));
+}
+
+/** Maps a full-patch scrollTop to the body offset *within* `hunkIndex`, so the editor-jump
+ * layer can keep passing `editorTargetForSelection` a per-hunk body offset even though the
+ * pane now tracks a whole-patch scroll position. Rows at or above the hunk's first body line
+ * resolve to 0; `editorTargetForSelection` clamps the upper end into the hunk's own range.
+ */
+export function fullPatchHunkBodyOffset(
+  patch: string | undefined,
+  hunkIndex: number,
+  scrollTop: number,
+): number {
+  const offsets = hunkLineOffsets(patch);
+  const headerRow = offsets[hunkIndex];
+  if (headerRow === undefined) return 0;
+  return Math.max(0, Math.trunc(scrollTop) - (headerRow + 1));
 }
 
 function scrollPatchText(patch: string, scrollTop: number): string {
@@ -541,9 +569,13 @@ export function renderDiffView(
     ui.Text({ content: view === "split" ? "split" : "inline", fg: theme.muted, height: 1 }),
   );
 
-  const renderPatch = selectedFile
-    ? diffPatchForRender(state, selectedFile, scrollState[DIFF_PATCH_SCROLL_ID] ?? 0)
-    : undefined;
+  // The pane now renders the whole patch and lets DiffRenderable scroll its own viewport,
+  // so the line-number gutter (which the component derives from the real hunk headers) stays
+  // pinned to its code. Scroll position is applied to the live renderable by the wiring layer
+  // (src/tui/index.ts) after mount, not by rewriting this string. `scrollState` is retained in
+  // the signature for callers/tests; it no longer transforms the rendered content.
+  void scrollState;
+  const renderPatch = selectedFile?.patch ? selectedFile.patch : undefined;
   const patchBody: VChild = renderPatch
     ? ui.h(ui.DiffRenderable, {
         id: DIFF_PATCH_SCROLL_ID,
