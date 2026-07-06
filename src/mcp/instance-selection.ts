@@ -18,6 +18,7 @@ export interface CurrentSelection {
   source: string;
   instanceName?: string;
   boardUrl?: string;
+  port?: number;
   workspace?: string;
   dbPath?: string;
   boardTokenPresent: boolean;
@@ -31,6 +32,7 @@ export interface SelectedInstanceTarget {
 
 type EnvLike = BoardClientOptions["env"] & {
   OPENBOARD_INSTANCE_NAME?: string;
+  OPENBOARD_INSTANCE_PORT?: string;
   OPENBOARD_INSTANCE_WORKSPACE?: string;
   OPENBOARD_INSTANCE_DB_PATH?: string;
   OPENBOARD_SELECTION_SOURCE?: string;
@@ -79,6 +81,10 @@ export async function resolveInstanceTarget(name: string, options: BoardClientOp
         OPENCODE_BOARD_URL: runtime.boardUrl,
         OPENBOARD_API_TOKEN: definition.boardToken,
         OPENBOARD_INSTANCE_NAME: definition.name,
+        OPENBOARD_INSTANCE_PORT: String(definition.port),
+        OPENBOARD_INSTANCE_WORKSPACE: definition.workspace,
+        OPENBOARD_INSTANCE_DB_PATH: definition.dbPath,
+        OPENBOARD_SELECTION_SOURCE: "select_instance",
       },
     },
   };
@@ -102,6 +108,7 @@ export function currentSelectionFromOptions(options: BoardClientOptions = {}): C
   const env = selectionEnv(options);
   const boardUrl = options.boardUrl ?? env.OPENCODE_BOARD_URL;
   const instanceName = env.OPENBOARD_INSTANCE_NAME?.trim() || undefined;
+  const port = parsePort(env.OPENBOARD_INSTANCE_PORT);
   const source = env.OPENBOARD_SELECTION_SOURCE?.trim()
     || (options.boardUrl ? "explicit boardUrl option" : env.OPENCODE_BOARD_URL ? "explicit OPENCODE_BOARD_URL" : instanceName ? "OPENBOARD_INSTANCE_NAME" : "none");
 
@@ -110,6 +117,7 @@ export function currentSelectionFromOptions(options: BoardClientOptions = {}): C
     source,
     ...(instanceName !== undefined ? { instanceName } : {}),
     ...(boardUrl?.trim() ? { boardUrl: boardUrl.trim() } : {}),
+    ...(port !== undefined ? { port } : {}),
     ...(env.OPENBOARD_INSTANCE_WORKSPACE?.trim() ? { workspace: env.OPENBOARD_INSTANCE_WORKSPACE.trim() } : {}),
     ...(env.OPENBOARD_INSTANCE_DB_PATH?.trim() ? { dbPath: env.OPENBOARD_INSTANCE_DB_PATH.trim() } : {}),
     boardTokenPresent: Boolean(env.OPENBOARD_API_TOKEN?.trim()),
@@ -148,6 +156,7 @@ export function mergeHealthIdentity(selection: CurrentSelection, health: BoardHe
     selected: true,
     instanceName: health.identity.instanceName ?? selection.instanceName,
     boardUrl: health.identity.boardUrl,
+    port: health.identity.port ?? selection.port,
     workspace: health.identity.workspace,
     dbPath: health.identity.dbPath,
     boardTokenPresent: selection.boardTokenPresent || health.identity.boardTokenPresent,
@@ -161,6 +170,7 @@ function selectionEnv(options: BoardClientOptions): EnvLike {
       OPENCODE_BOARD_URL: env.OPENCODE_BOARD_URL,
       OPENBOARD_API_TOKEN: env.OPENBOARD_API_TOKEN,
       OPENBOARD_INSTANCE_NAME: env.OPENBOARD_INSTANCE_NAME,
+      OPENBOARD_INSTANCE_PORT: env.OPENBOARD_INSTANCE_PORT,
       OPENBOARD_INSTANCE_WORKSPACE: env.OPENBOARD_INSTANCE_WORKSPACE,
       OPENBOARD_INSTANCE_DB_PATH: env.OPENBOARD_INSTANCE_DB_PATH,
       OPENBOARD_SELECTION_SOURCE: env.OPENBOARD_SELECTION_SOURCE,
@@ -170,8 +180,16 @@ function selectionEnv(options: BoardClientOptions): EnvLike {
     OPENCODE_BOARD_URL: process.env.OPENCODE_BOARD_URL,
     OPENBOARD_API_TOKEN: process.env.OPENBOARD_API_TOKEN,
     OPENBOARD_INSTANCE_NAME: process.env.OPENBOARD_INSTANCE_NAME,
+    OPENBOARD_INSTANCE_PORT: process.env.OPENBOARD_INSTANCE_PORT,
     OPENBOARD_INSTANCE_WORKSPACE: process.env.OPENBOARD_INSTANCE_WORKSPACE,
     OPENBOARD_INSTANCE_DB_PATH: process.env.OPENBOARD_INSTANCE_DB_PATH,
     OPENBOARD_SELECTION_SOURCE: process.env.OPENBOARD_SELECTION_SOURCE,
   };
+}
+
+function parsePort(value: string | undefined): number | undefined {
+  if (!value?.trim()) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+  return parsed;
 }

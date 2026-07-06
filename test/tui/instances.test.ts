@@ -331,6 +331,7 @@ describe("TUI label cleanup", () => {
     const text = textOf(app);
     expect(text).toContain("INSTANCE alpha:4097");
     expect(text).toContain("WORKSPACE /work/alpha");
+    expect(text).toContain("DB /data/alpha.sqlite");
     expect(text).toContain("1 TASK");
     expect(text).toContain("Board ok · OpenCode 1.2.3");
   });

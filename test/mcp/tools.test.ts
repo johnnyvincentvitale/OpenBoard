@@ -31,6 +31,7 @@ const SELECTED_ENV = {
   OPENCODE_BOARD_URL: "http://127.0.0.1:4999",
   OPENBOARD_API_TOKEN: "secret-token",
   OPENBOARD_INSTANCE_NAME: "alpha",
+  OPENBOARD_INSTANCE_PORT: "4999",
   OPENBOARD_INSTANCE_WORKSPACE: "/repo/alpha",
   OPENBOARD_INSTANCE_DB_PATH: "/data/alpha/board.sqlite",
   OPENBOARD_SELECTION_SOURCE: "cli --instance",
@@ -428,6 +429,7 @@ describe("MCP orchestrator tools", () => {
         source: "cli --instance",
         instanceName: "alpha",
         boardUrl: "http://127.0.0.1:4999",
+        port: 4999,
         workspace: "/repo/alpha",
         dbPath: "/data/alpha/board.sqlite",
         boardTokenPresent: true,
@@ -471,7 +473,14 @@ describe("MCP orchestrator tools", () => {
       agentCount: 1,
       taskCount: 1,
       mcpStartedAt: "2026-07-04T00:00:00.000Z",
-      selection: { instanceName: "alpha", boardTokenPresent: true },
+      selection: {
+        instanceName: "alpha",
+        boardUrl: "http://127.0.0.1:4999",
+        port: 4999,
+        workspace: "/repo/alpha",
+        dbPath: "/data/alpha/board.sqlite",
+        boardTokenPresent: true,
+      },
     });
     expect(JSON.stringify(result)).not.toContain("secret-token");
   });

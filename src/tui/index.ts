@@ -1315,6 +1315,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
   let healthLabel = boardHealthLabel(state);
   let instanceLabel = "";
   let workspaceLabel = "";
+  let dbLabel = "";
   let filterLabel = "";
 
   if (state.viewState.view === "board") {
@@ -1322,8 +1323,10 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     if (currentInstance) {
       instanceLabel = ` · INSTANCE ${currentInstance.definition.name}:${currentInstance.definition.port}`;
       workspaceLabel = `WORKSPACE ${shortPath(currentInstance.definition.workspace)}`;
+      dbLabel = `DB ${shortPath(state.health?.identity?.dbPath ?? currentInstance.definition.dbPath)}`;
     } else {
       workspaceLabel = `WORKSPACE ${shortPath(state.cwd)}`;
+      if (state.health?.identity?.dbPath) dbLabel = `DB ${shortPath(state.health.identity.dbPath)}`;
     }
     if (state.boardFilter) filterLabel = `FILTER ${state.boardFilter.kind}:${state.boardFilter.value}`;
   } else if (state.viewState.view === "launch") {
@@ -1333,6 +1336,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     refreshed = "";
     healthLabel = "";
     workspaceLabel = "";
+    dbLabel = "";
   } else if (state.viewState.view === "workspaceGate") {
     connection = "SETUP";
     host = "";
@@ -1340,6 +1344,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     refreshed = "";
     healthLabel = "";
     workspaceLabel = "";
+    dbLabel = "";
   } else if (state.viewState.view === "switcher") {
     connection = "SWITCHER";
     host = "";
@@ -1347,6 +1352,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     refreshed = "";
     healthLabel = "";
     workspaceLabel = "";
+    dbLabel = "";
   } else if (state.viewState.view === "archive") {
     connection = "ARCHIVE";
     host = "";
@@ -1354,6 +1360,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     refreshed = "";
     healthLabel = "";
     workspaceLabel = "";
+    dbLabel = "";
   } else if (state.viewState.view === "diff") {
     connection = "DIFF";
     host = "";
@@ -1361,6 +1368,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     refreshed = "";
     healthLabel = "";
     workspaceLabel = "";
+    dbLabel = "";
   }
 
   return ui.Box(
@@ -1374,7 +1382,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     },
     ui.Box({ flexGrow: 1 }),
     ui.Text({
-      content: [connection, host, instanceLabel.replace(/^ · /, ""), workspaceLabel, filterLabel, taskLabel, refreshed, healthLabel].filter(Boolean).join(" · "),
+      content: [connection, host, instanceLabel.replace(/^ · /, ""), workspaceLabel, dbLabel, filterLabel, taskLabel, refreshed, healthLabel].filter(Boolean).join(" · "),
       fg: state.error ? COLORS.bright : COLORS.muted,
       height: 1,
       truncate: true,

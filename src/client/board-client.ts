@@ -34,7 +34,7 @@ export interface BoardClientOptions {
   cwd?: string;
   fetch?: FetchLike;
   stat?: StatLike;
-  env?: Partial<Pick<NodeJS.ProcessEnv, "OPENCODE_BOARD_URL" | "OPENBOARD_API_TOKEN" | "OPENBOARD_INSTANCE_NAME" | "OPENBOARD_INSTANCE_WORKSPACE" | "OPENBOARD_INSTANCE_DB_PATH" | "OPENBOARD_SELECTION_SOURCE">>;
+  env?: Partial<Pick<NodeJS.ProcessEnv, "OPENCODE_BOARD_URL" | "OPENBOARD_API_TOKEN" | "OPENBOARD_INSTANCE_NAME" | "OPENBOARD_INSTANCE_WORKSPACE" | "OPENBOARD_INSTANCE_DB_PATH" | "OPENBOARD_INSTANCE_PORT" | "OPENBOARD_SELECTION_SOURCE">>;
   requireExplicitBoardUrl?: boolean;
 }
 
