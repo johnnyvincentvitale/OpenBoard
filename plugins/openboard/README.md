@@ -10,33 +10,28 @@ Multi-platform: the same `skills/` tree is used by **Claude Code** (`.claude-plu
 ## Install
 
 The canonical plugin package is this directory inside the OpenBoard repo. It is
-shipped as source, so the MCP server must be built before the plugin can connect:
+shipped as source and uses the installed `openboard` CLI for MCP:
 
 ```sh
 cd /path/to/openboard
 npm install
-npm run build:mcp          # produces dist/mcp/server.mjs
+npm run build:app
+npm link                   # exposes the `openboard` CLI on your PATH
 ```
 
 Then install it into your agent harness:
 
 - **Claude Code** — symlink or copy `plugins/openboard` into your Claude Code
-  plugins directory (e.g. `~/.claude/plugins/openboard`). Symlinking keeps this
-  copy authoritative and lets `mcp-server.mjs` resolve the bundle through the
-  symlink.
+  plugins directory (e.g. `~/.claude/plugins/openboard`).
 - **Codex** — follow Codex CLI plugin conventions for the `.codex-plugin`
   directory.
 - **OpenCode native** — copy or symlink `plugins/openboard/skills/` into your
   OpenCode skills directory.
 
-If you copy the plugin elsewhere, the bootstrap script can no longer find
-`dist/mcp/server.mjs` automatically. Set the absolute path explicitly:
-
-```sh
-export OPENCODE_BOARD_MCP_SERVER=/absolute/path/to/openboard/dist/mcp/server.mjs
-```
-
-The `.mcp.json` entry will use that path instead of the relative resolution.
+The `.mcp.json` entry runs `openboard mcp`, so copied and symlinked plugin
+installs behave the same way. It starts unbound; use `select_instance` from the
+MCP client or start a bound worker process with `openboard mcp --instance
+<name>` when the instance is already known.
 
 ## Source Of Truth
 
@@ -53,10 +48,9 @@ Keep shared content identical across harnesses:
 Keep harness-specific wrappers specific to their harness:
 
 - `.codex-plugin/plugin.json` for Codex metadata/default prompts.
-- `.claude-plugin/plugin.json` plus `hooks/` for SessionStart-capable harnesses
-  such as Claude Code and observed Codex CLI plugin sessions.
+- `.claude-plugin/plugin.json` for Claude plugin metadata.
 - OpenCode uses direct skill discovery from its configured skills directory;
-  its plugin should stay a thin startup hook, not a copy of the full skill bodies.
+  no OpenBoard startup plugin is required.
 
 ## Skills
 
@@ -85,19 +79,19 @@ profiles, then dispatch and verify.
 - **Bundled MCP server** (`.mcp.json`) — a local `openboard` server that binds to the
   selected board and exposes guarded orchestrator tools for task create/list, dependencies, run/retry/
   abort/move, structured complete/block reports, sync/integrate, comments, and task events.
-  In multi-instance workflows, start it with `openboard mcp --instance <name>` so the CLI injects
-  the selected board URL and token. It does not assume a default board port. `openboard_status`
-  proves the controlled instance. `integrate_task` requires `confirmReviewed: true`; Done moves
+  Normal plugin launches run `openboard mcp` unbound and then bind with
+  `select_instance`; worker/generated configs can use `openboard mcp --instance
+  <name>` so the CLI injects the selected board URL and token. It does not
+  assume a default board port. `openboard_status` proves the controlled
+  instance. `integrate_task` requires `confirmReviewed: true`; Done moves
   require explicit `completedBy`.
-- **SessionStart hook** (`hooks/`) — frames a fresh session as the orchestrator
-  cockpit and injects the flow in SessionStart-capable harnesses. Claude Code uses
-  this path, and Codex CLI plugin sessions have been observed to follow it too.
-  The `startup` skill remains the required first-skill contract and repeats the
-  same framing in its "Session Role" section.
-- **OpenCode startup hook** (`~/.config/opencode/plugins/openboard.js` globally) — injects only the
-  short cockpit/session-start contract. The full instructions live in native
-  OpenCode skills installed at `.opencode/skills/<name>/SKILL.md` or
-  `~/.config/opencode/skills/<name>/SKILL.md`.
+- **Skills** (`skills/`) — expose the OpenBoard workflow without automatically
+  forcing unrelated sessions into orchestration mode. Agents should invoke
+  `startup` only when the user is actually doing OpenBoard work.
+- **OpenCode native skills** — the full instructions live in native OpenCode
+  skills installed at `.opencode/skills/<name>/SKILL.md` or
+  `~/.config/opencode/skills/<name>/SKILL.md`; no global OpenBoard startup hook
+  is required.
   OpenCode docs say global skills should load from `~/.config/opencode/skills`,
   but OpenCode 1.17.13 on this machine returns zero skills when launched from
   `~`, `~/code`, or `/tmp`. Work around that by starting from the target
@@ -112,14 +106,22 @@ and orchestrate it. Nothing dispatches or integrates without your approval.
 ### Auth token
 
 If the selected OpenBoard instance requires authentication (the default after the
-security hardening), start MCP through the named-instance wrapper so the board URL,
-instance name, and per-instance token are injected automatically:
+security hardening), plugin MCP starts unbound through the installed CLI:
+
+```sh
+openboard mcp
+```
+
+Then call `select_instance` from the MCP client to bind to the running board.
+For generated worker configs or manual terminal use, start MCP through the
+named-instance wrapper so the board URL, instance name, and per-instance token
+are injected automatically:
 
 ```sh
 openboard mcp --instance <name>
 ```
 
 Manual `OPENBOARD_API_TOKEN` + `OPENCODE_BOARD_URL` remains available for custom
-scripts, but normal plugin use should not require env export. The bundled MCP
+scripts, but normal plugin use should not require env export. The MCP
 server sends the token as a bearer token on board API requests and never exposes
 the token through status tools.

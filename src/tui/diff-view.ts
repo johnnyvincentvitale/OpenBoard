@@ -15,7 +15,7 @@ type ThemeColor = string | RGBA;
 export const DIFF_FILE_COLUMN_WIDTH = 32;
 /** Every file-list entry is exactly two terminal rows: filename, then stats/marker. */
 export const DIFF_FILE_ROW_HEIGHT = 2;
-/** Minimum patch-pane width for side-by-side split view; narrower falls back to unified. */
+/** Legacy threshold retained for callers; DiffView no longer auto-collapses below it. */
 export const DIFF_MIN_SPLIT_WIDTH = 100;
 /** Shared ids/`state.detailScrollTop` keys so scroll position persists like every other detail pane. */
 export const DIFF_FILE_LIST_SCROLL_ID = "diff-files";
@@ -117,16 +117,17 @@ export function isFileReviewed(state: DiffViewState, file: string): boolean {
 }
 
 export function splitAvailable(patchPaneWidth: number): boolean {
-  return patchPaneWidth >= DIFF_MIN_SPLIT_WIDTH;
+  void patchPaneWidth;
+  return true;
 }
 
 export function effectiveDiffView(state: DiffViewState, patchPaneWidth: number): DiffPatchView {
-  if (!splitAvailable(patchPaneWidth)) return "unified";
+  void patchPaneWidth;
   return state.viewOverride ?? "split";
 }
 
 export function toggleViewOverride(state: DiffViewState, patchPaneWidth: number): DiffViewState {
-  if (!splitAvailable(patchPaneWidth)) return state;
+  void patchPaneWidth;
   const current = effectiveDiffView(state, patchPaneWidth);
   return { ...state, viewOverride: current === "split" ? "unified" : "split" };
 }
@@ -159,16 +160,16 @@ export function diffPatchScrollTop(state: DiffViewState): number {
   return offsets[state.selectedHunk.hunkIndex] ?? 0;
 }
 
-/** Patch text presented to DiffRenderable. Selected hunks are sliced to the top
- * so live navigation is visible even when DiffRenderable owns its own height and
- * ignores the outer ScrollBox's scrollTop.
+/** Patch text presented to DiffRenderable. Selected hunks are rotated to the top
+ * without changing the total line count, keeping the diff pane geometry stable.
  */
 export function diffPatchForRender(state: DiffViewState, file: DiffFile): string | undefined {
   if (!file.patch || !state.selectedHunk || state.selectedHunk.fileIndex !== state.selectedFileIndex) return file.patch;
   const offsets = hunkLineOffsets(file.patch);
   const selectedOffset = offsets[state.selectedHunk.hunkIndex];
   if (!selectedOffset) return file.patch;
-  return file.patch.split("\n").slice(selectedOffset).join("\n");
+  const lines = file.patch.split("\n");
+  return [...lines.slice(selectedOffset), ...lines.slice(0, selectedOffset)].join("\n");
 }
 
 export interface DiffFileListWindow {
@@ -242,7 +243,7 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
 }
 
 export function diffViewKeyHints(): string {
-  return "↑/↓ files · ←/→ hunks in file · m mark reviewed · t split/unified · ? help · esc/q back";
+  return "↑/↓ files · ←/→ hunks in file · m mark reviewed · t split/inline · ? help · esc/q back";
 }
 
 export interface DiffViewTheme {
@@ -324,6 +325,7 @@ export function renderDiffView(
   if (state.error) return fullWidthMessage(ui, theme, `Failed to load diff: ${state.error}`);
   if (state.kind === "no-git") return fullWidthMessage(ui, theme, state.noGitReason || "No git evidence for this task.");
   if (state.files.length === 0) return fullWidthMessage(ui, theme, "No changes.");
+  void scrollState;
 
   const selectedFile = state.files[state.selectedFileIndex];
   const reviewed = selectedFile ? isFileReviewed(state, selectedFile.file) : false;
@@ -369,46 +371,27 @@ export function renderDiffView(
       height: 1,
     }),
     ui.Text({ content: `${diffHunkPositionLabel(state)} · `, fg: theme.muted, height: 1 }),
-    ui.Text({ content: view === "split" ? "split" : "unified", fg: theme.muted, height: 1 }),
+    ui.Text({ content: view === "split" ? "split" : "inline", fg: theme.muted, height: 1 }),
   );
 
   const renderPatch = selectedFile ? diffPatchForRender(state, selectedFile) : undefined;
   const patchBody: VChild = renderPatch
     ? ui.h(ui.DiffRenderable, {
+        id: DIFF_PATCH_SCROLL_ID,
         diff: renderPatch,
         view,
         filetype: reviewed ? "text" : filetypeForFile(selectedFile.file),
         showLineNumbers: true,
-        wrapMode: "char",
+        syncScroll: true,
+        wrapMode: view === "split" ? "none" : "char",
         fg: reviewed ? theme.dim : theme.text,
         width: "100%",
+        height: "100%",
+        flexGrow: 1,
+        flexShrink: 1,
+        minHeight: 0,
       })
     : ui.Text({ content: "No patch available for this file.", fg: theme.muted });
-
-  const patchScroll = ui.ScrollBox(
-    {
-      id: DIFF_PATCH_SCROLL_ID,
-      width: "100%",
-      flexGrow: 1,
-      flexShrink: 1,
-      minHeight: 0,
-      scrollY: true,
-      scrollX: false,
-      stickyScroll: false,
-      ...theme.boxBg(theme.panel),
-      contentOptions: { flexDirection: "column", ...theme.boxBg(theme.panel) },
-      viewportOptions: { ...theme.boxBg(theme.panel) },
-      wrapperOptions: { ...theme.boxBg(theme.panel) },
-      onMouseScroll(this: { scrollTop: number }) {
-        const box = this;
-        process.nextTick(() => {
-          scrollState[DIFF_PATCH_SCROLL_ID] = Math.max(0, Math.trunc(box.scrollTop));
-        });
-      },
-    },
-    patchBody,
-  );
-  (patchScroll as unknown as { scrollTop: number }).scrollTop = scrollState[DIFF_PATCH_SCROLL_ID] ?? 0;
 
   const patchPane = ui.Box(
     {
@@ -421,14 +404,15 @@ export function renderDiffView(
       border: true,
       borderStyle: "single",
       borderColor: theme.border,
+      overflow: "hidden",
       ...theme.boxBg(theme.panel),
     },
     patchHeader,
-    patchScroll,
+    patchBody,
   );
 
   return ui.Box(
-    { flexGrow: 1, width: "100%", minHeight: 0, flexDirection: "row", gap: 1, ...theme.boxBg(theme.panel) },
+    { flexGrow: 1, width: "100%", height: "100%", minHeight: 0, flexDirection: "row", gap: 1, ...theme.boxBg(theme.panel) },
     fileList,
     patchPane,
   );

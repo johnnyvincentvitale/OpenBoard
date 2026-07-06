@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { ClaudeCodeRunner } from "../../src/server/claude-code-runner";
 import type { Task } from "../../src/shared";
 
@@ -66,6 +67,16 @@ describe("ClaudeCodeRunner", () => {
     expect(execFile.mock.calls[0][1]).not.toContain("--cwd");
     expect(execFile.mock.calls[0][1]).not.toContain("--agent");
     expect(execFile.mock.calls[0][1]).not.toContain("build");
+    const args = execFile.mock.calls[0][1] as string[];
+    const mcpConfigPath = args[args.indexOf("--mcp-config") + 1];
+    const mcpConfig = JSON.parse(readFileSync(mcpConfigPath, "utf8")) as {
+      mcpServers: { openboard: { type: string; command: string; args: string[] } };
+    };
+    expect(mcpConfig.mcpServers.openboard).toEqual({
+      type: "stdio",
+      command: "openboard",
+      args: ["mcp", "--instance", "alpha"],
+    });
     expect(execFile.mock.calls[0][2]).toEqual(
       expect.objectContaining({
         cwd: "/repo",
@@ -73,6 +84,48 @@ describe("ClaudeCodeRunner", () => {
     );
     expect(execFile.mock.calls[0][1].at(-1)).toContain("OPENBOARD CLAUDE CODE WORKER CONTRACT");
     expect(execFile.mock.calls[0][1].at(-1)).toContain('complete_task with { taskId: "task_1", runStartedAt: 123');
+  });
+
+  it("writes an unbound env-backed MCP config when no instance name is available", async () => {
+    const execFile = vi.fn((file, args, _options, callback) => {
+      callback(null, "started", "");
+    });
+    const runner = new ClaudeCodeRunner({
+      adapterBaseUrl: "http://127.0.0.1:4097",
+      boardToken: "token",
+      pluginDir: "/plugins/openboard",
+      execFile: execFile as never,
+      env: {},
+    });
+
+    await runner.run({
+      task,
+      directory: "/repo",
+      prompt: "Do the work",
+      runStartedAt: 124,
+    });
+
+    const args = execFile.mock.calls[0][1] as string[];
+    const mcpConfigPath = args[args.indexOf("--mcp-config") + 1];
+    const mcpConfig = JSON.parse(readFileSync(mcpConfigPath, "utf8")) as {
+      mcpServers: {
+        openboard: {
+          type: string;
+          command: string;
+          args: string[];
+          env: Record<string, string>;
+        };
+      };
+    };
+    expect(mcpConfig.mcpServers.openboard).toEqual({
+      type: "stdio",
+      command: "openboard",
+      args: ["mcp"],
+      env: {
+        OPENCODE_BOARD_URL: "http://127.0.0.1:4097",
+        OPENBOARD_API_TOKEN: "token",
+      },
+    });
   });
 
   it("polls all background agents so completed sessions remain visible", async () => {

@@ -42,6 +42,16 @@ function nodesByType(node: any, type: string): any[] {
   return [...matches, ...(node.children ?? []).flatMap((child: unknown) => nodesByType(child, type))];
 }
 
+function nodeById(node: any, id: string): any | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  if (node.props?.id === id) return node;
+  for (const child of node.children ?? []) {
+    const match = nodeById(child, id);
+    if (match) return match;
+  }
+  return undefined;
+}
+
 function metaRowByLabel(node: any, label: string): any | undefined {
   return nodesByType(node, "Box")
     .find((candidate) =>
@@ -719,7 +729,7 @@ describe("TUI archive detail cleanup", () => {
     expect(text).toContain("none");
   });
 
-  it("archive detail tabs render in stable scroll containers", () => {
+  it("archive detail tabs render in stable manual viewports without ScrollBox chrome", () => {
     const s = state({
       detailScrollTop: { "archive-detail-prompt-task-1": 9 },
       viewState: { view: "archive", previousView: "launch" },
@@ -740,28 +750,34 @@ describe("TUI archive detail cleanup", () => {
       })), "handoff"),
     }));
 
-    expect(nodesByType(promptApp, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-prompt-task-1");
-    expect(nodesByType(handoffApp, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-handoff-task-1");
+    expect(nodesByType(promptApp, "ScrollBox").map((node) => node.props.id)).not.toContain("archive-detail-prompt-task-1");
+    expect(nodesByType(handoffApp, "ScrollBox").map((node) => node.props.id)).not.toContain("archive-detail-handoff-task-1");
+    expect(nodeById(promptApp, "archive-detail-prompt-task-1")?.props).toMatchObject({ overflow: "hidden", minHeight: 0 });
+    expect(nodeById(handoffApp, "archive-detail-handoff-task-1")?.props).toMatchObject({ overflow: "hidden", minHeight: 0 });
     expect(textOf(promptApp)).toContain("Output");
     expect(textOf(promptApp)).toContain("Comments");
-    expect(nodesByType(promptApp, "ScrollBox").find((node) => node.props.id === "archive-detail-prompt-task-1")?.props)
-      .toMatchObject({ scrollY: true, scrollX: false, stickyScroll: false, minHeight: 0 });
-    expect(nodesByType(renderApp(fakeUi(), s), "ScrollBox").find((node) => node.props.id === "archive-detail-prompt-task-1")?.scrollTop)
-      .toBe(9);
+    expect(nodeById(renderApp(fakeUi(), s), "archive-detail-prompt-task-1-content")?.props.top).toBe(-9);
   });
 
-  it("archive detail scroll containers save wheel offsets for remounts", async () => {
+  it("archive detail manual viewports save wheel offsets for remounts", () => {
     const s = state({
       viewState: { view: "archive", previousView: "launch" },
       archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt"),
     });
     const app = renderApp(fakeUi(), s);
-    const scrollBox = nodesByType(app, "ScrollBox").find((node) => node.props.id === "archive-detail-prompt-task-1");
+    const viewport = nodeById(app, "archive-detail-prompt-task-1");
+    const content = nodeById(app, "archive-detail-prompt-task-1-content");
+    content.height = 40;
+    const requestRender = vi.fn();
+    const event = { scroll: { direction: "down" }, preventDefault: vi.fn(), stopPropagation: vi.fn() };
 
-    scrollBox?.props.onMouseScroll.call({ scrollTop: 14 });
-    await new Promise<void>((resolve) => process.nextTick(resolve));
+    viewport?.props.onMouseScroll.call({ height: 10, findDescendantById: () => content, requestRender }, event);
 
-    expect(s.detailScrollTop["archive-detail-prompt-task-1"]).toBe(14);
+    expect(s.detailScrollTop["archive-detail-prompt-task-1"]).toBe(3);
+    expect(content.top).toBe(-3);
+    expect(requestRender).toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.stopPropagation).toHaveBeenCalled();
   });
 
   it("handoff tab renders empty state when completion is null", () => {
@@ -832,7 +848,8 @@ describe("TUI archive detail cleanup", () => {
     }));
 
     expect(textOf(app)).toContain("archived assistant output");
-    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-output-task-1");
+    expect(nodeById(app, "archive-detail-output-task-1")).toBeDefined();
+    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).not.toContain("archive-detail-output-task-1");
   });
 
   it("comments tab renders archived comments and replies", () => {
@@ -850,7 +867,8 @@ describe("TUI archive detail cleanup", () => {
     const text = textOf(app);
     expect(text).toContain("top-level note");
     expect(text).toContain("reply note");
-    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).toContain("archive-detail-comments-task-1");
+    expect(nodeById(app, "archive-detail-comments-task-1")).toBeDefined();
+    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).not.toContain("archive-detail-comments-task-1");
   });
 
   it("prompt tab renders empty prompt message when description is empty", () => {
@@ -2298,8 +2316,8 @@ describe("TUI handoff text wrapping", () => {
     expect(text).toContain("npm run typecheck → passed");
     expect(text).toContain("RESIDUAL RISK");
 
-    // Sections grow to their content instead of clipping at a fixed few rows (no
-    // nested tiny scrollers) — the single outer ScrollBox handles all scrolling.
+    // Sections grow to their content instead of clipping at a fixed few rows.
+    // The enclosing manual viewport handles scrolling without ScrollBox chrome.
     const changedFilesText = textNodesContaining(app, "src/client/board-client.ts")[0];
     const verificationText = textNodesContaining(app, "npm run typecheck")[0];
     expect(changedFilesText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1 });
@@ -2307,7 +2325,8 @@ describe("TUI handoff text wrapping", () => {
     expect(verificationText.props).toMatchObject({ wrapMode: "char", width: "100%", minWidth: 0, flexShrink: 1 });
     expect(verificationText.props.height).toBeUndefined();
 
-    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).toContain("board-detail-handoff-done-card");
+    expect(nodeById(app, "board-detail-handoff-done-card")).toBeDefined();
+    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).not.toContain("board-detail-handoff-done-card");
   });
 
   it("board detail handoff tab shows empty state when no completion", () => {
@@ -2340,13 +2359,12 @@ describe("TUI handoff text wrapping", () => {
 
     const text = textOf(app);
     expect(text).toContain("Fix the login bug");
-    const scrollBox = nodesByType(app, "ScrollBox").find((node) => node.props.id === "board-detail-prompt-todo-card");
-    expect(scrollBox?.props).toMatchObject({ scrollY: true, scrollX: false, stickyScroll: false, minHeight: 0 });
-    expect(nodesByType(renderApp(fakeUi(), s), "ScrollBox").find((node) => node.props.id === "board-detail-prompt-todo-card")?.scrollTop)
-      .toBe(11);
+    expect(nodeById(app, "board-detail-prompt-todo-card")?.props).toMatchObject({ overflow: "hidden", minHeight: 0 });
+    expect(nodesByType(app, "ScrollBox").map((node) => node.props.id)).not.toContain("board-detail-prompt-todo-card");
+    expect(nodeById(renderApp(fakeUi(), s), "board-detail-prompt-todo-card-content")?.props.top).toBe(-11);
   });
 
-  it("board detail scroll containers save wheel offsets for remounts", async () => {
+  it("board detail manual viewports save wheel offsets for remounts", () => {
     const theTask = { ...task("todo-card", "todo"), description: "Fix the login bug" };
     const s = state({
       viewState: { view: "board", previousView: "launch" },
@@ -2355,12 +2373,19 @@ describe("TUI handoff text wrapping", () => {
       detailTab: "prompt",
     });
     const app = renderApp(fakeUi(), s);
-    const scrollBox = nodesByType(app, "ScrollBox").find((node) => node.props.id === "board-detail-prompt-todo-card");
+    const viewport = nodeById(app, "board-detail-prompt-todo-card");
+    const content = nodeById(app, "board-detail-prompt-todo-card-content");
+    content.height = 40;
+    const requestRender = vi.fn();
+    const event = { scroll: { direction: "down" }, preventDefault: vi.fn(), stopPropagation: vi.fn() };
 
-    scrollBox?.props.onMouseScroll.call({ scrollTop: 17 });
-    await new Promise<void>((resolve) => process.nextTick(resolve));
+    viewport?.props.onMouseScroll.call({ height: 10, findDescendantById: () => content, requestRender }, event);
 
-    expect(s.detailScrollTop["board-detail-prompt-todo-card"]).toBe(17);
+    expect(s.detailScrollTop["board-detail-prompt-todo-card"]).toBe(3);
+    expect(content.top).toBe(-3);
+    expect(requestRender).toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.stopPropagation).toHaveBeenCalled();
   });
 
   it("board detail prompt tab shows empty state when description is empty", () => {

@@ -90,8 +90,16 @@ as sensitive for the lifetime of the token, and rotate the token by restarting
 the board if those records are exposed.
 
 External clients must provide the token via the `OPENBOARD_API_TOKEN` environment
-variable. For MCP, prefer the named-instance wrapper so the token and board URL
-are injected automatically:
+variable. Plugin MCP starts unbound through the installed CLI:
+
+```
+openboard mcp
+```
+
+Then call `select_instance` from the MCP client so the running process binds to
+the selected board without exposing the stored token. For generated worker
+configs or manual terminal use, the named-instance wrapper still injects the
+token and board URL automatically:
 
 ```
 openboard mcp --instance <name>

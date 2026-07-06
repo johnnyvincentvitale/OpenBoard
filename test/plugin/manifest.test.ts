@@ -32,9 +32,10 @@ describe("plugin manifests", () => {
     expect(raw).not.toContain("/Users/");
     expect(mcp.mcpServers).toHaveProperty("openboard");
     const server = mcp.mcpServers.openboard;
-    expect(server.command).toBe("node");
-    expect(server.args.length).toBeGreaterThan(0);
-    expect(server.args[0]).toMatch(/mcp-server/);
+    expect(server.command).toBe("openboard");
+    expect(server.args).toEqual(["mcp"]);
+    expect(raw).not.toContain("OPENCODE_BOARD_MCP_SERVER");
+    expect(raw).not.toContain("mcp-server.mjs");
   });
 
   it("does not contain personal handles in public-distribution config", () => {
@@ -59,13 +60,10 @@ describe("plugin manifests", () => {
     expect(raw).not.toMatch(new RegExp(`(^|[^A-Za-z])${personalName}([^A-Za-z]|$)`));
   });
 
-  it("has a bootstrap script next to .mcp.json", () => {
-    const bootstrapPath = join(PLUGIN_ROOT, "mcp-server.mjs");
-    const bootstrap = readFileSync(bootstrapPath, "utf8");
+  it("does not require a repo-relative MCP bootstrap script", () => {
+    const pluginFiles = collectFiles(PLUGIN_ROOT).map((file) => file.slice(PLUGIN_ROOT.length + 1));
 
-    expect(bootstrap).toContain("OPENCODE_BOARD_MCP_SERVER");
-    expect(bootstrap).not.toContain("/Users/");
-    expect(bootstrap).toContain("dist/mcp/server.mjs");
+    expect(pluginFiles).not.toContain("mcp-server.mjs");
   });
 
   it.each([

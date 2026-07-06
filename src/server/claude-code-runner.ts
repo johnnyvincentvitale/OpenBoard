@@ -203,8 +203,8 @@ export class ClaudeCodeRunner implements ClaudeCodeRunnerLike {
       mcpServers: {
         openboard: {
           type: "stdio",
-          command: "node",
-          args: [join(this.pluginDir, "mcp-server.mjs")],
+          command: "openboard",
+          args: ["mcp"],
           env: {
             OPENCODE_BOARD_URL: this.adapterBaseUrl,
             ...(this.boardToken ? { OPENBOARD_API_TOKEN: this.boardToken } : {}),

@@ -127,7 +127,17 @@ export async function noSelectionMessage(): Promise<string> {
   } else {
     lines.push("No registered instances found.");
   }
-  lines.push("", "Start MCP with:", "  openboard mcp --instance <name>", "", "Or set:", "  OPENCODE_BOARD_URL=http://127.0.0.1:<port>");
+  lines.push(
+    "",
+    "Select one with:",
+    '  select_instance({"name":"<name>"})',
+    "",
+    "Or start MCP pre-bound with:",
+    "  openboard mcp --instance <name>",
+    "",
+    "Advanced callers may set:",
+    "  OPENCODE_BOARD_URL=http://127.0.0.1:<port>",
+  );
   return lines.join("\n");
 }
 

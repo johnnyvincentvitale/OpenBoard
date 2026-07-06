@@ -82,7 +82,7 @@ import {
 import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
 import { createRootLifecycle } from "./root-lifecycle";
 import { buildWordmarkRows } from "./wordmark";
-import { RGBA, type KeyEvent, type PasteEvent, type ScrollBoxOptions, type VChild } from "@opentui/core";
+import { RGBA, type KeyEvent, type MouseEvent, type PasteEvent, type VChild } from "@opentui/core";
 
 type OpenTui = typeof import("@opentui/core");
 type TuiColor = string | RGBA;
@@ -109,6 +109,11 @@ const SAFE_COLOR_MODE = process.env.OPENBOARD_TUI_SAFE === "1";
 // bug — independent of the color path, so it stays keyed to tmux.
 const SCREEN_MODE = IS_TMUX ? "main-screen" : "alternate-screen";
 const ARCHIVE_READER_MAX_BUFFER = 16 * 1024 * 1024;
+const DETAIL_SCROLL_STEP_ROWS = 3;
+
+export function shouldAutoRefresh(viewState: ViewState): boolean {
+  return !["archive", "diff", "launch", "workspaceGate"].includes(viewState.view);
+}
 
 export function boardApiFetchInit(init: RequestInit = {}, boardToken = process.env.OPENBOARD_API_TOKEN): RequestInit {
   const token = boardToken?.trim();
@@ -968,9 +973,7 @@ export async function runOpenBoardTui(
   process.once("SIGTERM", shutdown);
 
   refreshTimer = setInterval(() => {
-    if (state.viewState.view === "launch") return;
-    if (state.viewState.view === "workspaceGate") return;
-    if (state.viewState.view === "archive") return;
+    if (!shouldAutoRefresh(state.viewState)) return;
     refresh(true).catch((error) => {
       setError(error, "refresh failed");
       render();
@@ -1522,7 +1525,7 @@ function archiveWorktreeId(record: Pick<GlobalArchiveRecord, "task_id" | "worktr
 }
 
 function renderScrollableDetailText(ui: OpenTui, state: TuiState, id: string, content: string) {
-  return renderDetailScrollBox(
+  return renderDetailViewport(
     ui,
     state,
     id,
@@ -1530,44 +1533,61 @@ function renderScrollableDetailText(ui: OpenTui, state: TuiState, id: string, co
   );
 }
 
-function renderDetailScrollBox(ui: OpenTui, state: TuiState, id: string, ...children: VChild[]) {
-  const scrollBox = ui.ScrollBox(scrollBoxProps(state, id), ...children);
-  (scrollBox as unknown as { scrollTop: number }).scrollTop = state.detailScrollTop[id] ?? 0;
-  return scrollBox;
+function detailScrollOffset(state: TuiState, id: string): number {
+  return Math.max(0, Math.trunc(state.detailScrollTop[id] ?? 0));
 }
 
-function scrollBoxProps(state: TuiState, id: string): ScrollBoxOptions {
-  return {
-    id,
-    flexGrow: 1,
-    minHeight: 0,
-    scrollY: true,
-    scrollX: false,
-    stickyScroll: false,
-    ...boxBg(COLORS.panel),
-    contentOptions: {
-      flexDirection: "column",
-      gap: 1,
+function clampDetailScrollOffset(value: number, max: number): number {
+  const limit = Number.isFinite(max) ? Math.max(0, Math.trunc(max)) : Number.MAX_SAFE_INTEGER;
+  return Math.max(0, Math.min(Math.trunc(value), limit));
+}
+
+function renderDetailViewport(ui: OpenTui, state: TuiState, id: string, ...children: VChild[]) {
+  const contentId = `${id}-content`;
+  const offset = detailScrollOffset(state, id);
+  return ui.Box(
+    {
+      id,
+      flexGrow: 1,
+      minHeight: 0,
+      position: "relative",
+      overflow: "hidden",
       ...boxBg(COLORS.panel),
+      onMouseScroll(this: { height: number; findDescendantById: (id: string) => unknown; requestRender: () => void }, event: MouseEvent) {
+        const direction = event.scroll?.direction;
+        if (direction !== "up" && direction !== "down") return;
+        const content = this.findDescendantById(contentId) as { height?: number; top?: number } | undefined;
+        const max = Math.max(0, Math.trunc((content?.height ?? 0) - this.height));
+        const delta = direction === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+        const next = clampDetailScrollOffset(detailScrollOffset(state, id) + delta, max);
+        state.detailScrollTop[id] = next;
+        if (content) content.top = -next;
+        event.preventDefault();
+        event.stopPropagation();
+        this.requestRender();
+      },
     },
-    viewportOptions: {
-      ...boxBg(COLORS.panel),
-    },
-    wrapperOptions: {
-      ...boxBg(COLORS.panel),
-    },
-    onMouseScroll(this: { scrollTop: number }) {
-      const scrollBox = this;
-      process.nextTick(() => {
-        state.detailScrollTop[id] = Math.max(0, Math.trunc(scrollBox.scrollTop));
-      });
-    },
-  };
+    ui.Box(
+      {
+        id: contentId,
+        width: "100%",
+        minWidth: 0,
+        position: "absolute",
+        top: -offset,
+        left: 0,
+        right: 0,
+        flexDirection: "column",
+        gap: 1,
+        ...boxBg(COLORS.panel),
+      },
+      ...children,
+    ),
+  );
 }
 
 function renderHandoffTab(ui: OpenTui, state: TuiState, completion: CompletionReport | null, scrollId: string) {
   if (!completion) {
-    return renderDetailScrollBox(
+    return renderDetailViewport(
       ui,
       state,
       scrollId,
@@ -1580,7 +1600,7 @@ function renderHandoffTab(ui: OpenTui, state: TuiState, completion: CompletionRe
     ? completion.verification.map((item) => `${item.command} → ${item.result}`)
     : ["none"];
 
-  return renderDetailScrollBox(
+  return renderDetailViewport(
     ui,
     state,
     scrollId,
@@ -1630,7 +1650,7 @@ function renderArchiveCommentsTab(ui: OpenTui, state: TuiState, record: GlobalAr
     });
   }
 
-  return renderDetailScrollBox(ui, state, `archive-detail-comments-${record.task_id}`, ...rows);
+  return renderDetailViewport(ui, state, `archive-detail-comments-${record.task_id}`, ...rows);
 }
 
 function parseArchiveComments(raw: string | null | undefined): TaskComment[] {
@@ -2535,7 +2555,7 @@ function renderCommentsTab(ui: OpenTui, state: TuiState, task: Task) {
 
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    renderDetailScrollBox(ui, state, `board-detail-comments-${task.id}`, ...rows),
+    renderDetailViewport(ui, state, `board-detail-comments-${task.id}`, ...rows),
     draft
       ? ui.Box(
           { width: "100%", flexDirection: "column", gap: 0 },
@@ -2824,7 +2844,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["↑/↓", "select file"],
     ["←/→", "previous/next hunk"],
     ["m", "mark selected file reviewed"],
-    ["t", "toggle split/unified"],
+    ["t", "toggle split/inline"],
     ["esc / q", "back to board"],
   ];
 

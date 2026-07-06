@@ -53,13 +53,14 @@ the OpenCode server capabilities used by this adapter.
 git clone https://github.com/<owner>/openboard.git openboard
 cd openboard
 npm install
-npm run build:app          # or just `npm run build:mcp` for the MCP server bundle
+npm run build:app
+npm link                   # exposes the `openboard` CLI on your PATH
 ```
 
-The first build produces `dist/mcp/server.mjs`, which the bundled plugin
-(`.mcp.json`) bootstraps. See `plugins/openboard/README.md` for plugin-specific
-install options (symlink vs copy) and how to override the bundle path with
-`OPENCODE_BOARD_MCP_SERVER`.
+The bundled plugin's MCP config starts `openboard mcp`, so copy and symlink
+installs use the same path. No machine-local MCP bundle path or
+`OPENCODE_BOARD_MCP_SERVER` export is required for normal installs. See
+`plugins/openboard/README.md` for plugin-specific install options.
 
 ## Auth / token setup
 
@@ -67,10 +68,12 @@ After the security hardening, mutating and sensitive board routes require a
 per-instance board API token. The `/api/health` endpoint remains unauthenticated;
 all other `/api/*` routes require the token.
 
-Local launches (`npm run tui`, `openboard start`, `openboard mcp --instance <name>`)
-inject the token automatically — no manual setup is needed. External clients and
-custom scripts that bypass the named-instance CLI must provide the token via the
-`OPENBOARD_API_TOKEN` environment variable:
+Local launches (`npm run tui`, `openboard start`, and
+`openboard mcp --instance <name>`) inject the token automatically. Plugin MCP
+launches start unbound with `openboard mcp`; use `select_instance` to bind the
+running MCP process to a named instance before board tool calls. External clients
+and custom scripts that bypass the named-instance CLI must provide the token via
+the `OPENBOARD_API_TOKEN` environment variable:
 
 ```sh
 OPENBOARD_API_TOKEN=<token> OPENCODE_BOARD_URL=http://127.0.0.1:4097 your-client
@@ -218,7 +221,15 @@ error — it never produces a half-started, silently-duplicate instance. If you 
 `OPENBOARD_OPENCODE_PORT`, the adapter asks the OS for a free port itself, so two instances
 started with no OpenCode port configured never fight over the same spawned backend.
 
-To point an MCP client at a specific named instance, use the instance-aware wrapper:
+Plugin MCP clients start unbound through the installed CLI:
+
+```sh
+openboard mcp
+```
+
+Then call `select_instance` from the MCP client to bind that process to a
+running named instance. To start an MCP process already bound to a specific named
+instance, use the instance-aware wrapper:
 
 ```sh
 openboard mcp --instance my-repo

@@ -2,11 +2,12 @@
  * OpenBoard MCP server — exposes orchestrator-safe board control tools backed
  * by the board's REST API (see `../client/board-client.ts`).
  *
- * Multi-instance: this server always talks to exactly one selected OpenBoard
- * adapter. Prefer `openboard mcp --instance <name>`, which injects the selected
- * board URL, token, and instance identity. Manual `OPENCODE_BOARD_URL` remains
- * supported for advanced callers. The server does not fall back to a default
- * port when no board is selected.
+ * Multi-instance: this server starts unbound unless the CLI or environment
+ * selects one OpenBoard adapter. Plugin MCP launches should use `openboard mcp`
+ * and then call `select_instance`; worker sessions can use
+ * `openboard mcp --instance <name>` when the board is known. Manual
+ * `OPENCODE_BOARD_URL` remains supported for advanced callers. The server does
+ * not fall back to a default port when no board is selected.
  */
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

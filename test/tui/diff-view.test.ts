@@ -233,7 +233,7 @@ describe("diff hunk navigation", () => {
     expect(diffPatchScrollTop(state)).toBe(3);
   });
 
-  it("slices the rendered patch so the selected hunk is visibly at the top", () => {
+  it("rotates the rendered patch so the selected hunk is visibly at the top without resizing content", () => {
     const patch = "file header\n@@ -1,1 +1,1 @@\n-old1\n+new1\n@@ -9,1 +9,1 @@\n-old2\n+new2\n@@ -20,1 +20,1 @@\n-old3\n+new3\n";
     const files = [diffFile({ patch })];
     let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
@@ -243,7 +243,8 @@ describe("diff hunk navigation", () => {
     state = moveHunkSelection(state, 1);
     const rendered = diffPatchForRender(state, files[0]);
     expect(rendered?.startsWith("@@ -9,1 +9,1 @@")).toBe(true);
-    expect(rendered).not.toContain("old1");
+    expect(rendered).toContain("old1");
+    expect(rendered?.split("\n")).toHaveLength(patch.split("\n").length);
   });
 
   it("labels one-hunk and multi-hunk files in the patch header", () => {
@@ -271,21 +272,21 @@ describe("diff file-list windowing", () => {
   });
 });
 
-describe("split/unified view decision", () => {
+describe("split/inline view decision", () => {
   const files = [diffFile()];
   const base: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
 
-  it("defaults to split at or above the min width, unified below it", () => {
+  it("defaults to split at every width", () => {
     expect(splitAvailable(DIFF_MIN_SPLIT_WIDTH)).toBe(true);
-    expect(splitAvailable(DIFF_MIN_SPLIT_WIDTH - 1)).toBe(false);
+    expect(splitAvailable(DIFF_MIN_SPLIT_WIDTH - 1)).toBe(true);
     expect(effectiveDiffView(base, DIFF_MIN_SPLIT_WIDTH)).toBe("split");
-    expect(effectiveDiffView(base, DIFF_MIN_SPLIT_WIDTH - 1)).toBe("unified");
+    expect(effectiveDiffView(base, DIFF_MIN_SPLIT_WIDTH - 1)).toBe("split");
   });
 
-  it("lets the manual toggle flip split/unified only when width allows it", () => {
-    const toggled = toggleViewOverride(base, DIFF_MIN_SPLIT_WIDTH);
-    expect(effectiveDiffView(toggled, DIFF_MIN_SPLIT_WIDTH)).toBe("unified");
-    expect(toggleViewOverride(base, DIFF_MIN_SPLIT_WIDTH - 1)).toBe(base);
+  it("lets the manual toggle flip split/inline at every width", () => {
+    const toggled = toggleViewOverride(base, DIFF_MIN_SPLIT_WIDTH - 1);
+    expect(effectiveDiffView(toggled, DIFF_MIN_SPLIT_WIDTH - 1)).toBe("unified");
+    expect(effectiveDiffView(toggleViewOverride(toggled, DIFF_MIN_SPLIT_WIDTH - 1), DIFF_MIN_SPLIT_WIDTH - 1)).toBe("split");
   });
 });
 
@@ -390,21 +391,31 @@ describe("renderDiffView", () => {
     expect(textOf(fileList)).toContain("▸ src/features/insights/supe");
 
     const scrollBoxes = nodesByType(tree, "ScrollBox");
-    const patchPane = scrollBoxes.find((node) => node.props.id === DIFF_PATCH_SCROLL_ID);
     expect(scrollBoxes.find((node) => node.props.id === DIFF_FILE_LIST_SCROLL_ID)).toBeUndefined();
+    expect(scrollBoxes.find((node) => node.props.id === DIFF_PATCH_SCROLL_ID)).toBeUndefined();
 
-    expect(patchPane?.props).toMatchObject({
+    const diff = nodesByType(tree, "Diff")[0];
+    expect(diff?.props).toMatchObject({
+      id: DIFF_PATCH_SCROLL_ID,
       width: "100%",
       flexGrow: 1,
       flexShrink: 1,
       minHeight: 0,
-      scrollY: true,
-      scrollX: false,
-      stickyScroll: false,
+      height: "100%",
+      syncScroll: true,
+      wrapMode: "none",
     });
-    expect(patchPane?.props.contentOptions).toMatchObject({ flexDirection: "column" });
-    expect(patchPane?.props.viewportOptions).toBeDefined();
-    expect(patchPane?.props.wrapperOptions).toBeDefined();
+  });
+
+  it("does not wrap the native diff renderer in a patch ScrollBox", () => {
+    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+      kind: "diff",
+      files: [diffFile()],
+      capped: false,
+    });
+    const tree = renderDiffView(fakeUi(), fakeTheme(), { [DIFF_PATCH_SCROLL_ID]: 3 }, state, 200);
+    expect(nodesByType(tree, "ScrollBox").find((node) => node.props.id === DIFF_PATCH_SCROLL_ID)).toBeUndefined();
+    expect(nodesByType(tree, "Diff")[0].props.id).toBe(DIFF_PATCH_SCROLL_ID);
   });
 
   it("renders the patch header hunk count so one-hunk files do not look stuck", () => {
@@ -428,16 +439,30 @@ describe("renderDiffView", () => {
     const diff = nodesByType(tree, "Diff")[0];
     expect(textOf(tree)).toContain("hunk 2/3");
     expect(diff.props.diff.startsWith("@@ -5,1 +5,1 @@")).toBe(true);
-    expect(diff.props.diff).not.toContain("-a");
+    expect(diff.props.diff).toContain("-a");
   });
 
-  it("falls back to unified below the split width threshold", () => {
+  it("stays split below the old split width threshold", () => {
     const state = applyDiffResponse(createLoadingDiffViewState(task()), {
       kind: "diff",
       files: [diffFile()],
       capped: false,
     });
     const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 60);
+    expect(nodesByType(tree, "Diff")[0].props.view).toBe("split");
+  });
+
+  it("renders the manual inline view when toggled", () => {
+    const state = {
+      ...applyDiffResponse(createLoadingDiffViewState(task()), {
+        kind: "diff",
+        files: [diffFile()],
+        capped: false,
+      }),
+      viewOverride: "unified" as const,
+    };
+    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 200);
+    expect(textOf(tree)).toContain("inline");
     expect(nodesByType(tree, "Diff")[0].props.view).toBe("unified");
   });
 

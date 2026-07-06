@@ -428,6 +428,21 @@ describe("openboard attach", () => {
 // ---------------------------------------------------------------------------
 
 describe("openboard mcp", () => {
+  it("starts MCP unbound without resolving an instance", async () => {
+    const mcp = vi.fn().mockResolvedValue(0);
+    const provider = mockProvider();
+
+    const { code } = await run(["mcp"], provider, undefined, undefined, mcp);
+
+    expect(code).toBe(0);
+    expect(provider.get).not.toHaveBeenCalled();
+    expect(provider.getRuntime).not.toHaveBeenCalled();
+    expect(provider.start).not.toHaveBeenCalled();
+    expect(mcp).toHaveBeenCalledWith({
+      repoRoot: expect.any(String) as unknown,
+    });
+  });
+
   it("starts MCP for a named running instance without starting it", async () => {
     const mcp = vi.fn().mockResolvedValue(0);
     const provider = mockProvider({
@@ -443,14 +458,6 @@ describe("openboard mcp", () => {
       definition: DEFAULT_DEFINITION,
       runtime: RUNNING_RUNTIME,
     });
-  });
-
-  it("requires --instance", async () => {
-    const provider = mockProvider();
-    const { code, err } = await run(["mcp"], provider);
-
-    expect(code).toBe(1);
-    expect(err).toContain("mcp requires --instance");
   });
 
   it("refuses stopped instances", async () => {

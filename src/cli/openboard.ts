@@ -27,7 +27,11 @@ export interface AttachContext {
   runtime: InstanceRuntimeState;
 }
 
-export interface McpContext extends AttachContext {}
+export interface McpContext {
+  repoRoot: string;
+  definition?: InstanceDefinition;
+  runtime?: InstanceRuntimeState;
+}
 
 /** Minimal output stream abstraction so tests do not need a real TTY. */
 export interface OutStream {
@@ -59,7 +63,7 @@ type ParsedCommand =
   | { command: "start"; name: string }
   | { command: "stop"; name: string }
   | { command: "attach"; name?: string }
-  | { command: "mcp"; name: string }
+  | { command: "mcp"; name?: string }
   | { command: "rename"; oldName: string; newName: string }
   | { command: "bare"; name?: string };
 
@@ -229,9 +233,6 @@ export function parseArgs(argv: string[]): ParsedCommand {
         }
         throw new Error(`Unknown argument: ${rest[i]}`);
       }
-      if (name === undefined) {
-        throw new Error("mcp requires --instance <name>");
-      }
       return { command: "mcp", name };
     }
     case "rename": {
@@ -258,6 +259,11 @@ function parsePortArg(raw: string, label: string): number {
     throw new Error(`${label}: ${result.error}`);
   }
   return result.value;
+}
+
+function cliRepoRoot(): string {
+  const cliPath = realpathSync(fileURLToPath(import.meta.url));
+  return resolve(dirname(cliPath), "../..");
 }
 
 // ── Default port assignment ──────────────────────────────────────────────────
@@ -391,7 +397,7 @@ export async function defaultAttach(ctx: AttachContext): Promise<number> {
   });
 }
 
-/** Default MCP behavior: spawn the built MCP server bound to one running instance. */
+/** Default MCP behavior: spawn the built MCP server, optionally pre-bound to a running instance. */
 export async function defaultMcp(ctx: McpContext): Promise<number> {
   const { repoRoot, definition, runtime } = ctx;
   const mcpPath = join(repoRoot, "dist", "mcp", "server.mjs");
@@ -399,26 +405,29 @@ export async function defaultMcp(ctx: McpContext): Promise<number> {
     throw new InstanceError(`MCP server not found: ${mcpPath}. Run npm run build:mcp first.`);
   }
 
-  if (runtime.status !== "running") {
-    throw new InstanceError(
-      `Instance "${definition.name}" is ${runtime.status}. Start it with: openboard start ${definition.name}`,
-    );
-  }
-  if (!definition.boardToken?.trim()) {
-    throw new InstanceError(`Instance "${definition.name}" is missing a board token; restart or recreate the instance.`);
-  }
+  const env: NodeJS.ProcessEnv = { ...process.env };
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    OPENCODE_BOARD_URL: runtime.boardUrl,
-    OPENBOARD_API_TOKEN: definition.boardToken,
-    OPENBOARD_INSTANCE_NAME: definition.name,
-    OPENBOARD_INSTANCE_WORKSPACE: definition.workspace,
-    OPENBOARD_INSTANCE_DB_PATH: definition.dbPath,
-    OPENBOARD_INSTANCE_PORT: String(definition.port),
-    OPENBOARD_INSTANCE_STATUS: runtime.status,
-    OPENBOARD_SELECTION_SOURCE: "cli --instance",
-  };
+  if (definition !== undefined && runtime !== undefined) {
+    if (runtime.status !== "running") {
+      throw new InstanceError(
+        `Instance "${definition.name}" is ${runtime.status}. Start it with: openboard start ${definition.name}`,
+      );
+    }
+    if (!definition.boardToken?.trim()) {
+      throw new InstanceError(`Instance "${definition.name}" is missing a board token; restart or recreate the instance.`);
+    }
+
+    Object.assign(env, {
+      OPENCODE_BOARD_URL: runtime.boardUrl,
+      OPENBOARD_API_TOKEN: definition.boardToken,
+      OPENBOARD_INSTANCE_NAME: definition.name,
+      OPENBOARD_INSTANCE_WORKSPACE: definition.workspace,
+      OPENBOARD_INSTANCE_DB_PATH: definition.dbPath,
+      OPENBOARD_INSTANCE_PORT: String(definition.port),
+      OPENBOARD_INSTANCE_STATUS: runtime.status,
+      OPENBOARD_SELECTION_SOURCE: "cli --instance",
+    });
+  }
 
   const child = spawn(process.execPath, [mcpPath], {
     cwd: repoRoot,
@@ -455,7 +464,7 @@ Commands:
   rename <old> <new>                      Rename an instance (stops/restarts if
                                            running)
   attach [name]                           Attach the TUI to an instance
-  mcp --instance <name>                    Start MCP bound to a running instance
+  mcp [--instance <name>]                  Start MCP unbound, or bound to a running instance
   <name>                                  Start-if-stopped, then attach the TUI
 
 Options:
@@ -490,7 +499,7 @@ export async function runOpenboard(
   }
 
   if (parsed.command === "selector") {
-    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+    const repoRoot = cliRepoRoot();
     try {
       return await selector({ repoRoot });
     } catch (error) {
@@ -600,6 +609,10 @@ export async function runOpenboard(
         return 0;
       }
       case "mcp": {
+        const repoRoot = cliRepoRoot();
+        if (parsed.name === undefined) {
+          return await mcp({ repoRoot });
+        }
         const definition = await provider.get(parsed.name);
         const runtime = await provider.getRuntime(parsed.name);
         if (runtime.status !== "running") {
@@ -612,7 +625,6 @@ export async function runOpenboard(
           stderr.write(`Error: Instance "${parsed.name}" is missing a board token; restart or recreate it.\n`);
           return 1;
         }
-        const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
         return await mcp({ repoRoot, definition, runtime });
       }
       case "attach":
@@ -638,10 +650,7 @@ export async function runOpenboard(
           runtime = await provider.start(name);
         }
 
-        const repoRoot = resolve(
-          dirname(fileURLToPath(import.meta.url)),
-          "../..",
-        );
+        const repoRoot = cliRepoRoot();
         return await attach({ repoRoot, definition, runtime });
       }
     }

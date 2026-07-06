@@ -17,12 +17,11 @@ Do not assume a running server, default port, old browser tab, or previous sessi
 
 ## Session Role
 
-The session that loaded the OpenBoard plugin is the orchestrator cockpit. The
-user drives from here; the worker agents are OpenCode sessions the board
-dispatches. Claude Code and Codex CLI may receive the SessionStart hook when
-the plugin system loads `hooks/hooks.json`; still treat this `startup` skill as
-the first-skill contract and verify the selected instance before acting. On
-OpenCode, a thin plugin hook points the model to native OpenCode skills.
+When the user explicitly invokes OpenBoard work, treat the session as the
+orchestrator cockpit. The user drives from here; the worker agents are OpenCode
+sessions the board dispatches. This `startup` skill is the first-skill contract:
+verify the selected instance before acting and do not rely on automatic session
+hooks to enter OpenBoard mode.
 
 ## First-Skill Contract
 
@@ -30,9 +29,10 @@ Follow this sequence before any OpenBoard work:
 
 1. Treat this session as an OpenBoard cockpit, not a normal coding/chat session.
 2. Prove board state first with `startup`: identify the selected named instance
-   or explicit board URL, prefer `openboard mcp --instance <name>` for MCP binding,
-   verify API/MCP/GUI/TUI alignment, and confirm this session is looking at the
-   same board and task store the user sees.
+   or explicit board URL, start plugin MCP with `openboard mcp` and bind it with
+   `select_instance` unless the caller already provided `--instance`, verify
+   API/MCP/GUI/TUI alignment, and confirm this session is looking at the same
+   board and task store the user sees.
 3. Do not dispatch work or judge cards until the board surface is established.
 4. After board proof, ask: "Would you like me to assess your repository's
    readiness for agentic development?"
@@ -103,13 +103,15 @@ Label all evidence from this surface as browser/dev-server evidence.
 
 ## MCP Readiness
 
-The plugin bundles a local `openboard` MCP server (`.mcp.json`). In normal
-multi-instance workflows, start MCP through `openboard mcp --instance <name>` so
-the CLI injects `OPENCODE_BOARD_URL`, `OPENBOARD_API_TOKEN`, and
-`OPENBOARD_INSTANCE_NAME` for the selected running instance. Manual
-`OPENCODE_BOARD_URL` remains an advanced escape hatch, but MCP must never probe
-or silently fall back to `4097`. It exposes guarded orchestrator tools for board
-control:
+The plugin bundles a local `openboard` MCP server (`.mcp.json`). Normal plugin
+launches run `openboard mcp` without a selected board; bind the process with
+`select_instance` after proving the intended running instance. Generated worker
+configs or manual terminal sessions may start MCP through `openboard mcp
+--instance <name>` so the CLI injects `OPENCODE_BOARD_URL`,
+`OPENBOARD_API_TOKEN`, and `OPENBOARD_INSTANCE_NAME` for the selected running
+instance. Manual `OPENCODE_BOARD_URL` remains an advanced escape hatch, but MCP
+must never probe or silently fall back to `4097`. It exposes guarded
+orchestrator tools for board control:
 
 - `openboard_status` — proves selected instance/URL, workspace, DB identity, API reachability, and cheap counts.
 - `current_instance`, `list_instances`, `select_instance` — inspect/switch explicit named-instance targets.
@@ -125,11 +127,11 @@ control:
 Verify the MCP client points at the same selected board the user is viewing:
 `list_tasks` over MCP must match the visible cards and the selected instance's
 `GET /api/tasks`. If MCP reports no selected instance, use `list_instances` or
-`openboard list`, then restart MCP with `openboard mcp --instance <name>` or call
-`select_instance({ name })` for an already-running instance. The MCP server
-requires the board to be running and the built `dist/mcp/server.mjs` bundle. MCP
-Done moves require explicit `completedBy`; the tool layer must not silently
-default completion attribution.
+`openboard list`, then call `select_instance({ name })` for an already-running
+instance. If you control the launch command, `openboard mcp --instance <name>`
+is also valid. The MCP server requires the board to be running and the built
+`dist/mcp/server.mjs` bundle. MCP Done moves require explicit `completedBy`; the
+tool layer must not silently default completion attribution.
 
 If MCP is unavailable, use the adapter API directly and state that MCP was not the control path.
 

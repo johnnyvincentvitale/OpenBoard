@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleKeypress, renderApp } from "../../src/tui/index";
+import { handleKeypress, renderApp, shouldAutoRefresh } from "../../src/tui/index";
 import { createMockInstanceProvider, openDiffView } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
 
@@ -100,6 +100,15 @@ function actions(overrides: Record<string, unknown> = {}) {
 }
 
 describe("TUI diff view entry (v)", () => {
+  it("disables background board polling while the diff renderer owns scroll state", () => {
+    expect(shouldAutoRefresh({ view: "diff", previousView: "board" })).toBe(false);
+    expect(shouldAutoRefresh({ view: "archive", previousView: "board" })).toBe(false);
+    expect(shouldAutoRefresh({ view: "launch", previousView: "board" })).toBe(false);
+    expect(shouldAutoRefresh({ view: "workspaceGate", previousView: "launch" })).toBe(false);
+    expect(shouldAutoRefresh({ view: "board", previousView: "launch" })).toBe(true);
+    expect(shouldAutoRefresh({ view: "switcher", previousView: "board" })).toBe(true);
+  });
+
   it("opens the full-screen diff view for a selected Review card and fetches its diff", async () => {
     const reviewTask = task("review-1", "review");
     const s = state({ tasks: [reviewTask], selectedTaskId: "review-1" });
