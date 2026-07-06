@@ -560,6 +560,7 @@ describe("TaskDispatcher", () => {
       expect(text).toContain(gitProjectDir);
       expect(text).toContain("READ-ONLY");
       expect(text).toContain("Edit only inside your worktree; use relative paths.");
+      expect(text).toContain("Use the read tool, not shell commands, for base-repo context.");
       expect(text.indexOf("OPENBOARD WORKTREE ISOLATION")).toBeLessThan(text.indexOf("Fix the widget"));
       expect(text.indexOf("Fix the widget")).toBeLessThan(text.indexOf("OPENBOARD COMPLETION CONTRACT"));
     });
@@ -597,6 +598,7 @@ describe("TaskDispatcher", () => {
       expect(text).toContain(worktreePath!);
       expect(text).toContain(gitProjectDir);
       expect(text).toContain("READ-ONLY");
+      expect(text).toContain("Use the read tool, not shell commands, for base-repo context.");
       expect(text.indexOf("OPENBOARD WORKTREE ISOLATION")).toBeLessThan(text.indexOf("keep going"));
     });
 

@@ -783,10 +783,14 @@ export class TaskDispatcher implements Dispatcher {
    * Phase 1). Telling the agent its boundaries upfront just makes it less likely to try
    * an absolute path in the first place, and gives it something to recover with if a
    * write is denied — it does not, on its own, un-stick an already-stalled session
-   * (that's the dispatcher-side auto-nudge in trackStallAndMaybeNudge()).
+   * (that's the dispatcher-side auto-nudge in trackStallAndMaybeNudge()). It also steers
+   * the agent to the read tool for base-repo context instead of shell commands: the
+   * permission-responder pool only auto-approves read-class tools, so a shell command
+   * that trips the shell tool's own external-directory detection gets denied like any
+   * other bash call, where the read tool is approved every time.
    */
   private withWorktreeIsolationPreamble(worktreePath: string, baseRepoPath: string, prompt: string): string {
-    return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nBase repo (READ-ONLY — do not write here): ${baseRepoPath}\nEdit only inside your worktree; use relative paths.\n---\n\n${prompt}`;
+    return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nBase repo (READ-ONLY — do not write here): ${baseRepoPath}\nEdit only inside your worktree; use relative paths.\nUse the read tool, not shell commands, for base-repo context.\n---\n\n${prompt}`;
   }
 
   private withClaudePreflightContext(prompt: string, warning: string | undefined): string {

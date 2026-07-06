@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "../../src/server/escape-detector";
@@ -170,5 +170,27 @@ describe("detectBaseCheckoutEscape", () => {
     const result = await detectBaseCheckoutEscape(repo, snapshot);
     expect(result.escaped).toBe(true);
     expect(result.changedPaths).toEqual([".opencode-board-worktrees/repo/fake-task/evil.txt"]);
+  });
+
+  it("catches a symlink write-through that dirties a tracked base-checkout file (CVE-2026-39861 shape)", async () => {
+    // Mirrors the sandbox-wrapper-probe symlink scenario: a worktree (here just
+    // a separate directory, since the detector never inspects the worktree
+    // itself) holds a symlink pointing at a tracked file in the base checkout.
+    // A bash write through that symlink lands as an ordinary content change to
+    // the base repo's own working tree - this is the failure mode the detector
+    // must catch on its own, independent of whether any wrapper's write-fence
+    // blocks the symlink write in the first place.
+    const snapshot = await snapshotBaseCheckout(repo);
+    expect(snapshot).toBe("");
+
+    const worktreeStandIn = join(tmp, "worktree-stand-in");
+    mkdirSync(worktreeStandIn, { recursive: true });
+    const symlinkPath = join(worktreeStandIn, "evil-symlink");
+    symlinkSync(join(repo, "file.txt"), symlinkPath);
+    writeFileSync(symlinkPath, "escape written through a symlink into the base checkout\n");
+
+    const result = await detectBaseCheckoutEscape(repo, snapshot);
+    expect(result.escaped).toBe(true);
+    expect(result.changedPaths).toEqual(["file.txt"]);
   });
 });
