@@ -448,6 +448,8 @@ interface TuiState {
   // Selected-column filter (f/F)
   boardFilter?: BoardFilter;
   filterMode?: FilterModeState;
+  // In-column instance switcher (b from board view)
+  instanceSwitcher?: { selectedIndex: number };
   // Comments detail tab
   comments?: CommentsPanelState;
   commentDraft?: CommentDraftState;
@@ -2459,11 +2461,13 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
     },
     state.filterMode
       ? renderDetailsFilterPicker(ui, state, state.filterMode)
-      : state.newTask
-        ? renderInlineNewTask(ui, state)
-        : task
-          ? renderTaskDetails(ui, state, task)
-          : renderEmptyDetails(ui),
+      : state.instanceSwitcher
+        ? renderInstanceSwitcherPanel(ui, state)
+        : state.newTask
+          ? renderInlineNewTask(ui, state)
+          : task
+            ? renderTaskDetails(ui, state, task)
+            : renderEmptyDetails(ui),
   );
 }
 
@@ -2976,6 +2980,70 @@ function renderEmptyDetails(ui: OpenTui) {
   );
 }
 
+function renderInstanceSwitcherPanel(ui: OpenTui, state: TuiState) {
+  const switcher = state.instanceSwitcher;
+  if (!switcher) return renderEmptyDetails(ui);
+
+  const rows: VChild[] = [];
+  for (let i = 0; i < state.instanceList.length; i++) {
+    const item = state.instanceList[i];
+    const selected = i === switcher.selectedIndex;
+    const isCurrent = item.runtime.boardUrl === state.boardUrl;
+    const glyph = INSTANCE_STATUS_GLYPHS[item.runtime.status] ?? "?";
+    const action = state.instanceActionState[item.definition.name];
+    const status = action === "starting"
+      ? "STARTING"
+      : action === "stopping"
+      ? "STOPPING"
+      : instanceStatusLabel(item.runtime.status);
+    const control = item.runtime.status === "running" ? "s stop" : "s start";
+    const currentMarker = isCurrent ? " ← current" : "";
+    const line = `${selected ? "▸ " : "  "}${glyph} ${item.definition.name}  ${status}  :${item.definition.port}  ${control}${currentMarker}`;
+
+    rows.push(
+      ui.Box(
+        {
+          width: "100%",
+          height: 1,
+          flexDirection: "row",
+          ...boxBg(selected ? COLORS.panelRaised : COLORS.panel),
+        },
+        ui.Text({
+          content: line,
+          fg: selected ? COLORS.bright : isCurrent ? COLORS.accentBright : COLORS.text,
+          height: 1,
+          truncate: true,
+        }),
+      ),
+    );
+  }
+
+  return ui.Box(
+    {
+      flexGrow: 1,
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
+    },
+    ui.Text({
+      content: "Switch Instance",
+      fg: COLORS.text,
+      attributes: ui.TextAttributes.BOLD,
+      height: 1,
+      truncate: true,
+    }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...rows,
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ui.Text({
+      content: "↑/↓ navigate · enter select · s start/stop · esc/b back",
+      fg: COLORS.dim,
+      height: 1,
+      truncate: true,
+    }),
+  );
+}
+
 function renderDetail(ui: OpenTui, label: string, value: string, valueColor: TuiColor = COLORS.text) {
   return ui.Box(
     { width: "100%", flexDirection: "column", gap: 0 },
@@ -3022,7 +3090,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
             : state.viewState.view === "diff"
             ? diffViewKeyHints(state.diffView)
-            : "↑/↓ cards · ←/→ lanes · esc instances · b switch board · n new task · f filter · u refresh · ? help · q quit · A global archive",
+            : "↑/↓ cards · ←/→ lanes · b switch board · n new task · f filter · u refresh · ? help · q quit · A global archive",
         fg: COLORS.text,
         height: 1,
         flexGrow: 1,
@@ -3418,6 +3486,11 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.instanceSwitcher) {
+    await handleInstanceSwitcherKey(key, state, actions);
+    return;
+  }
+
   if (state.moveTargetColumn) {
     await handleInlineMoveKey(key, state, actions);
     return;
@@ -3538,9 +3611,10 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       return;
     case "b":
       clearPendingConfirmation(state);
-      state.viewState = openSwitcher(state.viewState);
-      state.switcherSelectedIndex = state.instanceList.findIndex((item) => item.runtime.boardUrl === state.boardUrl);
-      if (state.switcherSelectedIndex === -1) state.switcherSelectedIndex = 0;
+      closeInlineDetail(state);
+      state.moveTargetColumn = undefined;
+      state.instanceSwitcher = { selectedIndex: state.instanceList.findIndex((item) => item.runtime.boardUrl === state.boardUrl) };
+      if (state.instanceSwitcher.selectedIndex === -1) state.instanceSwitcher.selectedIndex = 0;
       actions.render();
       return;
   }
@@ -3553,8 +3627,8 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       actions.render();
       return;
     }
-    clearPendingConfirmation(state);
-    await actions.detachInstance();
+    // Esc at board level is a no-op — scoped cancellation (detail tabs, filter mode,
+    // move target, instance switcher) is handled before reaching this fallthrough.
     return;
   }
 
@@ -3782,6 +3856,12 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
   }
   if (key.sequence === "e") {
     await openSelectedFileInEditor(state, actions);
+    return;
+  }
+  if (key.sequence === "r") {
+    state.status = "refreshing diff...";
+    actions.render();
+    await refreshDiffViewAfterEditor(state, actions);
     return;
   }
   if (key.sequence === "?") {
@@ -4802,6 +4882,59 @@ async function handleSwitcherKey(key: KeyEvent, state: TuiState, actions: TuiAct
 
   if (key.sequence === "s") {
     const item = state.instanceList[state.switcherSelectedIndex];
+    if (!item) return;
+    if (state.instanceActionState[item.definition.name]) {
+      state.status = `${item.definition.name} is already ${state.instanceActionState[item.definition.name]}`;
+      actions.render();
+      return;
+    }
+    if (item.runtime.status === "running") {
+      await actions.stopInstance(item.definition.name);
+    } else {
+      await actions.startInstance(item.definition.name);
+    }
+    return;
+  }
+}
+
+async function handleInstanceSwitcherKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const switcher = state.instanceSwitcher;
+  if (!switcher) return;
+
+  if (isEscapeKey(key) || key.sequence === "b") {
+    state.instanceSwitcher = undefined;
+    actions.render();
+    return;
+  }
+
+  const keyName = key.name || key.sequence;
+
+  if (keyName === "down") {
+    switcher.selectedIndex = Math.min(switcher.selectedIndex + 1, state.instanceList.length - 1);
+    actions.render();
+    return;
+  }
+
+  if (keyName === "up") {
+    switcher.selectedIndex = Math.max(switcher.selectedIndex - 1, 0);
+    actions.render();
+    return;
+  }
+
+  if (isEnterKey(key)) {
+    const item = state.instanceList[switcher.selectedIndex];
+    if (item && item.runtime.boardUrl !== state.boardUrl) {
+      state.instanceSwitcher = undefined;
+      await actions.attachInstance(item);
+    } else {
+      state.instanceSwitcher = undefined;
+      actions.render();
+    }
+    return;
+  }
+
+  if (key.sequence === "s") {
+    const item = state.instanceList[switcher.selectedIndex];
     if (!item) return;
     if (state.instanceActionState[item.definition.name]) {
       state.status = `${item.definition.name} is already ${state.instanceActionState[item.definition.name]}`;

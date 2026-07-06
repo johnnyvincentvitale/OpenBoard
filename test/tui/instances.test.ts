@@ -298,7 +298,7 @@ describe("TUI label cleanup", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("esc instances");
+    expect(text).not.toContain("esc instances");
     expect(text).toContain("b switch board");
     expect(text).toContain("n new task");
     expect(text).not.toContain("m move card");
@@ -1154,6 +1154,43 @@ describe("TUI board view command strip", () => {
 
     const text = textOf(app);
     expect(text).toContain("q quit · A global archive");
+  });
+
+  it("b from board opens the in-column switcher without detaching or entering full-screen switcher", async () => {
+    const detachInstance = vi.fn(async () => undefined);
+    const alpha = instance("alpha", "running", 4097);
+    const beta = instance("beta", "running", 4200);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      instanceList: [alpha, beta],
+      boardUrl: alpha.runtime.boardUrl,
+      selectedTaskId: "todo-card",
+      tasks: [task("todo-card", "todo")],
+    });
+
+    await handleKeypress({ name: "b", sequence: "b" } as any, s, actions({ detachInstance }));
+
+    expect(s.instanceSwitcher).toEqual({ selectedIndex: 0 });
+    expect(s.viewState.view).toBe("board");
+    expect(detachInstance).not.toHaveBeenCalled();
+  });
+
+  it("Enter on another in-column switcher instance attaches and clears the panel", async () => {
+    const alpha = instance("alpha", "running", 4097);
+    const beta = instance("beta", "running", 4200);
+    const attachInstance = vi.fn(async () => undefined);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      instanceList: [alpha, beta],
+      boardUrl: alpha.runtime.boardUrl,
+      instanceSwitcher: { selectedIndex: 1 },
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ attachInstance }));
+
+    expect(attachInstance).toHaveBeenCalledWith(beta);
+    expect(s.instanceSwitcher).toBeUndefined();
+    expect(s.viewState.view).toBe("board");
   });
 });
 

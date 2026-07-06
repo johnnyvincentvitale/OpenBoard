@@ -207,6 +207,50 @@ describe("TUI diff view navigation and exit", () => {
     expect(s.viewState.view).toBe("board");
   });
 
+  it("b then v re-entering the diff view re-fetches current diff data via getTaskDiff", async () => {
+    const reviewTask = task("review-1", "review");
+    const s = state({ tasks: [reviewTask], selectedTaskId: "review-1" });
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [{ file: "src/a.ts", additions: 3, deletions: 0, status: "modified" as const, patch: "@@ -1,1 +1,1 @@\n-a\n+b\n" }],
+      capped: false,
+      root: "/repo",
+    }));
+    const a = actions({ client: { getTaskDiff } });
+
+    // First entry via v
+    await handleKeypress({ sequence: "v", name: "v" } as any, s, a);
+    expect(s.viewState.view).toBe("diff");
+    expect(getTaskDiff).toHaveBeenCalledTimes(1);
+
+    // Exit via b
+    await handleKeypress({ sequence: "b", name: "b" } as any, s, a);
+    expect(s.viewState.view).toBe("board");
+
+    // Re-entry via v must refetch
+    await handleKeypress({ sequence: "v", name: "v" } as any, s, a);
+    expect(s.viewState.view).toBe("diff");
+    expect(getTaskDiff).toHaveBeenCalledTimes(2);
+    expect(getTaskDiff).toHaveBeenLastCalledWith("review-1");
+  });
+
+  it("r refreshes the open diff view without leaving diff mode", async () => {
+    const s = openedState();
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [{ file: "refreshed.ts", additions: 1, deletions: 0, status: "modified" as const, patch: "@@ -1,1 +1,1 @@\n-new\n+newer\n" }],
+      capped: false,
+      root: "/repo",
+    }));
+    const a = actions({ client: { getTaskDiff } });
+
+    await handleKeypress({ sequence: "r", name: "r" } as any, s, a);
+
+    expect(s.viewState.view).toBe("diff");
+    expect(getTaskDiff).toHaveBeenCalledWith("review-1");
+    expect(s.diffView.files.map((file: { file: string }) => file.file)).toEqual(["refreshed.ts"]);
+  });
+
   it("q quits from the diff view", async () => {
     const s = openedState();
     const shutdown = vi.fn();

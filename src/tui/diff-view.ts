@@ -440,7 +440,7 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
 
 export function diffViewKeyHints(state?: DiffViewState): string {
   const vertical = state?.fileSelectionLocked ? "↑/↓ scroll · enter files" : "↑/↓ files · enter scroll";
-  return `${vertical} · ←/→ hunks · m mark · t split/inline · e edit · b back · q quit`;
+  return `${vertical} · ←/→ hunks · m mark · t split/inline · e edit · r refresh · b back · q quit`;
 }
 
 export interface DiffViewTheme {
