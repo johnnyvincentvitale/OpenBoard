@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleKeypress, renderApp, shouldAutoRefresh } from "../../src/tui/index";
 import { createMockInstanceProvider, openDiffView } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
@@ -95,6 +95,11 @@ function actions(overrides: Record<string, unknown> = {}) {
     closeArchive: vi.fn(),
     refreshArchive: vi.fn(async () => undefined),
     setupWorkspace: vi.fn(async () => undefined),
+    editorSpawner: {
+      runTerminalEditor: vi.fn(async () => ({ code: 0 })),
+      spawnGuiEditor: vi.fn(),
+      ...(overrides as any).editorSpawner,
+    },
     ...overrides,
   } as any;
 }
@@ -161,7 +166,7 @@ describe("TUI diff view entry (v)", () => {
 });
 
 describe("TUI diff view navigation and exit", () => {
-  function openedState(): any {
+  function openedState(diffViewOverrides: Record<string, unknown> = {}): any {
     const reviewTask = task("review-1", "review");
     const s = state({ tasks: [reviewTask], selectedTaskId: "review-1" });
     s.viewState = openDiffView(s.viewState);
@@ -172,6 +177,7 @@ describe("TUI diff view navigation and exit", () => {
       loading: false,
       kind: "diff",
       capped: false,
+      root: "/repo",
       files: [
         { file: "a.ts", additions: 3, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\nx\n@@ -9,1 +9,1 @@\ny\n@@ -20,1 +20,1 @@\nz\n" },
         { file: "b.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\ny\n" },
@@ -179,6 +185,7 @@ describe("TUI diff view navigation and exit", () => {
       selectedFileIndex: 0,
       fileSelectionLocked: false,
       reviewedFiles: new Set(),
+      ...diffViewOverrides,
     };
     return s;
   }
@@ -280,5 +287,266 @@ describe("TUI diff view navigation and exit", () => {
     await handleKeypress({ sequence: "d", name: "d" } as any, s, a);
     expect(a.runAction).not.toHaveBeenCalled();
     expect(s.viewState.view).toBe("diff");
+  });
+});
+
+describe("TUI diff view open-in-editor (e)", () => {
+  const ENV_KEYS = ["OPENBOARD_EDITOR", "VISUAL", "EDITOR"] as const;
+  let savedEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+    for (const key of ENV_KEYS) delete process.env[key];
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  function openedState(diffViewOverrides: Record<string, unknown> = {}): any {
+    const reviewTask = task("review-1", "review");
+    const s = state({ tasks: [reviewTask], selectedTaskId: "review-1", boardUrl: "http://127.0.0.1:4097" });
+    s.viewState = openDiffView(s.viewState);
+    s.diffView = {
+      taskId: "review-1",
+      sourceLabel: "working tree diff",
+      dirtyAtDispatch: false,
+      loading: false,
+      kind: "diff",
+      capped: false,
+      root: "/repo",
+      files: [
+        { file: "a.ts", additions: 3, deletions: 0, status: "modified", patch: "@@ -1,3 +10,3 @@\n ctx\n-old\n+new\n" },
+        { file: "b.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\ny\n" },
+      ],
+      selectedFileIndex: 0,
+      fileSelectionLocked: false,
+      reviewedFiles: new Set(),
+      ...diffViewOverrides,
+    };
+    return s;
+  }
+
+  it("terminal editor happy path (file-nav mode): suspend -> spawn -> resume -> diff re-fetched", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState();
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [{ file: "a.ts", additions: 4, deletions: 0, status: "modified" as const, patch: "@@ -1,3 +10,3 @@\n ctx\n-old\n+new\n" }],
+      capped: false,
+      root: "/repo",
+    }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() }, client: { getTaskDiff } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+10", "/repo/a.ts"], "/repo");
+    expect(getTaskDiff).toHaveBeenCalledWith("review-1");
+    expect(s.diffView.files).toHaveLength(1);
+    expect(s.status).toContain("editor closed");
+  });
+
+  it("terminal editor happy path (locked-scroll mode) uses the live scroll value", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState({ fileSelectionLocked: true });
+    s.detailScrollTop = { "diff-patch": 1 };
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    // hunk 0 new-start line 10 + body offset 1 (clamped into body length 3) = 11
+    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+11", "/repo/a.ts"], "/repo");
+  });
+
+  it("GUI editor happy path: no suspend, detached spawn, diff re-fetched", async () => {
+    process.env.EDITOR = "code";
+    const s = openedState();
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    const spawnGuiEditor = vi.fn();
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor }, client: { getTaskDiff } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(runTerminalEditor).not.toHaveBeenCalled();
+    expect(spawnGuiEditor).toHaveBeenCalledWith(["code", "-g", "/repo/a.ts:10"], "/repo", expect.any(Function));
+    expect(getTaskDiff).toHaveBeenCalledWith("review-1");
+  });
+
+  it("GUI editor spawn failure surfaces as a status message instead of crashing", async () => {
+    process.env.EDITOR = "code";
+    const s = openedState();
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    // Simulate the async ENOENT a missing editor binary produces: the real
+    // spawner invokes onError from the child's "error" event.
+    const spawnGuiEditor = vi.fn((argv: string[], cwd: string, onError?: (error: unknown) => void) => {
+      onError?.(new Error("spawn code ENOENT"));
+    });
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor }, client: { getTaskDiff } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(s.status).toContain("editor failed to launch");
+    expect(s.status).toContain("ENOENT");
+  });
+
+  it("guard: remote board blocks with a status message and never fetches the diff", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState();
+    s.boardUrl = "http://example.com:4097";
+    const a = actions();
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(a.client.getTaskDiff).not.toHaveBeenCalled();
+    expect(a.editorSpawner.runTerminalEditor).not.toHaveBeenCalled();
+    expect(s.status).toMatch(/local board/i);
+  });
+
+  it("guard: missing diff root blocks (no-git or missing root treated the same)", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState({ root: undefined });
+    const a = actions();
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(a.editorSpawner.runTerminalEditor).not.toHaveBeenCalled();
+    expect(s.status).toBeTruthy();
+  });
+
+  it("guard: no-git diff kind blocks", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState({ kind: "no-git", root: undefined, files: [] });
+    const a = actions();
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(a.editorSpawner.runTerminalEditor).not.toHaveBeenCalled();
+  });
+
+  it("guard: blocked editor target (e.g. deleted file) surfaces its reason", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState({
+      files: [{ file: "a.ts", additions: 0, deletions: 3, status: "deleted", patch: undefined }],
+    });
+    const a = actions();
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(a.editorSpawner.runTerminalEditor).not.toHaveBeenCalled();
+    expect(s.status).toMatch(/deleted/i);
+  });
+
+  it("guard: no editor configured surfaces the resolver's error", async () => {
+    const s = openedState();
+    const a = actions();
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(a.editorSpawner.runTerminalEditor).not.toHaveBeenCalled();
+    expect(s.status).toMatch(/no editor configured/i);
+  });
+
+  it("nonzero exit surfaces a status message instead of crashing", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState();
+    const runTerminalEditor = vi.fn(async () => ({ code: 1 }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(s.status).toContain("1");
+    expect(s.viewState.view).toBe("diff");
+  });
+
+  it("resume/refresh path still runs when the spawn throws", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState();
+    const runTerminalEditor = vi.fn(async () => {
+      throw new Error("spawn ENOENT");
+    });
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() }, client: { getTaskDiff } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(runTerminalEditor).toHaveBeenCalledTimes(1);
+    expect(s.status).toMatch(/spawn ENOENT|failed to launch/i);
+    // the TUI must still refresh the diff (i.e. "still resumes") even though spawn threw
+    expect(getTaskDiff).toHaveBeenCalledWith("review-1");
+  });
+
+  it("preserves the selected file by path after refresh, even if its index shifts", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState();
+    s.diffView.selectedFileIndex = 1; // b.ts selected
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    // Refreshed diff reorders files so b.ts is now index 0.
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [
+        { file: "b.ts", additions: 1, deletions: 0, status: "modified" as const, patch: "@@ -1,1 +1,1 @@\ny\n" },
+        { file: "a.ts", additions: 3, deletions: 0, status: "modified" as const, patch: "@@ -1,3 +10,3 @@\n ctx\n-old\n+new\n" },
+      ],
+      capped: false,
+      root: "/repo",
+    }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() }, client: { getTaskDiff } });
+
+    // b.ts is selected, so the editor should open b.ts, not a.ts.
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+1", "/repo/b.ts"], "/repo");
+    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.diffView.files[s.diffView.selectedFileIndex].file).toBe("b.ts");
+  });
+
+  it("falls back to a clamped index when the selected file vanished from the refreshed diff", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState();
+    s.diffView.selectedFileIndex = 1; // b.ts selected
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    // Refreshed diff no longer contains b.ts at all.
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [{ file: "a.ts", additions: 3, deletions: 0, status: "modified" as const, patch: "@@ -1,3 +10,3 @@\n ctx\n-old\n+new\n" }],
+      capped: false,
+      root: "/repo",
+    }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() }, client: { getTaskDiff } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(s.diffView.files).toHaveLength(1);
+    expect(s.diffView.selectedFileIndex).toBe(0);
+  });
+
+  it("preserves the current keyboard mode (locked-scroll) across the refresh", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState({ fileSelectionLocked: true });
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() }, client: { getTaskDiff } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(s.diffView.fileSelectionLocked).toBe(true);
+  });
+
+  it("e is active in locked-scroll mode too (not swallowed by scroll handling)", async () => {
+    process.env.EDITOR = "vim";
+    const s = openedState({ fileSelectionLocked: true });
+    const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
+    const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() } });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+
+    expect(runTerminalEditor).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
 import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type RosterAgent, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
+import { isLocalBoardUrl } from "../shared/instances";
+import { resolveEditorCommand, type EditorCommand } from "./editor-command";
 import {
   TUI_COLUMN_LABELS,
   TUI_COLUMNS,
@@ -65,6 +68,7 @@ import {
   diffViewHeaderLabel,
   diffViewKeyHints,
   renderDiffView,
+  editorTargetForSelection,
   DIFF_FILE_COLUMN_WIDTH,
   DIFF_FILE_ROW_HEIGHT,
   DIFF_PATCH_SCROLL_ID,
@@ -450,6 +454,60 @@ interface TuiState {
   diffView?: DiffViewState;
 }
 
+/** Result of running a terminal (foreground) editor to completion. */
+export interface TerminalEditorResult {
+  code: number | null;
+}
+
+/**
+ * Injectable child_process seam for the `e` (open in editor) action, so wiring tests can fake
+ * process spawning instead of launching a real editor. `runTerminalEditor` suspends/resumes the
+ * TUI around a foreground spawn (`stdio: "inherit"`) and resolves once the editor exits.
+ * `spawnGuiEditor` fires a detached, unref'd background spawn and returns immediately.
+ */
+export interface EditorSpawner {
+  runTerminalEditor: (argv: string[], cwd: string) => Promise<TerminalEditorResult>;
+  spawnGuiEditor: (argv: string[], cwd: string, onError?: (error: unknown) => void) => void;
+}
+
+function createRealEditorSpawner(renderer: { suspend: () => void; resume: () => void }): EditorSpawner {
+  return {
+    runTerminalEditor: (argv, cwd) =>
+      new Promise<TerminalEditorResult>((resolve, reject) => {
+        renderer.suspend();
+        try {
+          const [command, ...args] = argv;
+          const child = spawn(command!, args, { stdio: "inherit", cwd });
+          child.once("error", (error) => {
+            try {
+              renderer.resume();
+            } finally {
+              reject(error);
+            }
+          });
+          child.once("exit", (code) => {
+            try {
+              renderer.resume();
+            } finally {
+              resolve({ code });
+            }
+          });
+        } catch (error) {
+          renderer.resume();
+          reject(error);
+        }
+      }),
+    spawnGuiEditor: (argv, cwd, onError) => {
+      const [command, ...args] = argv;
+      const child = spawn(command!, args, { detached: true, stdio: "ignore", cwd });
+      // Without a listener, a spawn failure (editor not on PATH → ENOENT)
+      // is an unhandled "error" event and kills the whole renderer.
+      child.once("error", (error) => onError?.(error));
+      child.unref();
+    },
+  };
+}
+
 interface TuiActions {
   refresh: (quiet?: boolean) => Promise<void>;
   render: () => void;
@@ -471,6 +529,8 @@ interface TuiActions {
   closeArchive: () => void;
   refreshArchive: () => Promise<void>;
   setupWorkspace: () => Promise<void>;
+  // Open-in-editor (e on a DiffView selection)
+  editorSpawner: EditorSpawner;
 }
 
 export async function runOpenBoardTui(
@@ -938,6 +998,8 @@ export async function runOpenBoardTui(
     }
   };
 
+  const editorSpawner = createRealEditorSpawner(renderer);
+
   renderer.keyInput.on("keypress", (key) => {
     handleKeypress(key, state, {
       refresh,
@@ -959,6 +1021,7 @@ export async function runOpenBoardTui(
       closeArchive,
       refreshArchive,
       setupWorkspace,
+      editorSpawner,
     }).catch((error) => {
       setError(error, "key handling failed");
       render();
@@ -3646,11 +3709,138 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
     actions.render();
     return;
   }
+  if (key.sequence === "e") {
+    await openSelectedFileInEditor(state, actions);
+    return;
+  }
   if (key.sequence === "?") {
     state.overlay = "help";
     actions.render();
     return;
   }
+}
+
+/**
+ * `e` in the DiffView: resolve the selected file + hunk line, resolve an editor command from
+ * the environment, then either suspend/spawn/resume (terminal editors) or spawn detached (GUI
+ * editors). Each guard surfaces through the same `state.status` feedback row every other DiffView
+ * action uses. Never throws — spawn failures and nonzero exits become status messages, and the
+ * renderer is always resumed via try/finally around the terminal-editor path.
+ */
+/**
+ * Env for editor resolution. The renderer runs under npm exec, which injects
+ * EDITOR=vi; the launcher snapshots the user's real EDITOR/VISUAL into
+ * OPENBOARD_USER_* before npm can touch them. When those sentinels exist,
+ * they win over the (possibly npm-faked) direct vars — empty string means the
+ * user has none set, which resolution already treats as unset.
+ */
+export function editorResolutionEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  if (env.OPENBOARD_USER_EDITOR === undefined && env.OPENBOARD_USER_VISUAL === undefined) return env;
+  return { ...env, EDITOR: env.OPENBOARD_USER_EDITOR, VISUAL: env.OPENBOARD_USER_VISUAL };
+}
+
+async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): Promise<void> {
+  if (!isLocalBoardUrl(state.boardUrl)) {
+    state.status = "editor needs a local board";
+    actions.render();
+    return;
+  }
+
+  const diffView = state.diffView;
+  if (!diffView || diffView.kind !== "diff" || !diffView.root) {
+    state.status = "diff has no local root to open";
+    actions.render();
+    return;
+  }
+
+  const liveScrollTop = state.detailScrollTop[DIFF_PATCH_SCROLL_ID];
+  const target = editorTargetForSelection(diffView, liveScrollTop);
+  if (!target.ok) {
+    state.status = target.reason;
+    actions.render();
+    return;
+  }
+
+  const root = diffView.root;
+  const resolution = resolveEditorCommand(editorResolutionEnv(process.env), {
+    file: isAbsolute(target.relPath) ? target.relPath : join(root, target.relPath),
+    line: target.line,
+  });
+  if (!resolution.ok) {
+    state.status = resolution.error;
+    actions.render();
+    return;
+  }
+
+  await launchEditorCommand(resolution.command, root, state, actions);
+}
+
+async function launchEditorCommand(
+  command: EditorCommand,
+  root: string,
+  state: TuiState,
+  actions: TuiActions,
+): Promise<void> {
+  if (command.kind === "gui") {
+    // Status is set before the spawn so the async error callback (missing
+    // binary → ENOENT) is never clobbered by the optimistic "opened" message.
+    state.status = `opened ${command.argv[0]}`;
+    actions.editorSpawner.spawnGuiEditor(command.argv, root, (error) => {
+      state.status = `editor failed to launch: ${errorMessage(error)}`;
+      actions.render();
+    });
+    actions.render();
+    await refreshDiffViewAfterEditor(state, actions);
+    return;
+  }
+
+  try {
+    const result = await actions.editorSpawner.runTerminalEditor(command.argv, root);
+    state.status = result.code === 0 || result.code === null
+      ? `editor closed: ${command.argv[0]}`
+      : `editor exited with code ${result.code}: ${command.argv[0]}`;
+  } catch (error) {
+    state.status = `editor failed to launch: ${errorMessage(error)}`;
+  }
+  actions.render();
+  await refreshDiffViewAfterEditor(state, actions);
+}
+
+/**
+ * Re-fetches the diff after the editor returns and reapplies it, preserving the selected file
+ * by path (falling back to a clamped index if it vanished from the refreshed diff) and the
+ * current keyboard mode (file-nav vs. locked-scroll).
+ */
+async function refreshDiffViewAfterEditor(state: TuiState, actions: TuiActions): Promise<void> {
+  const diffView = state.diffView;
+  if (!diffView) return;
+
+  const selectedFile = diffView.files[diffView.selectedFileIndex];
+  const wasLocked = diffView.fileSelectionLocked;
+
+  try {
+    const response = await actions.client.getTaskDiff(diffView.taskId);
+    if (state.diffView?.taskId !== diffView.taskId) return;
+
+    let next = applyDiffResponse(state.diffView, response);
+    if (selectedFile) {
+      const restoredIndex = next.files.findIndex((file) => file.file === selectedFile.file);
+      next = {
+        ...next,
+        selectedFileIndex: restoredIndex !== -1
+          ? restoredIndex
+          : Math.max(0, Math.min(diffView.selectedFileIndex, next.files.length - 1)),
+        fileSelectionLocked: wasLocked,
+      };
+    }
+    state.diffView = next;
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+  } catch (error) {
+    if (state.diffView?.taskId === diffView.taskId) {
+      state.diffView = applyDiffError(state.diffView, errorMessage(error));
+    }
+  }
+  actions.render();
 }
 
 function clearPendingConfirmation(state: TuiState): void {

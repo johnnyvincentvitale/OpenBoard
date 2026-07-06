@@ -93,6 +93,20 @@ describe("diff contract", () => {
     expect(noGit.reason).toBe("not a git repository");
   });
 
+  it("DiffResponse kind:diff variant accepts the optional root field", () => {
+    // root is the absolute filesystem path of the tree the diff was computed
+    // against (worktree or in-place dir). Typed optional so pre-existing
+    // fixtures without it still compile; the live route always sets it.
+    const withRoot: import("../../src/shared").DiffResponse = {
+      kind: "diff",
+      files: [],
+      capped: false,
+      root: "/tmp/some/worktree",
+    };
+    expect(withRoot.kind).toBe("diff");
+    expect((withRoot as { kind: "diff"; root?: string }).root).toBe("/tmp/some/worktree");
+  });
+
   it("DiffFile has the required four statuses", () => {
     const statuses = ["added", "deleted", "modified"] as const;
     for (const s of statuses) {

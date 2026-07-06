@@ -7,6 +7,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_BOARD_URL, resolveBoardUrl } from "../client/board-client";
 import { BOARD_SERVER_DEFAULTS, OPENCODE_DEFAULTS } from "../shared/opencode-defaults";
+import { isLocalBoardUrl } from "../shared/instances";
+
+export { isLocalBoardUrl } from "../shared/instances";
 
 const HEALTH_PATH = "/api/health";
 const NODE_FFI_VERSION = "26.3.0";
@@ -53,11 +56,6 @@ export interface ChildExit {
 
 export function repoRootFromModuleUrl(moduleUrl = import.meta.url): string {
   return resolve(dirname(fileURLToPath(moduleUrl)), "../..");
-}
-
-export function isLocalBoardUrl(boardUrl: string): boolean {
-  const { hostname } = new URL(boardUrl);
-  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
 }
 
 export function boardPortFromUrl(boardUrl: string): number {
@@ -263,6 +261,12 @@ export async function runLauncher(): Promise<number> {
     // runs adapters — so daemons the renderer starts use a compatible runtime.
     OPENBOARD_NODE_EXEC: process.env.OPENBOARD_NODE_EXEC ?? process.execPath,
     OPENBOARD_API_TOKEN: boardToken,
+    // npm exec (the FFI-node renderer wrapper) injects EDITOR=vi into child
+    // env. Snapshot the user's real editor vars here — the launcher still runs
+    // in the clean shell env — so open-in-editor never sees npm's fake value.
+    // Empty string means "user has none set" (resolution treats it as unset).
+    OPENBOARD_USER_EDITOR: process.env.EDITOR ?? "",
+    OPENBOARD_USER_VISUAL: process.env.VISUAL ?? "",
   };
   if (boardUrl !== undefined) {
     rendererEnv.OPENCODE_BOARD_URL = boardUrl;

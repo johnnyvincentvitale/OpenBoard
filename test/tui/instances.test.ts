@@ -2736,6 +2736,10 @@ function actions(overrides: Record<string, unknown> = {}) {
     closeArchive: vi.fn(),
     refreshArchive: vi.fn(async () => undefined),
     setupWorkspace: vi.fn(async () => undefined),
+    editorSpawner: {
+      runTerminalEditor: vi.fn(async () => ({ code: 0 })),
+      spawnGuiEditor: vi.fn(),
+    },
     ...overrides,
   } as any;
 }

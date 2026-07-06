@@ -246,8 +246,12 @@ function capBytes(files: DiffFile[], maxBytes: number): { files: DiffFile[]; cap
 
 /**
  * Compute the diff for a Review-card task. Returns a DiffResponse:
- *  - `{ kind: "diff", files, capped }` with file-level patches when git
- *    evidence is available.
+ *  - `{ kind: "diff", files, capped, root }` with file-level patches when
+ *    git evidence is available. `root` is the absolute path of the tree the
+ *    diff was actually computed against — the task's worktree path for
+ *    worktree/harness-worktree cards, or the task directory for in-place
+ *    cards — so callers can resolve `files[].file` (repo-relative) to a
+ *    real path on disk without re-deriving which tree was diffed.
  *  - `{ kind: "no-git", reason }` when no git evidence can be produced
  *    (non-git dir, missing baseCommit, deleted branch, etc.).
  */
@@ -292,10 +296,15 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
       }
     }
     if (files.length === 0) {
-      return { kind: "diff", files: [], capped: false };
+      return { kind: "diff", files: [], capped: false, root: task.worktreePath };
     }
     const capped = capBytes(files, MAX_TOTAL_PATCH_BYTES);
-    return { kind: "diff", files: capped.files, capped: capped.capped || forcedCapped };
+    return {
+      kind: "diff",
+      files: capped.files,
+      capped: capped.capped || forcedCapped,
+      root: task.worktreePath,
+    };
   }
 
   // --- Claude Code cards with harness worktree metadata ---
@@ -313,7 +322,7 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
         let files = parseUnifiedDiff(result.stdout);
         if (files.length > 0) {
           const capped = capBytes(files, MAX_TOTAL_PATCH_BYTES);
-          return { kind: "diff", files: capped.files, capped: capped.capped };
+          return { kind: "diff", files: capped.files, capped: capped.capped, root: task.harnessCwd };
         }
       }
     }
@@ -363,10 +372,15 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     }
 
     if (files.length === 0) {
-      return { kind: "diff", files: [], capped: false };
+      return { kind: "diff", files: [], capped: false, root: task.directory };
     }
     const capped = capBytes(files, MAX_TOTAL_PATCH_BYTES);
-    return { kind: "diff", files: capped.files, capped: capped.capped || forcedCapped };
+    return {
+      kind: "diff",
+      files: capped.files,
+      capped: capped.capped || forcedCapped,
+      root: task.directory,
+    };
   }
 
   // --- No git evidence ---

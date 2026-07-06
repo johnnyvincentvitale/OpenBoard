@@ -30,6 +30,11 @@ The public repo is TUI/CLI/server-first:
   the card to Review when the session goes idle; the UI updates live over SSE.
 - **Review diffs in place.** On Review cards, press `v` to open the full-screen diff view
   before syncing, integrating, or accepting the work.
+- **Fix it without leaving the diff.** Press `e` on a DiffView selection to open that file —
+  at the selected hunk's line — in `$VISUAL`/`$EDITOR` (or an `OPENBOARD_EDITOR` template).
+  Terminal editors take over the terminal until you quit; GUI editors open detached. The diff
+  refreshes on return so the fix rides straight into the same Integrate. Requires a local
+  board and a configured editor — no fallback guessing.
 - **Per-card actions:** Run, Retry (re-prompt), Stop (abort), Delete.
 
 ## How it works
@@ -326,6 +331,35 @@ Concurrent agents in one repo share a working tree and can clobber each other. T
   branch *into* the worktree (resolve drift there); **Integrate** merges the worktree branch *into*
   the base branch, removes the worktree, and **keeps the branch**. Conflicts are reported, not
   forced.
+
+## Open in editor
+
+From a Review card's DiffView (`v`), press **`e`** to open the currently selected file — at the
+selected hunk's line — in your own editor. This is the in-app fix-then-integrate path: no
+in-app editor, just a suspend/resume handoff to the terminal (or a detached launch for GUI
+editors).
+
+- **Resolution order:** `OPENBOARD_EDITOR` (a command template) → `$VISUAL` → `$EDITOR` → a
+  clear "no editor configured" status message. Nothing ever falls back to a platform default
+  opener — if none of these are set, `e` fails loud instead of guessing.
+- **`OPENBOARD_EDITOR` template.** Supports `{file}`/`{line}` placeholders, e.g.
+  `OPENBOARD_EDITOR="hx {file}:{line}"`. If the template has no `{file}` placeholder, the file
+  path is appended as the last argument.
+- **Editors with line-jump support:** `vim`/`nvim`/`vi`/`gvim`, `emacs`/`emacsclient`, `nano`,
+  `micro`, `kak`, `hx`, `subl`, `zed`, `code`/`code-insiders`, `cursor`, `windsurf`. Any other
+  `$EDITOR`/`$VISUAL` still opens the file, just without a line jump.
+- **Terminal vs. GUI.** `vim`/`nvim`/`vi`/`emacs`/`emacsclient`/`nano`/`micro`/`kak`/`hx` and
+  unrecognized editors suspend the TUI renderer and take over the terminal until you quit;
+  `code`/`code-insiders`/`cursor`/`windsurf`/`zed`/`subl`/`gvim` are spawned detached, and the
+  TUI keeps running underneath.
+- **Target tree.** The edit lands in whichever tree the diff was actually computed against —
+  the task's worktree, or the in-place task directory for dirty in-place diffs — never the base
+  repo copy.
+- **Diff refreshes on return.** As soon as the editor exits (terminal) or launches (GUI), the
+  DiffView re-fetches and reapplies the diff, so the edit is immediately visible and rides into
+  the same Integrate.
+- **Requires a local board and a configured editor.** `e` is blocked with a status message on a
+  remote board (`isLocalBoardUrl` check) — same reasoning as the localhost threat model above.
 
 ## Known constraints (verified)
 - `session.wait` is a stub in this OpenCode version → completion comes from the `/event` stream.

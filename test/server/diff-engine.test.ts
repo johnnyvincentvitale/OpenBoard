@@ -91,6 +91,8 @@ describe("computeDiff", () => {
         expect(result.files.find((f) => f.file === "README.md")?.status).toBe("modified");
         expect(result.files.find((f) => f.file === "src.ts")?.status).toBe("added");
         expect(result.capped).toBe(false);
+        // root must be the worktree path, not the base repo the worktree was cut from.
+        expect(result.root).toBe(worktreePath);
       }
     });
   });
@@ -136,6 +138,8 @@ describe("computeDiff", () => {
         expect(untracked?.additions).toBeGreaterThan(0);
         expect(untracked?.patch).toContain("+export const x = 1;");
         expect(result.capped).toBe(false);
+        // root for an in-place (dirty working-tree) diff is the task directory itself.
+        expect(result.root).toBe(repoDir);
       }
     });
 
@@ -177,6 +181,7 @@ describe("computeDiff", () => {
       if (result.kind === "diff") {
         expect(result.files).toEqual([]);
         expect(result.capped).toBe(false);
+        expect(result.root).toBe(repoDir);
       }
     });
   });
@@ -218,6 +223,8 @@ describe("computeDiff", () => {
       if (result.kind === "diff") {
         expect(result.files.length).toBeGreaterThan(0);
         expect(result.files.some((f) => f.file === "claude-work.ts")).toBe(true);
+        // root is the harness's own worktree cwd, not the task's base directory.
+        expect(result.root).toBe(harnessDir);
       }
     });
   });

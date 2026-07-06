@@ -202,7 +202,8 @@ want agents working in.
 (state, agent/harness, model, directory, worktree, session). Press **`?`** for
 the complete key overlay — that's the authoritative reference. The ones you'll
 use constantly: `n` new task, `r` run, `enter` read the handoff, `x` accept to
-Done, `v` view a Review-card diff, `b` switch instances, `A` browse the archive.
+Done, `v` view a Review-card diff, `e` open the selected diff file in your
+editor, `b` switch instances, `A` browse the archive.
 
 **Worktree isolation — the multi-agent rule.** Concurrent agents in one repo
 share a working tree and *will* clobber each other; there's no file locking.
@@ -213,6 +214,21 @@ drift there), **`i`** integrates the worktree branch back into base and removes
 the worktree. Conflicts are reported, never forced. Rule of thumb: isolate
 whenever more than one card can touch the same repo, and press **`v`** on the
 Review card to read the worktree diff before integrating.
+
+**Fix it yourself without leaving the diff.** From the DiffView (`v`), press
+**`e`** to open the selected file at the selected hunk's line in your own
+editor — `$VISUAL`/`$EDITOR`, whichever is set (`$VISUAL` wins if both are).
+Terminal editors (vim, nvim, vi, emacs, emacsclient, nano, micro, kak, hx) take
+over the terminal until you quit; GUI editors (subl, zed, code/code-insiders,
+cursor, windsurf, gvim) open detached and hand control straight back. Set
+`OPENBOARD_EDITOR` to override with your own command template — `{file}` and
+`{line}` placeholders get substituted, e.g. `OPENBOARD_EDITOR="hx {file}:{line}"`.
+Edits land in the diff's actual tree (the worktree, or the task directory for
+in-place diffs) and the diff refreshes the moment you're back, so a quick fix
+rides straight into the same Integrate — no separate PR round trip. Requires a
+**local board** and a **configured editor**; there's no fallback guessing, so
+an unset `$EDITOR` on a remote board fails loud with a status message instead
+of silently doing nothing.
 
 ## 8. Harnesses: OpenCode and Claude Code
 

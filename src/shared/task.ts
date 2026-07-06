@@ -13,13 +13,19 @@ export interface DiffFile {
  * Structured diff response from GET /api/tasks/:id/diff.
  * - `kind: "diff"` carries the file-level patches. `capped` is true when
  *   the total patch bytes exceeded the ~2 MB cap and some file patches
- *   were dropped (file metadata + stats are still present).
+ *   were dropped (file metadata + stats are still present). `root` is the
+ *   absolute filesystem path of the tree the diff was computed against —
+ *   the task worktree for worktree-isolated cards, or the task directory
+ *   for in-place cards — so consumers (e.g. the editor-open feature) know
+ *   where on disk `files[].file` (repo-relative) actually resolves. The
+ *   live diff-engine/route always populates it; it is typed optional only
+ *   so older hand-built fixtures/mocks in tests don't need updating.
  * - `kind: "no-git"` is a non-crash sentinel for when git evidence is
  *   missing (non-git dir, deleted branch, etc.). The reason string is a
  *   human-readable message destined for the TUI header/detail pane.
  */
 export type DiffResponse =
-  | { kind: "diff"; files: DiffFile[]; capped: boolean }
+  | { kind: "diff"; files: DiffFile[]; capped: boolean; root?: string }
   | { kind: "no-git"; reason: string };
 
 /**

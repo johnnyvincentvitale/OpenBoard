@@ -44,6 +44,10 @@ export interface DiffViewState {
   selectedHunk?: SelectedHunk;
   reviewedFiles: Set<string>;
   viewOverride?: DiffPatchView;
+  /** Absolute path of the tree the diff was computed against (worktree or in-place dir), from
+   * the diff response's `root`. Undefined when the server didn't send one — callers (the `e`
+   * open-in-editor wiring) must treat a missing root as blocked, never guess a path. */
+  root?: string;
 }
 
 /** Diff-source label shown in the header, derived from how the task's session ran. */
@@ -74,7 +78,7 @@ export function createLoadingDiffViewState(task: Task): DiffViewState {
 
 export function applyDiffResponse(state: DiffViewState, response: DiffResponse): DiffViewState {
   if (response.kind === "no-git") {
-    return { ...state, loading: false, error: undefined, kind: "no-git", noGitReason: response.reason, files: [] };
+    return { ...state, loading: false, error: undefined, kind: "no-git", noGitReason: response.reason, files: [], root: undefined };
   }
   return {
     ...state,
@@ -86,6 +90,7 @@ export function applyDiffResponse(state: DiffViewState, response: DiffResponse):
     selectedFileIndex: 0,
     fileSelectionLocked: false,
     selectedHunk: undefined,
+    root: response.root,
   };
 }
 
@@ -184,17 +189,29 @@ function scrollPatchText(patch: string, scrollTop: number): string {
   return [...lines.slice(offset), ...Array.from({ length: offset }, () => "")].join("\n");
 }
 
+/** Shared by `diffPatchForRender` and `editorTargetForSelection`: resolves which hunk is
+ * "at the top" for a given scrollTop, and how far into that hunk's body the scroll has
+ * gone, without duplicating the `patchScrollTarget`/`clampHunkBodyOffset` math twice.
+ */
+function hunkRenderTarget(
+  state: DiffViewState,
+  sections: PatchSections,
+  scrollTop: number,
+): { hunkIndex: number; bodyOffset: number } {
+  const selectedHunkIndex = state.selectedHunk?.fileIndex === state.selectedFileIndex
+    ? state.selectedHunk.hunkIndex
+    : undefined;
+  return selectedHunkIndex === undefined
+    ? patchScrollTarget(sections, scrollTop)
+    : { hunkIndex: selectedHunkIndex, bodyOffset: clampHunkBodyOffset(sections.hunks[selectedHunkIndex], scrollTop) };
+}
+
 export function diffPatchForRender(state: DiffViewState, file: DiffFile, scrollTop = 0): string | undefined {
   if (!file.patch) return undefined;
   const sections = splitPatchIntoHunkSections(file.patch);
   if (!sections) return scrollPatchText(file.patch, scrollTop);
 
-  const selectedHunkIndex = state.selectedHunk?.fileIndex === state.selectedFileIndex
-    ? state.selectedHunk.hunkIndex
-    : undefined;
-  const target = selectedHunkIndex === undefined
-    ? patchScrollTarget(sections, scrollTop)
-    : { hunkIndex: selectedHunkIndex, bodyOffset: clampHunkBodyOffset(sections.hunks[selectedHunkIndex], scrollTop) };
+  const target = hunkRenderTarget(state, sections, scrollTop);
   return renderPatchSections(sections, target.hunkIndex, target.bodyOffset);
 }
 
@@ -291,6 +308,71 @@ export function diffHunkPositionLabel(state: DiffViewState): string {
   return `hunk ${current}/${count}`;
 }
 
+/** Result of resolving where `e` should open an editor for the current DiffView selection.
+ * Deliberately ignorant of filesystem roots, $EDITOR, or remote-board guards — a separate
+ * wiring layer (src/tui/index.ts + src/tui/editor-command.ts) joins `relPath` to the diff
+ * response's `root` and applies those guards.
+ */
+export type EditorJumpTarget = { ok: true; relPath: string; line: number } | { ok: false; reason: string };
+
+/** Parses a unified-diff hunk header (`@@ -a,b +c,d @@` or the no-comma `@@ -a +c @@` form)
+ * and returns the new-file start line `c`. Returns undefined if the header doesn't match.
+ */
+function newFileStartLine(header: string): number | undefined {
+  const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(header);
+  if (!match) return undefined;
+  const line = Number.parseInt(match[1], 10);
+  return Number.isFinite(line) ? line : undefined;
+}
+
+/** Resolves the editor jump target (repo-relative path + 1-based line) for whatever the
+ * DiffView is currently showing. Never throws — any DiffViewState shape (loading, error,
+ * no-git, no files) resolves to `{ ok: false }` instead.
+ *
+ * `liveScrollTop`, when provided, is the TUI wiring layer's actual current patch scrollTop
+ * (index.ts's `detailScrollTop[DIFF_PATCH_SCROLL_ID]`) — the real live-owned position the
+ * renderer is showing on screen right now. When omitted, this falls back to the state-only
+ * approximation (`diffPatchScrollTop(state)`, the selected hunk's own raw header offset) so
+ * existing state-only callers/tests keep their prior behavior unchanged.
+ */
+export function editorTargetForSelection(state: DiffViewState, liveScrollTop?: number): EditorJumpTarget {
+  if (state.kind !== "diff" || state.files.length === 0) return { ok: false, reason: "no file selected" };
+
+  const file = state.files[state.selectedFileIndex];
+  if (!file) return { ok: false, reason: "no file selected" };
+  if (file.status === "deleted") return { ok: false, reason: "file was deleted in this diff" };
+
+  if (!file.patch) return { ok: true, relPath: file.file, line: 1 };
+  const sections = splitPatchIntoHunkSections(file.patch);
+  if (!sections || sections.hunks.length === 0) return { ok: true, relPath: file.file, line: 1 };
+
+  const selectedHunkIndex = state.selectedHunk?.fileIndex === state.selectedFileIndex
+    ? state.selectedHunk.hunkIndex
+    : undefined;
+  const hunkIndex = selectedHunkIndex !== undefined
+    ? Math.max(0, Math.min(selectedHunkIndex, sections.hunks.length - 1))
+    : 0;
+  const hunk = sections.hunks[hunkIndex];
+  const startLine = newFileStartLine(hunk.header) ?? 1;
+
+  // Locked-scroll mode: Up/Down scroll the patch body rather than moving file selection, so
+  // the line the user is actually looking at can be past the hunk's own start line. The
+  // renderer computes that live scroll position via `patchScrollTarget`/`clampHunkBodyOffset`
+  // (see diffPatchForRender/hunkRenderTarget above), and the TUI wiring layer owns the actual
+  // scrollTop those need (index.ts's `detailScrollTop` map) — callers that have it pass it as
+  // `liveScrollTop` so the jump line tracks exactly what's on screen. Callers without it (e.g.
+  // pure-state unit tests) fall back to `diffPatchScrollTop(state)`, the selected hunk's own raw
+  // header offset, which reproduces the renderer's math via the same `hunkRenderTarget` helper
+  // and adds whatever body offset it resolves to (0 when no finer-grained position is known).
+  // Counting patch body lines (including unchanged/deleted context lines) as new-file lines is
+  // an approximation — exactness is not required for v1 (see editor-open-plan.md Phase 2).
+  const bodyOffset = state.fileSelectionLocked
+    ? hunkRenderTarget(state, sections, liveScrollTop ?? diffPatchScrollTop(state)).bodyOffset
+    : 0;
+
+  return { ok: true, relPath: file.file, line: startLine + bodyOffset };
+}
+
 const EXTENSION_FILETYPES: Record<string, string> = {
   ".ts": "typescript",
   ".tsx": "typescript",
@@ -330,7 +412,7 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
 
 export function diffViewKeyHints(state?: DiffViewState): string {
   const vertical = state?.fileSelectionLocked ? "↑/↓ scroll · enter files" : "↑/↓ files · enter scroll";
-  return `${vertical} · ←/→ hunks · m mark · t split/inline · b back · q quit`;
+  return `${vertical} · ←/→ hunks · m mark · t split/inline · e edit · b back · q quit`;
 }
 
 export interface DiffViewTheme {

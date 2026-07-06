@@ -556,3 +556,18 @@ export function resolveDefaultInstance(
   }
   return undefined;
 }
+
+/**
+ * Whether a board URL points at this machine (loopback host).
+ *
+ * Lives here — not in the TUI launcher — so renderer code can use it without
+ * importing the launcher module. The launcher ends in an "am I the entrypoint"
+ * `import.meta.url === argv[1]` guard; bundling it into `dist/tui/index.mjs`
+ * makes that guard true inside the renderer and every renderer boot spawns
+ * another renderer (live incident, 2026-07-05). Nothing the renderer bundle
+ * imports may pull in `src/tui/launcher.ts`.
+ */
+export function isLocalBoardUrl(boardUrl: string): boolean {
+  const { hostname } = new URL(boardUrl);
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+}

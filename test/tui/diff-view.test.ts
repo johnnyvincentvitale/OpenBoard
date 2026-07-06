@@ -17,6 +17,7 @@ import {
   diffHunkPositionLabel,
   diffSourceLabel,
   diffViewHeaderLabel,
+  editorTargetForSelection,
   effectiveDiffView,
   filetypeForFile,
   hunkLineOffsets,
@@ -96,6 +97,20 @@ describe("diff response application", () => {
     expect(next.selectedFileIndex).toBe(0);
   });
 
+  it("carries the diff response's root through for the editor-open wiring to use", () => {
+    const loading = createLoadingDiffViewState(task());
+    const response: DiffResponse = { kind: "diff", files: [diffFile()], capped: false, root: "/tmp/worktree-abc" };
+    const next = applyDiffResponse(loading, response);
+    expect(next.root).toBe("/tmp/worktree-abc");
+  });
+
+  it("clears root when the response has none (never guesses a path)", () => {
+    const loading = createLoadingDiffViewState(task());
+    const response: DiffResponse = { kind: "diff", files: [diffFile()], capped: false };
+    const next = applyDiffResponse(loading, response);
+    expect(next.root).toBeUndefined();
+  });
+
   it("carries the no-git sentinel as a readable reason, not an error", () => {
     const loading = createLoadingDiffViewState(task());
     const response: DiffResponse = { kind: "no-git", reason: "not a git repository" };
@@ -103,6 +118,7 @@ describe("diff response application", () => {
     expect(next.kind).toBe("no-git");
     expect(next.noGitReason).toBe("not a git repository");
     expect(next.error).toBeUndefined();
+    expect(next.root).toBeUndefined();
   });
 
   it("records fetch failures as an error state", () => {
@@ -177,6 +193,8 @@ describe("diff file navigation", () => {
     expect(locked.fileSelectionLocked).toBe(true);
     expect(diffViewKeyHints(locked)).toContain("↑/↓ scroll · enter files");
     expect(diffViewKeyHints(base)).toContain("↑/↓ files · enter scroll");
+    expect(diffViewKeyHints(locked)).toContain("e edit");
+    expect(diffViewKeyHints(base)).toContain("e edit");
   });
 });
 
@@ -529,5 +547,153 @@ describe("renderDiffView", () => {
   it("shows a fallback message when no card has opened the view yet", () => {
     const tree = renderDiffView(fakeUi(), fakeTheme(), {}, undefined, 200);
     expect(textOf(tree)).toContain("Select a Review card");
+  });
+});
+
+describe("editorTargetForSelection", () => {
+  // Two-hunk fixture with distinct new-file start lines and distinct hunk body lengths,
+  // used to compute exact expected line numbers by hand (see PR/handoff notes):
+  //   hunk 0 header "@@ -1,3 +10,3 @@"  -> new-start 10, body = [ctx1, -old1, +new1] (length 3)
+  //   hunk 1 header "@@ -20,4 +30,5 @@" -> new-start 30, body = [ctx2, +added1, +added2, ctx3, ctx4] (length 5)
+  const multiHunkPatch = [
+    "diff --git a/x.ts b/x.ts",
+    "--- a/x.ts",
+    "+++ b/x.ts",
+    "@@ -1,3 +10,3 @@",
+    " ctx1",
+    "-old1",
+    "+new1",
+    "@@ -20,4 +30,5 @@",
+    " ctx2",
+    "+added1",
+    "+added2",
+    " ctx3",
+    " ctx4",
+  ].join("\n");
+
+  function diffState(overrides: Partial<DiffViewState> = {}): DiffViewState {
+    return {
+      ...createLoadingDiffViewState(task()),
+      loading: false,
+      kind: "diff",
+      capped: false,
+      files: [diffFile({ file: "src/x.ts", patch: multiHunkPatch })],
+      selectedFileIndex: 0,
+      ...overrides,
+    };
+  }
+
+  it("resolves the new-file start line of hunk 1 (file-nav mode, no hunk selected yet)", () => {
+    const result = editorTargetForSelection(diffState());
+    expect(result).toEqual({ ok: true, relPath: "src/x.ts", line: 10 });
+  });
+
+  it("resolves the new-file start line of hunk 2 once it is selected", () => {
+    const state = moveHunkSelection(diffState(), 1);
+    expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+    const state2 = moveHunkSelection(state, 1);
+    expect(state2.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
+    const result = editorTargetForSelection(state2);
+    expect(result).toEqual({ ok: true, relPath: "src/x.ts", line: 30 });
+  });
+
+  it("adds the locked-scroll-mode hunk body offset on top of the hunk's new-start line", () => {
+    // Hunk 0 selected + locked: diffPatchScrollTop = hunk 0's raw header offset (3),
+    // clamped into hunk 0's body range [0, 3-1=2] -> bodyOffset 2 -> line 10 + 2 = 12.
+    const hunk0Locked = { ...moveHunkSelection(diffState(), 1), fileSelectionLocked: true };
+    expect(editorTargetForSelection(hunk0Locked)).toEqual({ ok: true, relPath: "src/x.ts", line: 12 });
+
+    // Hunk 1 selected + locked: diffPatchScrollTop = hunk 1's raw header offset (7),
+    // clamped into hunk 1's body range [0, 5-1=4] -> bodyOffset 4 -> line 30 + 4 = 34.
+    const hunk1Locked = {
+      ...moveHunkSelection(moveHunkSelection(diffState(), 1), 1),
+      fileSelectionLocked: true,
+    };
+    expect(editorTargetForSelection(hunk1Locked)).toEqual({ ok: true, relPath: "src/x.ts", line: 34 });
+  });
+
+  it("does not add a locked-mode offset when file selection is not locked", () => {
+    const hunk1Unlocked = moveHunkSelection(moveHunkSelection(diffState(), 1), 1);
+    expect(hunk1Unlocked.fileSelectionLocked).toBe(false);
+    expect(editorTargetForSelection(hunk1Unlocked)).toEqual({ ok: true, relPath: "src/x.ts", line: 30 });
+  });
+
+  it("uses the live scroll value over the state-only approximation when locked", () => {
+    // Hunk 0 selected + locked, live scrollTop = 1 (body offset 1, within hunk 0's
+    // body range [0, 2]) -> line 10 + 1 = 11, distinct from the state-only value (12).
+    const hunk0Locked = { ...moveHunkSelection(diffState(), 1), fileSelectionLocked: true };
+    expect(editorTargetForSelection(hunk0Locked, 1)).toEqual({ ok: true, relPath: "src/x.ts", line: 11 });
+  });
+
+  it("clamps the live scroll value into the selected hunk's own body range", () => {
+    // Hunk 0's body has length 3 (indices 0-2); a live scrollTop far past it clamps to 2.
+    const hunk0Locked = { ...moveHunkSelection(diffState(), 1), fileSelectionLocked: true };
+    expect(editorTargetForSelection(hunk0Locked, 999)).toEqual({ ok: true, relPath: "src/x.ts", line: 12 });
+  });
+
+  it("falls back to the state-only approximation when liveScrollTop is omitted", () => {
+    const hunk0Locked = { ...moveHunkSelection(diffState(), 1), fileSelectionLocked: true };
+    expect(editorTargetForSelection(hunk0Locked)).toEqual(editorTargetForSelection(hunk0Locked, undefined));
+    expect(editorTargetForSelection(hunk0Locked)).toEqual({ ok: true, relPath: "src/x.ts", line: 12 });
+  });
+
+  it("ignores liveScrollTop when file selection is not locked", () => {
+    const hunk1Unlocked = moveHunkSelection(moveHunkSelection(diffState(), 1), 1);
+    expect(hunk1Unlocked.fileSelectionLocked).toBe(false);
+    expect(editorTargetForSelection(hunk1Unlocked, 999)).toEqual({ ok: true, relPath: "src/x.ts", line: 30 });
+  });
+
+  it("blocks on a deleted file with a reason mentioning deletion", () => {
+    const state = diffState({
+      files: [diffFile({ file: "src/gone.ts", status: "deleted", patch: multiHunkPatch })],
+    });
+    const result = editorTargetForSelection(state);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/deleted/i);
+  });
+
+  it("falls back to line 1 when the file has no patch (e.g. dropped by a capped response)", () => {
+    const state = diffState({ files: [diffFile({ file: "src/capped.ts", patch: undefined })] });
+    expect(editorTargetForSelection(state)).toEqual({ ok: true, relPath: "src/capped.ts", line: 1 });
+  });
+
+  it("falls back to line 1 when the patch has no hunks", () => {
+    const state = diffState({ files: [diffFile({ file: "src/nohunks.ts", patch: "diff --git a/n b/n\n" })] });
+    expect(editorTargetForSelection(state)).toEqual({ ok: true, relPath: "src/nohunks.ts", line: 1 });
+  });
+
+  it("blocks with 'no file selected' when there are no files", () => {
+    const state = diffState({ files: [] });
+    expect(editorTargetForSelection(state)).toEqual({ ok: false, reason: "no file selected" });
+  });
+
+  it("blocks with 'no file selected' while the diff is loading", () => {
+    const state = createLoadingDiffViewState(task());
+    expect(editorTargetForSelection(state)).toEqual({ ok: false, reason: "no file selected" });
+  });
+
+  it("blocks with 'no file selected' on an error state", () => {
+    const state = applyDiffError(createLoadingDiffViewState(task()), "network down");
+    expect(editorTargetForSelection(state)).toEqual({ ok: false, reason: "no file selected" });
+  });
+
+  it("blocks with 'no file selected' on a no-git state", () => {
+    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+      kind: "no-git",
+      reason: "not a git repository",
+    });
+    expect(editorTargetForSelection(state)).toEqual({ ok: false, reason: "no file selected" });
+  });
+
+  it("parses the single-line-count hunk header form (no comma) for the new-start line", () => {
+    const patch = "@@ -3 +5 @@\n-old\n+new\n";
+    const state = diffState({ files: [diffFile({ file: "src/single.ts", patch })] });
+    expect(editorTargetForSelection(state)).toEqual({ ok: true, relPath: "src/single.ts", line: 5 });
+  });
+
+  it("parses a mixed single/comma-count header (single old count, comma new count)", () => {
+    const patch = "@@ -3 +5,2 @@\n-old\n+new1\n+new2\n";
+    const state = diffState({ files: [diffFile({ file: "src/mixed.ts", patch })] });
+    expect(editorTargetForSelection(state)).toEqual({ ok: true, relPath: "src/mixed.ts", line: 5 });
   });
 });
