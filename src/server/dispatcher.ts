@@ -417,6 +417,9 @@ export class TaskDispatcher implements Dispatcher {
     // session work. This canonicalizes symlinks and rejects escapes from the
     // configured board workspace unless the user has explicitly opted in.
     let execDirectory = this.resolveDirectory(task.directory);
+    // Captured before the worktree swap below — the Phase 3 preamble needs the
+    // original (base repo) directory, not the worktree path execDirectory becomes.
+    const baseRepoDirectory = execDirectory;
 
     // Resolve where the session actually runs. In worktree isolation the session
     // runs in a dedicated `git worktree`; a non-repo directory can't be isolated,
@@ -481,9 +484,12 @@ export class TaskDispatcher implements Dispatcher {
     }
 
     const runStartedAt = Date.now();
+    const taskPrompt = isolatedRun
+      ? this.withWorktreeIsolationPreamble(execDirectory, baseRepoDirectory, task.description)
+      : task.description;
     const promptError = await this.prompt(
       sessionId,
-      this.withCompletionContract(task.id, this.withParentHandoffs(task, task.description), runStartedAt),
+      this.withCompletionContract(task.id, this.withParentHandoffs(task, taskPrompt), runStartedAt),
       task.agent ?? undefined,
       task.model ?? undefined,
     );
@@ -769,6 +775,20 @@ export class TaskDispatcher implements Dispatcher {
     return lines.join("\n").trimEnd();
   }
 
+  /**
+   * Boundary preamble for worktree-isolated task prompts — states the agent's actual
+   * cwd, the base repo path it must not write to, and the relative-path recovery hint.
+   * This is guidance/recovery only: `WRITE_FENCED_PERMISSION` + the permission-responder
+   * pool are what actually block an absolute-path escape (worktree-isolation-plan.md
+   * Phase 1). Telling the agent its boundaries upfront just makes it less likely to try
+   * an absolute path in the first place, and gives it something to recover with if a
+   * write is denied — it does not, on its own, un-stick an already-stalled session
+   * (that's the dispatcher-side auto-nudge in trackStallAndMaybeNudge()).
+   */
+  private withWorktreeIsolationPreamble(worktreePath: string, baseRepoPath: string, prompt: string): string {
+    return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nBase repo (READ-ONLY — do not write here): ${baseRepoPath}\nEdit only inside your worktree; use relative paths.\n---\n\n${prompt}`;
+  }
+
   private withClaudePreflightContext(prompt: string, warning: string | undefined): string {
     if (!warning) return prompt;
     return `${prompt}\n\n---\nOPENBOARD PREFLIGHT WARNING\n${warning}\nIf you avoid the dirty target by using a Claude-managed worktree or branch, report the actual cwd, branch, and commit in your final OpenBoard report.`;
@@ -795,9 +815,19 @@ export class TaskDispatcher implements Dispatcher {
     this.outputCandidates.delete(task.sessionId);
 
     const runStartedAt = Date.now();
+    // retry() re-prompts an existing session — the worktree already exists from
+    // run(), so its path comes off the task record rather than ensureWorktree().
+    const isolatedRetry = wantsWorktree(task, this.store);
+    const retryPrompt = isolatedRetry
+      ? this.withWorktreeIsolationPreamble(
+          this.resolveDirectory(task.worktreePath ?? task.directory),
+          this.resolveDirectory(task.directory),
+          feedback ?? task.description,
+        )
+      : feedback ?? task.description;
     const promptError = await this.prompt(
       task.sessionId,
-      this.withCompletionContract(task.id, this.withParentHandoffs(task, feedback ?? task.description), runStartedAt),
+      this.withCompletionContract(task.id, this.withParentHandoffs(task, retryPrompt), runStartedAt),
       task.agent ?? undefined,
       task.model ?? undefined,
     );

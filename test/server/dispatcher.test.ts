@@ -540,6 +540,133 @@ describe("TaskDispatcher", () => {
       expect(client.permissionListCalls[0]?.directory).toBe(store.get(task.id)?.worktreePath);
     });
 
+    it("worktree-isolated tasks get the isolation preamble, before parent handoffs and the completion contract", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+      client.nextSessionId = "ses_preamble";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+
+      await dispatcher.run(task.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      const worktreePath = store.get(task.id)?.worktreePath;
+      expect(worktreePath).toBeTruthy();
+      expect(text).toContain("OPENBOARD WORKTREE ISOLATION");
+      expect(text).toContain(worktreePath!);
+      expect(text).toContain(gitProjectDir);
+      expect(text).toContain("READ-ONLY");
+      expect(text).toContain("Edit only inside your worktree; use relative paths.");
+      expect(text.indexOf("OPENBOARD WORKTREE ISOLATION")).toBeLessThan(text.indexOf("Fix the widget"));
+      expect(text.indexOf("Fix the widget")).toBeLessThan(text.indexOf("OPENBOARD COMPLETION CONTRACT"));
+    });
+
+    it("in-place tasks get no worktree-isolation preamble", async () => {
+      const task = createTask({ directory: myProjectDir, description: "Fix the widget" });
+      client.nextSessionId = "ses_no_preamble";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).not.toContain("OPENBOARD WORKTREE ISOLATION");
+      expect(text).not.toContain("READ-ONLY");
+    });
+
+    it("retry() re-injects the worktree-isolation preamble with the worktree + base repo paths", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+      client.nextSessionId = "ses_preamble_retry";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+      await dispatcher.run(task.id);
+      const worktreePath = store.get(task.id)?.worktreePath;
+      store.move(task.id, "review", 0);
+      store.update(task.id, { runState: "idle" });
+
+      await dispatcher.retry(task.id, "keep going");
+
+      const text = (client.promptCalls[1]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("OPENBOARD WORKTREE ISOLATION");
+      expect(text).toContain(worktreePath!);
+      expect(text).toContain(gitProjectDir);
+      expect(text).toContain("READ-ONLY");
+      expect(text.indexOf("OPENBOARD WORKTREE ISOLATION")).toBeLessThan(text.indexOf("keep going"));
+    });
+
+    it("retry()'s preamble reflects the live task record's worktree path, not a value cached from run()-time", async () => {
+      // Proves retry() re-reads task.worktreePath from the store at retry-time
+      // rather than closing over a stale value from run(). Note this does NOT by
+      // itself prove retry() avoids calling ensureWorktree() again — ensureWorktree()
+      // short-circuits to the exact same stored value once worktreePath/worktreeBranch
+      // are set, so that specific mutation is behaviorally a no-op and this sentinel
+      // can't distinguish it (verified live). The next test closes that gap directly
+      // by spying on ensureWorktree() itself.
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+      client.nextSessionId = "ses_preamble_retry_record";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+      await dispatcher.run(task.id);
+      store.move(task.id, "review", 0);
+      store.update(task.id, { runState: "idle" });
+      const sentinelWorktreePath = join(workspace, "sentinel-worktree-path-from-record");
+      mkdirSync(sentinelWorktreePath, { recursive: true });
+      store.update(task.id, { worktreePath: sentinelWorktreePath });
+
+      await dispatcher.retry(task.id, "keep going");
+
+      const text = (client.promptCalls[1]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain(sentinelWorktreePath);
+      expect(text).toContain(gitProjectDir);
+    });
+
+    it("retry() does not call ensureWorktree() again to source the preamble's worktree path", async () => {
+      // ensureWorktree() re-cuts a worktree (or, once one exists, only reconfirms
+      // it) — retry()'s worktree path must come off the already-persisted
+      // task.worktreePath field instead, matching the code's own stated intent.
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+      client.nextSessionId = "ses_preamble_retry_no_ensure";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+      await dispatcher.run(task.id);
+      store.move(task.id, "review", 0);
+      store.update(task.id, { runState: "idle" });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ensureWorktreeSpy = vi.spyOn(dispatcher as any, "ensureWorktree");
+
+      await dispatcher.retry(task.id, "keep going");
+
+      expect(ensureWorktreeSpy).not.toHaveBeenCalled();
+    });
+
+    it("retry() gets no worktree-isolation preamble for an in-place task", async () => {
+      const task = createTask({ directory: myProjectDir, description: "Fix the widget" });
+      client.nextSessionId = "ses_no_preamble_retry";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      store.move(task.id, "review", 0);
+      store.update(task.id, { runState: "idle" });
+
+      await dispatcher.retry(task.id, "keep going");
+
+      const text = (client.promptCalls[1]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).not.toContain("OPENBOARD WORKTREE ISOLATION");
+    });
+
     it("retry() restarts the permission responder for a worktree-isolated task", async () => {
       store.updateSettings({ worktreeDefault: true });
       const task = createTask({ directory: gitProjectDir });
