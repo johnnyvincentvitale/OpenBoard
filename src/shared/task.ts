@@ -189,8 +189,18 @@ export interface Task {
    * time. Drives an honesty label in the diff view header. Default false.
    */
   dirtyAtDispatch: boolean;
+  /**
+   * `git status --porcelain` of the BASE checkout (not the worktree) captured
+   * at dispatch time, for worktree-isolated tasks only. Compared against the
+   * same command re-run at completion/integrate time by the escape detector
+   * (src/server/escape-detector.ts) to catch a session writing outside its
+   * worktree. Null for in-place tasks or when not yet captured.
+   */
+  baseCheckoutSnapshot?: string | null;
   /** A decision the run is blocked on and the UI must resolve (e.g. "git-init" for a non-repo dir). */
   pending?: TaskPending;
+  /** Base-checkout paths the escape detector found changed outside the worktree, when `pending` is "base-checkout-escape". */
+  escapeDetectedPaths?: string[];
   /** Hidden from active boards/lists when true; default false. */
   archived?: boolean;
   /** IDs of tasks that must precede this task. */
@@ -227,7 +237,7 @@ export interface MoveTaskBody {
 }
 
 /** A decision a run is waiting on the user to resolve before it can proceed. */
-export const TASK_PENDING = ["git-init"] as const;
+export const TASK_PENDING = ["git-init", "base-checkout-escape"] as const;
 export type TaskPending = (typeof TASK_PENDING)[number];
 
 export interface CreateTaskInput {
@@ -273,6 +283,21 @@ export interface RosterAgent {
 /** The permission ruleset that lets a dispatched session run unattended. */
 export const UNATTENDED_PERMISSION = [
   { permission: "*", pattern: "**", action: "allow" },
+] as const;
+
+/**
+ * The permission ruleset for worktree-isolated sessions. Per-session `edit`
+ * pattern rules are broken in OpenCode 1.17.13 (whichever rule is last in the
+ * array wins for every edit/write/patch call, regardless of pattern text —
+ * see opencode-capabilities.md Phase 0), so this does not attempt path-based
+ * edit fencing. Instead it puts OpenCode's built-in `external_directory`
+ * Location boundary into "ask" mode; a live auto-responder (see
+ * server/permission-responder.ts) then classifies and replies to each ask.
+ * In-worktree edits stay inside Location and never trigger an ask at all.
+ */
+export const WRITE_FENCED_PERMISSION = [
+  { permission: "*", pattern: "**", action: "allow" },
+  { permission: "external_directory", pattern: "**", action: "ask" },
 ] as const;
 
 /** SSE frames the task board pushes to the browser. */

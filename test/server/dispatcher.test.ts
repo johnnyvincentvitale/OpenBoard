@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { OpencodeEvent, Task } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
@@ -11,6 +12,28 @@ async function* makeAsyncGenerator<T>(items: T[]): AsyncGenerator<T> {
   for (const item of items) {
     yield item;
   }
+}
+
+/** Init a real git repo with one commit, so worktree isolation (`isGitRepo`) is satisfied. */
+function makeGitRepo(root: string): void {
+  mkdirSync(root, { recursive: true });
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("GIT_")) env[k] = v;
+  const run = (args: string[]) =>
+    execFileSync("git", args, {
+      cwd: root,
+      env: {
+        ...env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@localhost",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@localhost",
+      },
+    });
+  run(["init", "-b", "main"]);
+  writeFileSync(join(root, "file.txt"), "base\n");
+  run(["add", "-A"]);
+  run(["commit", "--no-gpg-sign", "-m", "base"]);
 }
 
 function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
@@ -101,6 +124,20 @@ class FakeOpencodeClient {
       const script = this.scripts[this.subscribeCallCount] ?? [];
       this.subscribeCallCount += 1;
       return { stream: makeAsyncGenerator(script) };
+    },
+  };
+
+  permissionListCalls: Array<{ directory?: string }> = [];
+  permissionReplyCalls: Array<{ requestID: string; directory?: string; reply: string }> = [];
+
+  permission = {
+    list: async (params: { directory?: string }) => {
+      this.permissionListCalls.push(params);
+      return { data: [], error: undefined };
+    },
+    reply: async (params: { requestID: string; directory?: string; reply: string }) => {
+      this.permissionReplyCalls.push(params);
+      return { data: true, error: undefined };
     },
   };
 }
@@ -444,6 +481,251 @@ describe("TaskDispatcher", () => {
       expect(result.column).toBe("todo");
       expect(store.get(task.id)?.column).toBe("todo");
       expect(store.get(task.id)?.runState).toBe("error");
+    });
+  });
+
+  describe("run() — worktree write-fencing", () => {
+    let gitProjectDir: string;
+
+    beforeEach(() => {
+      gitProjectDir = join(workspace, "git-project");
+      makeGitRepo(gitProjectDir);
+    });
+
+    it("in-place tasks (default isolation) get UNATTENDED_PERMISSION and no permission responder", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_inplace";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      expect(client.createCalls[0]?.permission).toEqual([{ permission: "*", pattern: "**", action: "allow" }]);
+      // Give any (incorrectly-started) responder a chance to poll before asserting it didn't.
+      await new Promise((r) => setTimeout(r, 30));
+      expect(client.permissionListCalls).toHaveLength(0);
+    });
+
+    it("worktree-isolated tasks get WRITE_FENCED_PERMISSION and start a permission responder", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_fenced";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+
+      await dispatcher.run(task.id);
+
+      expect(client.createCalls[0]?.permission).toEqual([
+        { permission: "*", pattern: "**", action: "allow" },
+        { permission: "external_directory", pattern: "**", action: "ask" },
+      ]);
+
+      await waitFor(() => client.permissionListCalls.length > 0);
+      expect(client.permissionListCalls[0]?.directory).toBe(store.get(task.id)?.worktreePath);
+    });
+
+    it("retry() restarts the permission responder for a worktree-isolated task", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_fenced_retry";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+      await dispatcher.run(task.id);
+      store.move(task.id, "review", 0);
+      store.update(task.id, { runState: "idle" });
+      client.permissionListCalls = [];
+
+      await dispatcher.retry(task.id, "keep going");
+
+      await waitFor(() => client.permissionListCalls.length > 0);
+      expect(client.permissionListCalls[0]?.directory).toBe(store.get(task.id)?.worktreePath);
+    });
+
+    it("abort() stops the permission responder for a worktree-isolated task", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_fenced_abort";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+      await dispatcher.run(task.id);
+      await waitFor(() => client.permissionListCalls.length > 0);
+
+      await dispatcher.abort(task.id);
+      const countAtAbort = client.permissionListCalls.length;
+
+      await new Promise((r) => setTimeout(r, 300));
+      expect(client.permissionListCalls.length).toBe(countAtAbort);
+    });
+
+    it("a normal idle-fallback completion stops the permission responder", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_fenced_idle";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+      await dispatcher.run(task.id);
+      await waitFor(() => client.permissionListCalls.length > 0);
+
+      client.messageResponses = [
+        [
+          {
+            info: { role: "assistant" },
+            parts: [{ type: "step-finish", reason: "stop" }],
+          },
+        ],
+      ];
+      await waitFor(() => store.get(task.id)?.column === "review", 3000);
+      const countAtCompletion = client.permissionListCalls.length;
+
+      // If the responder were still polling, this would keep growing.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(client.permissionListCalls.length).toBe(countAtCompletion);
+    });
+
+    it("an agent-reported completion (runState flipped outside the dispatcher) stops the permission responder", async () => {
+      // Mirrors what src/server/routes/completion.ts does on POST /complete or
+      // /block: it flips runState directly on the store, with no reference to
+      // the dispatcher or its permissionResponders map at all. The dispatcher's
+      // own watchCompletion loop must be the one to notice and stop the
+      // responder — this simulates that path without wiring up the full route.
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_fenced_reported";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+      await dispatcher.run(task.id);
+      await waitFor(() => client.permissionListCalls.length > 0);
+
+      store.update(task.id, { runState: "idle", completionSource: "reported" });
+      store.move(task.id, "review", 0);
+
+      // Give the watcher's next poll tick a chance to observe the state
+      // change and stop the responder.
+      await new Promise((r) => setTimeout(r, 1300));
+      const countAfterSettle = client.permissionListCalls.length;
+
+      await new Promise((r) => setTimeout(r, 300));
+      expect(client.permissionListCalls.length).toBe(countAfterSettle);
+    });
+  });
+
+  describe("base-checkout escape detection", () => {
+    let gitProjectDir: string;
+
+    beforeEach(() => {
+      gitProjectDir = join(workspace, "git-project-escape");
+      makeGitRepo(gitProjectDir);
+    });
+
+    function queueFinishedTurn(sessionSlot = 0) {
+      const responses: unknown[][] = [];
+      responses[sessionSlot] = [
+        {
+          info: { role: "assistant" },
+          parts: [{ type: "step-finish", reason: "stop" }],
+        },
+      ];
+      client.messageResponses = responses;
+    }
+
+    it("blocks a worktree task at completion when the base checkout was mutated during the run", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_escape";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-escape"),
+      });
+
+      await dispatcher.run(task.id);
+      expect(store.get(task.id)?.baseCheckoutSnapshot).toBe("");
+
+      // Simulate a bash-based escape: a write that lands directly in the base
+      // checkout, bypassing the worktree entirely (no permission ask at all).
+      writeFileSync(join(gitProjectDir, "escaped.txt"), "escaped write\n");
+
+      queueFinishedTurn();
+      await waitFor(() => store.get(task.id)?.runState !== "running", 3000);
+
+      const blocked = store.get(task.id);
+      expect(blocked?.column).toBe("in_progress");
+      expect(blocked?.pending).toBe("base-checkout-escape");
+      expect(blocked?.escapeDetectedPaths).toEqual(["escaped.txt"]);
+      expect(blocked?.runState).toBe("idle");
+    });
+
+    it("a normal worktree task (base checkout untouched) still reaches review", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_clean";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-escape"),
+      });
+
+      await dispatcher.run(task.id);
+
+      queueFinishedTurn();
+      await waitFor(() => store.get(task.id)?.column === "review", 3000);
+
+      const finished = store.get(task.id);
+      expect(finished?.column).toBe("review");
+      expect(finished?.pending).toBeUndefined();
+      expect(finished?.completionSource).toBe("idle-fallback");
+    });
+
+    it("integrate() refuses when the base checkout escaped and succeeds when clean", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_integrate_escape";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-escape"),
+      });
+
+      const ran = await dispatcher.run(task.id);
+      const wtPath = ran.worktreePath!;
+      writeFileSync(join(wtPath, "feature.txt"), "work\n");
+
+      // integrate() refuses to run against a still-running session (TOCTOU
+      // guard), so let the run reach its normal idle/review completion first
+      // — Integrate is only ever reachable from the UI once idle anyway.
+      queueFinishedTurn();
+      await waitFor(() => store.get(task.id)?.runState !== "running", 3000);
+
+      writeFileSync(join(gitProjectDir, "escaped.txt"), "escaped write\n");
+
+      const blockedOutcome = await dispatcher.integrate(task.id);
+      expect(blockedOutcome.ok).toBe(false);
+      expect(blockedOutcome.conflict).toBe(false);
+      expect(blockedOutcome.message).toContain("escaped.txt");
+      expect(store.get(task.id)?.pending).toBe("base-checkout-escape");
+      expect(store.get(task.id)?.worktreePath).toBe(wtPath);
+
+      // Clean up the escape and retry — integrate should now succeed.
+      execFileSync("rm", [join(gitProjectDir, "escaped.txt")]);
+      store.update(task.id, { pending: undefined, escapeDetectedPaths: undefined });
+
+      const okOutcome = await dispatcher.integrate(task.id);
+      expect(okOutcome.ok).toBe(true);
+      expect(store.get(task.id)?.worktreePath).toBeUndefined();
     });
   });
 

@@ -484,6 +484,7 @@ export function taskStatus(task: Pick<Task, "runState" | "column" | "pending">):
 } {
   if (task.runState === "error") return { glyph: "!", label: "ERROR" };
   if (task.pending === "git-init") return { glyph: "△", label: "BLOCKED" };
+  if (task.pending === "base-checkout-escape") return { glyph: "△", label: "BLOCKED" };
   if (task.runState === "running") return { glyph: "●", label: "RUNNING" };
   if (task.column === "done") return { glyph: "○", label: "DONE" };
   if (task.column === "review") return { glyph: "▲", label: "REVIEW" };

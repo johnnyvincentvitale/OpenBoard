@@ -195,6 +195,11 @@ describe("TaskDispatcher — worktree isolation", () => {
     g(wtPath, ["add", "-A"]);
     g(wtPath, ["commit", "--no-gpg-sign", "-m", "feature"]);
 
+    // integrate() refuses to run against a still-running session (TOCTOU
+    // guard) — Integrate is only ever reachable from the UI once the task
+    // has finished running, so simulate that here.
+    store.update(task.id, { runState: "idle" });
+
     const outcome = await dispatcher.integrate(task.id);
     expect(outcome.ok).toBe(true);
     // base has the feature, worktree gone, branch kept, task.worktreePath cleared.

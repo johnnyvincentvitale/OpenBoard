@@ -14,10 +14,12 @@
  */
 import { basename, dirname, join, resolve } from "node:path";
 import type { MergeOutcome, OpencodeEvent, Task, TaskStore } from "../shared";
-import { AdapterError, UNATTENDED_PERMISSION } from "../shared";
+import { AdapterError, UNATTENDED_PERMISSION, WRITE_FENCED_PERMISSION } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
+import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "./escape-detector";
 import { eventLiveState, eventSessionId } from "./events/session-status";
+import { startPermissionResponder, type PermissionResponderWatcher } from "./permission-responder";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeCodeRunner, type ClaudeCodeRunnerLike } from "./claude-code-runner";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
@@ -291,6 +293,7 @@ export class TaskDispatcher implements Dispatcher {
   private consumeLoopPromise: Promise<void> | null = null;
   private readonly completionWatchers = new Map<string, { cancelled: boolean }>();
   private readonly outputCandidates = new Map<string, string>();
+  private readonly permissionResponders = new Map<string, PermissionResponderWatcher>();
 
   constructor(deps: TaskDispatcherDeps) {
     this.client = deps.client;
@@ -366,18 +369,22 @@ export class TaskDispatcher implements Dispatcher {
     // worktree lane's baseCommit is the main-repo HEAD (not the worktree
     // checkout), captured via the original execDirectory before the worktree
     // path swap above.
-    const baseCommitDir = wantsWorktree(task, this.store)
+    const isolatedForSnapshot = wantsWorktree(task, this.store);
+    const baseCommitDir = isolatedForSnapshot
       ? this.resolveDirectory(task.directory)
       : execDirectory;
-    const [baseCommit, dirty] = await Promise.all([
+    const [baseCommit, dirty, baseCheckoutSnapshot] = await Promise.all([
       resolveHeadCommit(baseCommitDir),
       isWorkingTreeDirty(baseCommitDir),
+      isolatedForSnapshot ? snapshotBaseCheckout(baseCommitDir) : Promise.resolve(null),
     ]);
-    this.store.update(taskId, { baseCommit, dirtyAtDispatch: dirty });
+    this.store.update(taskId, { baseCommit, dirtyAtDispatch: dirty, baseCheckoutSnapshot });
 
     if (task.harness === "claude-code") {
       return this.runClaudeTask(task, execDirectory, task.description, "run");
     }
+
+    const isolatedRun = wantsWorktree(task, this.store);
 
     // The legacy session/message surface is the one that actually wakes the
     // agent in OpenCode 1.17.13. It also honors an agent's configured default
@@ -387,7 +394,9 @@ export class TaskDispatcher implements Dispatcher {
       agent: task.agent ?? undefined,
       model: task.model ?? undefined,
       directory: execDirectory,
-      permission: UNATTENDED_PERMISSION.map((rule) => ({ ...rule })),
+      permission: (isolatedRun ? WRITE_FENCED_PERMISSION : UNATTENDED_PERMISSION).map((rule) => ({
+        ...rule,
+      })),
     };
     const created = await this.client.session.create(createInput);
     if ((created as { error?: unknown }).error) {
@@ -429,6 +438,9 @@ export class TaskDispatcher implements Dispatcher {
     });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
     this.startCompletionWatcher(taskId, sessionId);
+    if (isolatedRun) {
+      this.startPermissionResponder(sessionId, execDirectory);
+    }
 
     const fresh = this.store.get(taskId);
     if (!fresh) {
@@ -557,12 +569,36 @@ export class TaskDispatcher implements Dispatcher {
     if (!task.worktreePath || !task.worktreeBranch) {
       throw AdapterError.validation("Task has no worktree to integrate");
     }
+    // A still-running session may still be writing to the worktree/base
+    // checkout via a bash escape (external_directory fencing never blocks
+    // bash writes — see escape-detector.ts). The escape snapshot compare
+    // below is a single check-then-act read; refusing to even start it while
+    // the session is live closes most of that TOCTOU window instead of
+    // racing a concurrent writer that this design already assumes exists.
+    if (task.runState === "running") {
+      throw AdapterError.validation("Cannot integrate a task while its session is still running");
+    }
     const target = targetBranch ?? task.baseBranch;
     if (!target) throw AdapterError.validation("No target branch to integrate into");
 
     // Re-resolve the task directory to stay inside the workspace boundary even
     // after the worktree has been removed.
     const repoDir = this.resolveDirectory(task.directory);
+
+    const escapeCheck = await detectBaseCheckoutEscape(repoDir, task.baseCheckoutSnapshot ?? null);
+    if (escapeCheck.escaped) {
+      this.store.update(taskId, {
+        pending: "base-checkout-escape",
+        escapeDetectedPaths: escapeCheck.changedPaths,
+      });
+      return {
+        task: this.store.get(taskId) ?? task,
+        ok: false,
+        conflict: false,
+        message: `Refusing to integrate: base checkout changed outside the worktree (${escapeCheck.changedPaths.join(", ")})`,
+      };
+    }
+
     const result = await this.worktrees.integrate(
       repoDir,
       task.worktreeBranch,
@@ -682,6 +718,9 @@ export class TaskDispatcher implements Dispatcher {
     this.store.update(taskId, { runState: "running", runStartedAt, error: undefined });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
     this.startCompletionWatcher(taskId, task.sessionId);
+    if (wantsWorktree(task, this.store)) {
+      this.startPermissionResponder(task.sessionId, this.resolveDirectory(task.worktreePath ?? task.directory));
+    }
 
     const fresh = this.store.get(taskId);
     if (!fresh) {
@@ -735,6 +774,7 @@ export class TaskDispatcher implements Dispatcher {
     }
     await this.client.session.abort({ sessionID: task.sessionId });
     this.cancelCompletionWatcher(task.sessionId);
+    this.stopPermissionResponder(task.sessionId);
     this.outputCandidates.delete(task.sessionId);
     this.store.update(taskId, { runState: "idle" });
   }
@@ -760,6 +800,10 @@ export class TaskDispatcher implements Dispatcher {
     }
     this.completionWatchers.clear();
     this.outputCandidates.clear();
+    for (const responder of this.permissionResponders.values()) {
+      responder.cancel();
+    }
+    this.permissionResponders.clear();
   }
 
   // ---- internals ----
@@ -783,6 +827,21 @@ export class TaskDispatcher implements Dispatcher {
     if (watcher) {
       watcher.cancelled = true;
       this.completionWatchers.delete(sessionId);
+    }
+  }
+
+  /** Start (or restart) the external_directory ask auto-responder for a worktree session. */
+  private startPermissionResponder(sessionId: string, directory: string): void {
+    this.stopPermissionResponder(sessionId);
+    const responder = startPermissionResponder({ client: this.client, sessionID: sessionId, directory });
+    this.permissionResponders.set(sessionId, responder);
+  }
+
+  private stopPermissionResponder(sessionId: string): void {
+    const responder = this.permissionResponders.get(sessionId);
+    if (responder) {
+      responder.cancel();
+      this.permissionResponders.delete(sessionId);
     }
   }
 
@@ -826,6 +885,11 @@ export class TaskDispatcher implements Dispatcher {
         if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
           return;
         }
+
+        if (wantsWorktree(beforeFallback, this.store) && (await this.blockOnBaseCheckoutEscape(taskId, beforeFallback))) {
+          return;
+        }
+
         if (
           !this.updateTaskForWatcher(taskId, {
             runState: "idle",
@@ -850,6 +914,48 @@ export class TaskDispatcher implements Dispatcher {
         this.completionWatchers.delete(sessionId);
         this.outputCandidates.delete(sessionId);
       }
+      // The permission responder must be stopped whenever this watcher stops
+      // watching a worktree-isolated session, regardless of which exit path
+      // got here — normal idle-fallback completion, timeout, escape
+      // detection, or the task having already left "running" because the
+      // agent itself reported completion via /complete or /block (those
+      // routes flip runState directly on the store without touching the
+      // dispatcher, so this finally block is the only place that reliably
+      // observes every completion path for this sessionId).
+      this.stopPermissionResponder(sessionId);
+    }
+  }
+
+  /**
+   * Re-check the base checkout against its dispatch-time snapshot for a
+   * worktree-isolated task. If an escape is detected, marks the task blocked
+   * (pending: "base-checkout-escape") with the changed paths instead of
+   * letting the normal idle/review transition proceed, and returns true so
+   * the caller stops there. Returns false (no state change) when the base
+   * repo can't be resolved/checked or no escape is found.
+   */
+  private async blockOnBaseCheckoutEscape(taskId: string, task: Task): Promise<boolean> {
+    try {
+      const baseRepoDir = this.resolveDirectory(task.directory);
+      const { escaped, changedPaths } = await detectBaseCheckoutEscape(
+        baseRepoDir,
+        task.baseCheckoutSnapshot ?? null,
+      );
+      if (!escaped) return false;
+
+      this.updateTaskForWatcher(taskId, {
+        runState: "idle",
+        pending: "base-checkout-escape",
+        escapeDetectedPaths: changedPaths,
+        completion: null,
+        completionSource: null,
+      });
+      return true;
+    } catch {
+      // Detector failure shouldn't hang the run indefinitely — fall through
+      // to the normal completion path rather than blocking forever on an
+      // unrelated git error (e.g. the base repo dir vanished mid-run).
+      return false;
     }
   }
 

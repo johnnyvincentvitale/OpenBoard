@@ -5375,6 +5375,7 @@ function laneColor(task: Task): TuiColor {
 function taskStatusColor(task: Task): TuiColor {
   if (task.runState === "error") return COLORS.bright;
   if (task.pending === "git-init") return COLORS.muted;
+  if (task.pending === "base-checkout-escape") return COLORS.muted;
   if (task.runState === "running") return COLORS.accentBright;
   if (task.column === "done") return COLORS.dim;
   if (task.column === "review") return COLORS.muted;
