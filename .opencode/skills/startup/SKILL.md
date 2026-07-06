@@ -89,6 +89,10 @@ the next skill immediately.
 5. Confirm the TUI and API match:
    - The task list includes the cards the user can see, or
    - The user has been told that the selected endpoint is a different board/store.
+6. Note the startup side effect: bringing up a named instance runs a
+   best-effort orphan-worktree sweep — clean orphan worktrees in remembered
+   repos are pruned; dirty ones are kept. If you started the instance this turn,
+   a worktree that vanished may have been a clean orphan, not a bug.
 
 ## Browser Fallback
 

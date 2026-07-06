@@ -14,10 +14,13 @@ description: >
 
 Design the multi-agent run before anything dispatches. The output of this skill
 is a run plan the user approves: workflow shape, waves, card contracts, worker
-harness choices, agent profiles, model assignments, and a verified-green baseline. OpenBoard has no
-dependency links, completion contracts, or failure caps natively — the
-orchestrator session enforces all of them procedurally, and this plan is where
-they get defined.
+harness choices, agent profiles, model assignments, and a verified-green
+baseline. OpenBoard provides native task dependency links (`link_tasks` /
+`unlink_tasks`, with run/retry returning 409 on unmet parents) and native
+completion contracts (`/complete`, `/block`); declare these in the plan.
+Auto-promotion of ready children when a parent completes, per-card retry caps,
+and role-loop round-trip caps are not native — the orchestrator session enforces
+them procedurally, and this plan is where they get defined.
 
 Plan, do not implement. The orchestrator session decomposes, dispatches,
 reviews, and integrates; it does not write feature code itself. Work that needs
@@ -53,6 +56,31 @@ Offer the user named shapes rather than a blank page:
 
 Serial at the edges, parallel in the middle: setup and integration are always
 serial; only execution parallelizes.
+
+## What `isolation: "worktree"` Enforces
+
+On the OpenCode lane, a worktree-isolated card is contained at the tool and
+syscall level. Plan around these guarantees:
+
+- **Write-fence.** File-tool writes outside the worktree are denied at the
+  permission layer (reads outside are allowed); the fence is fail-closed.
+- **Escape detector.** The base checkout's git status is snapshotted at
+  dispatch and re-checked before Review and before Integrate; a detected escape
+  blocks the card with `pending: "base-checkout-escape"` instead of advancing.
+- **macOS sandbox (spawn mode).** Worktree cards additionally run under a
+  Seatbelt wrapper. If sandboxing is expected but unavailable, the card fails
+  closed at dispatch (`runState: "error"`) before any session starts — a
+  worktree card on macOS carries a sandbox precondition.
+
+File-disjoint decomposition remains a core part of the plan: it keeps merges
+clean and Review legible, and it is how concurrent lanes stay independent. The
+containment stack is the structural backstop underneath that boundary, so a
+single agent's mistake cannot reach the base checkout.
+
+The Claude Code lane is UNFENCED — it runs `bypassPermissions` with no
+write-fence, escape detector, or sandbox. When the plan puts feature work on
+`harness: "claude-code"`, label those cards UNFENCED and do not describe them as
+isolated.
 
 ## Decompose Along The File Tree
 
@@ -201,6 +229,10 @@ Every worktree branches from a verified-green commit:
    worktrees — no `node_modules`, no `.env`. Prove a fresh worktree can
    install and build before fan-out, or make setup step 1 of every card.
    Relative paths that escape the repo may also break inside a worktree.
+4. **macOS sandbox precondition (worktree + spawn mode).** A worktree card
+   fails closed if the sandbox wrapper is expected but unavailable. Confirm the
+   selected instance reports sandboxing available before planning a macOS
+   worktree fan-out, or plan for the fail-closed error as a first-run gate.
 
 ## Write Cards As Contracts
 
@@ -236,8 +268,21 @@ Decide before dispatch, not mid-thrash:
   the error. Do not re-run to see if it goes away.
 - A stalled In-Progress card gets its session inspected, not re-dispatched.
   Distinguish board-state bugs from hung OpenCode sessions.
+- Integration is rebase-first: Integrate rebases the task branch onto the
+  target branch inside the worktree, then fast-forwards. A conflict does not
+  dirty the base — the card blocks with `pending: "rebase-conflict"` +
+  `rebaseConflictPaths`, and the resolution is to retry the same still-live
+  session (which inherits a mid-rebase worktree — conflict markers present, not
+  a clean tree). Declare who resolves a rebase conflict and the retry budget
+  for it.
 - Integration order for fan-out is declared in the plan; Sync a worktree only
   when a later card genuinely needs the updated base.
+- Plan the non-Integrate endings too. Audit/QA/error-replaced cards leave
+  worktrees. Discard (Review cards) and delete clean them up, but a dirty
+  worktree blocks removal unless forced or kept. Decide up front whether a dirty
+  abandoned worktree is salvaged (a manual git commit inside it — standalone
+  commit is not a product action) or force-removed. Discard/delete are REST/TUI
+  actions, not MCP tools.
 - Role loops get a round-trip cap in addition to the per-card retry cap.
 - End every fan-out with one serial seam card: fix integration seams, run the
   full verification, add minimal smoke tests if needed.

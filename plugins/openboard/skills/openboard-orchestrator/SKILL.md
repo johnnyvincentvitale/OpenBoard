@@ -76,6 +76,10 @@ Starting cards is not enough. After Run, verify each card passes the crash windo
 - The task still carries the expected stored `model`.
 - Worktree metadata appears when isolation is enabled.
 - The OpenCode session is producing real messages or tool activity.
+- No fail-closed sandbox block. On macOS spawn mode, a worktree card whose
+  sandbox wrapper is expected but unavailable lands in `runState: "error"`
+  before any session starts. That is a precondition failure, not a worker
+  failure — surface it as an environment gap, do not retry blindly.
 
 If a card reaches Review suspiciously fast, inspect the OpenCode session messages. Intermediate tool-call steps are not final completion.
 
@@ -85,29 +89,60 @@ When the requester asks to run work now, confirm both the card was dispatched an
 
 For each Review card:
 
-1. Inspect `git status --short` in the worktree.
-2. Confirm changed files respect the card boundary.
-3. Read or diff the changed files.
-4. Run the required build/test command in that worktree.
-5. Check whether the agent satisfied the acceptance criteria.
-6. Only then consider Sync or Integrate.
+1. Check for a blocking `pending` state first. An escape detector gates Review
+   and Integrate: a card with `pending: "base-checkout-escape"` +
+   `escapeDetectedPaths` wrote outside its worktree and must be investigated,
+   not integrated. `pending: "git-init"` and `pending: "rebase-conflict"` are
+   likewise blocks, not ordinary Review state.
+2. Inspect `git status --short` in the worktree.
+3. Confirm changed files respect the card boundary.
+4. Read or diff the changed files.
+5. Run the required build/test command in that worktree.
+6. Check whether the agent satisfied the acceptance criteria.
+7. Only then consider Sync or Integrate.
 
-If a card remains In Progress but appears stalled, inspect session messages before intervening. Distinguish board-state bugs from OpenCode session hangs.
+If a card remains In Progress but appears stalled, inspect session messages
+before intervening. On the fenced OpenCode lane, a stall often means a write was
+denied at the permission layer; the dispatcher sends up to two denial-aware
+auto-nudges to recover it, and the retry counter resets on any progress. Give
+that recovery a beat before treating the card as hung, and distinguish
+board-state bugs from genuine OpenCode session hangs.
 
 ## Integrate Safely
+
+Integrate is rebase-first: it rebases the task branch onto the target branch
+inside the worktree, then fast-forwards the base checkout (`--ff-only`) and
+removes the worktree, keeping the `board/*` branch. The base checkout is never
+merged into directly, so a conflict cannot dirty it.
 
 Before Integrate:
 
 - Verify the worktree has the expected diff.
 - Verify build/tests pass in the worktree.
-- Confirm dirty worktree changes will be preserved by the integration path.
+- Confirm the card is not blocked (`pending` is unset — not
+  `base-checkout-escape`, `rebase-conflict`, or `git-init`).
 - Do not manually move cards to Done to hide uncertainty.
+
+Integrate over MCP is `integrate_task` with `confirmReviewed: true` (optional
+`targetBranch`). There is no force/keep option on integrate.
+
+If Integrate returns a rebase conflict:
+
+- The card blocks with `pending: "rebase-conflict"` + `rebaseConflictPaths`; the
+  base checkout stays untouched and unmerged. This is expected, not a failure to
+  route around.
+- Resolve by retrying the same still-live session — its worktree is left in
+  mid-rebase state (conflict markers, not a clean tree). Author the retry so the
+  session knows it is already mid-rebase and must resolve the listed paths,
+  stage, then `git rebase --continue`. Do not delete the worktree or start a
+  fresh session; that discards the in-progress rebase.
+- Enforce a retry budget for conflict resolution like any other loop.
 
 After Integrate:
 
-- Confirm the target branch contains the commit/diff.
-- Confirm the worktree was removed.
-- Confirm the branch was kept.
+- Confirm the target branch contains the commit/diff (verify it fast-forwarded,
+  not rewrote).
+- Confirm the worktree was removed and the `board/*` branch kept.
 - Confirm the card no longer exposes dead worktree actions.
 - Run final build/tests in the integrated repo.
 
@@ -219,6 +254,25 @@ fixtures. Do not leave them behind.
 - For role loops, clean up only after the loop's exit condition or cap is
   reached and the work is signed off; the sessions may still respawn mid-loop.
 
+## Clean Up Worktrees On Non-Integrate Endings
+
+Integrate cleans up its own worktree. Every other ending is your
+responsibility, because orphaned worktrees are a real tester-day-one failure:
+
+- **Audit/QA Review cards** that will never integrate: use **discard** (Review
+  cards only) — removes the checkout, keeps the `board/*` branch, keeps the
+  card. This is a REST action (`POST .../discard`, `force` in body) or the TUI
+  `D` key; it is not an MCP tool.
+- **Deleting a card** with a worktree removes the worktree (REST
+  `DELETE /api/tasks/:id`, with `forceWorktree` / `keepWorktree` query params).
+  Also not exposed over MCP.
+- A **dirty** worktree blocks removal unless you explicitly force it or keep it.
+  Do not force-remove partial work without deciding whether it should be
+  salvaged first (a manual git commit inside the worktree — standalone commit is
+  not a product action).
+- Startup runs a best-effort orphan sweep of clean worktrees in remembered
+  repos, but do not lean on it — clean up the run you dispatched.
+
 ## Failure Modes
 
 - Treating Review as Done.
@@ -237,3 +291,11 @@ fixtures. Do not leave them behind.
 - Reporting agents are running before confirming sessions actually started.
 - Completing one wave or review and then failing to ask whether to move to the
   next planned step.
+- Treating a `base-checkout-escape` / `rebase-conflict` / `git-init` `pending`
+  block as ordinary Review state and integrating over it.
+- Resolving a rebase conflict by starting a fresh session instead of retrying
+  the same mid-rebase session.
+- Leaving worktrees orphaned after audit/QA/error-replaced cards end without
+  Integrate.
+- Reaching for a nonexistent MCP discard/delete tool instead of the REST route.
+- Describing a Claude Code lane card as isolated. It is UNFENCED — label it so.

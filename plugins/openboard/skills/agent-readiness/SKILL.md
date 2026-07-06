@@ -91,7 +91,9 @@ score. Missing Tier 1 items cap the repo below L3 regardless of Tier 2/3.
 Translate the score into advice for the user — advice, not board actions:
 
 - **L3+ →** safe to dispatch. Suggest `isolation: "worktree"` for concurrent
-  work.
+  work — on the OpenCode lane it provides enforced containment (write-fence +
+  escape detector, plus a macOS sandbox), a genuine safety net for a repo that
+  is otherwise thin on guardrails.
 - **L1–L2 with Tier 1 gaps →** advise against dispatching feature work
   unattended into the shared tree. Recommend worktree isolation at minimum, and
   report the readiness fixes to close first.
