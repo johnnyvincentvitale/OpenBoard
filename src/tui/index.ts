@@ -60,6 +60,8 @@ import {
   toggleViewOverride as toggleDiffViewOverride,
   moveHunkSelection as moveDiffHunkSelection,
   diffPatchScrollTop,
+  clampDiffPatchScrollTop,
+  toggleFileSelectionLock as toggleDiffFileSelectionLock,
   diffViewHeaderLabel,
   diffViewKeyHints,
   renderDiffView,
@@ -2644,7 +2646,7 @@ function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
     }),
     ...details,
     ui.Box({ flexGrow: 1 }),
-    ...renderDetailHints(ui),
+    ...renderDetailHints(ui, task),
   );
 }
 
@@ -2673,15 +2675,132 @@ function renderCompactDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
       ...compactRows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright)),
     ),
     ui.Box({ flexGrow: 1 }),
-    ...renderDetailHints(ui),
+    ...renderDetailHints(ui, task),
   );
 }
 
-function renderDetailHints(ui: OpenTui): VChild[] {
-  return [
-    ui.Text({ content: "r run · R retry · a archive task · d delete", fg: COLORS.muted, height: 1, truncate: true }),
-    ui.Text({ content: "s sync · i integrate · x done · ↵ details", fg: COLORS.muted, height: 1, truncate: true }),
-  ];
+type SelectedCardAction =
+  | "run"
+  | "edit"
+  | "retry"
+  | "abort"
+  | "view-diff"
+  | "integrate"
+  | "done"
+  | "archive"
+  | "delete"
+  | "move"
+  | "details";
+
+interface SelectedCardShortcut {
+  action: SelectedCardAction;
+  key: string;
+  label: string;
+}
+
+const SELECTED_CARD_SHORTCUTS: Record<SelectedCardAction, SelectedCardShortcut> = {
+  run: { action: "run", key: "r", label: "run" },
+  edit: { action: "edit", key: "e", label: "edit" },
+  retry: { action: "retry", key: "R", label: "retry" },
+  abort: { action: "abort", key: "k", label: "abort" },
+  "view-diff": { action: "view-diff", key: "v", label: "diff" },
+  integrate: { action: "integrate", key: "i", label: "integrate" },
+  done: { action: "done", key: "x", label: "done" },
+  archive: { action: "archive", key: "a", label: "archive" },
+  delete: { action: "delete", key: "d", label: "delete" },
+  move: { action: "move", key: "m", label: "move" },
+  details: { action: "details", key: "↵", label: "details" },
+};
+
+function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
+  if (task.column === "done") {
+    return shortcutList("archive", "delete", "move", "details");
+  }
+
+  if (task.runState === "error") {
+    return shortcutList("retry", "delete", "move", "details");
+  }
+
+  if (task.column === "in_progress" || task.runState === "running") {
+    return shortcutList("abort", "move", "details");
+  }
+
+  if (task.column === "todo") {
+    return task.type === "manual"
+      ? shortcutList("edit", "delete", "move", "details")
+      : shortcutList("run", "edit", "delete", "move", "details");
+  }
+
+  if (task.column === "review") {
+    return shortcutList("view-diff", "integrate", "done", "delete", "move", "details");
+  }
+
+  return shortcutList("details");
+}
+
+function shortcutList(...actions: SelectedCardAction[]): SelectedCardShortcut[] {
+  return actions.map((action) => SELECTED_CARD_SHORTCUTS[action]);
+}
+
+function hasSelectedCardAction(task: Task | undefined, action: SelectedCardAction): boolean {
+  return Boolean(task && selectedCardShortcuts(task).some((shortcut) => shortcut.action === action));
+}
+
+function canUseSelectedCardAction(state: TuiState, actions: Pick<TuiActions, "render">, action: SelectedCardAction): boolean {
+  const task = selectedTask(state);
+  if (hasSelectedCardAction(task, action)) return true;
+
+  state.error = undefined;
+  clearPendingConfirmation(state);
+  state.status = selectedCardActionUnavailableMessage(action, task);
+  actions.render();
+  return false;
+}
+
+function selectedCardActionUnavailableMessage(action: SelectedCardAction, task: Task | undefined): string {
+  if (!task) return "no task selected";
+  if (action === "run" && task.type === "manual") {
+    return "manual cards are not runnable; convert to an agent card first";
+  }
+  switch (action) {
+    case "run":
+      return "run is only available for To Do agent cards";
+    case "edit":
+      return "edit is only available for To Do cards";
+    case "retry":
+      return "retry is only available for error cards";
+    case "abort":
+      return "abort is only available for In Progress cards";
+    case "view-diff":
+      return "diff view is only available for Review cards";
+    case "integrate":
+      return "integrate is only available for Review cards";
+    case "done":
+      return "done is only available for Review cards";
+    case "archive":
+      return "archive is only available for Done cards";
+    case "delete":
+      return "delete is only available for To Do, Error, Review, or Done cards";
+    case "move":
+      return "move requires a selected card";
+    case "details":
+      return "details require a selected card";
+  }
+}
+
+function renderDetailHints(ui: OpenTui, task: Task): VChild[] {
+  const shortcuts = selectedCardShortcuts(task);
+  const midpoint = Math.ceil(shortcuts.length / 2);
+  const lines = [
+    shortcuts.slice(0, midpoint),
+    shortcuts.slice(midpoint),
+  ]
+    .filter((line) => line.length > 0)
+    .map((line) => line.map((shortcut) => `${shortcut.key} ${shortcut.label}`).join(" · "));
+
+  return lines.map((line) =>
+    ui.Text({ content: line, fg: COLORS.muted, height: 1, truncate: true }),
+  );
 }
 
 function inlineErrorMode(terminalRows: number): "compact" | "full" {
@@ -2776,8 +2895,8 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             : state.viewState.view === "launch"
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
             : state.viewState.view === "diff"
-            ? diffViewKeyHints()
-            : "↑/↓ cards · ←/→ lanes · esc instances · b switch board · n new task · e edit · f filter · m move card · u refresh · ? help · q quit · A global archive",
+            ? diffViewKeyHints(state.diffView)
+            : "↑/↓ cards · ←/→ lanes · esc instances · b switch board · n new task · f filter · u refresh · ? help · q quit · A global archive",
         fg: COLORS.text,
         height: 1,
         flexGrow: 1,
@@ -2821,7 +2940,6 @@ function renderHelpOverlay(ui: OpenTui) {
     ["a", "archive task"],
     ["A", "global archive browser"],
     ["d", "delete selected card"],
-    ["s", "sync worktree"],
     ["i", "integrate branch"],
     ["x", "move to Done (accepted by User)"],
     ["m", "manual move to lane"],
@@ -2841,11 +2959,13 @@ function renderHelpOverlay(ui: OpenTui) {
     ["l", "cycle lane filter"],
     ["", ""],
     ["DIFF VIEW", ""],
-    ["↑/↓", "select file"],
+    ["↑/↓", "select file / scroll when locked"],
+    ["enter", "toggle file select / patch scroll"],
     ["←/→", "previous/next hunk"],
     ["m", "mark selected file reviewed"],
     ["t", "toggle split/inline"],
-    ["esc / q", "back to board"],
+    ["b / esc", "back to board"],
+    ["q", "quit"],
   ];
 
   return ui.Box(
@@ -3240,12 +3360,15 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       await actions.refresh();
       return;
     case "r":
+      if (!canUseSelectedCardAction(state, actions, "run")) return;
       await handleConfirmableCardAction("run", state, actions, (task) => actions.client.runTask(task.id), "run");
       return;
     case "R":
+      if (!canUseSelectedCardAction(state, actions, "retry")) return;
       await handleConfirmableCardAction("retry", state, actions, (task) => actions.client.retryTask(task.id), "retry");
       return;
     case "a":
+      if (!canUseSelectedCardAction(state, actions, "archive")) return;
       await handleConfirmableCardAction("archive", state, actions, (task) => actions.archiveTask(task.id), "archive");
       return;
     case "A":
@@ -3253,16 +3376,18 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       await actions.openArchive();
       return;
     case "d":
+      if (!canUseSelectedCardAction(state, actions, "delete")) return;
       await handleConfirmableCardAction("delete", state, actions, (task) => actions.client.deleteTask(task.id), "delete");
       return;
     case "v":
       await openDiffViewForSelection(state, actions);
       return;
-    case "s":
-      clearPendingConfirmation(state);
-      await actions.runAction("sync", (task) => actions.client.syncTask(task.id));
+    case "k":
+      if (!canUseSelectedCardAction(state, actions, "abort")) return;
+      await handleConfirmableCardAction("abort", state, actions, (task) => actions.client.abortTask(task.id), "abort");
       return;
     case "i":
+      if (!canUseSelectedCardAction(state, actions, "integrate")) return;
       clearPendingConfirmation(state);
       await actions.runAction("integrate", (task) => actions.client.integrateTask(task.id));
       return;
@@ -3271,6 +3396,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       await actions.runAction("init git and run", (task) => actions.client.initGitAndRun(task.id));
       return;
     case "x":
+      if (!canUseSelectedCardAction(state, actions, "done")) return;
       await confirmMoveToDone(state, actions);
       return;
     case "m":
@@ -3449,7 +3575,12 @@ async function openDiffViewForSelection(state: TuiState, actions: TuiActions): P
 }
 
 async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
-  if (isEscapeKey(key) || key.sequence === "q") {
+  if (key.sequence === "q") {
+    actions.shutdown();
+    return;
+  }
+
+  if (isEscapeKey(key) || key.sequence === "b") {
     state.viewState = closeDiffView(state.viewState);
     state.diffView = undefined;
     actions.render();
@@ -3460,13 +3591,34 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
   const keyName = key.name || key.sequence;
   const patchPaneWidth = diffPatchPaneWidth(state.terminalCols);
 
+  if (isEnterKey(key)) {
+    state.diffView = toggleDiffFileSelectionLock(state.diffView);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = 0;
+    actions.render();
+    return;
+  }
+
   if (keyName === "down") {
+    if (state.diffView.fileSelectionLocked) {
+      const selectedFile = state.diffView.files[state.diffView.selectedFileIndex];
+      const current = state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0;
+      state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampDiffPatchScrollTop(selectedFile?.patch, current + 1);
+      actions.render();
+      return;
+    }
     state.diffView = moveDiffFileSelection(state.diffView, 1);
     state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
     actions.render();
     return;
   }
   if (keyName === "up") {
+    if (state.diffView.fileSelectionLocked) {
+      const selectedFile = state.diffView.files[state.diffView.selectedFileIndex];
+      const current = state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0;
+      state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampDiffPatchScrollTop(selectedFile?.patch, current - 1);
+      actions.render();
+      return;
+    }
     state.diffView = moveDiffFileSelection(state.diffView, -1);
     state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
     actions.render();
@@ -3474,13 +3626,13 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
   }
   if (keyName === "right" || key.sequence === "\u001b[C") {
     state.diffView = moveDiffHunkSelection(state.diffView, 1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = 0;
     actions.render();
     return;
   }
   if (keyName === "left" || key.sequence === "\u001b[D") {
     state.diffView = moveDiffHunkSelection(state.diffView, -1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = 0;
     actions.render();
     return;
   }

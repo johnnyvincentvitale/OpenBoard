@@ -2,14 +2,15 @@ import type { Column, Task } from "../shared";
 
 /**
  * Card-level actions that require a second press to confirm before executing.
- * These are bound to single keys in board view (run/retry/move-to-done/archive/delete).
+ * These are bound to single keys in board view (run/retry/abort/move-to-done/archive/delete).
  */
-export type ConfirmableAction = "run" | "retry" | "move-to-done" | "archive" | "delete";
+export type ConfirmableAction = "run" | "retry" | "abort" | "move-to-done" | "archive" | "delete";
 
 /** Canonical display order for confirmable actions. */
 export const CONFIRMABLE_ACTIONS: readonly ConfirmableAction[] = [
   "run",
   "retry",
+  "abort",
   "move-to-done",
   "archive",
   "delete",
@@ -143,6 +144,8 @@ function actionKey(action: ConfirmableAction): string {
       return "r";
     case "retry":
       return "R";
+    case "abort":
+      return "k";
     case "move-to-done":
       return "x";
     case "archive":
@@ -158,6 +161,8 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
       return presentParticiple ? "running" : "run";
     case "retry":
       return presentParticiple ? "retrying" : "retry";
+    case "abort":
+      return presentParticiple ? "aborting" : "abort";
     case "move-to-done":
       return presentParticiple ? "moving to Done" : "move to Done";
     case "archive":
@@ -185,6 +190,12 @@ export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task
       body = [
         `Send a follow-up to the existing session for "${task.title}".`,
         "Use this after editing files or adding context to the prompt.",
+      ];
+      break;
+    case "abort":
+      body = [
+        `Stop the running session for "${task.title}".`,
+        "Use this before archiving or deleting an active card.",
       ];
       break;
     case "move-to-done":

@@ -40,6 +40,7 @@ export interface DiffViewState {
   capped: boolean;
   files: DiffFile[];
   selectedFileIndex: number;
+  fileSelectionLocked: boolean;
   selectedHunk?: SelectedHunk;
   reviewedFiles: Set<string>;
   viewOverride?: DiffPatchView;
@@ -66,6 +67,7 @@ export function createLoadingDiffViewState(task: Task): DiffViewState {
     capped: false,
     files: [],
     selectedFileIndex: 0,
+    fileSelectionLocked: false,
     reviewedFiles: new Set(),
   };
 }
@@ -82,6 +84,7 @@ export function applyDiffResponse(state: DiffViewState, response: DiffResponse):
     capped: response.capped,
     files: response.files,
     selectedFileIndex: 0,
+    fileSelectionLocked: false,
     selectedHunk: undefined,
   };
 }
@@ -94,13 +97,18 @@ export function selectFileIndex(state: DiffViewState, index: number): DiffViewSt
   if (state.files.length === 0) return state;
   const clamped = Math.max(0, Math.min(index, state.files.length - 1));
   if (clamped === state.selectedFileIndex) return state;
-  return { ...state, selectedFileIndex: clamped, selectedHunk: undefined };
+  return { ...state, selectedFileIndex: clamped, fileSelectionLocked: false, selectedHunk: undefined };
 }
 
 export function moveFileSelection(state: DiffViewState, delta: number): DiffViewState {
   if (state.files.length === 0) return state;
   const next = (state.selectedFileIndex + delta + state.files.length) % state.files.length;
-  return { ...state, selectedFileIndex: next, selectedHunk: undefined };
+  return { ...state, selectedFileIndex: next, fileSelectionLocked: false, selectedHunk: undefined };
+}
+
+export function toggleFileSelectionLock(state: DiffViewState): DiffViewState {
+  if (state.files.length === 0 || state.kind !== "diff") return state;
+  return { ...state, fileSelectionLocked: !state.fileSelectionLocked };
 }
 
 export function toggleFileReviewed(state: DiffViewState): DiffViewState {
@@ -163,13 +171,91 @@ export function diffPatchScrollTop(state: DiffViewState): number {
 /** Patch text presented to DiffRenderable. Selected hunks are rotated to the top
  * without changing the total line count, keeping the diff pane geometry stable.
  */
-export function diffPatchForRender(state: DiffViewState, file: DiffFile): string | undefined {
-  if (!file.patch || !state.selectedHunk || state.selectedHunk.fileIndex !== state.selectedFileIndex) return file.patch;
-  const offsets = hunkLineOffsets(file.patch);
-  const selectedOffset = offsets[state.selectedHunk.hunkIndex];
-  if (!selectedOffset) return file.patch;
-  const lines = file.patch.split("\n");
-  return [...lines.slice(selectedOffset), ...lines.slice(0, selectedOffset)].join("\n");
+export function clampDiffPatchScrollTop(patch: string | undefined, value: number): number {
+  if (!patch) return 0;
+  const max = Math.max(0, countScrollablePatchLines(patch) - 1);
+  return Math.max(0, Math.min(Math.trunc(value), max));
+}
+
+function scrollPatchText(patch: string, scrollTop: number): string {
+  const offset = clampDiffPatchScrollTop(patch, scrollTop);
+  if (offset === 0) return patch;
+  const lines = patch.split("\n");
+  return [...lines.slice(offset), ...Array.from({ length: offset }, () => "")].join("\n");
+}
+
+export function diffPatchForRender(state: DiffViewState, file: DiffFile, scrollTop = 0): string | undefined {
+  if (!file.patch) return undefined;
+  const sections = splitPatchIntoHunkSections(file.patch);
+  if (!sections) return scrollPatchText(file.patch, scrollTop);
+
+  const selectedHunkIndex = state.selectedHunk?.fileIndex === state.selectedFileIndex
+    ? state.selectedHunk.hunkIndex
+    : undefined;
+  const target = selectedHunkIndex === undefined
+    ? patchScrollTarget(sections, scrollTop)
+    : { hunkIndex: selectedHunkIndex, bodyOffset: clampHunkBodyOffset(sections.hunks[selectedHunkIndex], scrollTop) };
+  return renderPatchSections(sections, target.hunkIndex, target.bodyOffset);
+}
+
+interface PatchHunkSection {
+  header: string;
+  body: string[];
+}
+
+interface PatchSections {
+  metadata: string[];
+  hunks: PatchHunkSection[];
+}
+
+function splitPatchIntoHunkSections(patch: string): PatchSections | undefined {
+  const lines = patch.split("\n");
+  const hunks: PatchHunkSection[] = [];
+  const metadata: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      hunks.push({ header: line, body: [] });
+    } else if (hunks.length === 0) {
+      metadata.push(line);
+    } else {
+      hunks[hunks.length - 1].body.push(line);
+    }
+  }
+
+  return hunks.length === 0 ? undefined : { metadata, hunks };
+}
+
+function countScrollablePatchLines(patch: string): number {
+  const sections = splitPatchIntoHunkSections(patch);
+  if (!sections) return patch.split("\n").length;
+  return sections.hunks.reduce((total, hunk) => total + hunk.body.length, 0);
+}
+
+function clampHunkBodyOffset(hunk: PatchHunkSection | undefined, value: number): number {
+  if (!hunk || hunk.body.length === 0) return 0;
+  return Math.max(0, Math.min(Math.trunc(value), hunk.body.length - 1));
+}
+
+function patchScrollTarget(sections: PatchSections, scrollTop: number): { hunkIndex: number; bodyOffset: number } {
+  let remaining = clampDiffPatchScrollTop(renderPatchSections(sections, 0, 0), scrollTop);
+  for (let index = 0; index < sections.hunks.length; index++) {
+    const hunk = sections.hunks[index];
+    if (remaining < hunk.body.length) return { hunkIndex: index, bodyOffset: remaining };
+    remaining -= hunk.body.length;
+  }
+  return { hunkIndex: Math.max(0, sections.hunks.length - 1), bodyOffset: 0 };
+}
+
+function renderPatchSections(sections: PatchSections, hunkIndex: number, bodyOffset: number): string {
+  const clampedHunkIndex = Math.max(0, Math.min(Math.trunc(hunkIndex), sections.hunks.length - 1));
+  const hunkOrder = [...sections.hunks.slice(clampedHunkIndex), ...sections.hunks.slice(0, clampedHunkIndex)];
+  const lines = [...sections.metadata];
+  for (const [index, hunk] of hunkOrder.entries()) {
+    const offset = index === 0 ? clampHunkBodyOffset(hunk, bodyOffset) : 0;
+    lines.push(hunk.header, ...hunk.body.slice(offset), ...hunk.body.slice(0, offset));
+  }
+  return lines.join("\n");
 }
 
 export interface DiffFileListWindow {
@@ -242,8 +328,9 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
   return `${state.sourceLabel} · ${state.files.length} ${fileWord}${dirty}${capped}`;
 }
 
-export function diffViewKeyHints(): string {
-  return "↑/↓ files · ←/→ hunks in file · m mark reviewed · t split/inline · ? help · esc/q back";
+export function diffViewKeyHints(state?: DiffViewState): string {
+  const vertical = state?.fileSelectionLocked ? "↑/↓ scroll · enter files" : "↑/↓ files · enter scroll";
+  return `${vertical} · ←/→ hunks · m mark · t split/inline · b back · q quit`;
 }
 
 export interface DiffViewTheme {
@@ -325,8 +412,6 @@ export function renderDiffView(
   if (state.error) return fullWidthMessage(ui, theme, `Failed to load diff: ${state.error}`);
   if (state.kind === "no-git") return fullWidthMessage(ui, theme, state.noGitReason || "No git evidence for this task.");
   if (state.files.length === 0) return fullWidthMessage(ui, theme, "No changes.");
-  void scrollState;
-
   const selectedFile = state.files[state.selectedFileIndex];
   const reviewed = selectedFile ? isFileReviewed(state, selectedFile.file) : false;
   const view = effectiveDiffView(state, patchPaneWidth);
@@ -374,7 +459,9 @@ export function renderDiffView(
     ui.Text({ content: view === "split" ? "split" : "inline", fg: theme.muted, height: 1 }),
   );
 
-  const renderPatch = selectedFile ? diffPatchForRender(state, selectedFile) : undefined;
+  const renderPatch = selectedFile
+    ? diffPatchForRender(state, selectedFile, scrollState[DIFF_PATCH_SCROLL_ID] ?? 0)
+    : undefined;
   const patchBody: VChild = renderPatch
     ? ui.h(ui.DiffRenderable, {
         id: DIFF_PATCH_SCROLL_ID,

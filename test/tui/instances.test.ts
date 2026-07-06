@@ -301,7 +301,7 @@ describe("TUI label cleanup", () => {
     expect(text).toContain("esc instances");
     expect(text).toContain("b switch board");
     expect(text).toContain("n new task");
-    expect(text).toContain("m move card");
+    expect(text).not.toContain("m move card");
     expect(text).not.toContain("b switch · n new");
   });
 
@@ -335,7 +335,7 @@ describe("TUI label cleanup", () => {
     expect(text).toContain("Board ok · OpenCode 1.2.3");
   });
 
-  it("selected-card action hints use 'archive task'", () => {
+  it("selected-card action hints are contextual for Done cards", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [task("done-card", "done")],
@@ -343,8 +343,84 @@ describe("TUI label cleanup", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("a archive task");
-    expect(text).not.toContain("a archive · d delete");
+    expect(text).toContain("a archive · d delete");
+    expect(text).toContain("m move · ↵ details");
+    expect(text).not.toContain("r run · R retry");
+    expect(text).not.toContain("s sync");
+  });
+
+  it("selected-card action hints are contextual for To Do cards", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("r run · e edit · d delete");
+    expect(text).toContain("m move · ↵ details");
+    expect(text).not.toContain("R retry");
+    expect(text).not.toContain("s sync");
+    expect(text).not.toContain("i integrate");
+  });
+
+  it("selected-card action hints are contextual for In Progress cards", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("running-card", "in_progress"), runState: "running" }],
+      selectedTaskId: "running-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("k abort · m move");
+    expect(text).toContain("↵ details");
+    expect(text).not.toContain("r run");
+    expect(text).not.toContain("R retry");
+    expect(text).not.toContain("a archive");
+    expect(text).not.toContain("d delete");
+  });
+
+  it("selected-card action hints allow deleting Error cards", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("error-card", "in_progress"), runState: "error" }],
+      selectedTaskId: "error-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("R retry · d delete");
+    expect(text).toContain("m move · ↵ details");
+    expect(text).not.toContain("r run");
+    expect(text).not.toContain("k abort");
+    expect(text).not.toContain("a archive");
+  });
+
+  it("selected-card action hints are contextual for Review cards", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("review-card", "review")],
+      selectedTaskId: "review-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("v diff · i integrate · x done");
+    expect(text).toContain("d delete · m move · ↵ details");
+    expect(text).not.toContain("s sync");
+    expect(text).not.toContain("r run");
+    expect(text).not.toContain("R retry");
+  });
+
+  it("selected-card action hints are contextual for manual Review cards", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("review-card", "review"), type: "manual" }],
+      selectedTaskId: "review-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("v diff · i integrate · x done");
+    expect(text).toContain("d delete · m move · ↵ details");
+    expect(text).not.toContain("s sync");
   });
 });
 
@@ -1048,7 +1124,7 @@ describe("TUI board view command strip", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("m move card");
+    expect(text).not.toContain("m move card");
     expect(text).toContain("q quit · A global archive");
   });
 
@@ -1328,20 +1404,20 @@ describe("TUI Enter key shows inline selected-card details", () => {
   });
 
   it.each([
-    ["a", "archive"],
-    ["d", "delete"],
-    ["x", "move-to-done"],
-  ] as const)("esc cancels %s confirmation without opening instances", async (keySequence, expectedAction) => {
+    ["a", "archive", task("done-card", "done")],
+    ["d", "delete", task("todo-card", "todo")],
+    ["x", "move-to-done", task("review-card", "review")],
+  ] as const)("esc cancels %s confirmation without opening instances", async (keySequence, expectedAction, selected) => {
     const detachInstance = vi.fn(async () => undefined);
     const s = state({
       viewState: { view: "board", previousView: "launch" },
-      tasks: [task("todo-card", "todo")],
-      selectedTaskId: "todo-card",
+      tasks: [selected],
+      selectedTaskId: selected.id,
     });
     const a = actions({ detachInstance });
 
     await handleKeypress({ name: keySequence, sequence: keySequence } as any, s, a);
-    expect(s.pendingConfirmation).toEqual({ action: expectedAction, taskId: "todo-card" });
+    expect(s.pendingConfirmation).toEqual({ action: expectedAction, taskId: selected.id });
 
     await handleKeypress({ name: "escape", sequence: "\u001b" } as any, s, a);
 
@@ -2046,6 +2122,115 @@ describe("TUI manual task creation", () => {
     expect(runTask).not.toHaveBeenCalled();
     expect(s.status).toContain("manual cards are not runnable");
   });
+
+  it("does not run In Progress cards from the board shortcut", async () => {
+    const runTask = vi.fn(async () => task("running-card", "in_progress"));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("running-card", "in_progress"), runState: "running" }],
+      selectedTaskId: "running-card",
+    });
+
+    await handleKeypress({ name: "r", sequence: "r" } as any, s, actions({
+      client: { runTask },
+    }));
+
+    expect(runTask).not.toHaveBeenCalled();
+    expect(s.status).toBe("run is only available for To Do agent cards");
+  });
+
+  it("does not retry non-error cards from the board shortcut", async () => {
+    const retryTask = vi.fn(async () => task("review-card", "review"));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("review-card", "review")],
+      selectedTaskId: "review-card",
+    });
+
+    await handleKeypress({ name: "R", sequence: "R" } as any, s, actions({
+      client: { retryTask },
+    }));
+
+    expect(retryTask).not.toHaveBeenCalled();
+    expect(s.status).toBe("retry is only available for error cards");
+  });
+
+  it("deletes Error cards from the board shortcut", async () => {
+    const deleteTask = vi.fn(async () => undefined);
+    const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("error-card", "in_progress"), runState: "error" }],
+      selectedTaskId: "error-card",
+    });
+
+    await handleKeypress({ name: "d", sequence: "d" } as any, s, actions({
+      client: { deleteTask },
+      runAction,
+    }));
+
+    expect(deleteTask).not.toHaveBeenCalled();
+    expect(runAction).not.toHaveBeenCalled();
+    expect(s.pendingConfirmation).toEqual({ action: "delete", taskId: "error-card" });
+
+    await handleKeypress({ name: "d", sequence: "d" } as any, s, actions({
+      client: { deleteTask },
+      runAction,
+    }));
+
+    expect(runAction).toHaveBeenCalledTimes(1);
+    expect(runAction.mock.calls[0]?.[0]).toBe("delete");
+    const callback = runAction.mock.calls[0]?.[1] as (t: Task) => Promise<unknown>;
+    await callback({ ...task("error-card", "in_progress"), runState: "error" });
+    expect(deleteTask).toHaveBeenCalledWith("error-card");
+  });
+
+  it("k aborts In Progress cards", async () => {
+    const abortTask = vi.fn(async () => ({ ...task("running-card", "in_progress"), runState: "error" as const }));
+    const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("running-card", "in_progress"), runState: "running" }],
+      selectedTaskId: "running-card",
+    });
+
+    await handleKeypress({ name: "k", sequence: "k" } as any, s, actions({
+      client: { abortTask },
+      runAction,
+    }));
+
+    expect(runAction).not.toHaveBeenCalled();
+    expect(s.pendingConfirmation).toEqual({ action: "abort", taskId: "running-card" });
+
+    await handleKeypress({ name: "k", sequence: "k" } as any, s, actions({
+      client: { abortTask },
+      runAction,
+    }));
+
+    expect(runAction).toHaveBeenCalledTimes(1);
+    expect(runAction.mock.calls[0]?.[0]).toBe("abort");
+    const callback = runAction.mock.calls[0]?.[1] as (t: Task) => Promise<unknown>;
+    await callback({ ...task("running-card", "in_progress"), runState: "running" });
+    expect(abortTask).toHaveBeenCalledWith("running-card");
+  });
+
+  it("s no longer syncs Review cards from the board shortcut", async () => {
+    const syncTask = vi.fn(async () => ({ ok: true }));
+    const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("review-card", "review")],
+      selectedTaskId: "review-card",
+    });
+
+    await handleKeypress({ name: "s", sequence: "s" } as any, s, actions({
+      client: { syncTask },
+      runAction,
+    }));
+
+    expect(syncTask).not.toHaveBeenCalled();
+    expect(runAction).not.toHaveBeenCalled();
+  });
 });
 
 describe("TUI inline manual move", () => {
@@ -2235,12 +2420,12 @@ describe("TUI inline manual move", () => {
   });
 
   it("x key arms then moves to Done with completedBy 'User'", async () => {
-    const moveTask = vi.fn(async () => [{ ...task("todo-card", "done"), completedBy: "User" }]);
+    const moveTask = vi.fn(async () => [{ ...task("review-card", "done"), completedBy: "User" }]);
     const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
     const s = state({
       viewState: { view: "board", previousView: "launch" },
-      tasks: [task("todo-card", "todo")],
-      selectedTaskId: "todo-card",
+      tasks: [task("review-card", "review")],
+      selectedTaskId: "review-card",
     });
 
     await handleKeypress({ name: "x", sequence: "x" } as any, s, actions({
@@ -2249,7 +2434,7 @@ describe("TUI inline manual move", () => {
     }));
 
     expect(runAction).not.toHaveBeenCalled();
-    expect(s.pendingConfirmation).toEqual({ action: "move-to-done", taskId: "todo-card" });
+    expect(s.pendingConfirmation).toEqual({ action: "move-to-done", taskId: "review-card" });
 
     await handleKeypress({ name: "x", sequence: "x" } as any, s, actions({
       client: { moveTask },
@@ -2264,8 +2449,8 @@ describe("TUI inline manual move", () => {
     // Invoke the callback to verify completedBy is passed
     const callback = runAction.mock.calls[0]?.[1] as (t: Task) => Promise<unknown>;
     if (callback) {
-      await callback(task("todo-card", "todo"));
-      expect(moveTask).toHaveBeenCalledWith("todo-card", "done", 0, "User");
+      await callback(task("review-card", "review"));
+      expect(moveTask).toHaveBeenCalledWith("review-card", "done", 0, "User");
     }
   });
 });

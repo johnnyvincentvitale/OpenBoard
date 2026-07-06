@@ -177,6 +177,7 @@ describe("TUI diff view navigation and exit", () => {
         { file: "b.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1,1 +1,1 @@\ny\n" },
       ],
       selectedFileIndex: 0,
+      fileSelectionLocked: false,
       reviewedFiles: new Set(),
     };
     return s;
@@ -193,18 +194,43 @@ describe("TUI diff view navigation and exit", () => {
     expect(s.diffView).toBeUndefined();
   });
 
-  it("q also returns to the board", async () => {
+  it("b returns to the board", async () => {
     const s = openedState();
-    await handleKeypress({ sequence: "q", name: "q" } as any, s, actions());
+    await handleKeypress({ sequence: "b", name: "b" } as any, s, actions());
     expect(s.viewState.view).toBe("board");
   });
 
-  it("down/up move the selected file", async () => {
+  it("q quits from the diff view", async () => {
+    const s = openedState();
+    const shutdown = vi.fn();
+    await handleKeypress({ sequence: "q", name: "q" } as any, s, actions({ shutdown }));
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(s.viewState.view).toBe("diff");
+  });
+
+  it("enter toggles whether down/up move files or scroll the selected patch", async () => {
     const s = openedState();
     await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(1);
     await handleKeypress({ name: "up", sequence: "[A" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions());
+    expect(s.diffView.fileSelectionLocked).toBe(true);
+    expect(s.detailScrollTop["diff-patch"]).toBe(0);
+
+    await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.detailScrollTop["diff-patch"]).toBe(1);
+
+    await handleKeypress({ name: "up", sequence: "[A" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.detailScrollTop["diff-patch"]).toBe(0);
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions());
+    expect(s.diffView.fileSelectionLocked).toBe(false);
+    await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
+    expect(s.diffView.selectedFileIndex).toBe(1);
   });
 
   it("left/right hunk navigation recognizes sequence-only arrows and keeps the selected file stable", async () => {
@@ -218,12 +244,12 @@ describe("TUI diff view navigation and exit", () => {
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
     expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
-    expect(s.detailScrollTop["diff-patch"]).toBe(2);
+    expect(s.detailScrollTop["diff-patch"]).toBe(0);
 
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);
     expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 2 });
-    expect(s.detailScrollTop["diff-patch"]).toBe(4);
+    expect(s.detailScrollTop["diff-patch"]).toBe(0);
 
     await handleKeypress({ sequence: "\u001b[D" } as any, s, actions());
     expect(s.diffView.selectedFileIndex).toBe(0);

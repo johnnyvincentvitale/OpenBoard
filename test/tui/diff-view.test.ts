@@ -8,7 +8,9 @@ import {
   applyDiffError,
   applyDiffResponse,
   canOpenDiffView,
+  clampDiffPatchScrollTop,
   createLoadingDiffViewState,
+  diffViewKeyHints,
   diffPatchScrollTop,
   diffPatchForRender,
   diffFileListWindow,
@@ -24,6 +26,7 @@ import {
   renderDiffView,
   selectFileIndex,
   splitAvailable,
+  toggleFileSelectionLock,
   toggleFileReviewed,
   toggleViewOverride,
   type DiffViewState,
@@ -167,6 +170,14 @@ describe("diff file navigation", () => {
     const unreviewed = toggleFileReviewed(reviewed);
     expect(isFileReviewed(unreviewed, "a.ts")).toBe(false);
   });
+
+  it("toggles between file selection and patch scrolling modes", () => {
+    expect(base.fileSelectionLocked).toBe(false);
+    const locked = toggleFileSelectionLock(base);
+    expect(locked.fileSelectionLocked).toBe(true);
+    expect(diffViewKeyHints(locked)).toContain("↑/↓ scroll · enter files");
+    expect(diffViewKeyHints(base)).toContain("↑/↓ files · enter scroll");
+  });
 });
 
 describe("diff hunk navigation", () => {
@@ -242,8 +253,42 @@ describe("diff hunk navigation", () => {
     state = moveHunkSelection(state, 1);
     state = moveHunkSelection(state, 1);
     const rendered = diffPatchForRender(state, files[0]);
-    expect(rendered?.startsWith("@@ -9,1 +9,1 @@")).toBe(true);
+    expect(rendered?.startsWith("file header\n@@ -9,1 +9,1 @@")).toBe(true);
     expect(rendered).toContain("old1");
+    expect(rendered?.split("\n")).toHaveLength(patch.split("\n").length);
+  });
+
+  it("scrolls the rendered patch without changing the diff geometry", () => {
+    const patch = "line0\nline1\nline2\nline3\n";
+    const files = [diffFile({ patch })];
+    const state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+
+    expect(clampDiffPatchScrollTop(patch, -1)).toBe(0);
+    expect(clampDiffPatchScrollTop(patch, 99)).toBe(4);
+    const rendered = diffPatchForRender(state, files[0], 2);
+    expect(rendered?.startsWith("line2\nline3")).toBe(true);
+    expect(rendered?.split("\n")).toHaveLength(patch.split("\n").length);
+  });
+
+  it("keeps git diff headers valid while scrolling a short hunk body", () => {
+    const patch = [
+      "diff --git a/qa.ts b/qa.ts",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/qa.ts",
+      "@@ -0,0 +1,4 @@",
+      "+line 1",
+      "+line 2",
+      "+line 3",
+      "+line 4",
+    ].join("\n");
+    const files = [diffFile({ file: "qa.ts", patch })];
+    const state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+
+    expect(clampDiffPatchScrollTop(patch, 99)).toBe(3);
+    const rendered = diffPatchForRender(state, files[0], 99);
+    expect(rendered?.startsWith("diff --git a/qa.ts b/qa.ts\nnew file mode 100644\n--- /dev/null\n+++ b/qa.ts\n@@ -0,0 +1,4 @@\n+line 4")).toBe(true);
+    expect(rendered).toContain("+line 1");
     expect(rendered?.split("\n")).toHaveLength(patch.split("\n").length);
   });
 
@@ -418,6 +463,16 @@ describe("renderDiffView", () => {
     expect(nodesByType(tree, "Diff")[0].props.id).toBe(DIFF_PATCH_SCROLL_ID);
   });
 
+  it("passes locked patch scroll state into the diff renderer", () => {
+    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+      kind: "diff",
+      files: [diffFile({ patch: "line0\nline1\nline2\n" })],
+      capped: false,
+    });
+    const tree = renderDiffView(fakeUi(), fakeTheme(), { [DIFF_PATCH_SCROLL_ID]: 1 }, state, 200);
+    expect(nodesByType(tree, "Diff")[0].props.diff.startsWith("line1\nline2")).toBe(true);
+  });
+
   it("renders the patch header hunk count so one-hunk files do not look stuck", () => {
     const state = applyDiffResponse(createLoadingDiffViewState(task()), {
       kind: "diff",
@@ -438,7 +493,7 @@ describe("renderDiffView", () => {
     const tree = renderDiffView(fakeUi(), fakeTheme(), {}, selected, 200);
     const diff = nodesByType(tree, "Diff")[0];
     expect(textOf(tree)).toContain("hunk 2/3");
-    expect(diff.props.diff.startsWith("@@ -5,1 +5,1 @@")).toBe(true);
+    expect(diff.props.diff.startsWith("preamble\n@@ -5,1 +5,1 @@")).toBe(true);
     expect(diff.props.diff).toContain("-a");
   });
 

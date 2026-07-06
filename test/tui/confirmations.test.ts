@@ -123,6 +123,7 @@ describe("confirmation copy builders", () => {
   it.each([
     ["run", "Running this card?", "Press r again to run."],
     ["retry", "Retrying this card?", "Press R again to retry."],
+    ["abort", "Aborting this card?", "Press k again to abort."],
     ["move-to-done", "Move this card to Done?", "Press x again to move to Done."],
     ["archive", "Archiving this card?", "Press a again to archive."],
     ["delete", "Deleting this card?", "Press d again to delete."],
