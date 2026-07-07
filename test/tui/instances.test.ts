@@ -1751,6 +1751,93 @@ describe("TUI Enter key shows inline selected-card details", () => {
   });
 });
 
+describe("TUI selected Review diff stat", () => {
+  it("renders loading, success, empty, no-git, and error states in the selected-card details", () => {
+    const reviewCard = task("review-card", "review");
+    const base = {
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+    };
+
+    expect(textOf(renderApp(fakeUi(), state(base)))).toContain("DIFF\nloading...");
+    expect(textOf(renderApp(fakeUi(), state({
+      ...base,
+      reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "3 files · +42 -17 ›" },
+    })))).toContain("DIFF\n3 files · +42 -17 ›");
+    expect(textOf(renderApp(fakeUi(), state({
+      ...base,
+      reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "0 files · +0 -0 ›" },
+    })))).toContain("DIFF\n0 files · +0 -0 ›");
+    expect(textOf(renderApp(fakeUi(), state({
+      ...base,
+      reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "diff unavailable" },
+    })))).toContain("DIFF\ndiff unavailable");
+    expect(textOf(renderApp(fakeUi(), state({
+      ...base,
+      reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "error", label: "diff unavailable" },
+    })))).toContain("DIFF\ndiff unavailable");
+  });
+
+  it("fetches diff stats for Review selections only and reuses the same selected-card cache", async () => {
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      capped: false,
+      files: [{ file: "src/a.ts", additions: 2, deletions: 1, status: "modified" as const }],
+    }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo"), task("review-card", "review")],
+      selectedTaskId: "todo-card",
+    });
+    const a = actions({ client: { getTaskDiff } });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, a);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(getTaskDiff).toHaveBeenCalledTimes(1);
+    expect(getTaskDiff).toHaveBeenCalledWith("review-card");
+    expect(textOf(renderApp(fakeUi(), s))).toContain("DIFF\n1 files · +2 -1 ›");
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+    await Promise.resolve();
+    expect(s.selectedTaskId).toBe("review-card");
+    expect(getTaskDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fetch diff stats for non-Review cards", async () => {
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, capped: false, files: [] }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { getTaskDiff } }));
+    await Promise.resolve();
+
+    expect(getTaskDiff).not.toHaveBeenCalled();
+    expect(textOf(renderApp(fakeUi(), s))).not.toContain("DIFF");
+  });
+});
+
+describe("TUI inline detail keyboard scroll clamp", () => {
+  it("keeps repeated keyboard scroll within a non-negative bounded range", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+      detailTab: "prompt",
+    });
+
+    for (let i = 0; i < 20; i += 1) await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.detailScrollTop["board-detail-prompt-todo-card"]).toBe(3);
+    for (let i = 0; i < 20; i += 1) await handleKeypress({ name: "up", sequence: "\u001b[A" } as any, s, actions());
+    expect(s.detailScrollTop["board-detail-prompt-todo-card"]).toBe(0);
+  });
+});
+
 describe("TUI accepted-by display", () => {
   it("sidebar shows ACCEPTED BY when task has completedBy attribute", () => {
     const doneCard = { ...task("done-card", "done"), completedBy: "User" };
@@ -3681,6 +3768,7 @@ function actions(overrides: Record<string, unknown> = {}) {
     client: {
       moveTask: vi.fn(async () => []),
       updateTask: vi.fn(async (id: string) => ({ ...task(id, "todo"), id })),
+      getTaskDiff: vi.fn(async () => ({ kind: "diff", capped: false, files: [] })),
       listComments: vi.fn(async () => []),
       addComment: vi.fn(async () => ({ id: "comment-1", taskId: "todo-card", author: "User", body: "", createdAt: 1 })),
     },

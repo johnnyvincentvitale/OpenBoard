@@ -77,6 +77,7 @@ import {
   type DiffViewState,
   type DiffViewTheme,
 } from "./diff-view";
+import { formatDiffStat } from "./diff-stat";
 import {
   buildConfirmationCopy,
   buildRunConfidenceDetails,
@@ -546,6 +547,11 @@ interface CommentsPanelState {
   selectedIndex: number;
 }
 
+type ReviewDiffStatState =
+  | { taskId: string; taskUpdatedAt: number; status: "loading" }
+  | { taskId: string; taskUpdatedAt: number; status: "success"; label: string }
+  | { taskId: string; taskUpdatedAt: number; status: "error"; label: string };
+
 /** In-progress compose state for a new top-level comment or a reply. */
 interface CommentDraftState {
   taskId: string;
@@ -602,6 +608,8 @@ interface TuiState {
   commentDraft?: CommentDraftState;
   // Full-screen diff view (v on a selected Review card)
   diffView?: DiffViewState;
+  // Inline selected-card diff stat for Review cards, fetched once per selected task identity.
+  reviewDiffStat?: ReviewDiffStatState;
   // Set by diff keyboard scroll/hunk-nav so the next render() treats `detailScrollTop`
   // as authoritative (applies it to the diff renderable) instead of capturing the live
   // renderable's scrollY. Mouse-wheel scroll leaves it false so that scroll is captured.
@@ -885,6 +893,7 @@ export async function runOpenBoardTui(
       state.providers = providers;
       state.acpConfig = acpConfig;
       state.selectedTaskId = resolveSelectedTaskId(tasks, state.selectedTaskId);
+      state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selectedTask(state));
       state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
       if (healthResult.ok) {
         state.health = healthResult.health;
@@ -896,6 +905,7 @@ export async function runOpenBoardTui(
       state.error = undefined;
       state.status = tasks.length === 0 ? "board is empty" : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
       state.lastRefresh = new Date();
+      void fetchSelectedReviewDiffStat(state, currentClient, render);
     } catch (error) {
       state.error = errorMessage(error);
       state.status = "board unavailable";
@@ -953,6 +963,7 @@ export async function runOpenBoardTui(
       state.agents = [];
       state.providers = [];
       state.selectedTaskId = undefined;
+      state.reviewDiffStat = undefined;
       state.viewState = transitionView(state.viewState, "board");
       state.status = `attached to ${item.definition.name} (${item.runtime.boardUrl})`;
       await refresh();
@@ -969,6 +980,7 @@ export async function runOpenBoardTui(
     state.agents = [];
     state.providers = [];
     state.selectedTaskId = undefined;
+    state.reviewDiffStat = undefined;
     state.status = "detached; back to instance list";
     render();
   };
@@ -2686,6 +2698,8 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   if (task.sessionId) rows.push({ label: "SESSION", value: task.sessionId, color: COLORS.muted });
   if (task.worktreeBranch) rows.push({ label: "BRANCH", value: `⑃ ${task.worktreeBranch}`, color: COLORS.muted });
   if (task.baseBranch) rows.push({ label: "BASE", value: `⑃ ${task.baseBranch}`, color: COLORS.muted });
+  const diffStatRow = reviewDiffStatRow(state, task);
+  if (diffStatRow) rows.push(diffStatRow);
   rows.push({ label: "TASK ID", value: task.id, color: COLORS.text });
 
   if (state.moveTargetColumn) {
@@ -2705,10 +2719,22 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   // to single-line card-meta rows instead of letting labels and values collide.
   // Error cards represent the failure as normal metadata here; the red error
   // notice is reserved for the inline Prompt/Handoff detail view.
-  const mode = sidebarDetailMode(laneInnerHeight(state.terminalRows), rows.length, false);
+  const modeRows = rows.filter((row) => row.label !== "DIFF").length;
+  const mode = sidebarDetailMode(laneInnerHeight(state.terminalRows), modeRows, false);
   return mode === "expanded"
     ? renderExpandedDetails(ui, task, rows)
     : renderCompactDetails(ui, task, rows);
+}
+
+function reviewDiffStatRow(state: TuiState, task: Task): MetaRow | undefined {
+  if (!canOpenDiffView(task)) return undefined;
+  const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
+  if (!cache || cache.status === "loading") return { label: "DIFF", value: "loading...", color: COLORS.muted };
+  return {
+    label: "DIFF",
+    value: cache.label,
+    color: cache.status === "success" ? COLORS.accentBright : COLORS.muted,
+  };
 }
 
 function worktreeId(task: Pick<Task, "id" | "worktreePath" | "worktreeBranch">): string {
@@ -2766,6 +2792,26 @@ function boardDetailScrollId(tab: TaskDetailTab, taskId: string): string | undef
   }
 }
 
+function boardDetailScrollMax(state: TuiState, task: Task, tab: TaskDetailTab): number {
+  const approxWidth = Math.max(20, selectedPanelWidth(state.terminalCols) - 4);
+  const wrappedRows = (text: string) => text
+    .split("\n")
+    .reduce((sum, line) => sum + Math.max(1, Math.ceil(Math.max(1, line.length) / approxWidth)), 0);
+  const contentRows = tab === "prompt"
+    ? wrappedRows(task.description || "(empty prompt)")
+    : tab === "handoff"
+      ? task.completion
+        ? wrappedRows(`${task.completion.summary}\n${task.completion.changedFiles.join(", ") || "none"}\n${task.completion.verification.map((item) => `${item.command} → ${item.result}`).join("; ") || "none"}\n${task.completion.residualRisk ?? "none"}`)
+        : 1
+      : tab === "output"
+        ? wrappedRows(task.finalSessionOutput?.trim() || "No final session output available")
+        : 0;
+  // Keyboard scroll happens before OpenTUI reports the real viewport/content heights.
+  // Clamp to a conservative content-derived cap so held arrows cannot grow forever;
+  // renderDetailViewport's mouse-wheel path still applies the exact visual clamp.
+  return contentRows > 0 ? Math.max(DETAIL_SCROLL_STEP_ROWS, contentRows) : 0;
+}
+
 function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
   const tab = state.detailTab ?? "prompt";
   const content: VChild =
@@ -2776,7 +2822,7 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
         : tab === "output"
           ? renderOutputTab(ui, state, task)
           : renderCommentsTab(ui, state, task);
-  const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY"].includes(row.label));
+  const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label));
   const footer = tab === "comments"
     ? (state.commentDraft ? "enter submit · esc cancel" : "esc details · ←/→ tabs · c comment · r reply")
     : "↑/↓ scroll · esc details · ←/→ tabs · m move card";
@@ -4031,7 +4077,10 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       const scrollId = task ? boardDetailScrollId(state.detailTab, task.id) : undefined;
       if (scrollId) {
         const delta = (key.name || key.sequence) === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
-        state.detailScrollTop[scrollId] = Math.max(0, detailScrollOffset(state, scrollId) + delta);
+        state.detailScrollTop[scrollId] = clampDetailScrollOffset(
+          detailScrollOffset(state, scrollId) + delta,
+          task ? boardDetailScrollMax(state, task, state.detailTab) : 0,
+        );
       }
       actions.render();
       return;
@@ -4164,6 +4213,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     clearPendingConfirmation(state);
     if (state.detailTab) closeInlineDetail(state);
     else state.detailTab = "prompt";
+    void fetchSelectedReviewDiffStat(state, actions.client, actions.render);
     actions.render();
     return;
   }
@@ -4176,7 +4226,9 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     else if (keyName === "up") state.selectedTaskId = nextTaskId(visibleTasks, state.selectedTaskId, -1);
     else if (keyName === "left") state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, -1);
     else state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, 1);
+    state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selectedTask(state));
     state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
+    void fetchSelectedReviewDiffStat(state, actions.client, actions.render);
     actions.render();
   }
 }
@@ -6100,6 +6152,46 @@ function resolveSelectedTaskId(tasks: Task[], selectedTaskId: string | undefined
 
 function selectedTask(state: TuiState): Task | undefined {
   return state.tasks.find((task) => task.id === state.selectedTaskId);
+}
+
+function reviewDiffStatCacheKey(task: Pick<Task, "id" | "updatedAt">): Pick<ReviewDiffStatState, "taskId" | "taskUpdatedAt"> {
+  return { taskId: task.id, taskUpdatedAt: task.updatedAt };
+}
+
+function isSameReviewDiffStatIdentity(cache: ReviewDiffStatState | undefined, task: Pick<Task, "id" | "updatedAt"> | undefined): boolean {
+  return Boolean(cache && task && cache.taskId === task.id && cache.taskUpdatedAt === task.updatedAt);
+}
+
+function reconcileReviewDiffStatCache(cache: ReviewDiffStatState | undefined, task: Task | undefined): ReviewDiffStatState | undefined {
+  if (!canOpenDiffView(task)) return undefined;
+  return isSameReviewDiffStatIdentity(cache, task) ? cache : undefined;
+}
+
+async function fetchSelectedReviewDiffStat(
+  state: TuiState,
+  client: Pick<BoardClient, "getTaskDiff">,
+  render: () => void,
+): Promise<void> {
+  const task = selectedTask(state);
+  if (!task || !canOpenDiffView(task)) {
+    state.reviewDiffStat = undefined;
+    return;
+  }
+  if (isSameReviewDiffStatIdentity(state.reviewDiffStat, task)) return;
+
+  const key = reviewDiffStatCacheKey(task);
+  state.reviewDiffStat = { ...key, status: "loading" };
+  render();
+
+  try {
+    const response = await client.getTaskDiff(task.id);
+    if (!isSameReviewDiffStatIdentity(state.reviewDiffStat, task)) return;
+    state.reviewDiffStat = { ...key, status: "success", label: formatDiffStat(response) };
+  } catch {
+    if (!isSameReviewDiffStatIdentity(state.reviewDiffStat, task)) return;
+    state.reviewDiffStat = { ...key, status: "error", label: "diff unavailable" };
+  }
+  render();
 }
 
 function currentInstanceItem(state: TuiState): InstanceListItem | undefined {
