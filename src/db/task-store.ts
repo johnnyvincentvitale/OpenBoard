@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS task (
   harness_session_id TEXT,
   harness_session_name TEXT,
   harness_status TEXT,
+  permission_mode TEXT,
   claude_permission_mode TEXT,
+  acp_options TEXT,
   harness_cwd TEXT,
   harness_branch TEXT,
   harness_commit TEXT,
@@ -116,7 +118,9 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["harness_session_id", "TEXT"],
   ["harness_session_name", "TEXT"],
   ["harness_status", "TEXT"],
+  ["permission_mode", "TEXT"],
   ["claude_permission_mode", "TEXT"],
+  ["acp_options", "TEXT"],
   ["harness_cwd", "TEXT"],
   ["harness_branch", "TEXT"],
   ["harness_commit", "TEXT"],
@@ -159,7 +163,9 @@ interface TaskRowRecord {
   harness_session_id: string | null;
   harness_session_name: string | null;
   harness_status: string | null;
+  permission_mode: string | null;
   claude_permission_mode: string | null;
+  acp_options: string | null;
   harness_cwd: string | null;
   harness_branch: string | null;
   harness_commit: string | null;
@@ -243,7 +249,9 @@ function toTask(record: TaskRowRecord): Task {
   if (record.harness_session_id !== null) task.harnessSessionId = record.harness_session_id;
   if (record.harness_session_name !== null) task.harnessSessionName = record.harness_session_name;
   if (record.harness_status !== null) task.harnessStatus = record.harness_status;
+  if (record.permission_mode !== null) task.permissionMode = record.permission_mode as Task["permissionMode"];
   if (record.claude_permission_mode !== null) task.claudePermissionMode = record.claude_permission_mode as ClaudeCodePermissionMode;
+  if (record.acp_options !== null) task.acpOptions = JSON.parse(record.acp_options) as Task["acpOptions"];
   if (record.harness_cwd !== null) task.harnessCwd = record.harness_cwd;
   if (record.harness_branch !== null) task.harnessBranch = record.harness_branch;
   if (record.harness_commit !== null) task.harnessCommit = record.harness_commit;
@@ -342,8 +350,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
-         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
+         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -358,7 +366,9 @@ export class SqliteTaskStore implements TaskStore {
            harness_session_id = @harnessSessionId,
            harness_session_name = @harnessSessionName,
            harness_status = @harnessStatus,
+           permission_mode = @permissionMode,
            claude_permission_mode = @claudePermissionMode,
+           acp_options = @acpOptions,
            harness_cwd = @harnessCwd,
            harness_branch = @harnessBranch,
            harness_commit = @harnessCommit,
@@ -516,7 +526,9 @@ export class SqliteTaskStore implements TaskStore {
         harnessSessionId: null,
         harnessSessionName: null,
         harnessStatus: null,
+        permissionMode: data.permissionMode ?? null,
         claudePermissionMode: data.claudePermissionMode ?? null,
+        acpOptions: data.acpOptions ? JSON.stringify(data.acpOptions) : null,
         harnessCwd: null,
         harnessBranch: null,
         harnessCommit: null,
@@ -576,7 +588,9 @@ export class SqliteTaskStore implements TaskStore {
         harnessSessionId: merged.harnessSessionId ?? null,
         harnessSessionName: merged.harnessSessionName ?? null,
         harnessStatus: merged.harnessStatus ?? null,
+        permissionMode: merged.permissionMode ?? null,
         claudePermissionMode: merged.claudePermissionMode ?? null,
+        acpOptions: merged.acpOptions ? JSON.stringify(merged.acpOptions) : null,
         harnessCwd: merged.harnessCwd ?? null,
         harnessBranch: merged.harnessBranch ?? null,
         harnessCommit: merged.harnessCommit ?? null,

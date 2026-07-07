@@ -1,7 +1,8 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { DEFAULT_CLAUDE_CODE_PERMISSION_MODE, type ClaudeCodePermissionMode } from "../shared";
+import { DEFAULT_ACP_PERMISSION_MODE, type AcpPermissionMode } from "../shared";
+import type { AcpConfigOption, AcpConfigValueOption, AcpHarnessConfig, AcpModelOption, AcpOptionValue, AcpTaskHarness } from "../shared";
 import type {
   ClaudeCodeRunInput,
   ClaudeCodeRunResult,
@@ -46,7 +47,7 @@ interface AcpSessionState {
   buffer: string;
   nextId: number;
   pending: Map<JsonRpcId, PendingRequest>;
-  permissionMode: ClaudeCodePermissionMode;
+  permissionMode: AcpPermissionMode;
 }
 
 interface AcpRunnerServiceConfig {
@@ -138,6 +139,23 @@ const CURSOR_ACP_SERVICE: AcpRunnerServiceConfig = {
   mcpCommandEnv: "OPENBOARD_CURSOR_ACP_MCP_COMMAND",
 };
 
+function acpServiceForHarness(harness: AcpTaskHarness): AcpRunnerServiceConfig {
+  switch (harness) {
+    case "claude-code":
+      return CLAUDE_ACP_SERVICE;
+    case "codex":
+      return CODEX_ACP_SERVICE;
+    case "gemini-acp":
+      return GEMINI_ACP_SERVICE;
+    case "hermes":
+      return HERMES_ACP_SERVICE;
+    case "pi-coding-agent":
+      return PI_ACP_SERVICE;
+    case "cursor-acp":
+      return CURSOR_ACP_SERVICE;
+  }
+}
+
 function defaultCommand(service: AcpRunnerServiceConfig, env: NodeJS.ProcessEnv): { command: string; args: string[] } {
   const configured = env[service.envCommand]?.trim();
   if (configured) return { command: configured, args: [] };
@@ -156,7 +174,7 @@ function defaultCommand(service: AcpRunnerServiceConfig, env: NodeJS.ProcessEnv)
   return { command: service.fallbackCommand, args: [] };
 }
 
-function normalizeMode(mode: ClaudeCodePermissionMode): string {
+function normalizeMode(mode: AcpPermissionMode): string {
   return mode === "manual" ? "default" : mode;
 }
 
@@ -218,7 +236,7 @@ function isOpenBoardReportToolName(name: string): boolean {
 export function decideClaudeAcpPermission(
   params: AcpPermissionParams,
   cwd: string,
-  permissionMode: ClaudeCodePermissionMode,
+  permissionMode: AcpPermissionMode,
 ): "allow" | "reject" {
   if (permissionMode === "bypassPermissions") return "allow";
 
@@ -268,6 +286,197 @@ function errorFromRpc(error: unknown): Error {
   return new Error("ACP request failed");
 }
 
+function flattenConfigSelectOptions(options: unknown): AcpConfigValueOption[] {
+  if (!Array.isArray(options)) return [];
+  const output: AcpConfigValueOption[] = [];
+  for (const item of options) {
+    if (item === null || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const value = typeof record.value === "string" ? record.value : typeof record.id === "string" ? record.id : undefined;
+    if (value) {
+      output.push({
+        value,
+        ...(typeof record.name === "string" ? { name: record.name } : {}),
+        ...(typeof record.description === "string" ? { description: record.description } : {}),
+      });
+      continue;
+    }
+    output.push(...flattenConfigSelectOptions(record.options));
+  }
+  return output;
+}
+
+function modelOptionsFromSessionNew(value: unknown, omitModelIds: readonly string[] = []): AcpModelOption[] {
+  if (value === null || typeof value !== "object") return [];
+  const configOptions = (value as Record<string, unknown>).configOptions;
+  if (!Array.isArray(configOptions)) return [];
+  const modelOption = configOptions.find((option) => {
+    if (option === null || typeof option !== "object") return false;
+    const record = option as Record<string, unknown>;
+    return record.category === "model" || record.id === "model";
+  });
+  if (modelOption === null || typeof modelOption !== "object") return [];
+  const omit = new Set(["default", ...omitModelIds]);
+  const seen = new Set<string>();
+  const models: AcpModelOption[] = [];
+  for (const option of flattenConfigSelectOptions((modelOption as Record<string, unknown>).options)) {
+    const id = option.value.trim();
+    if (!id || omit.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    models.push({
+      id,
+      ...(option.name ? { name: option.name } : {}),
+      ...(option.description ? { description: option.description } : {}),
+    });
+  }
+  return models;
+}
+
+function configValue(value: unknown): AcpOptionValue | undefined {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : undefined;
+}
+
+function acpConfigFromSessionNew(value: unknown, omitModelIds: readonly string[] = []): AcpHarnessConfig {
+  const models = modelOptionsFromSessionNew(value, omitModelIds);
+  if (value === null || typeof value !== "object") return { available: true, modes: [], models, options: [] };
+  const record = value as Record<string, unknown>;
+  const modesRecord = record.modes;
+  const modes =
+    modesRecord !== null && typeof modesRecord === "object"
+      ? flattenConfigSelectOptions((modesRecord as Record<string, unknown>).availableModes)
+      : [];
+  const configOptions = Array.isArray(record.configOptions) ? record.configOptions : [];
+  const options: AcpConfigOption[] = [];
+  for (const item of configOptions) {
+    if (item === null || typeof item !== "object") continue;
+    const option = item as Record<string, unknown>;
+    const id = typeof option.id === "string" ? option.id.trim() : "";
+    const type = option.type;
+    if (!id || (type !== "select" && type !== "boolean")) continue;
+    const category = typeof option.category === "string" ? option.category : undefined;
+    if (category === "model" || category === "mode" || id === "model" || id === "mode") continue;
+    const parsed: AcpConfigOption = {
+      id,
+      name: typeof option.name === "string" && option.name.trim() ? option.name : id,
+      type,
+      ...(typeof option.description === "string" ? { description: option.description } : {}),
+      ...(category ? { category } : {}),
+      ...(configValue(option.currentValue) !== undefined ? { currentValue: configValue(option.currentValue) } : {}),
+    };
+    if (type === "select") parsed.options = flattenConfigSelectOptions(option.options);
+    options.push(parsed);
+  }
+  return { available: true, modes, models, options };
+}
+
+export async function discoverAcpModelOptions(
+  harness: AcpTaskHarness,
+  options: { cwd: string; env?: NodeJS.ProcessEnv; spawn?: Spawn; timeoutMs?: number },
+): Promise<AcpModelOption[]> {
+  const service = acpServiceForHarness(harness);
+  return withDiscoverySession(service, options, (created) => modelOptionsFromSessionNew(created, service.omitModelIds));
+}
+
+export async function discoverAcpConfig(
+  harness: AcpTaskHarness,
+  options: { cwd: string; env?: NodeJS.ProcessEnv; spawn?: Spawn; timeoutMs?: number },
+): Promise<AcpHarnessConfig> {
+  const service = acpServiceForHarness(harness);
+  return withDiscoverySession(service, options, (created) => acpConfigFromSessionNew(created, service.omitModelIds));
+}
+
+async function withDiscoverySession<T>(
+  service: AcpRunnerServiceConfig,
+  options: { cwd: string; env?: NodeJS.ProcessEnv; spawn?: Spawn; timeoutMs?: number },
+  parse: (sessionNewResult: unknown) => T,
+): Promise<T> {
+  const env = options.env ?? process.env;
+  const spawn = options.spawn ?? nodeSpawn;
+  const command = defaultCommand(service, env);
+  const child = spawn(command.command, command.args, {
+    cwd: options.cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let buffer = "";
+  let nextId = 1;
+  const pending = new Map<JsonRpcId, PendingRequest>();
+  let sessionId: string | undefined;
+
+  const cleanup = (): void => {
+    child.stdout.off("data", onStdout);
+    child.kill();
+  };
+
+  const failAll = (error: Error): void => {
+    for (const pendingRequest of pending.values()) pendingRequest.reject(error);
+    pending.clear();
+  };
+
+  const onStdout = (chunk: Buffer): void => {
+    buffer += chunk.toString("utf8");
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
+      const raw = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (raw) {
+        try {
+          const message = JSON.parse(raw) as { id?: JsonRpcId; result?: unknown; error?: unknown };
+          if (message.id !== undefined && pending.has(message.id)) {
+            const request = pending.get(message.id) as PendingRequest;
+            pending.delete(message.id);
+            if (message.error) request.reject(errorFromRpc(message.error));
+            else request.resolve(message.result);
+          }
+        } catch {
+          // Ignore non-JSON adapter chatter.
+        }
+      }
+      newline = buffer.indexOf("\n");
+    }
+  };
+
+  child.stdout.on("data", onStdout);
+  child.once("error", failAll);
+  child.once("exit", () => failAll(new Error(`${service.displayName} exited before config discovery completed`)));
+
+  const request = (method: string, params: Record<string, unknown>): Promise<unknown> => {
+    const id = nextId++;
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  };
+
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(`${service.displayName} config discovery timed out`)), options.timeoutMs ?? 5000).unref();
+  });
+
+  try {
+    return await Promise.race([
+      (async () => {
+        await request("initialize", {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            _meta: { terminal_output: true },
+          },
+        });
+        const created = await request("session/new", {
+          cwd: options.cwd,
+          mcpServers: [],
+          _meta: {},
+        });
+        const rawSessionId = (created as { sessionId?: unknown } | null)?.sessionId;
+        if (typeof rawSessionId === "string") sessionId = rawSessionId;
+        return parse(created);
+      })(),
+      timeout,
+    ]);
+  } finally {
+    if (sessionId) request("session/close", { sessionId }).catch(() => {});
+    cleanup();
+  }
+}
+
 export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   private readonly adapterBaseUrl: string;
   private readonly boardToken?: string;
@@ -277,7 +486,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   private readonly command: string;
   private readonly commandArgs: string[];
   private readonly mcpCommand: string;
-  private readonly permissionMode: ClaudeCodePermissionMode;
+  private readonly permissionMode: AcpPermissionMode;
   private readonly service: AcpRunnerServiceConfig;
   private readonly sessions = new Map<string, AcpSessionState>();
 
@@ -293,7 +502,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     this.commandArgs = command.args;
     this.mcpCommand = (deps.mcpCommand ?? (this.service.mcpCommandEnv ? this.env[this.service.mcpCommandEnv]?.trim() : undefined)) || "openboard";
     const envPermissionMode = this.env.OPENBOARD_CLAUDE_PERMISSION_MODE?.trim();
-    this.permissionMode = (deps.permissionMode as ClaudeCodePermissionMode | undefined) ?? (envPermissionMode as ClaudeCodePermissionMode | undefined) ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE;
+    this.permissionMode = (deps.permissionMode as AcpPermissionMode | undefined) ?? (envPermissionMode as AcpPermissionMode | undefined) ?? DEFAULT_ACP_PERMISSION_MODE;
   }
 
   run(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult> {
@@ -327,7 +536,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
 
   private async start(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult> {
     const sessionName = `openboard-${input.task.id}-${input.runStartedAt}`;
-    const permissionMode = input.task.claudePermissionMode ?? this.permissionMode;
+    const permissionMode = input.task.permissionMode ?? input.task.claudePermissionMode ?? this.permissionMode;
     const child = this.spawn(this.command, this.commandArgs, {
       cwd: input.directory,
       env: this.env,
@@ -396,18 +605,29 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     const model = input.task.model?.id && !this.service.omitModelIds?.includes(input.task.model.id)
       ? { model: input.task.model.id }
       : {};
+    const taskMetadata = {
+      ...(input.task.permissionMode ? { permissionMode: input.task.permissionMode } : {}),
+      ...(input.task.acpOptions ? { acpOptions: input.task.acpOptions } : {}),
+    };
     const meta: Record<string, unknown> = { ...(this.service.extraMeta ?? {}) };
+    if (Object.keys(taskMetadata).length > 0) {
+      meta.openboard = {
+        ...((meta.openboard !== null && typeof meta.openboard === "object" && !Array.isArray(meta.openboard)) ? meta.openboard : {}),
+        ...taskMetadata,
+      };
+    }
     for (const key of this.service.metaKeys) {
       meta[key] = {
         options: {
           ...model,
+          ...(input.task.acpOptions ?? {}),
         },
       };
     }
     return meta;
   }
 
-  private async trySetMode(state: AcpSessionState, mode: ClaudeCodePermissionMode): Promise<void> {
+  private async trySetMode(state: AcpSessionState, mode: AcpPermissionMode): Promise<void> {
     try {
       await this.request(state, "session/set_mode", {
         sessionId: state.sessionId,

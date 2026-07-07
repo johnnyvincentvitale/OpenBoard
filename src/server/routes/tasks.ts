@@ -22,7 +22,7 @@ import {
   USER_COMPLETED_BY,
   isColumn,
 } from "../../shared";
-import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore, UpdateTaskInput } from "../../shared";
+import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
@@ -62,6 +62,10 @@ function isClaudePermissionMode(value: unknown): value is ClaudeCodePermissionMo
   return typeof value === "string" && (CLAUDE_CODE_PERMISSION_MODES as readonly string[]).includes(value);
 }
 
+function isAcpPermissionMode(value: unknown): value is AcpPermissionMode {
+  return isClaudePermissionMode(value);
+}
+
 function isAcpHarness(harness: TaskHarness): boolean {
   return harness !== "opencode";
 }
@@ -95,6 +99,16 @@ function isPermissionOverrides(value: unknown): value is PermissionOverrides {
     ([key, action]) =>
       (PERMISSION_OVERRIDE_CATEGORIES as readonly string[]).includes(key) &&
       (PERMISSION_OVERRIDE_ACTIONS as readonly string[]).includes(action as string),
+  );
+}
+
+function isAcpOptions(value: unknown): value is AcpOptions {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.entries(value as Record<string, unknown>).every(
+    ([key, option]) =>
+      key.trim().length > 0 &&
+      (typeof option === "string" || typeof option === "number" || typeof option === "boolean") &&
+      (typeof option !== "number" || Number.isFinite(option)),
   );
 }
 
@@ -162,9 +176,10 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model, isolation, assignedTo, claudePermissionMode, permissionOverrides } = body;
+      const { title, description, directory, agent, model, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides } = body;
       const taskType = body.type ?? "agent";
       const harness = body.harness ?? "opencode";
+      const effectivePermissionMode = permissionMode ?? claudePermissionMode;
 
       if (typeof title !== "string" || title.trim().length === 0) {
         throw AdapterError.validation("title must be a non-empty string");
@@ -196,8 +211,20 @@ export function registerTaskRoutes(
       if (claudePermissionMode !== undefined && (taskType !== "agent" || harness !== "claude-code")) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
       }
-      if (taskType === "agent" && isAcpHarness(harness) && harness !== "claude-code" && claudePermissionMode !== undefined) {
-        throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
+      if (permissionMode !== undefined && !isAcpPermissionMode(permissionMode)) {
+        throw AdapterError.validation("permissionMode must be a supported ACP permission mode");
+      }
+      if (permissionMode !== undefined && (taskType !== "agent" || !isAcpHarness(harness))) {
+        throw AdapterError.validation("permissionMode can only be set for ACP agent tasks");
+      }
+      if (permissionMode !== undefined && claudePermissionMode !== undefined && permissionMode !== claudePermissionMode) {
+        throw AdapterError.validation("permissionMode and claudePermissionMode must match when both are provided");
+      }
+      if (acpOptions !== undefined && !isAcpOptions(acpOptions)) {
+        throw AdapterError.validation("acpOptions must be an object of provider-specific string, number, or boolean values");
+      }
+      if (acpOptions !== undefined && (taskType !== "agent" || !isAcpHarness(harness))) {
+        throw AdapterError.validation("acpOptions can only be set for ACP agent tasks");
       }
       if (permissionOverrides !== undefined && !isPermissionOverrides(permissionOverrides)) {
         throw AdapterError.validation(
@@ -227,7 +254,9 @@ export function registerTaskRoutes(
         description: typeof description === "string" ? description : "",
         directory: canonicalDirectory,
         ...(taskType === "agent" && harness === "opencode" && typeof agent === "string" ? { agent } : {}),
-        ...(taskType === "agent" && harness === "claude-code" && isClaudePermissionMode(claudePermissionMode) ? { claudePermissionMode } : {}),
+        ...(taskType === "agent" && isAcpHarness(harness) && isAcpPermissionMode(effectivePermissionMode) ? { permissionMode: effectivePermissionMode } : {}),
+        ...(taskType === "agent" && harness === "claude-code" && isClaudePermissionMode(effectivePermissionMode) ? { claudePermissionMode: effectivePermissionMode } : {}),
+        ...(taskType === "agent" && isAcpHarness(harness) && isAcpOptions(acpOptions) ? { acpOptions } : {}),
         ...(taskType === "manual" && typeof assignedTo === "string" && assignedTo.trim() ? { assignedTo: assignedTo.trim() } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
@@ -401,7 +430,9 @@ export function registerTaskRoutes(
       "assignedTo",
       "isolation",
       "harness",
+      "permissionMode",
       "claudePermissionMode",
+      "acpOptions",
       "permissionOverrides",
     ]);
     for (const key of Object.keys(body)) {
@@ -461,6 +492,22 @@ export function registerTaskRoutes(
       }
       patch.claudePermissionMode = body.claudePermissionMode ?? null;
     }
+    if (body.permissionMode !== undefined) {
+      if (body.permissionMode !== null && !isAcpPermissionMode(body.permissionMode)) {
+        throw AdapterError.validation("permissionMode must be a supported ACP permission mode or null");
+      }
+      patch.permissionMode = body.permissionMode ?? null;
+    }
+    if (patch.permissionMode !== undefined && patch.claudePermissionMode !== undefined && patch.permissionMode !== patch.claudePermissionMode) {
+      throw AdapterError.validation("permissionMode and claudePermissionMode must match when both are provided");
+    }
+
+    if (body.acpOptions !== undefined) {
+      if (body.acpOptions !== null && !isAcpOptions(body.acpOptions)) {
+        throw AdapterError.validation("acpOptions must be an object of provider-specific string, number, or boolean values, or null");
+      }
+      patch.acpOptions = body.acpOptions ?? null;
+    }
 
     if (body.permissionOverrides !== undefined && body.permissionOverrides !== null && !isPermissionOverrides(body.permissionOverrides)) {
       throw AdapterError.validation(
@@ -477,16 +524,27 @@ export function registerTaskRoutes(
       if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
       }
+      if (body.permissionMode !== undefined && body.permissionMode !== null) {
+        throw AdapterError.validation("permissionMode can only be set for ACP agent tasks");
+      }
+      if (body.acpOptions !== undefined && body.acpOptions !== null) {
+        throw AdapterError.validation("acpOptions can only be set for ACP agent tasks");
+      }
       if (body.permissionOverrides !== undefined && body.permissionOverrides !== null) {
         throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
       }
       patch.agent = null;
       patch.model = null;
+      patch.permissionMode = null;
       patch.claudePermissionMode = null;
+      patch.acpOptions = null;
       patch.permissionOverrides = null;
       return patch;
     }
 
+    if (patch.permissionMode !== undefined && patch.permissionMode !== null && !isAcpHarness(patch.harness)) {
+      throw AdapterError.validation("permissionMode can only be set for ACP agent tasks");
+    }
     if (patch.claudePermissionMode !== undefined && patch.claudePermissionMode !== null && patch.harness !== "claude-code") {
       throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
     }
@@ -503,9 +561,26 @@ export function registerTaskRoutes(
       }
       patch.agent = null;
       patch.model = body.model === undefined ? compatibleAcpModel(existing.model, patch.harness) : body.model === null ? null : resolveAcpModel(patch.harness, body.model);
-      if (patch.harness !== "claude-code") patch.claudePermissionMode = null;
+      patch.acpOptions = body.acpOptions === undefined ? existing.acpOptions ?? null : body.acpOptions === null ? null : body.acpOptions;
+      if (patch.harness === "claude-code") {
+        const nextMode = patch.permissionMode ?? patch.claudePermissionMode;
+        if (nextMode !== undefined) {
+          patch.permissionMode = nextMode;
+          patch.claudePermissionMode = nextMode;
+        }
+      } else {
+        patch.claudePermissionMode = null;
+      }
       patch.permissionOverrides = null;
     } else {
+      if (body.acpOptions !== undefined && body.acpOptions !== null) {
+        throw AdapterError.validation("acpOptions can only be set for ACP agent tasks");
+      }
+      patch.acpOptions = null;
+      if (body.permissionMode !== undefined && body.permissionMode !== null) {
+        throw AdapterError.validation("permissionMode can only be set for ACP agent tasks");
+      }
+      patch.permissionMode = null;
       if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
       }

@@ -119,7 +119,9 @@ describe("board client", () => {
       directory: "app",
       harness: "claude-code",
       agent: "plan",
+      permissionMode: "auto",
       claudePermissionMode: "auto",
+      acpOptions: { profile: "audit", maxTurns: 3, readOnly: true },
       model: "claude-code/sonnet",
       isolation: "worktree",
     });
@@ -133,7 +135,9 @@ describe("board client", () => {
       title: "Claude task",
       description: "Use Claude Code",
       directory: `${CWD}/app`,
+      permissionMode: "auto",
       claudePermissionMode: "auto",
+      acpOptions: { profile: "audit", maxTurns: 3, readOnly: true },
       model: { providerID: "claude-code", id: "sonnet" },
       isolation: "worktree",
     });

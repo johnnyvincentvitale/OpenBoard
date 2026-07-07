@@ -52,6 +52,35 @@ openboard CLI / TUI (src/cli + src/tui)
 Uses the OpenCode **v2 durable session API** (`client.v2.session.*`), verified against
 the OpenCode server capabilities used by this adapter.
 
+## Harnesses
+
+A card's **harness** is the agent runtime that executes it. OpenCode is the default;
+the other harnesses are driven over the **Agent Client Protocol (ACP)**.
+
+- **OpenCode** — binds one of your OpenCode agents (`build`, `plan`, `general`,
+  `explore`, …) and a model synced live from the providers OpenCode is authenticated
+  for.
+- **Claude Code** — dispatches a background Claude Code ACP session. This is the
+  exercised ACP path; it reports completion through the same structured contract, so its
+  cards join Review, handoffs, and dependencies like any other.
+- **Codex, Gemini, Hermes, Pi Coding Agent, Cursor** — additional ACP harnesses.
+  **Experimental:** the runner and live discovery are wired, but these have not yet been
+  run end-to-end. Each appears in the new-task wizard only when its adapter is actually
+  installed and launchable.
+
+**Live discovery.** `GET /api/acp-config` probes each ACP adapter (`initialize` +
+`session/new`) and reports `available`, `modes`, `models`, and extra config options per
+harness (30s cache; `GET /api/acp-models` is the models-only projection). The wizard
+sources its model/mode/option controls from this and hides adapters that don't launch, so
+you never see a harness you can't run. Model IDs can also be entered freeform per harness.
+
+**Adapter resolution** (per harness, in order): an explicit
+`OPENBOARD_<HARNESS>_ACP_COMMAND` override → a bundled `@agentclientprotocol/*` adapter
+package if installed (Claude, Codex, Gemini) → the adapter binary on `PATH`
+(`claude-agent-acp`, `codex-acp`, `gemini-agent-acp`, `hermes-agent-acp`,
+`pi-coding-agent-acp`, `cursor-agent-acp`). All ACP harnesses share Claude Code's
+write-fence permission model and `permissionMode` set.
+
 ## Install
 
 ```sh
@@ -377,8 +406,14 @@ editors).
 - Without worktree isolation, concurrent agents in one repo have **no file locking** — assign
   non-overlapping work, or enable worktree isolation (above).
 - Available models depend on your local OpenCode auth/config and enabled providers.
+- ACP harnesses beyond Claude Code (Codex, Gemini, Hermes, Pi, Cursor) are wired and
+  discovered live but **not yet verified end-to-end**; persisted `permissionMode`
+  validation is still shaped around the Claude mode set, so a non-Claude adapter reporting
+  a mode outside that set may be rejected.
 
 ## Roadmap
 - V1 TUI + named-instance CLI — **ship target**.
 - Worktree-per-agent isolation — **done** (board default + per-task override, sync/integrate).
-- Multi-CLI: back an agent with Codex or Claude instead of OpenCode (a provider seam / ACP host).
+- Multi-CLI ACP host — **in progress**: Claude Code is the exercised path; Codex, Gemini,
+  Hermes, Pi Coding Agent, and Cursor harnesses are wired and discovered live
+  (experimental, adapter-gated, not yet verified end-to-end).

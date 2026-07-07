@@ -15,7 +15,7 @@ Kanban board, and ends with what we'd most like you to test. The
 6. [Orchestration and multi-agent workflows](#6-orchestration-and-multi-agent-workflows)
 7. [The OpenBoard plugin and its skills](#7-the-openboard-plugin-and-its-skills)
 8. [Everyday use](#8-everyday-use)
-9. [Harnesses: OpenCode and Claude Code](#9-harnesses-opencode-and-claude-code)
+9. [Harnesses: OpenCode, Claude Code, and other ACP agents](#9-harnesses-opencode-claude-code-and-other-acp-agents)
 10. [Safety notes](#10-safety-notes)
 11. [Known issues and rough edges](#11-known-issues-and-rough-edges)
 12. [What to test and how to report](#12-what-to-test-and-how-to-report)
@@ -56,6 +56,9 @@ You need:
 - **git** — required for worktree isolation, recommended everywhere.
 - Optional: **Claude Code** installed and authenticated, if you want to back
   cards with Claude instead of OpenCode.
+- Optional (experimental): other ACP agents — **Codex**, **Gemini**, **Hermes**,
+  **Pi Coding Agent**, **Cursor**. Each shows up as a harness only when its ACP
+  adapter is installed and launchable; none are verified end-to-end yet (see §9).
 
 **Verify OpenCode works by itself first.** Before touching OpenBoard, open a
 terminal, run `opencode` in some repo, and ask it to do something trivial. If
@@ -301,9 +304,10 @@ rides straight into the same Integrate — no separate PR round trip. Requires a
 an unset `$EDITOR` on a remote board fails loud with a status message instead
 of silently doing nothing.
 
-## 9. Harnesses: OpenCode and Claude Code
+## 9. Harnesses: OpenCode, Claude Code, and other ACP agents
 
-Every card has a `HARNESS` field, chosen on the wizard's Harness screen.
+Every card has a `HARNESS` field, chosen on the wizard's Harness screen. OpenCode
+is the default; the others are driven over the **Agent Client Protocol (ACP)**.
 
 **OpenCode** (default). The card binds one of your OpenCode agents (`AGENT
 PROFILE`, its own wizard screen) and a model. `PROVIDER`/`MODEL` are synced
@@ -338,6 +342,29 @@ separate, later workflow. What changes today:
   into its own worktree instead of editing in place. The card's `RUN DIR` /
   `RUN BRANCH` / `RUN COMMIT` / `RESULT` rows show where the work actually
   landed, and harness-created worktrees feed the normal sync/integrate flow.
+
+**Other ACP harnesses (experimental).** Beyond Claude Code, OpenBoard has a
+generalized ACP runner for **Codex**, **Gemini**, **Hermes**, **Pi Coding
+Agent**, and **Cursor**. These are wired but **not yet exercised end-to-end** —
+treat them as experimental.
+
+- **They only appear if their adapter is installed.** The wizard's `HARNESS`
+  list is populated from live discovery (`GET /api/acp-config`, which runs each
+  adapter's `initialize` + `session/new`). A harness whose adapter isn't
+  installed or won't launch is hidden — so if you don't see one, that's why, and
+  it's expected.
+- **Model, modes, and options come from the adapter, not a hardcoded list.** The
+  Harness screen's `MODEL` and permission-mode controls are sourced from what the
+  live adapter reports; you can also type a model ID freeform per harness.
+- **Adapter resolution.** OpenBoard looks for, in order: an explicit
+  `OPENBOARD_<HARNESS>_ACP_COMMAND` command override → a bundled
+  `@agentclientprotocol/*` adapter package if installed (Claude, Codex, Gemini) →
+  the adapter binary on your `PATH` (`codex-acp`, `gemini-agent-acp`,
+  `hermes-agent-acp`, `pi-coding-agent-acp`, `cursor-agent-acp`).
+- **Same safety model as Claude Code.** All ACP harnesses run under the same
+  write-fence permission logic and `permissionMode` set. One known rough edge:
+  that mode set is still shaped around Claude's modes, so a non-Claude adapter
+  reporting a mode outside it may be rejected until validation is relaxed.
 
 **OpenCode permissions, and why worktree isolation locks them.** The wizard's
 isolation screen shows a `PERMISSIONS` section for OpenCode cards only.
@@ -388,6 +415,12 @@ Things we already know about — no need to report these:
 - **MCP `add_tasks` rejects models with two-slash ids** (e.g.
   `openrouter/anthropic/...`). Workaround: set the model on an agent profile
   instead.
+- **Non-Claude ACP harnesses are experimental.** Codex, Gemini, Hermes, Pi
+  Coding Agent, and Cursor are wired and discovered live but haven't been run
+  end-to-end. Their `permissionMode` validation is still shaped around Claude's
+  mode set, so a mode a non-Claude adapter reports outside that set may be
+  rejected. If you have one of these adapters installed and want to try it, we'd
+  love a report — just expect rough edges.
 
 ## 12. What to test and how to report
 

@@ -24,6 +24,8 @@ import {
 } from "./instance-selection";
 
 const IdSchema = z.string().min(1);
+const AcpOptionValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
+const AcpOptionsSchema = z.record(z.string().min(1), AcpOptionValueSchema);
 const CompletionReportInputSchema = z
   .object({
     summary: z.string(),
@@ -51,7 +53,9 @@ const AgentTaskInputSchema = z
     description: z.string().optional(),
     directory: z.string().optional(),
     agent: z.string().optional(),
+    permissionMode: z.enum(CLAUDE_CODE_PERMISSION_MODES).optional(),
     claudePermissionMode: z.enum(CLAUDE_CODE_PERMISSION_MODES).optional(),
+    acpOptions: AcpOptionsSchema.optional(),
     model: z.string().optional(),
     isolation: z.enum(["worktree", "in-place"]).optional(),
   })
@@ -67,7 +71,9 @@ export const AddTaskInputSchema = z
     description: z.string().optional(),
     directory: z.string().optional(),
     agent: z.string().optional(),
+    permissionMode: z.enum(CLAUDE_CODE_PERMISSION_MODES).optional(),
     claudePermissionMode: z.enum(CLAUDE_CODE_PERMISSION_MODES).optional(),
+    acpOptions: AcpOptionsSchema.optional(),
     assignedTo: z.string().optional(),
     model: z.string().optional(),
     isolation: z.enum(["worktree", "in-place"]).optional(),

@@ -94,6 +94,8 @@ function state(overrides: Record<string, unknown> = {}) {
   return {
     tasks: [],
     agents: [],
+    providers: [],
+    acpConfig: {},
     boardUrl: "http://127.0.0.1:4097",
     selectedTaskId: undefined,
     status: "ready",
@@ -1816,9 +1818,17 @@ describe("TUI edit mode (e)", () => {
   });
 
   it("saving an edit calls updateTask (not createTask) and does not create a new card", async () => {
-    const s = state({
-      viewState: { view: "board", previousView: "launch" },
-      newTask: {
+	    const s = state({
+	      viewState: { view: "board", previousView: "launch" },
+	      acpConfig: {
+	        "claude-code": {
+	          available: true,
+	          modes: [{ value: "bypassPermissions", name: "Bypass Permissions" }],
+	          models: [],
+	          options: [],
+	        },
+	      },
+	      newTask: {
         type: "agent",
         title: "Renamed title",
         description: "desc",
@@ -2215,9 +2225,17 @@ describe("TUI manual task creation", () => {
       ...(payload as object),
       id: "claude-card",
     }));
-    const s = state({
-      viewState: { view: "board", previousView: "launch" },
-      newTask: {
+	    const s = state({
+	      viewState: { view: "board", previousView: "launch" },
+	      acpConfig: {
+	        "claude-code": {
+	          available: true,
+	          modes: [{ value: "bypassPermissions", name: "Bypass Permissions" }],
+	          models: [],
+	          options: [],
+	        },
+	      },
+	      newTask: {
         type: "agent",
         title: "Claude work",
         description: "Run headlessly",
@@ -2225,7 +2243,9 @@ describe("TUI manual task creation", () => {
         harness: "claude-code",
         providerId: "",
         agentId: "plan",
+        permissionMode: "bypassPermissions",
         claudePermissionMode: "bypassPermissions",
+        acpOptions: {},
         assignedTo: "",
         model: { providerID: "claude-code", id: "opus" },
         isolation: "worktree",
@@ -2248,9 +2268,9 @@ describe("TUI manual task creation", () => {
     // Screen C (AGENT) — Claude Code shows PERMS, unchanged from today's behavior.
     s.newTask.step = "agentProfile";
     s.newTask.field = "permissionMode";
-    const profileText = textOf(renderApp(fakeUi(), s));
-    expect(profileText).toContain("PERMS");
-    expect(profileText).toContain("bypassPermissions");
+	    const profileText = textOf(renderApp(fakeUi(), s));
+	    expect(profileText).toContain("PERMS");
+	    expect(profileText).toContain("Bypass Permissions");
     expect(profileText).not.toContain("AGENT PROFILE");
 
     // Screen E (confirm) — enter creates the card, never runs it.
@@ -2265,6 +2285,7 @@ describe("TUI manual task creation", () => {
       title: "Claude work",
       description: "Run headlessly",
       directory: "/repo",
+      permissionMode: "bypassPermissions",
       claudePermissionMode: "bypassPermissions",
       model: { providerID: "claude-code", id: "opus" },
       isolation: "worktree",
@@ -2500,7 +2521,8 @@ describe("TUI new-task wizard navigation", () => {
       harness: "opencode",
       providerId: "",
       agentId: "",
-      claudePermissionMode: "bypassPermissions",
+      permissionMode: "bypassPermissions",
+      acpOptions: {},
       assignedTo: "",
       isolation: "worktree",
       permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
@@ -2614,6 +2636,23 @@ describe("TUI new-task wizard navigation", () => {
     expect(s.newTask.field).toBe("model");
   });
 
+  it("hides ACP harnesses whose adapters are unavailable", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      acpConfig: {
+        "claude-code": { available: true, modes: [], models: [], options: [] },
+        codex: { available: false, modes: [], models: [], options: [], error: "missing" },
+      },
+      newTask: agentDraft({ step: "harness", field: "harness", harness: "opencode" }),
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.newTask.harness).toBe("claude-code");
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.newTask.harness).toBe("opencode");
+  });
+
   it("renders 'Use Agent Profile Default' for both PROVIDER and MODEL while locked", () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
@@ -2668,6 +2707,109 @@ describe("TUI new-task wizard navigation", () => {
     await handleKeypress({ name: "backspace", sequence: "" } as any, s, actions());
 
     expect(s.newTask.modelQuery).toBe("claud");
+  });
+
+  it("typing on an ACP MODEL field creates a freeform provider-scoped model id", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({
+        step: "harness",
+        field: "model",
+        harness: "codex",
+      }),
+    });
+
+    for (const key of ["o", "p", "e", "n", "a", "i", "/", "g", "p", "t", "-", "5", ".", "2"]) {
+      await handleKeypress({ name: key, sequence: key } as any, s, actions());
+    }
+
+    expect(s.newTask.model).toEqual({ providerID: "codex", id: "openai/gpt-5.2" });
+    expect(s.newTask.modelQuery).toBe("openai/gpt-5.2");
+  });
+
+  it("uses the discovered ACP model catalog for harness MODEL selection", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      acpConfig: {
+	        "claude-code": {
+	          available: true,
+	          modes: [{ value: "bypassPermissions", name: "Bypass Permissions" }],
+          models: [
+            { id: "opus[1m]", name: "Opus" },
+            { id: "claude-fable-5[1m]", name: "Fable" },
+            { id: "sonnet", name: "Sonnet" },
+          ],
+          options: [],
+        },
+      },
+      newTask: agentDraft({
+        step: "harness",
+        field: "harness",
+        harness: "opencode",
+        model: { providerID: "openai", id: "gpt-5" },
+      }),
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.newTask.harness).toBe("claude-code");
+    expect(s.newTask.model).toBeUndefined();
+    expect(textOf(renderApp(fakeUi(), s))).toContain("Provider Default");
+
+    s.newTask.field = "model";
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.newTask.model).toEqual({ providerID: "claude-code", id: "opus[1m]" });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.newTask.model).toEqual({ providerID: "claude-code", id: "claude-fable-5[1m]" });
+
+    s.newTask.modelQuery = undefined;
+    for (const key of ["g", "p", "t"]) {
+      await handleKeypress({ name: key, sequence: key } as any, s, actions());
+    }
+    expect(s.newTask.model).toEqual({ providerID: "claude-code", id: "gpt" });
+    expect(textOf(renderApp(fakeUi(), s))).toContain("custom: gpt");
+  });
+
+  it("renders and cycles provider-specific ACP options", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      acpConfig: {
+	        codex: {
+	          available: true,
+	          modes: [{ value: "bypassPermissions", name: "Bypass Permissions" }],
+          models: [],
+          options: [
+            {
+              id: "reasoningEffort",
+              name: "Reasoning Effort",
+              type: "select",
+              currentValue: "minimal",
+              options: [
+                { value: "minimal", name: "Minimal" },
+                { value: "low", name: "Low" },
+              ],
+            },
+          ],
+        },
+      },
+      newTask: agentDraft({
+        step: "agentProfile",
+        field: "acpOption0",
+        harness: "codex",
+        model: { providerID: "codex", id: "gpt-5-codex" },
+        acpOptions: { reasoningEffort: "minimal" },
+      }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("REASONING EFFORT");
+    expect(text).toContain("Minimal");
+    expect(text).not.toContain("PROFILE");
+    expect(text).not.toContain("TOOLS");
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+
+    expect(s.newTask.acpOptions).toEqual({ reasoningEffort: "low" });
   });
 
   it("up/down on the MODEL field cycles only through the filtered matches", async () => {

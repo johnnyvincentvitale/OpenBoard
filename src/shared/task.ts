@@ -76,6 +76,46 @@ export const CURSOR_ACP_MODEL_PROVIDER = "cursor-acp" as const;
 export const CLAUDE_CODE_PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"] as const;
 export type ClaudeCodePermissionMode = (typeof CLAUDE_CODE_PERMISSION_MODES)[number];
 export const DEFAULT_CLAUDE_CODE_PERMISSION_MODE: ClaudeCodePermissionMode = "bypassPermissions";
+export const ACP_PERMISSION_MODES = CLAUDE_CODE_PERMISSION_MODES;
+export type AcpPermissionMode = ClaudeCodePermissionMode;
+export const DEFAULT_ACP_PERMISSION_MODE: AcpPermissionMode = DEFAULT_CLAUDE_CODE_PERMISSION_MODE;
+
+export type AcpOptionValue = string | number | boolean;
+export type AcpOptions = Record<string, AcpOptionValue>;
+
+export interface AcpModelOption {
+  id: string;
+  name?: string;
+  description?: string;
+}
+
+export type AcpModelCatalog = Partial<Record<AcpTaskHarness, AcpModelOption[]>>;
+
+export interface AcpConfigValueOption {
+  value: string;
+  name?: string;
+  description?: string;
+}
+
+export interface AcpConfigOption {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  type: "select" | "boolean";
+  currentValue?: AcpOptionValue;
+  options?: AcpConfigValueOption[];
+}
+
+export interface AcpHarnessConfig {
+  available: boolean;
+  modes: AcpConfigValueOption[];
+  models: AcpModelOption[];
+  options: AcpConfigOption[];
+  error?: string;
+}
+
+export type AcpConfigCatalog = Partial<Record<AcpTaskHarness, AcpHarnessConfig>>;
 
 export const TASK_COMPLETION_LOCATIONS = ["task-directory", "harness-directory", "mixed", "missing", "none"] as const;
 export type TaskCompletionLocation = (typeof TASK_COMPLETION_LOCATIONS)[number];
@@ -178,8 +218,12 @@ export interface Task {
   agent?: string | null;
   /** Worker harness that launches agent tasks. Defaults to OpenCode for older rows. */
   harness?: TaskHarness;
-  /** Claude Code permission mode for Claude-harness agent tasks. */
+  /** Generic ACP permission mode sent via session/set_mode. */
+  permissionMode?: AcpPermissionMode | null;
+  /** Claude Code permission mode for legacy Claude-harness callers. */
   claudePermissionMode?: ClaudeCodePermissionMode | null;
+  /** Provider-specific ACP adapter options, interpreted only by the selected harness. */
+  acpOptions?: AcpOptions | null;
   /** Human assignee for manual/PM cards. */
   assignedTo?: string | null;
   /** Model the dispatched session runs on. For new tasks with an assigned agent and no explicit model, the create route resolves this from the live roster. */
@@ -296,7 +340,9 @@ export interface CreateTaskInput {
   description: string;
   directory: string;
   agent?: string;
+  permissionMode?: AcpPermissionMode;
   claudePermissionMode?: ClaudeCodePermissionMode;
+  acpOptions?: AcpOptions;
   assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
@@ -310,7 +356,9 @@ export interface UpdateTaskInput {
   description?: string;
   directory?: string;
   agent?: string | null;
+  permissionMode?: AcpPermissionMode | null;
   claudePermissionMode?: ClaudeCodePermissionMode | null;
+  acpOptions?: AcpOptions | null;
   assignedTo?: string | null;
   model?: ModelRef | null;
   isolation?: TaskIsolationMode | null;

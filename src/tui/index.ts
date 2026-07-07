@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type Column, type CompletionReport, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -303,19 +303,20 @@ const HARNESS_FIELDS_CLAUDE = ["harness", "model"] as const;
 /** Shared label for "no explicit provider/model — the assigned agent profile's own model wins." */
 const AGENT_PROFILE_DEFAULT_LABEL = "Use Agent Profile Default";
 const AGENT_PROFILE_FIELDS_OPENCODE = ["agent"] as const;
-const AGENT_PROFILE_FIELDS_CLAUDE = ["permissionMode"] as const;
+const AGENT_PROFILE_FIELDS_ACP_BASE = ["permissionMode"] as const;
+const ACP_OPTION_FIELDS = ["acpOption0", "acpOption1", "acpOption2", "acpOption3", "acpOption4", "acpOption5"] as const;
 /** No permission editor: worktree isolation (locked, automatic) or Claude Code harness (N/A). */
 const ISOLATION_FIELDS_LOCKED = ["isolation"] as const;
 const ISOLATION_FIELDS_EDITABLE = ["isolation", "permEdit", "permBash", "permWebfetch"] as const;
 const CONFIRM_FIELDS: readonly never[] = [];
 const TEXT_INPUT_COLUMNS = 56;
-const HARNESS_CYCLE: readonly TaskHarness[] = TASK_HARNESSES;
 type Overlay = "none" | "help" | "newTask" | "addInstance" | "renameInstance";
 type NewTaskField =
   | (typeof IDENTITY_FIELDS_MANUAL)[number]
   | (typeof HARNESS_FIELDS_OPENCODE)[number]
   | (typeof AGENT_PROFILE_FIELDS_OPENCODE)[number]
-  | (typeof AGENT_PROFILE_FIELDS_CLAUDE)[number]
+  | (typeof AGENT_PROFILE_FIELDS_ACP_BASE)[number]
+  | (typeof ACP_OPTION_FIELDS)[number]
   | (typeof ISOLATION_FIELDS_EDITABLE)[number];
 type TextInputField = Extract<NewTaskField, "title" | "description" | "directory" | "assignedTo">;
 type AddInstanceField = "name" | "workspace";
@@ -345,6 +346,68 @@ function acpHarnessModels(harness: TaskHarness): readonly ModelRef[] {
     case "opencode":
       return [];
   }
+}
+
+function acpModelProviderForHarness(harness: TaskHarness): string | undefined {
+  return acpHarnessModels(harness)[0]?.providerID;
+}
+
+function acpConfigForHarness(catalog: AcpConfigCatalog, harness: TaskHarness | undefined) {
+  if (!isAcpHarness(harness)) return undefined;
+  const config = catalog[harness as AcpTaskHarness];
+  return config?.available ? config : undefined;
+}
+
+function harnessCycle(state: TuiState): readonly TaskHarness[] {
+  return [
+    "opencode",
+    ...TASK_HARNESSES.filter(
+      (harness): harness is AcpTaskHarness => harness !== "opencode" && acpConfigForHarness(state.acpConfig, harness) !== undefined,
+    ),
+  ];
+}
+
+function acpOptionSpecs(catalog: AcpConfigCatalog, harness: TaskHarness | undefined): readonly AcpConfigOption[] {
+  return acpConfigForHarness(catalog, harness)?.options.slice(0, ACP_OPTION_FIELDS.length) ?? [];
+}
+
+function defaultAcpOptions(catalog: AcpConfigCatalog, harness: TaskHarness): AcpOptions {
+  const options: AcpOptions = {};
+  for (const spec of acpOptionSpecs(catalog, harness)) {
+    if (spec.currentValue !== undefined) options[spec.id] = spec.currentValue;
+    else if (spec.type === "select") {
+      const first = spec.options?.[0]?.value;
+      if (first !== undefined) options[spec.id] = first;
+    } else if (spec.type === "boolean") {
+      options[spec.id] = false;
+    }
+  }
+  return options;
+}
+
+function reconcileAcpOptions(catalog: AcpConfigCatalog, harness: TaskHarness, current: AcpOptions | undefined | null): AcpOptions {
+  const options: AcpOptions = {};
+  for (const spec of acpOptionSpecs(catalog, harness)) {
+    const currentValue = current?.[spec.id];
+    if (spec.type === "boolean") {
+      options[spec.id] = typeof currentValue === "boolean" ? currentValue : typeof spec.currentValue === "boolean" ? spec.currentValue : false;
+      continue;
+    }
+    const allowed = new Set((spec.options ?? []).map((option) => option.value));
+    if (typeof currentValue === "string" && (allowed.size === 0 || allowed.has(currentValue))) {
+      options[spec.id] = currentValue;
+    } else if (typeof spec.currentValue === "string" && (allowed.size === 0 || allowed.has(spec.currentValue))) {
+      options[spec.id] = spec.currentValue;
+    } else {
+      const first = spec.options?.[0]?.value;
+      if (first !== undefined) options[spec.id] = first;
+    }
+  }
+  return options;
+}
+
+function acpOptionFieldIndex(field: NewTaskField): number {
+  return ACP_OPTION_FIELDS.indexOf(field as (typeof ACP_OPTION_FIELDS)[number]);
 }
 
 function harnessDisplayName(harness: TaskHarness | undefined): string {
@@ -416,7 +479,8 @@ interface NewTaskDraft {
   /** Selected OpenCode provider id ("" = unset — MODEL falls back to the agent-roster-derived list). */
   providerId: string;
   agentId: string;
-  claudePermissionMode: ClaudeCodePermissionMode;
+  permissionMode: AcpPermissionMode;
+  acpOptions: AcpOptions;
   assignedTo: string;
   model?: ModelRef;
   /** Type-to-filter query for the MODEL field, active only while it's focused — reset whenever focus leaves it. */
@@ -493,6 +557,7 @@ interface TuiState {
   tasks: Task[];
   agents: RosterAgent[];
   providers: RosterProvider[];
+  acpConfig: AcpConfigCatalog;
   boardUrl: string;
   selectedTaskId?: string;
   status: string;
@@ -692,6 +757,7 @@ export async function runOpenBoardTui(
     tasks: [],
     agents: [],
     providers: [],
+    acpConfig: {},
     boardUrl: client.boardUrl,
     status: `connected to ${client.boardUrl}`,
     refreshing: false,
@@ -800,7 +866,7 @@ export async function runOpenBoardTui(
     }
 
     try {
-      const [tasks, agents, providers, healthResult] = await Promise.all([
+      const [tasks, agents, providers, acpConfig, healthResult] = await Promise.all([
         currentClient.listTasks(),
         currentClient.listAgents(),
         // Best-effort: an older board daemon without /api/providers (or any
@@ -808,6 +874,7 @@ export async function runOpenBoardTui(
         // fall back to [], same contract as the server route's own best-effort
         // GET /api/providers behavior.
         currentClient.listProviders().catch(() => [] as RosterProvider[]),
+        currentClient.listAcpConfig().catch(() => ({} as AcpConfigCatalog)),
         currentClient.getHealth().then(
           (health) => ({ ok: true as const, health }),
           (error) => ({ ok: false as const, error }),
@@ -816,6 +883,7 @@ export async function runOpenBoardTui(
       state.tasks = tasks;
       state.agents = agents;
       state.providers = providers;
+      state.acpConfig = acpConfig;
       state.selectedTaskId = resolveSelectedTaskId(tasks, state.selectedTaskId);
       state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
       if (healthResult.ok) {
@@ -2509,11 +2577,8 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   if (task.type === "manual") {
     return [type, assigned];
   }
-  if (isClaudeHarness(task.harness)) {
-    return [{ label: "PERMS", value: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE, color: COLORS.muted }, model];
-  }
   if (isAcpHarness(task.harness)) {
-    return [agent, model];
+    return [{ label: "MODE", value: task.permissionMode ?? task.claudePermissionMode ?? DEFAULT_ACP_PERMISSION_MODE, color: COLORS.muted }, model];
   }
   if (task.column === "done" && task.completionSource === "reported") {
     const second = task.worktreeBranch
@@ -2599,9 +2664,8 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
           { label: isAcpHarness(task.harness) ? "HARNESS" : "AGENT", value: isAcpHarness(task.harness) ? harnessDisplayName(task.harness) : agentLabel(task, state.agents), color: COLORS.text },
           ...(isAcpHarness(task.harness)
             ? [
-                ...(isClaudeHarness(task.harness)
-                  ? [{ label: "PERMS", value: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE, color: COLORS.text }]
-                  : []),
+                { label: "MODE", value: task.permissionMode ?? task.claudePermissionMode ?? DEFAULT_ACP_PERMISSION_MODE, color: COLORS.text },
+                ...acpOptionRows(state.acpConfig, task.harness, task.acpOptions),
                 ...(task.harnessWarning ? [{ label: "WARN", value: task.harnessWarning, color: COLORS.bright }] : []),
                 ...(task.harnessCwd && task.harnessCwd !== task.directory
                   ? [{ label: "RUN DIR", value: shortPath(task.harnessCwd), color: COLORS.bright }]
@@ -3395,7 +3459,7 @@ function renderWizardBody(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
     case "harness":
       return renderHarnessStep(ui, state, draft);
     case "agentProfile":
-      return renderAgentProfileStep(ui, draft);
+      return renderAgentProfileStep(ui, state, draft);
     case "isolation":
       return renderIsolationStep(ui, draft);
     case "confirm":
@@ -3453,7 +3517,7 @@ function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
     ...(draft.harness === "opencode"
       ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
       : []),
-    renderModelField(ui, draft, state.agents, state.providers),
+    renderModelField(ui, draft, state.agents, state.providers, state.acpConfig),
     renderDraftErrorRow(ui, draft),
   );
 }
@@ -3467,15 +3531,24 @@ function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
  * state, so the plain-select branch below renders it correctly with no
  * special-casing needed here.
  */
-function renderModelField(ui: OpenTui, draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[]) {
+function renderModelField(ui: OpenTui, draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[], acpConfig: AcpConfigCatalog) {
   const focused = draft.field === "model";
   if (!focused) {
     return renderSelectField(ui, "MODEL", currentModelLabel(draft), false);
   }
 
   const query = draft.modelQuery ?? "";
-  const matches = filteredModelOptions(draft, agents, providers);
-  const selectedLabel = matches.length === 0 ? "no matches" : draft.model ? modelLabel(draft.model) : "type to narrow, ↑/↓ to pick";
+  const matches = filteredModelOptions(draft, agents, providers, acpConfig);
+  const selectedLabel =
+    matches.length === 0
+      ? isAcpHarness(draft.harness) && query
+        ? `custom: ${query}`
+        : "no matches"
+      : draft.model
+        ? modelLabel(draft.model)
+        : isAcpHarness(draft.harness)
+          ? "Provider Default"
+          : "type to narrow, ↑/↓ to pick";
 
   return renderFieldShell(
     ui,
@@ -3494,14 +3567,22 @@ function renderModelField(ui: OpenTui, draft: NewTaskDraft, agents: RosterAgent[
   );
 }
 
-// Step C — AGENT PROFILE (OpenCode roster, live-synced) or PERMS (Claude Code,
-// unchanged — full Claude "agent profile" support is a separate future workflow).
-function renderAgentProfileStep(ui: OpenTui, draft: NewTaskDraft) {
+// Step C — execution knobs. OpenCode keeps its live agent picker; ACP harnesses
+// expose session/set_mode plus only the selected provider's own option specs.
+function renderAgentProfileStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  const config = acpConfigForHarness(state.acpConfig, draft.harness);
+  const modes = config?.modes ?? [];
+  const specs = acpOptionSpecs(state.acpConfig, draft.harness);
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    isClaudeHarness(draft.harness)
-      ? renderSelectField(ui, "PERMS", currentPermissionModeLabel(draft), draft.field === "permissionMode")
-      : renderSelectField(ui, "AGENT PROFILE", currentAgentLabel(draft), draft.field === "agent"),
+    ...(draft.harness === "opencode"
+      ? [renderSelectField(ui, "AGENT PROFILE", currentAgentLabel(draft), draft.field === "agent")]
+      : modes.length > 0
+        ? [renderSelectField(ui, "PERMS", currentPermissionModeLabel(state.acpConfig, draft), draft.field === "permissionMode")]
+        : []),
+    ...specs.map((spec, index) =>
+      renderSelectField(ui, acpConfigLabel(spec), acpConfigValueLabel(spec, draft.acpOptions[spec.id]), draft.field === ACP_OPTION_FIELDS[index]),
+    ),
     renderDraftErrorRow(ui, draft),
   );
 }
@@ -3609,9 +3690,12 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
   ];
 
   const agentProfile: MetaRow[] = [
-    isClaudeHarness(draft.harness)
-      ? { label: "PERMS", value: currentPermissionModeLabel(draft), color: COLORS.text }
-      : { label: "AGENT PROFILE", value: currentAgentLabel(draft), color: COLORS.text },
+    ...(draft.harness === "opencode"
+      ? [{ label: "AGENT PROFILE", value: currentAgentLabel(draft), color: COLORS.text }]
+      : (acpConfigForHarness(state.acpConfig, draft.harness)?.modes.length ?? 0) > 0
+        ? [{ label: "PERMS", value: currentPermissionModeLabel(state.acpConfig, draft), color: COLORS.text }]
+        : []),
+    ...acpOptionRows(state.acpConfig, draft.harness, draft.acpOptions),
   ];
 
   const isolation: MetaRow[] = [
@@ -3634,6 +3718,23 @@ function permissionOverridesSummary(draft: NewTaskDraft): string {
   const changed = PERMISSION_OVERRIDE_CATEGORIES.filter((category) => draft.permissionOverrides[category] !== "allow");
   if (changed.length === 0) return "Default (allow all)";
   return changed.map((category) => `${category}: ${draft.permissionOverrides[category]}`).join(", ");
+}
+
+function acpConfigLabel(option: AcpConfigOption): string {
+  return option.name.toUpperCase();
+}
+
+function acpConfigValueLabel(option: AcpConfigOption, value: unknown): string {
+  if (option.type === "boolean") return value === true ? "on" : "off";
+  const raw = typeof value === "string" ? value : typeof option.currentValue === "string" ? option.currentValue : option.options?.[0]?.value ?? "";
+  return option.options?.find((item) => item.value === raw)?.name ?? raw;
+}
+
+function acpOptionRows(catalog: AcpConfigCatalog, harness: TaskHarness | undefined, options: AcpOptions | null | undefined): MetaRow[] {
+  if (!harness || !options) return [];
+  return acpOptionSpecs(catalog, harness)
+    .filter((spec) => options[spec.id] !== undefined)
+    .map((spec) => ({ label: acpConfigLabel(spec), value: acpConfigValueLabel(spec, options[spec.id]), color: COLORS.text }));
 }
 
 function currentProviderLabel(draft: NewTaskDraft, providers: RosterProvider[]): string {
@@ -3681,6 +3782,7 @@ function wizardFooterHint(draft: NewTaskDraft, isEditing: boolean): string {
     return `${isFirst ? "" : "b back · "}enter ${isEditing ? "save" : "create"}`;
   }
   if (draft.field === "model") {
+    if (isAcpHarness(draft.harness)) return "type to filter or custom id · ↑/↓ pick ACP model · tab next field · enter continue";
     // 'b' types a literal "b" into the filter query here, not "back" — say so instead of the usual hint.
     return "type to filter · ↑/↓ pick match · tab next field · enter continue";
   }
@@ -4457,7 +4559,8 @@ function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
     // to Use Agent Profile Default.
     providerId: task.model?.providerID ?? "",
     agentId: task.agent ?? defaultAgentId(state.agents),
-    claudePermissionMode: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
+    permissionMode: task.permissionMode ?? task.claudePermissionMode ?? defaultAcpPermissionMode(state.acpConfig, task.harness),
+    acpOptions: reconcileAcpOptions(state.acpConfig, task.harness ?? "opencode", task.acpOptions),
     assignedTo: task.assignedTo ?? "",
     model: task.model ?? undefined,
     isolation: task.isolation ?? "worktree",
@@ -4720,7 +4823,7 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
   }
 
   if (isTabKey(key)) {
-    moveDraftField(draft, key.shift ? -1 : 1);
+    moveDraftField(state, draft, key.shift ? -1 : 1);
     actions.render();
     return;
   }
@@ -4730,7 +4833,7 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
       await createDraftTask(state, actions);
       return;
     }
-    advanceWizardStep(draft, 1);
+    advanceWizardStep(state, draft, 1);
     actions.render();
     return;
   }
@@ -4748,7 +4851,7 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
   }
 
   if (isWizardBackKey(key, draft)) {
-    advanceWizardStep(draft, -1);
+    advanceWizardStep(state, draft, -1);
     actions.render();
     return;
   }
@@ -4792,6 +4895,24 @@ function isWizardBackKey(key: KeyEvent, draft: NewTaskDraft): boolean {
 function handleModelQueryKey(draft: NewTaskDraft, key: KeyEvent): boolean {
   if (draft.field !== "model") return false;
 
+  if (isAcpHarness(draft.harness)) {
+    const providerID = acpModelProviderForHarness(draft.harness);
+    if (!providerID) return false;
+    const current = draft.model?.id ?? "";
+    if (key.name === "backspace" || key.sequence === "" || key.sequence === "\b") {
+      const next = current.slice(0, -1);
+      draft.model = next ? { providerID, id: next } : undefined;
+      draft.modelQuery = next || undefined;
+      return true;
+    }
+    if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
+    const base = draft.modelQuery === undefined ? "" : current;
+    const next = `${base}${key.sequence}`;
+    draft.model = { providerID, id: next };
+    draft.modelQuery = next;
+    return true;
+  }
+
   if (key.name === "backspace" || key.sequence === "" || key.sequence === "\b") {
     draft.modelQuery = (draft.modelQuery ?? "").slice(0, -1) || undefined;
     return true;
@@ -4818,6 +4939,17 @@ function draftPermissionOverridesPayload(draft: NewTaskDraft): PermissionOverrid
   return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
+function draftAcpOptionsPayload(state: TuiState, draft: NewTaskDraft): AcpOptions | undefined {
+  if (!isAcpHarness(draft.harness)) return undefined;
+  const options = reconcileAcpOptions(state.acpConfig, draft.harness, draft.acpOptions);
+  return Object.keys(options).length > 0 ? options : undefined;
+}
+
+function draftModelPayload(draft: NewTaskDraft): ModelRef | undefined {
+  if (isAcpHarness(draft.harness) && draft.model?.id === "") return undefined;
+  return draft.model;
+}
+
 async function createDraftTask(state: TuiState, actions: TuiActions): Promise<void> {
   const draft = state.newTask;
   if (!draft || draft.submitting) return;
@@ -4842,6 +4974,10 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
   actions.render();
 
   try {
+    const permissionMode = currentPermissionModeValue(state.acpConfig, draft);
+    const hasAcpModes = (acpConfigForHarness(state.acpConfig, draft.harness)?.modes.length ?? 0) > 0;
+    const acpOptions = draftAcpOptionsPayload(state, draft);
+    const model = draftModelPayload(draft);
     const task = isEditing
       ? await actions.client.updateTask(draft.editingTaskId as string, draft.type === "manual" ? {
           type: "manual",
@@ -4856,8 +4992,10 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           description: draft.description,
           directory,
           agent: draft.harness === "opencode" ? draft.agentId || null : null,
-          claudePermissionMode: isClaudeHarness(draft.harness) ? draft.claudePermissionMode : null,
-          model: draft.model ?? null,
+          permissionMode: isAcpHarness(draft.harness) && hasAcpModes ? permissionMode : null,
+          claudePermissionMode: isClaudeHarness(draft.harness) && hasAcpModes ? permissionMode : null,
+          acpOptions: acpOptions ?? null,
+          model: model ?? null,
           isolation: draft.isolation,
           permissionOverrides: draftPermissionOverridesPayload(draft) ?? null,
         })
@@ -4873,9 +5011,11 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           title,
           description: draft.description,
           directory,
-          agent: draft.harness === "opencode" ? draft.agentId || undefined : undefined,
-          claudePermissionMode: isClaudeHarness(draft.harness) ? draft.claudePermissionMode : undefined,
-          model: draft.model,
+          ...(draft.harness === "opencode" ? { agent: draft.agentId || undefined } : {}),
+          ...(isAcpHarness(draft.harness) && hasAcpModes ? { permissionMode } : {}),
+          ...(isClaudeHarness(draft.harness) && hasAcpModes ? { claudePermissionMode: permissionMode } : {}),
+          ...(acpOptions ? { acpOptions } : {}),
+          model,
           isolation: draft.isolation,
           permissionOverrides: draftPermissionOverridesPayload(draft),
         });
@@ -4907,7 +5047,8 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
     // picked, so the agent profile's own model is what actually runs.
     providerId: "",
     agentId,
-    claudePermissionMode: DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
+    permissionMode: defaultAcpPermissionMode(state.acpConfig, "opencode"),
+    acpOptions: {},
     assignedTo: "",
     model: undefined,
     isolation: "worktree",
@@ -4920,8 +5061,8 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
   };
 }
 
-function moveDraftField(draft: NewTaskDraft, delta: number): void {
-  const order = stepFieldOrder(draft);
+function moveDraftField(state: TuiState, draft: NewTaskDraft, delta: number): void {
+  const order = stepFieldOrder(state, draft);
   if (order.length === 0) return; // confirm screen has no focusable fields — Tab is a no-op
   const current = order.includes(draft.field) ? draft.field : order[0];
   const index = order.indexOf(current);
@@ -4933,21 +5074,25 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
   switch (draft.field) {
     case "type":
       draft.type = draft.type === "agent" ? "manual" : "agent";
-      if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
+      if (!stepFieldOrder(state, draft).includes(draft.field)) draft.field = stepFieldOrder(state, draft)[0] ?? draft.field;
       return true;
     case "harness":
       {
-        const current = Math.max(0, HARNESS_CYCLE.indexOf(draft.harness));
-        draft.harness = HARNESS_CYCLE[(current + delta + HARNESS_CYCLE.length) % HARNESS_CYCLE.length] ?? "opencode";
+        const harnesses = harnessCycle(state);
+        const current = Math.max(0, harnesses.indexOf(draft.harness));
+        draft.harness = harnesses[(current + delta + harnesses.length) % harnesses.length] ?? "opencode";
       }
       if (isAcpHarness(draft.harness)) {
-        draft.model = acpHarnessModels(draft.harness)[0];
+        draft.model = undefined;
+        draft.permissionMode = defaultAcpPermissionMode(state.acpConfig, draft.harness);
+        draft.acpOptions = defaultAcpOptions(state.acpConfig, draft.harness);
       } else {
         draft.providerId = "";
         draft.model = undefined;
+        draft.acpOptions = {};
       }
       draft.modelQuery = undefined;
-      if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
+      if (!stepFieldOrder(state, draft).includes(draft.field)) draft.field = stepFieldOrder(state, draft)[0] ?? draft.field;
       return true;
     case "provider":
       cycleProvider(draft, state.providers, delta);
@@ -4956,14 +5101,19 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       cycleAgent(draft, state.agents, delta);
       return true;
     case "permissionMode":
-      cyclePermissionMode(draft, delta);
+      cyclePermissionMode(state.acpConfig, draft, delta);
+      return true;
+    case "acpOption0":
+    case "acpOption1":
+    case "acpOption2":
+      cycleAcpOption(state.acpConfig, draft, acpOptionFieldIndex(draft.field), delta);
       return true;
     case "model":
-      cycleModel(draft, state.agents, state.providers, delta);
+      cycleModel(draft, state.agents, state.providers, state.acpConfig, delta);
       return true;
     case "isolation":
       draft.isolation = draft.isolation === "worktree" ? "in-place" : "worktree";
-      if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
+      if (!stepFieldOrder(state, draft).includes(draft.field)) draft.field = stepFieldOrder(state, draft)[0] ?? draft.field;
       return true;
     case "permEdit":
       cyclePermissionOverride(draft, "edit", delta);
@@ -5016,9 +5166,38 @@ function modelRefFromProvider(provider: RosterProvider): ModelRef | undefined {
   return modelId ? { providerID: provider.id, id: modelId } : undefined;
 }
 
-function cyclePermissionMode(draft: NewTaskDraft, delta: number): void {
-  const current = Math.max(0, CLAUDE_CODE_PERMISSION_MODES.indexOf(draft.claudePermissionMode));
-  draft.claudePermissionMode = CLAUDE_CODE_PERMISSION_MODES[(current + delta + CLAUDE_CODE_PERMISSION_MODES.length) % CLAUDE_CODE_PERMISSION_MODES.length];
+function defaultAcpPermissionMode(catalog: AcpConfigCatalog, harness: TaskHarness | undefined): AcpPermissionMode {
+  const first = acpConfigForHarness(catalog, harness)?.modes[0]?.value;
+  return (first || DEFAULT_ACP_PERMISSION_MODE) as AcpPermissionMode;
+}
+
+function cyclePermissionMode(catalog: AcpConfigCatalog, draft: NewTaskDraft, delta: number): void {
+  const modes = acpConfigForHarness(catalog, draft.harness)?.modes ?? [];
+  if (modes.length === 0) return;
+  const ids = modes.map((mode) => mode.value);
+  const current = Math.max(0, ids.indexOf(draft.permissionMode));
+  draft.permissionMode = ids[(current + delta + ids.length) % ids.length] as AcpPermissionMode;
+}
+
+function cycleAcpOption(catalog: AcpConfigCatalog, draft: NewTaskDraft, optionIndex: number, delta: number): void {
+  const spec = acpOptionSpecs(catalog, draft.harness)[optionIndex];
+  if (!spec) return;
+  if (spec.type === "boolean") {
+    draft.acpOptions = {
+      ...draft.acpOptions,
+      [spec.id]: !(draft.acpOptions[spec.id] === true),
+    };
+    return;
+  }
+  const values = spec.options?.map((option) => option.value) ?? [];
+  if (values.length === 0) return;
+  const rawCurrent = draft.acpOptions[spec.id];
+  const currentValue: string = typeof rawCurrent === "string" ? rawCurrent : values[0] ?? "";
+  const current = Math.max(0, values.indexOf(currentValue));
+  draft.acpOptions = {
+    ...draft.acpOptions,
+    [spec.id]: values[(current + delta + values.length) % values.length],
+  };
 }
 
 function cyclePermissionOverride(draft: NewTaskDraft, category: PermissionOverrideCategory, delta: number): void {
@@ -5027,8 +5206,8 @@ function cyclePermissionOverride(draft: NewTaskDraft, category: PermissionOverri
     PERMISSION_OVERRIDE_ACTIONS[(current + delta + PERMISSION_OVERRIDE_ACTIONS.length) % PERMISSION_OVERRIDE_ACTIONS.length];
 }
 
-function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[], delta: number): void {
-  const options = filteredModelOptions(draft, agents, providers);
+function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[], acpConfig: AcpConfigCatalog, delta: number): void {
+  const options = filteredModelOptions(draft, agents, providers, acpConfig);
   if (options.length === 0) return; // no matches for the current query — nothing to move to
   const current = Math.max(
     0,
@@ -5282,14 +5461,11 @@ function lineRangeAtCursor(value: string, cursor: number): { start: number; end:
 /** The wizard screens for the current draft's card type — manual cards skip straight from identity to confirm. */
 function wizardSteps(draft: NewTaskDraft): readonly WizardStep[] {
   if (draft.type === "manual") return ["identity", "confirm"] as const;
-  if (draft.harness !== "opencode" && !isClaudeHarness(draft.harness)) {
-    return ["identity", "harness", "isolation", "confirm"] as const;
-  }
   return ["identity", "harness", "agentProfile", "isolation", "confirm"] as const;
 }
 
 /** The focusable field order for the draft's *current* step, branched by harness/isolation where relevant. */
-function stepFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
+function stepFieldOrder(state: TuiState, draft: NewTaskDraft): readonly NewTaskField[] {
   switch (draft.step) {
     case "identity":
       return draft.type === "manual" ? IDENTITY_FIELDS_MANUAL : IDENTITY_FIELDS_AGENT;
@@ -5297,7 +5473,12 @@ function stepFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
       if (isAcpHarness(draft.harness)) return HARNESS_FIELDS_CLAUDE;
       return draft.providerId ? HARNESS_FIELDS_OPENCODE : HARNESS_FIELDS_OPENCODE_LOCKED;
     case "agentProfile":
-      if (isClaudeHarness(draft.harness)) return AGENT_PROFILE_FIELDS_CLAUDE;
+      if (isAcpHarness(draft.harness)) {
+        const fields: NewTaskField[] = [];
+        if ((acpConfigForHarness(state.acpConfig, draft.harness)?.modes.length ?? 0) > 0) fields.push("permissionMode");
+        fields.push(...ACP_OPTION_FIELDS.slice(0, acpOptionSpecs(state.acpConfig, draft.harness).length));
+        return fields;
+      }
       return draft.harness === "opencode" ? AGENT_PROFILE_FIELDS_OPENCODE : CONFIRM_FIELDS;
     case "isolation":
       return draft.harness === "opencode" && draft.isolation === "in-place" ? ISOLATION_FIELDS_EDITABLE : ISOLATION_FIELDS_LOCKED;
@@ -5315,12 +5496,12 @@ function stepFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
  * text-field focus can never make `b` silently insert a literal "b" instead
  * of navigating back.
  */
-function advanceWizardStep(draft: NewTaskDraft, delta: number): void {
+function advanceWizardStep(state: TuiState, draft: NewTaskDraft, delta: number): void {
   const steps = wizardSteps(draft);
   const currentIndex = steps.indexOf(draft.step);
   const nextIndex = Math.max(0, Math.min(steps.length - 1, (currentIndex === -1 ? 0 : currentIndex) + delta));
   draft.step = steps[nextIndex] ?? steps[0];
-  draft.field = stepFieldOrder(draft)[0] ?? "type";
+  draft.field = stepFieldOrder(state, draft)[0] ?? "type";
   draft.modelQuery = undefined; // leaving the harness screen always leaves MODEL too
 }
 
@@ -5800,13 +5981,19 @@ function currentHarnessLabel(draft: NewTaskDraft): string {
   return harnessDisplayName(draft.harness);
 }
 
-function currentPermissionModeLabel(draft: NewTaskDraft): string {
-  return draft.claudePermissionMode;
+function currentPermissionModeLabel(catalog: AcpConfigCatalog, draft: NewTaskDraft): string {
+  const value = currentPermissionModeValue(catalog, draft);
+  return acpConfigForHarness(catalog, draft.harness)?.modes.find((mode) => mode.value === value)?.name ?? value;
+}
+
+function currentPermissionModeValue(catalog: AcpConfigCatalog, draft: NewTaskDraft): AcpPermissionMode {
+  const legacy = (draft as NewTaskDraft & { claudePermissionMode?: AcpPermissionMode }).claudePermissionMode;
+  return draft.permissionMode ?? legacy ?? defaultAcpPermissionMode(catalog, draft.harness);
 }
 
 function currentModelLabel(draft: NewTaskDraft): string {
   if (isAcpHarness(draft.harness)) {
-    return draft.model?.id ?? `${harnessDisplayName(draft.harness)} default`;
+    return draft.model?.id || "Provider Default";
   }
   return draft.model ? modelLabel(draft.model) : AGENT_PROFILE_DEFAULT_LABEL;
 }
@@ -5825,16 +6012,23 @@ function uniqueModels(agents: RosterAgent[]): ModelRef[] {
   return models;
 }
 
-function modelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[]): Array<ModelRef | undefined> {
-  if (isAcpHarness(draft.harness)) return [...acpHarnessModels(draft.harness)];
+function modelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[], acpConfig: AcpConfigCatalog): Array<ModelRef | undefined> {
+  if (isAcpHarness(draft.harness)) {
+    const providerID = acpModelProviderForHarness(draft.harness);
+    const harness = draft.harness as AcpTaskHarness;
+    const discovered = providerID
+      ? (acpConfig[harness]?.models ?? []).map((model) => ({ providerID, id: model.id }))
+      : [];
+    return [undefined, ...discovered];
+  }
   const provider = draft.providerId ? providers.find((item) => item.id === draft.providerId) : undefined;
   if (provider) return provider.models.map((model) => ({ providerID: provider.id, id: model.id }));
   return [undefined, ...uniqueModels(agents)];
 }
 
 /** modelOptions() narrowed by the MODEL field's live type-to-filter query — a provider like OpenRouter can carry hundreds of models, too many to arrow through one at a time. */
-function filteredModelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[]): Array<ModelRef | undefined> {
-  const options = modelOptions(draft, agents, providers);
+function filteredModelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[], acpConfig: AcpConfigCatalog): Array<ModelRef | undefined> {
+  const options = modelOptions(draft, agents, providers, acpConfig);
   const query = (draft.modelQuery ?? "").trim().toLowerCase();
   if (!query) return options;
   return options.filter((model): model is ModelRef => model !== undefined && modelLabel(model).toLowerCase().includes(query));

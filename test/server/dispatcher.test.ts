@@ -14,6 +14,18 @@ async function* makeAsyncGenerator<T>(items: T[]): AsyncGenerator<T> {
   }
 }
 
+/**
+ * A copy of the process env with all `GIT_*` vars stripped. Git exports
+ * `GIT_DIR`/`GIT_INDEX_FILE` (relative paths) into hook environments, so under a
+ * pre-commit hook an inherited-env `git` call in a temp repo would resolve those
+ * against the wrong repo and fail with `.git/index: ... Not a directory`.
+ */
+function cleanGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("GIT_")) env[k] = v;
+  return env;
+}
+
 /** Init a real git repo with one commit, so worktree isolation (`isGitRepo`) is satisfied. */
 function makeGitRepo(root: string): void {
   mkdirSync(root, { recursive: true });
@@ -982,6 +994,7 @@ describe("TaskDispatcher", () => {
       const claudeWorktree = join(workspace, "claude-managed-worktree");
       execFileSync("git", ["worktree", "add", "-b", "claude/self-isolated", claudeWorktree, "HEAD"], {
         cwd: gitProjectDir,
+        env: cleanGitEnv(),
       });
       const task = store.create({
         title: "Claude in-place self isolate",
@@ -1113,9 +1126,10 @@ describe("TaskDispatcher", () => {
       const subdir = join(gitProjectDir, "subdir");
       mkdirSync(subdir, { recursive: true });
       writeFileSync(join(subdir, "nested.txt"), "nested\n");
-      execFileSync("git", ["add", "-A"], { cwd: gitProjectDir });
+      execFileSync("git", ["add", "-A"], { cwd: gitProjectDir, env: cleanGitEnv() });
       execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "--no-gpg-sign", "-m", "add subdir"], {
         cwd: gitProjectDir,
+        env: cleanGitEnv(),
       });
 
       const task = createTask({ directory: subdir });

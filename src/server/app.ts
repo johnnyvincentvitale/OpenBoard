@@ -16,6 +16,7 @@ import { registerTaskRoutes } from "./routes/tasks";
 import { registerTaskEventsRoutes } from "./routes/task-events";
 import { registerAgentRoutes } from "./routes/agents";
 import { registerProviderRoutes } from "./routes/providers";
+import { registerAcpConfigRoutes } from "./routes/acp-config";
 import { registerCompletionRoutes } from "./routes/completion";
 import { registerArchiveRoutes } from "./routes/archive";
 import { registerTaskLinkRoutes } from "./routes/links";
@@ -66,6 +67,7 @@ export function createApp(deps: AppDeps): Hono {
   // Push (task) layer: the roster, task CRUD/run, and the task SSE stream.
   registerAgentRoutes(app, { baseUrl: deps.opencodeBaseUrl });
   registerProviderRoutes(app, { client: deps.client });
+  registerAcpConfigRoutes(app, { cwd: deps.sourceInstance.workspace });
   registerCompletionRoutes(app, { store: deps.taskStore });
   registerTaskLinkRoutes(app, { store: deps.taskStore });
   registerTaskCommentRoutes(app, { store: deps.taskStore });

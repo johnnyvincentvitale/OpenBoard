@@ -133,11 +133,15 @@ describe("SqliteTaskStore", () => {
       const created = store.create(input({
         harness: "claude-code",
         agent: "plan",
+        permissionMode: "bypassPermissions",
         claudePermissionMode: "bypassPermissions",
+        acpOptions: { profile: "audit", maxTurns: 3, readOnly: true },
       }));
 
       expect(created.harness).toBe("claude-code");
+      expect(created.permissionMode).toBe("bypassPermissions");
       expect(created.claudePermissionMode).toBe("bypassPermissions");
+      expect(created.acpOptions).toEqual({ profile: "audit", maxTurns: 3, readOnly: true });
       expect(created.model).toBeUndefined();
 
       const updated = store.update(created.id, {
@@ -150,7 +154,9 @@ describe("SqliteTaskStore", () => {
         harnessCommit: "abc1234",
         harnessWarning: "Warning: target working tree has 2 uncommitted paths. Claude Code may isolate edits in its own worktree. Please commit before using Claude agents in this repo.",
         completionLocation: "harness-directory",
+        permissionMode: "manual",
         claudePermissionMode: "manual",
+        acpOptions: { profile: "fix", maxTurns: 7, readOnly: false },
       });
 
       expect(updated).toMatchObject({
@@ -163,7 +169,9 @@ describe("SqliteTaskStore", () => {
         harnessCommit: "abc1234",
         harnessWarning: "Warning: target working tree has 2 uncommitted paths. Claude Code may isolate edits in its own worktree. Please commit before using Claude agents in this repo.",
         completionLocation: "harness-directory",
+        permissionMode: "manual",
         claudePermissionMode: "manual",
+        acpOptions: { profile: "fix", maxTurns: 7, readOnly: false },
       });
       expect(store.get(created.id)).toMatchObject({
         harness: "claude-code",
@@ -175,14 +183,18 @@ describe("SqliteTaskStore", () => {
         harnessCommit: "abc1234",
         harnessWarning: "Warning: target working tree has 2 uncommitted paths. Claude Code may isolate edits in its own worktree. Please commit before using Claude agents in this repo.",
         completionLocation: "harness-directory",
+        permissionMode: "manual",
         claudePermissionMode: "manual",
+        acpOptions: { profile: "fix", maxTurns: 7, readOnly: false },
       });
       expect(store.list().find((task) => task.id === created.id)).toMatchObject({
         harness: "claude-code",
         harnessSessionId: "claude-session-1",
         harnessCwd: "/tmp/project/.claude/worktrees/task-1",
         completionLocation: "harness-directory",
+        permissionMode: "manual",
         claudePermissionMode: "manual",
+        acpOptions: { profile: "fix", maxTurns: 7, readOnly: false },
       });
     });
 

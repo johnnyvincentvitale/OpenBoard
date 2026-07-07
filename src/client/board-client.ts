@@ -8,6 +8,10 @@ import type {
   DiffResponse,
   MergeOutcome,
   ModelRef,
+  AcpConfigCatalog,
+  AcpModelCatalog,
+  AcpOptions,
+  AcpPermissionMode,
   PermissionOverrideAction,
   PermissionOverrideCategory,
   PermissionOverrides,
@@ -64,7 +68,9 @@ export interface TaskSummary {
   column: Task["column"];
   runState: Task["runState"];
   agent?: string;
+  permissionMode?: AcpPermissionMode;
   claudePermissionMode?: ClaudeCodePermissionMode;
+  acpOptions?: AcpOptions;
   assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
@@ -89,7 +95,9 @@ export interface CreateBoardTaskInput {
   description?: string;
   directory?: string;
   agent?: string;
+  permissionMode?: string;
   claudePermissionMode?: string;
+  acpOptions?: AcpOptions;
   assignedTo?: string;
   model?: string | ModelRef;
   isolation?: string;
@@ -99,10 +107,12 @@ export interface CreateBoardTaskInput {
 
 export type UpdateBoardTaskInput = Omit<
   Partial<CreateBoardTaskInput>,
-  "agent" | "claudePermissionMode" | "assignedTo" | "model" | "isolation" | "permissionOverrides"
+  "agent" | "permissionMode" | "claudePermissionMode" | "acpOptions" | "assignedTo" | "model" | "isolation" | "permissionOverrides"
 > & {
   agent?: string | null;
+  permissionMode?: string | null;
   claudePermissionMode?: string | null;
+  acpOptions?: AcpOptions | null;
   assignedTo?: string | null;
   model?: string | ModelRef | null;
   isolation?: string | null;
@@ -135,6 +145,8 @@ export interface BoardClient {
   listTaskSummaries(): Promise<TaskSummary[]>;
   listAgents(): Promise<RosterAgent[]>;
   listProviders(): Promise<RosterProvider[]>;
+  listAcpConfig(): Promise<AcpConfigCatalog>;
+  listAcpModels(): Promise<AcpModelCatalog>;
   createTask(input: CreateBoardTaskInput): Promise<Task>;
   createTasks(input: CreateBoardTaskInput[]): Promise<Task[]>;
   updateTask(id: string, input: UpdateBoardTaskInput): Promise<Task>;
@@ -211,6 +223,21 @@ function normalizePermissionOverrides(overrides: PermissionOverrides): Permissio
   return result;
 }
 
+function normalizeAcpOptions(options: AcpOptions): AcpOptions {
+  const result: AcpOptions = {};
+  for (const [key, value] of Object.entries(options)) {
+    if (!key.trim()) throw new Error("acpOptions keys must be non-empty strings");
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      throw new Error("acpOptions values must be strings, numbers, or booleans");
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error("acpOptions number values must be finite");
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
 export function createBoardClient(options: BoardClientOptions = {}): BoardClient {
   const resolved = resolveOptions(options);
 
@@ -224,6 +251,8 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     },
     listAgents: () => requestJson<RosterAgent[]>(resolved, "/api/agents", { method: "GET" }),
     listProviders: () => requestJson<RosterProvider[]>(resolved, "/api/providers", { method: "GET" }),
+    listAcpConfig: () => requestJson<AcpConfigCatalog>(resolved, "/api/acp-config", { method: "GET" }),
+    listAcpModels: () => requestJson<AcpModelCatalog>(resolved, "/api/acp-models", { method: "GET" }),
     createTask: async (input) => {
       const task = normalizeTaskInput(input, resolved.cwd);
       await assertExistingDirectory(task.directory, resolved.stat);
@@ -326,6 +355,15 @@ function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): Upda
     }
     payload.claudePermissionMode = task.claudePermissionMode as ClaudeCodePermissionMode | null;
   }
+  if (task.permissionMode !== undefined) {
+    if (task.permissionMode !== null && !VALID_CLAUDE_PERMISSION_MODE.has(task.permissionMode as AcpPermissionMode)) {
+      throw new Error("permissionMode must be a supported ACP permission mode");
+    }
+    payload.permissionMode = task.permissionMode as AcpPermissionMode | null;
+  }
+  if (task.acpOptions !== undefined) {
+    payload.acpOptions = task.acpOptions === null ? null : normalizeAcpOptions(task.acpOptions);
+  }
   if (task.model !== undefined) payload.model = task.model === null ? null : typeof task.model === "string" ? parseModelRef(task.model) : task.model;
   if (task.isolation !== undefined) {
     if (task.isolation !== null && !VALID_ISOLATION.has(task.isolation as TaskIsolationMode)) throw new Error("isolation must be 'worktree' or 'in-place'");
@@ -370,7 +408,9 @@ export function toTaskSummary(task: Task): TaskSummary {
     column: task.column,
     runState: task.runState,
     ...(task.agent != null ? { agent: task.agent } : {}),
+    ...(task.permissionMode != null ? { permissionMode: task.permissionMode } : {}),
     ...(task.claudePermissionMode != null ? { claudePermissionMode: task.claudePermissionMode } : {}),
+    ...(task.acpOptions != null ? { acpOptions: task.acpOptions } : {}),
     ...(task.assignedTo != null ? { assignedTo: task.assignedTo } : {}),
     ...(task.model != null ? { model: task.model } : {}),
     ...(task.isolation != null ? { isolation: task.isolation } : {}),
@@ -435,6 +475,28 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
       throw new Error("claudePermissionMode must be a supported Claude Code permission mode");
     }
     payload.claudePermissionMode = claudePermissionMode as ClaudeCodePermissionMode;
+  }
+
+  const permissionMode = task.permissionMode?.trim();
+  if (permissionMode) {
+    if (payload.type !== "agent" || payload.harness === undefined || payload.harness === "opencode") {
+      throw new Error("permissionMode can only be set for ACP agent tasks");
+    }
+    if (!VALID_CLAUDE_PERMISSION_MODE.has(permissionMode as AcpPermissionMode)) {
+      throw new Error("permissionMode must be a supported ACP permission mode");
+    }
+    payload.permissionMode = permissionMode as AcpPermissionMode;
+  }
+
+  if (payload.permissionMode && payload.claudePermissionMode && payload.permissionMode !== payload.claudePermissionMode) {
+    throw new Error("permissionMode and claudePermissionMode must match when both are provided");
+  }
+
+  if (task.acpOptions !== undefined) {
+    if (payload.type !== "agent" || payload.harness === undefined || payload.harness === "opencode") {
+      throw new Error("acpOptions can only be set for ACP agent tasks");
+    }
+    payload.acpOptions = normalizeAcpOptions(task.acpOptions);
   }
 
   const assignedTo = task.assignedTo?.trim();
