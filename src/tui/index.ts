@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type Column, type CompletionReport, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -208,6 +208,8 @@ interface TuiColors {
   dim: TuiColor;
   accent: TuiColor;
   accentBright: TuiColor;
+  diffAdd: TuiColor;
+  diffDelete: TuiColor;
   logo: TuiColor;
   logoDark: TuiColor;
   laneTodo: TuiColor;
@@ -230,6 +232,8 @@ const TRUECOLOR_COLORS: TuiColors = {
   dim: "#383836",
   accent: "#3f5e52",
   accentBright: "#4a6e60",
+  diffAdd: "#30d77d",
+  diffDelete: "#ff5c5c",
   logo: "#5b8a78",
   logoDark: "#2e453c",
   // Lane hues carry real chroma on purpose: the original design-kit values
@@ -256,6 +260,8 @@ const INDEXED_COLORS: TuiColors = {
   dim: RGBA.fromIndex(238),
   accent: RGBA.fromIndex(66),
   accentBright: RGBA.fromIndex(72),
+  diffAdd: RGBA.fromIndex(78),
+  diffDelete: RGBA.fromIndex(203),
   logo: RGBA.fromIndex(72),
   logoDark: RGBA.fromIndex(23),
   laneTodo: RGBA.fromIndex(68),
@@ -528,7 +534,7 @@ interface ArchiveState {
 }
 
 /** Detail tabs shown for a selected card via Enter. */
-export type TaskDetailTab = "prompt" | "handoff" | "output" | "comments";
+export type TaskDetailTab = "prompt" | "handoff" | "output" | "files" | "comments";
 
 /** State for the two-step global filter picker opened with f/F. */
 interface FilterModeState {
@@ -547,9 +553,15 @@ interface CommentsPanelState {
   selectedIndex: number;
 }
 
+interface FilesDetailState {
+  ownerId: string;
+  selectedIndex: number;
+  mode: "list" | "patch";
+}
+
 type ReviewDiffStatState =
   | { taskId: string; taskUpdatedAt: number; status: "loading" }
-  | { taskId: string; taskUpdatedAt: number; status: "success"; label: string }
+  | { taskId: string; taskUpdatedAt: number; status: "success"; label: string; response?: DiffResponse }
   | { taskId: string; taskUpdatedAt: number; status: "error"; label: string };
 
 /** In-progress compose state for a new top-level comment or a reply. */
@@ -606,6 +618,8 @@ interface TuiState {
   // Comments detail tab
   comments?: CommentsPanelState;
   commentDraft?: CommentDraftState;
+  // Files detail tab
+  filesDetail?: FilesDetailState;
   // Full-screen diff view (v on a selected Review card)
   diffView?: DiffViewState;
   // Inline selected-card diff stat for Review cards, fetched once per selected task identity.
@@ -1760,7 +1774,9 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
         ? renderHandoffTab(ui, state, completion, `archive-detail-handoff-${record.task_id}`)
         : tab === "output"
           ? renderFinalOutputTab(ui, state, `archive-detail-output-${record.task_id}`, record.final_session_output)
-          : renderArchiveCommentsTab(ui, state, record);
+          : tab === "files"
+            ? renderArchiveFilesTab(ui, state, record, completion)
+            : renderArchiveCommentsTab(ui, state, record);
 
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
@@ -1773,7 +1789,7 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
     // Tab headers
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 2 },
-      ...DETAIL_TABS.map((candidate) =>
+      ...BOARD_DETAIL_TABS.map((candidate) =>
         ui.Text({
           content: DETAIL_TAB_LABELS[candidate],
           fg: tab === candidate ? activeTabFg : inactiveTabFg,
@@ -1934,6 +1950,25 @@ function renderHandoffTab(ui: OpenTui, state: TuiState, completion: CompletionRe
       ui.Text({ content: completion.residualRisk ?? "none", fg: COLORS.text, width: "100%", minWidth: 0, flexShrink: 1, wrapMode: "word", flexGrow: 1 }),
     ),
   );
+}
+
+function renderArchiveFilesTab(ui: OpenTui, state: TuiState, record: GlobalArchiveRecord, completion: CompletionReport | null) {
+  const files = completion?.changedFiles ?? [];
+  const scrollId = `archive-detail-files-${record.task_id}`;
+  if (files.length === 0) {
+    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "No changed files recorded", fg: COLORS.muted, height: 1 }));
+  }
+  const detail = filesDetailState(state, archiveFilesOwnerId(record.task_id), files.length);
+  return renderDetailViewport(
+    ui,
+    state,
+    scrollId,
+    ...files.map((file, index) => renderChangedFileListRow(ui, { file, additions: null, deletions: null }, index === detail.selectedIndex)),
+  );
+}
+
+function archiveFilesVisibleRows(state: TuiState): number {
+  return Math.max(2, laneInnerHeight(state.terminalRows) - 8);
 }
 
 function renderArchiveCommentsTab(ui: OpenTui, state: TuiState, record: GlobalArchiveRecord) {
@@ -2512,6 +2547,12 @@ interface MetaRow {
   label: string;
   value: string;
   color: TuiColor;
+  valueParts?: MetaValuePart[];
+}
+
+interface MetaValuePart {
+  content: string;
+  color: TuiColor;
 }
 
 // Status row text: glyph + label, plus the live elapsed time while running
@@ -2605,20 +2646,36 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
 }
 
 function renderTaskMeta(ui: OpenTui, meta: MetaRow, done: boolean, labelWidth = 7, valueColor?: TuiColor) {
+  const resolvedValueColor = valueColor ?? (done ? COLORS.dim : meta.color);
   return ui.Box(
     { width: "100%", height: 1, flexDirection: "row" },
     ui.Text({ content: meta.label, fg: COLORS.dim, width: labelWidth, height: 1 }),
     // minWidth:0 lets the value shrink inside the row instead of overflowing the
     // card's right border when the path/branch is longer than the lane is wide.
-    ui.Text({
-      content: meta.value,
-      fg: valueColor ?? (done ? COLORS.dim : meta.color),
-      flexGrow: 1,
-      flexShrink: 1,
-      minWidth: 0,
+    meta.valueParts && !done
+      ? renderInlineMetaValue(ui, meta.valueParts, resolvedValueColor)
+      : ui.Text({
+          content: meta.value,
+          fg: resolvedValueColor,
+          flexGrow: 1,
+          flexShrink: 1,
+          minWidth: 0,
+          height: 1,
+          truncate: true,
+        }),
+  );
+}
+
+function renderInlineMetaValue(ui: OpenTui, parts: MetaValuePart[], fallbackColor: TuiColor) {
+  return ui.Box(
+    { flexGrow: 1, flexShrink: 1, minWidth: 0, height: 1, flexDirection: "row" },
+    ...parts.map((part) => ui.Text({
+      content: part.content,
+      fg: part.color ?? fallbackColor,
       height: 1,
+      flexShrink: 0,
       truncate: true,
-    }),
+    })),
   );
 }
 
@@ -2655,7 +2712,7 @@ function selectedPanelWidth(terminalCols: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH + Math.floor(extra / 2));
 }
 
-function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
+function selectedDetailRows(state: TuiState, task: Task): MetaRow[] {
   const instance = currentInstanceItem(state);
   const lifecycleRows: MetaRow[] = taskLifecycleDetailRows(task).map((row) => ({
     label: row.label,
@@ -2701,7 +2758,11 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   const diffStatRow = reviewDiffStatRow(state, task);
   if (diffStatRow) rows.push(diffStatRow);
   rows.push({ label: "TASK ID", value: task.id, color: COLORS.text });
+  return rows;
+}
 
+function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
+  const rows = selectedDetailRows(state, task);
   if (state.moveTargetColumn) {
     return renderInlineMoveDetail(ui, state, task);
   }
@@ -2734,7 +2795,21 @@ function reviewDiffStatRow(state: TuiState, task: Task): MetaRow | undefined {
     label: "DIFF",
     value: cache.label,
     color: cache.status === "success" ? COLORS.accentBright : COLORS.muted,
+    ...(cache.status === "success" ? { valueParts: diffStatValueParts(cache.label) } : {}),
   };
+}
+
+function diffStatValueParts(label: string): MetaValuePart[] | undefined {
+  const match = /^(.*?)(\+\d+)(\s+)(-\d+)(.*)$/.exec(label);
+  if (!match) return undefined;
+  const [, prefix, additions, spacer, deletions, suffix] = match;
+  return [
+    ...(prefix ? [{ content: prefix, color: COLORS.text }] : []),
+    { content: additions, color: COLORS.diffAdd },
+    { content: spacer, color: COLORS.text },
+    { content: deletions, color: COLORS.diffDelete },
+    ...(suffix ? [{ content: suffix, color: COLORS.text }] : []),
+  ];
 }
 
 function worktreeId(task: Pick<Task, "id" | "worktreePath" | "worktreeBranch">): string {
@@ -2766,17 +2841,18 @@ function lifecycleRowColor(role: string | undefined, task: Task): TuiColor {
   return COLORS.text;
 }
 
-const DETAIL_TABS: readonly TaskDetailTab[] = ["prompt", "handoff", "output", "comments"];
+const BOARD_DETAIL_TABS = ["prompt", "handoff", "output", "files", "comments"] as const satisfies readonly TaskDetailTab[];
 const DETAIL_TAB_LABELS: Record<TaskDetailTab, string> = {
   prompt: "Prompt",
   handoff: "Handoff",
   output: "Output",
+  files: "Files",
   comments: "Comments",
 };
 
-function nextDetailTab(tab: TaskDetailTab, delta: number): TaskDetailTab {
-  const index = DETAIL_TABS.indexOf(tab);
-  return DETAIL_TABS[(index + delta + DETAIL_TABS.length) % DETAIL_TABS.length];
+function nextDetailTab(tab: TaskDetailTab, delta: number, tabs: readonly TaskDetailTab[] = BOARD_DETAIL_TABS): TaskDetailTab {
+  const index = Math.max(0, tabs.indexOf(tab));
+  return tabs[(index + delta + tabs.length) % tabs.length];
 }
 
 function boardDetailScrollId(tab: TaskDetailTab, taskId: string): string | undefined {
@@ -2787,6 +2863,8 @@ function boardDetailScrollId(tab: TaskDetailTab, taskId: string): string | undef
       return `board-detail-handoff-${taskId}`;
     case "output":
       return `board-detail-output-${taskId}`;
+    case "files":
+      return `board-detail-files-${taskId}`;
     case "comments":
       return undefined;
   }
@@ -2805,7 +2883,9 @@ function boardDetailScrollMax(state: TuiState, task: Task, tab: TaskDetailTab): 
         : 1
       : tab === "output"
         ? wrappedRows(task.finalSessionOutput?.trim() || "No final session output available")
-        : 0;
+        : tab === "files"
+          ? filesTabScrollRows(state, task)
+          : 0;
   // Keyboard scroll happens before OpenTUI reports the real viewport/content heights.
   // Clamp to a conservative content-derived cap so held arrows cannot grow forever;
   // renderDetailViewport's mouse-wheel path still applies the exact visual clamp.
@@ -2821,10 +2901,14 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
         ? renderHandoffTab(ui, state, task.completion ?? null, `board-detail-handoff-${task.id}`)
         : tab === "output"
           ? renderOutputTab(ui, state, task)
-          : renderCommentsTab(ui, state, task);
+          : tab === "files"
+            ? renderFilesTab(ui, state, task)
+            : renderCommentsTab(ui, state, task);
   const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label));
   const footer = tab === "comments"
     ? (state.commentDraft ? "enter submit · esc cancel" : "esc details · ←/→ tabs · c comment · r reply")
+    : tab === "files"
+      ? filesTabFooter(state, task)
     : "↑/↓ scroll · esc details · ←/→ tabs · m move card";
 
   return ui.Box(
@@ -2848,7 +2932,7 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
     ...(task.error ? [renderErrorBox(ui, task.error, inlineErrorMode(state.terminalRows))] : []),
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 2 },
-      ...DETAIL_TABS.map((candidate) =>
+      ...BOARD_DETAIL_TABS.map((candidate) =>
         ui.Text({
           content: DETAIL_TAB_LABELS[candidate],
           fg: tab === candidate ? COLORS.accentBright : COLORS.dim,
@@ -2866,6 +2950,19 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
   );
 }
 
+function boardFilesVisibleRows(state: TuiState, inlineRowsCount: number): number {
+  const fixedRows =
+    2 + // title
+    1 + // gap after title
+    inlineRowsCount +
+    1 + // gap after inline metadata
+    1 + // tab row
+    1 + // hairline
+    1 + // footer
+    3; // conservative panel/border/padding slack
+  return Math.max(2, laneInnerHeight(state.terminalRows) - fixedRows);
+}
+
 function renderOutputTab(ui: OpenTui, state: TuiState, task: Task) {
   return renderFinalOutputTab(ui, state, `board-detail-output-${task.id}`, task.finalSessionOutput);
 }
@@ -2878,6 +2975,162 @@ function renderFinalOutputTab(ui: OpenTui, state: TuiState, scrollId: string, fi
     scrollId,
     output && output.length > 0 ? output : "No final session output available",
   );
+}
+
+function filesTabScrollRows(state: TuiState, task: Task): number {
+  const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
+  if (!cache || cache.status !== "success" || !cache.response || cache.response.kind === "no-git") return 1;
+  if (cache.response.files.length === 0) return 1;
+  const detail = filesDetailState(state, task.id, cache.response.files.length);
+  if (detail.mode === "list") return cache.response.files.length * 2;
+  const file = cache.response.files[detail.selectedIndex];
+  return Math.max(1, normalizedPatchLines(file?.patch).length + 2);
+}
+
+function renderFilesTab(ui: OpenTui, state: TuiState, task: Task) {
+  const scrollId = `board-detail-files-${task.id}`;
+  if (!canOpenDiffView(task)) {
+    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "Files are only available on Review cards", fg: COLORS.muted, height: 1 }));
+  }
+
+  const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
+  if (!cache || cache.status === "loading") {
+    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "Loading diff...", fg: COLORS.muted, height: 1 }));
+  }
+  if (cache.status === "error" || !cache.response) {
+    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "diff unavailable", fg: COLORS.muted, height: 1 }));
+  }
+  if (cache.response.kind === "no-git") {
+    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: cache.response.reason || "No git evidence for this task.", fg: COLORS.muted, wrapMode: "word" }));
+  }
+  if (cache.response.files.length === 0) {
+    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "No changes.", fg: COLORS.muted, height: 1 }));
+  }
+  const detail = filesDetailState(state, task.id, cache.response.files.length);
+  const selectedFile = cache.response.files[detail.selectedIndex];
+  if (detail.mode === "patch") {
+    return renderDetailViewport(
+      ui,
+      state,
+      scrollId,
+      renderChangedFileListRow(ui, selectedFile, true),
+      ...renderPatchLines(ui, selectedFile.patch),
+    );
+  }
+
+  return renderDetailViewport(
+    ui,
+    state,
+    scrollId,
+    ...cache.response.files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex)),
+  );
+}
+
+function filesTabFooter(state: TuiState, task: Task): string {
+  const files = reviewDiffFiles(state, task);
+  const detail = filesDetailState(state, task.id, files.length);
+  return detail.mode === "patch"
+    ? "↑/↓ scroll · esc files · ←/→ tabs"
+    : "↑/↓ files · enter patch · esc details · ←/→ tabs";
+}
+
+function reviewDiffFiles(state: TuiState, task: Task | undefined): Array<{ file: string; additions: number; deletions: number; patch?: string }> {
+  const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
+  return cache?.status === "success" && cache.response?.kind === "diff" ? cache.response.files : [];
+}
+
+function renderChangedFileListRow(ui: OpenTui, file: { file: string; additions: number | null; deletions: number | null }, selected = false): VChild {
+  return ui.Box(
+    { width: "100%", height: 2, flexDirection: "column", gap: 0, flexShrink: 0, ...boxBg(selected ? COLORS.panelRaised : COLORS.panel) },
+    ui.Text({ content: `${selected ? "▸ " : "  "}${file.file}`, fg: COLORS.bright, height: 1, truncate: true }),
+    ui.Box(
+      { width: "100%", flexDirection: "row", height: 1 },
+      ui.Text({ content: file.additions === null ? "+?" : `+${file.additions}`, fg: COLORS.diffAdd, height: 1, width: 8, truncate: true }),
+      ui.Text({ content: file.deletions === null ? "-?" : `-${file.deletions}`, fg: COLORS.diffDelete, height: 1, width: 8, truncate: true }),
+    ),
+  );
+}
+
+function renderPatchLines(ui: OpenTui, patch: string | undefined): VChild[] {
+  const lines = normalizedPatchLines(patch);
+  if (lines.length === 0) return [ui.Text({ content: "(no text diff)", fg: COLORS.muted, height: 1 })];
+  return lines.map((line) => ui.Text({
+    content: line,
+    fg: diffPatchLineColor(line),
+    width: "100%",
+    minWidth: 0,
+    height: 1,
+    truncate: true,
+  }));
+}
+
+function normalizedPatchLines(patch: string | undefined): string[] {
+  if (!patch) return [];
+  return patch.split("\n").filter((line, index, lines) => index < lines.length - 1 || line.length > 0);
+}
+
+function diffPatchLineColor(line: string): TuiColor {
+  if (line.startsWith("+") && !line.startsWith("+++")) return COLORS.diffAdd;
+  if (line.startsWith("-") && !line.startsWith("---")) return COLORS.diffDelete;
+  if (line.startsWith("@@")) return COLORS.accentBright;
+  return COLORS.muted;
+}
+
+function archiveFilesOwnerId(taskId: string): string {
+  return `archive:${taskId}`;
+}
+
+function filesDetailState(state: TuiState, ownerId: string, fileCount: number): FilesDetailState {
+  const current = state.filesDetail?.ownerId === ownerId
+    ? state.filesDetail
+    : { ownerId, selectedIndex: 0, mode: "list" as const };
+  return {
+    ownerId,
+    selectedIndex: clampIndex(current.selectedIndex, Math.max(1, fileCount)),
+    mode: current.mode,
+  };
+}
+
+function setFilesDetailState(state: TuiState, detail: FilesDetailState): void {
+  state.filesDetail = detail;
+}
+
+function moveFilesSelection(state: TuiState, ownerId: string, fileCount: number, delta: number, scrollId: string, visibleRows: number): void {
+  const current = filesDetailState(state, ownerId, fileCount);
+  const selectedIndex = clampIndex(current.selectedIndex + delta, fileCount);
+  setFilesDetailState(state, { ownerId, selectedIndex, mode: "list" });
+  state.detailScrollTop[scrollId] = filesListScrollForSelection(
+    selectedIndex,
+    fileCount,
+    detailScrollOffset(state, scrollId),
+    visibleRows,
+  );
+}
+
+function filesListScrollForSelection(selectedIndex: number, fileCount: number, currentScrollTop: number, visibleRows: number): number {
+  const rowStart = selectedIndex * 2;
+  const rowEnd = rowStart + 1;
+  const contentRows = Math.max(0, fileCount * 2);
+  const viewportRows = Math.max(2, Math.trunc(visibleRows));
+  const maxScroll = Math.max(0, contentRows - viewportRows);
+  let next = clampDetailScrollOffset(currentScrollTop, maxScroll);
+  if (rowStart < next) next = rowStart;
+  else if (rowEnd >= next + viewportRows) next = rowEnd - viewportRows + 1;
+  return clampDetailScrollOffset(next, maxScroll);
+}
+
+function openFilesPatch(state: TuiState, ownerId: string, fileCount: number, scrollId: string): void {
+  const current = filesDetailState(state, ownerId, fileCount);
+  setFilesDetailState(state, { ownerId, selectedIndex: current.selectedIndex, mode: "patch" });
+  state.detailScrollTop[scrollId] = 0;
+}
+
+function closeFilesPatch(state: TuiState, ownerId: string, fileCount: number, scrollId: string): boolean {
+  const current = filesDetailState(state, ownerId, fileCount);
+  if (current.mode !== "patch") return false;
+  setFilesDetailState(state, { ownerId, selectedIndex: current.selectedIndex, mode: "list" });
+  state.detailScrollTop[scrollId] = Math.max(0, current.selectedIndex * 2);
+  return true;
 }
 
 function renderCommentsTab(ui: OpenTui, state: TuiState, task: Task) {
@@ -2985,7 +3238,7 @@ function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Ta
 }
 
 function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
-  const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, COLORS.bright));
+  const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, COLORS.bright, row.valueParts));
 
   return ui.Box(
     {
@@ -3291,11 +3544,11 @@ function renderInstanceSwitcherPanel(ui: OpenTui, state: TuiState) {
   );
 }
 
-function renderDetail(ui: OpenTui, label: string, value: string, valueColor: TuiColor = COLORS.text) {
+function renderDetail(ui: OpenTui, label: string, value: string, valueColor: TuiColor = COLORS.text, valueParts?: MetaValuePart[]) {
   return ui.Box(
     { width: "100%", flexDirection: "column", gap: 0 },
     ui.Text({ content: label, fg: COLORS.dim, height: 1 }),
-    ui.Text({ content: value, fg: valueColor, height: 1, truncate: true }),
+    valueParts ? renderInlineMetaValue(ui, valueParts, valueColor) : ui.Text({ content: value, fg: valueColor, height: 1, truncate: true }),
   );
 }
 
@@ -4054,6 +4307,56 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.detailTab === "files") {
+    const task = selectedTask(state);
+    const files = reviewDiffFiles(state, task);
+    const ownerId = task?.id ?? "";
+    const scrollId = task ? `board-detail-files-${task.id}` : "";
+    const inlineRowsCount = task ? selectedDetailRows(state, task).filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label)).length : 0;
+    if (isEscapeKey(key)) {
+      if (task && closeFilesPatch(state, ownerId, files.length, scrollId)) {
+        actions.render();
+        return;
+      }
+      closeInlineDetail(state);
+      actions.render();
+      return;
+    }
+    if ((key.name || key.sequence) === "left") {
+      state.detailTab = nextDetailTab(state.detailTab, -1);
+      actions.render();
+      return;
+    }
+    if ((key.name || key.sequence) === "right" || key.sequence === "\t") {
+      state.detailTab = nextDetailTab(state.detailTab, 1);
+      if (state.detailTab === "comments") await loadCommentsForTask(state, actions, task);
+      actions.render();
+      return;
+    }
+    if (isEnterKey(key)) {
+      const detail = filesDetailState(state, ownerId, files.length);
+      if (task && files.length > 0 && detail.mode === "list") openFilesPatch(state, ownerId, files.length, scrollId);
+      actions.render();
+      return;
+    }
+    if ((key.name || key.sequence) === "down" || (key.name || key.sequence) === "up") {
+      const detail = filesDetailState(state, ownerId, files.length);
+      if (task && files.length > 0 && detail.mode === "list") {
+        moveFilesSelection(state, ownerId, files.length, (key.name || key.sequence) === "down" ? 1 : -1, scrollId, boardFilesVisibleRows(state, inlineRowsCount));
+      } else if (task && scrollId) {
+        const delta = (key.name || key.sequence) === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+        state.detailScrollTop[scrollId] = clampDetailScrollOffset(
+          detailScrollOffset(state, scrollId) + delta,
+          boardDetailScrollMax(state, task, state.detailTab),
+        );
+      }
+      actions.render();
+      return;
+    }
+    actions.render();
+    return;
+  }
+
   if (state.detailTab) {
     if (isEscapeKey(key)) {
       closeInlineDetail(state);
@@ -4601,6 +4904,7 @@ function closeInlineDetail(state: TuiState): void {
   state.detailTab = undefined;
   state.comments = undefined;
   state.commentDraft = undefined;
+  state.filesDetail = undefined;
 }
 
 // ── Edit mode (E/e) ─────────────────────────────────────────────────────────────
@@ -6017,6 +6321,21 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
     actions.closeArchive();
     return;
   }
+  if (archive.detailTab === "files") {
+    const record = filteredArchiveRecords(archive)[archive.selectedIndex];
+    const files = parseCompletion(record?.completion ?? null)?.changedFiles ?? [];
+    const ownerId = archiveFilesOwnerId(record?.task_id ?? "");
+    const scrollId = record ? `archive-detail-files-${record.task_id}` : "";
+    if (keyName === "down" || keyName === "up") {
+      if (record && files.length > 0) moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, archiveFilesVisibleRows(state));
+      actions.render();
+      return;
+    }
+    if (isEnterKey(key)) {
+      actions.render();
+      return;
+    }
+  }
   if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
     archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
     actions.render();
@@ -6186,7 +6505,7 @@ async function fetchSelectedReviewDiffStat(
   try {
     const response = await client.getTaskDiff(task.id);
     if (!isSameReviewDiffStatIdentity(state.reviewDiffStat, task)) return;
-    state.reviewDiffStat = { ...key, status: "success", label: formatDiffStat(response) };
+    state.reviewDiffStat = { ...key, status: "success", label: formatDiffStat(response), response };
   } catch {
     if (!isSameReviewDiffStatIdentity(state.reviewDiffStat, task)) return;
     state.reviewDiffStat = { ...key, status: "error", label: "diff unavailable" };

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp } from "../../src/tui/index";
+import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp, type TaskDetailTab } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
 import type { Column, Task } from "../../src/shared";
 
@@ -844,6 +844,29 @@ describe("TUI archive detail cleanup", () => {
     expect(text).toContain("none");
   });
 
+  it("files tab renders archived changed-file names from completion metadata", async () => {
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", JSON.stringify({
+        outcome: "complete",
+        summary: "Fixed the bug",
+        changedFiles: ["src/a.ts", "src/b.ts"],
+        verification: [],
+        residualRisk: "none",
+      })), "files"),
+    });
+    const app = renderApp(fakeUi(), s);
+
+    const text = textOf(app);
+    expect(text).toContain("src/a.ts");
+    expect(text).toContain("src/b.ts");
+    expect(textNodesContaining(app, "+?")[0]?.props.fg).toBe("#30d77d");
+    expect(textNodesContaining(app, "-?")[0]?.props.fg).toBe("#ff5c5c");
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.filesDetail).toMatchObject({ ownerId: "archive:task-1", selectedIndex: 1, mode: "list" });
+  });
+
   it("archive detail tabs render in stable manual viewports without ScrollBox chrome", () => {
     const s = state({
       detailScrollTop: { "archive-detail-prompt-task-1": 9 },
@@ -870,6 +893,7 @@ describe("TUI archive detail cleanup", () => {
     expect(nodeById(promptApp, "archive-detail-prompt-task-1")?.props).toMatchObject({ overflow: "hidden", minHeight: 0 });
     expect(nodeById(handoffApp, "archive-detail-handoff-task-1")?.props).toMatchObject({ overflow: "hidden", minHeight: 0 });
     expect(textOf(promptApp)).toContain("Output");
+    expect(textOf(promptApp)).toContain("Files");
     expect(textOf(promptApp)).toContain("Comments");
     expect(nodeById(renderApp(fakeUi(), s), "archive-detail-prompt-task-1-content")?.props.top).toBe(-9);
   });
@@ -1086,6 +1110,7 @@ describe("TUI archive tab navigation", () => {
     expect(text).toContain("Prompt");
     expect(text).toContain("Handoff");
     expect(text).toContain("Output");
+    expect(text).toContain("Files");
     expect(text).toContain("Comments");
     // Prompt should be active (showing the description)
     expect(text).toContain("Fix the login bug");
@@ -1119,6 +1144,9 @@ describe("TUI archive tab navigation", () => {
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
     expect(s.archive.detailTab).toBe("output");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    expect(s.archive.detailTab).toBe("files");
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
     expect(s.archive.detailTab).toBe("comments");
@@ -1699,7 +1727,7 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(s.selectedTaskId).toBe("second-card");
   });
 
-  it("inline detail tab cycles forward through all four tabs with tab key", async () => {
+  it("inline detail tab cycles forward through all five tabs with tab key", async () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [task("todo-card", "todo")],
@@ -1713,6 +1741,9 @@ describe("TUI Enter key shows inline selected-card details", () => {
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
     expect(s.detailTab).toBe("output");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
+    expect(s.detailTab).toBe("files");
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
     expect(s.detailTab).toBe("comments");
@@ -1761,14 +1792,22 @@ describe("TUI selected Review diff stat", () => {
     };
 
     expect(textOf(renderApp(fakeUi(), state(base)))).toContain("DIFF\nloading...");
-    expect(textOf(renderApp(fakeUi(), state({
+    const successApp = renderApp(fakeUi(), state({
       ...base,
       reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "3 files · +42 -17 ›" },
-    })))).toContain("DIFF\n3 files · +42 -17 ›");
+    }));
+    expect(textOf(successApp)).toContain("+42");
+    expect(textOf(successApp)).toContain("-17");
+    expect(textNodesContaining(successApp, "+42")[0]?.props.fg).toBe("#30d77d");
+    expect(textNodesContaining(successApp, "-17")[0]?.props.fg).toBe("#ff5c5c");
     expect(textOf(renderApp(fakeUi(), state({
       ...base,
       reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "0 files · +0 -0 ›" },
-    })))).toContain("DIFF\n0 files · +0 -0 ›");
+    })))).toContain("+0");
+    expect(textOf(renderApp(fakeUi(), state({
+      ...base,
+      reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "0 files · +0 -0 ›" },
+    })))).toContain("-0");
     expect(textOf(renderApp(fakeUi(), state({
       ...base,
       reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "diff unavailable" },
@@ -1798,7 +1837,9 @@ describe("TUI selected Review diff stat", () => {
 
     expect(getTaskDiff).toHaveBeenCalledTimes(1);
     expect(getTaskDiff).toHaveBeenCalledWith("review-card");
-    expect(textOf(renderApp(fakeUi(), s))).toContain("DIFF\n1 files · +2 -1 ›");
+    const app = renderApp(fakeUi(), s);
+    expect(textOf(app)).toContain("+2");
+    expect(textOf(app)).toContain("-1");
 
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
     await Promise.resolve();
@@ -1819,6 +1860,104 @@ describe("TUI selected Review diff stat", () => {
 
     expect(getTaskDiff).not.toHaveBeenCalled();
     expect(textOf(renderApp(fakeUi(), s))).not.toContain("DIFF");
+  });
+
+  it("renders a read-only Files tab with changed files only", async () => {
+    const reviewCard = task("review-card", "review");
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+      detailTab: "files",
+      reviewDiffStat: {
+        taskId: "review-card",
+        taskUpdatedAt: 1,
+        status: "success",
+        label: "2 files · +23 -1 ›",
+        response: {
+          kind: "diff" as const,
+          capped: false,
+          files: [
+            {
+              file: "src/tui/index.ts",
+              additions: 22,
+              deletions: 1,
+              status: "modified" as const,
+              patch: "@@ -1,2 +1,2 @@\n-old line\n+new line",
+            },
+            {
+              file: "test/tui/instances.test.ts",
+              additions: 1,
+              deletions: 0,
+              status: "modified" as const,
+              patch: "@@ -3,0 +4,1 @@\n+test line",
+            },
+          ],
+        },
+      },
+    });
+
+    const app = renderApp(fakeUi(), s);
+    const text = textOf(app);
+    expect(text).toContain("Files");
+    expect(text).toContain("src/tui/index.ts");
+    expect(text).toContain("test/tui/instances.test.ts");
+    expect(text).not.toContain("-old line");
+    expect(text).not.toContain("+new line");
+    expect(textNodesContaining(app, "+22")[0]?.props.fg).toBe("#30d77d");
+    expect(textNodesContaining(app, "-1")[0]?.props.fg).toBe("#ff5c5c");
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.filesDetail).toMatchObject({ ownerId: "review-card", selectedIndex: 1, mode: "list" });
+    expect(s.detailScrollTop["board-detail-files-review-card"]).toBe(0);
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions());
+    expect(s.filesDetail).toMatchObject({ ownerId: "review-card", selectedIndex: 1, mode: "patch" });
+    const patchText = textOf(renderApp(fakeUi(), s));
+    expect(patchText).toContain("+test line");
+    expect(patchText).not.toContain("-old line");
+
+    await handleKeypress({ name: "escape", sequence: "\u001b" } as any, s, actions());
+    expect(s.detailTab).toBe("files");
+    expect(s.filesDetail).toMatchObject({ ownerId: "review-card", selectedIndex: 1, mode: "list" });
+    expect(textOf(renderApp(fakeUi(), s))).not.toContain("+test line");
+
+    await handleKeypress({ name: "m", sequence: "m" } as any, s, actions());
+    expect(s.detailTab).toBe("files");
+    expect(s.moveTargetColumn).toBeUndefined();
+  });
+
+  it("files tab selection scrolls only when the selected file leaves the visible window", async () => {
+    const reviewCard = task("review-card", "review");
+    const files = Array.from({ length: 5 }, (_, index) => ({
+      file: `src/file-${index + 1}.ts`,
+      additions: index + 1,
+      deletions: 0,
+      status: "modified" as const,
+      patch: `@@ -1 +1 @@\n+file ${index + 1}`,
+    }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 33,
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+      detailTab: "files",
+      reviewDiffStat: {
+        taskId: "review-card",
+        taskUpdatedAt: 1,
+        status: "success",
+        label: "5 files · +15 -0 ›",
+        response: { kind: "diff" as const, capped: false, files },
+      },
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.filesDetail).toMatchObject({ selectedIndex: 1, mode: "list" });
+    expect(s.detailScrollTop["board-detail-files-review-card"]).toBe(0);
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.filesDetail).toMatchObject({ selectedIndex: 2, mode: "list" });
+    expect(s.detailScrollTop["board-detail-files-review-card"]).toBeGreaterThan(0);
   });
 });
 
@@ -2169,6 +2308,9 @@ describe("TUI comments tab", () => {
       { id: "c1", taskId: "review-card", author: "User", body: "Looks good", createdAt: 1, parentCommentId: null },
     ]);
     const a = actions({ client: { moveTask: vi.fn(), updateTask: vi.fn(), listComments, addComment: vi.fn() } });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, a);
+    expect(s.detailTab).toBe("files");
 
     await handleKeypress({ name: "right", sequence: "[C" } as any, s, a);
 
@@ -3745,7 +3887,7 @@ function archiveRecord(
   };
 }
 
-function archiveState(records: ReturnType<typeof archiveRecord> | ReturnType<typeof archiveRecord>[], detailTab: "prompt" | "handoff" | "output" | "comments" = "prompt") {
+function archiveState(records: ReturnType<typeof archiveRecord> | ReturnType<typeof archiveRecord>[], detailTab: TaskDetailTab = "prompt") {
   const list = Array.isArray(records) ? records : [records];
   return {
     records: list,
