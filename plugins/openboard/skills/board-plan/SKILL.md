@@ -77,10 +77,12 @@ clean and Review legible, and it is how concurrent lanes stay independent. The
 containment stack is the structural backstop underneath that boundary, so a
 single agent's mistake cannot reach the base checkout.
 
-The Claude Code lane is UNFENCED — it runs `bypassPermissions` with no
-write-fence, escape detector, or sandbox. When the plan puts feature work on
-`harness: "claude-code"`, label those cards UNFENCED and do not describe them as
-isolated.
+The Claude Code lane — and every other ACP harness (`codex`, `gemini-acp`,
+`hermes`, `pi-coding-agent`, `cursor-acp`) — is UNFENCED at its default
+`bypassPermissions` mode: no write-fence, escape detector, or sandbox. When the
+plan puts feature work on any ACP harness, label those cards UNFENCED and do not
+describe them as isolated. Only `harness: "opencode"` worktree runs carry the
+containment stack above.
 
 ## Decompose Along The File Tree
 
@@ -99,11 +101,18 @@ OpenBoard has more than one execution path:
 - `harness: "opencode"` — dispatches through OpenCode's agent roster. Use this
   when the worker should be an OpenCode agent profile with a roster-visible
   provider/model.
-- `harness: "claude-code"` — dispatches through Claude Code. Use this when the
-  worker should be Claude Code itself, with a Claude Code model selection and
-  `claudePermissionMode` such as `bypassPermissions`. Do **not** create an
-  OpenCode profile pretending to be Anthropic when the intended executor is
-  Claude Code.
+- `harness: "claude-code"` — dispatches Claude Code over ACP. Use this when the
+  worker should be Claude Code itself, with a Claude Code model selection and a
+  `permissionMode` such as `bypassPermissions`. Do **not** create an OpenCode
+  profile pretending to be Anthropic when the intended executor is Claude Code.
+- Other ACP harnesses (`codex`, `gemini-acp`, `hermes`, `pi-coding-agent`,
+  `cursor-acp`) — the same ACP path backed by a different agent. Treat these as
+  **experimental and adapter-gated**: a harness is usable only when its adapter is
+  installed and launchable, which the board reports through `/api/acp-config`
+  (models, modes, and options are discovered live per harness, and freeform model
+  IDs are allowed). Default real runs to `opencode` or `claude-code`; reach for
+  these only after confirming the adapter is available. They carry the same
+  `permissionMode` set and unfenced-by-default posture as the Claude Code lane.
 
 Create one profile per distinct OpenCode behavior; parallel lanes are cards,
 not identities. The live OpenCode roster is the board's model/provider source

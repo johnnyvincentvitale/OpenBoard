@@ -298,4 +298,6 @@ responsibility, because orphaned worktrees are a real tester-day-one failure:
 - Leaving worktrees orphaned after audit/QA/error-replaced cards end without
   Integrate.
 - Reaching for a nonexistent MCP discard/delete tool instead of the REST route.
-- Describing a Claude Code lane card as isolated. It is UNFENCED — label it so.
+- Describing any ACP lane card (`claude-code`, `codex`, `gemini-acp`, `hermes`,
+  `pi-coding-agent`, `cursor-acp`) as isolated. At the default `bypassPermissions`
+  mode they are UNFENCED — label them so.
