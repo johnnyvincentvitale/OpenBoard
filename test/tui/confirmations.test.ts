@@ -158,6 +158,45 @@ describe("confirmation copy builders", () => {
     expect(copy.body).toContain("Residual risk: none reported");
     expect(copy.body).toContain("Source: agent-reported");
   });
+
+  it("run confirmation for a worktree-isolated card names the exact isolation mode", () => {
+    const copy = buildConfirmationCopy("run", { title: "Widget work", isolation: "worktree", harness: "opencode" });
+
+    expect(copy.body).toContain("Isolation: worktree - a new git worktree will be created for this task.");
+  });
+
+  it("run confirmation for an in-place card explains no worktree is created and shows default permissions", () => {
+    const copy = buildConfirmationCopy("run", { title: "Widget work", isolation: "in-place", harness: "opencode" });
+
+    expect(copy.body).toContain(
+      "Isolation: in_place — no worktree is created; the agent works directly in this directory and its edits modify your live working tree.",
+    );
+    expect(copy.body).toContain("Permissions: default (allow all)");
+  });
+
+  it("run confirmation for an in-place card with permission overrides shows them", () => {
+    const copy = buildConfirmationCopy("run", {
+      title: "Widget work",
+      isolation: "in-place",
+      harness: "opencode",
+      permissionOverrides: { edit: "ask", bash: "deny" },
+    });
+
+    expect(copy.body).toContain("Permissions: edit: ask, bash: deny");
+  });
+
+  it("run confirmation for a Claude Code card has no isolation/permission lines", () => {
+    const copy = buildConfirmationCopy("run", { title: "Widget work", isolation: "in-place", harness: "claude-code" });
+
+    expect(copy.body.some((line) => line.startsWith("Isolation:"))).toBe(false);
+    expect(copy.body.some((line) => line.startsWith("Permissions:"))).toBe(false);
+  });
+
+  it("run confirmation for a card with no explicit isolation defers to the board default rather than guessing", () => {
+    const copy = buildConfirmationCopy("run", { title: "Widget work", harness: "opencode" });
+
+    expect(copy.body).toContain("Isolation: board default — the board's worktree-default setting decides at dispatch time.");
+  });
 });
 
 describe("pre-run confidence details", () => {

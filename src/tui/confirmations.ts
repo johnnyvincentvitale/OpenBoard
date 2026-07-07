@@ -1,4 +1,4 @@
-import type { Column, Task } from "../shared";
+import type { Column, PermissionOverrides, Task } from "../shared";
 
 /**
  * Card-level actions that require a second press to confirm before executing.
@@ -180,7 +180,10 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
 /**
  * Build the copy for the confirmation prompt shown in the Selected/details column.
  */
-export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task, "title" | "completion" | "completionSource">): ConfirmationCopy {
+export function buildConfirmationCopy(
+  action: ConfirmableAction,
+  task: Pick<Task, "title" | "completion" | "completionSource" | "isolation" | "harness" | "permissionOverrides">,
+): ConfirmationCopy {
   const title = action === "move-to-done"
     ? "Move this card to Done?"
     : action === "discard-worktree"
@@ -192,7 +195,7 @@ export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task
     case "run":
       body = [
         `Dispatch the assigned agent on "${task.title}".`,
-        "A git worktree will be created if worktree isolation is enabled.",
+        ...runIsolationLines(task),
       ];
       break;
     case "retry":
@@ -253,6 +256,39 @@ export function buildConfirmationCopy(action: ConfirmableAction, task: Pick<Task
     body,
     confirmHint: `Press ${actionKey(action)} again to ${actionVerb(action)}.`,
   };
+}
+
+/**
+ * Isolation-specific body lines for the run confirmation. Claude Code cards
+ * don't have an isolation/permission-override concept at all (that's an
+ * OpenCode-only mechanism — see resolveOpenCodePermissionRules), so this
+ * returns nothing for them. Worktree and in-place each get their own exact
+ * wording rather than one generic line that doesn't reflect the actual
+ * choice; in-place additionally surfaces the configured permission overrides
+ * so they're visible before the second `r` actually dispatches the run.
+ */
+function runIsolationLines(task: Pick<Task, "isolation" | "harness" | "permissionOverrides">): string[] {
+  if (task.harness === "claude-code") return [];
+  if (task.isolation === "worktree") {
+    return ["Isolation: worktree - a new git worktree will be created for this task."];
+  }
+  if (task.isolation === "in-place") {
+    return [
+      "Isolation: in_place — no worktree is created; the agent works directly in this directory and its edits modify your live working tree.",
+      `Permissions: ${permissionOverridesRunSummary(task.permissionOverrides)}`,
+    ];
+  }
+  // No per-task isolation override — the board-level default decides at dispatch
+  // time (see wantsWorktree() in dispatcher.ts), which this pure copy-builder has
+  // no access to. Say so rather than guessing a specific mode.
+  return ["Isolation: board default — the board's worktree-default setting decides at dispatch time."];
+}
+
+function permissionOverridesRunSummary(overrides: PermissionOverrides | null | undefined): string {
+  if (!overrides) return "default (allow all)";
+  const changed = Object.entries(overrides).filter(([, action]) => action && action !== "allow");
+  if (changed.length === 0) return "default (allow all)";
+  return changed.map(([category, action]) => `${category}: ${action}`).join(", ");
 }
 
 function capitalize(value: string): string {

@@ -297,7 +297,11 @@ type WizardStep = "identity" | "harness" | "agentProfile" | "isolation" | "confi
 const IDENTITY_FIELDS_AGENT = ["type", "title", "description", "directory"] as const;
 const IDENTITY_FIELDS_MANUAL = ["type", "title", "description", "assignedTo", "directory"] as const;
 const HARNESS_FIELDS_OPENCODE = ["harness", "provider", "model"] as const;
+/** MODEL is locked out while PROVIDER is "Use Agent Profile Default" (draft.providerId === "") — nothing to pick. */
+const HARNESS_FIELDS_OPENCODE_LOCKED = ["harness", "provider"] as const;
 const HARNESS_FIELDS_CLAUDE = ["harness", "model"] as const;
+/** Shared label for "no explicit provider/model — the assigned agent profile's own model wins." */
+const AGENT_PROFILE_DEFAULT_LABEL = "Use Agent Profile Default";
 const AGENT_PROFILE_FIELDS_OPENCODE = ["agent"] as const;
 const AGENT_PROFILE_FIELDS_CLAUDE = ["permissionMode"] as const;
 /** No permission editor: worktree isolation (locked, automatic) or Claude Code harness (N/A). */
@@ -367,6 +371,8 @@ interface NewTaskDraft {
   claudePermissionMode: ClaudeCodePermissionMode;
   assignedTo: string;
   model?: ModelRef;
+  /** Type-to-filter query for the MODEL field, active only while it's focused — reset whenever focus leaves it. */
+  modelQuery?: string;
   isolation: TaskIsolationMode;
   /** OpenCode permission-category overrides. Only ever submitted for in-place (non-worktree) OpenCode tasks. */
   permissionOverrides: Record<PermissionOverrideCategory, PermissionOverrideAction>;
@@ -1884,7 +1890,7 @@ function renderInlineMoveDetail(ui: OpenTui, state: TuiState, task: Task) {
       ui.Text({ content: task.title, fg: COLORS.bright, height: 2, wrapMode: "word" }),
       ui.Text({ content: `Current lane: ${TUI_COLUMN_LABELS[task.column]}`, fg: COLORS.muted, height: 1 }),
       ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
-      ...copy.body.map((line) => ui.Text({ content: line, fg: COLORS.text, wrapMode: "word", height: 2 })),
+      ...copy.body.map((line) => ui.Text({ content: line, fg: COLORS.text, wrapMode: "word", height: wrappedTextHeight(line, 6) })),
       ui.Box({ flexGrow: 1 }),
       ui.Text({ content: "Press enter again to move to Done.", fg: COLORS.accentBright, height: 1, truncate: true }),
       ui.Text({ content: "accepted by User · esc cancel", fg: COLORS.dim, height: 1, truncate: true }),
@@ -2781,7 +2787,7 @@ function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Ta
     ui.Text({ content: copy.title, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
     ui.Text({ content: task.title, fg: COLORS.bright, height: 2, wrapMode: "word" }),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
-    ...copy.body.map((line) => ui.Text({ content: line, fg: COLORS.text, wrapMode: "word", height: 2 })),
+    ...copy.body.map((line) => ui.Text({ content: line, fg: COLORS.text, wrapMode: "word", height: wrappedTextHeight(line, 6) })),
     ...(confidence.length
       ? [
           ui.Text({ content: "Pre-run confidence", fg: COLORS.dim, height: 1, truncate: true }),
@@ -2991,8 +2997,19 @@ function inlineErrorMode(terminalRows: number): "compact" | "full" {
   return terminalRows <= 34 ? "compact" : "full";
 }
 
+/**
+ * Estimated word-wrapped line count for a text node at the sidebar's usual
+ * text width, clamped to `maxRows` so one long field can't crowd out the
+ * rest of a fixed-height panel. A fixed `height: 2` regardless of actual
+ * content length was the bug — long lines (e.g. "Residual risk: ...")
+ * silently clipped mid-sentence even though there was room to grow.
+ */
+function wrappedTextHeight(text: string, maxRows: number, columns = TEXT_INPUT_COLUMNS): number {
+  return Math.min(maxRows, Math.max(1, Math.ceil(text.length / columns)));
+}
+
 function renderErrorBox(ui: OpenTui, error: string, mode: "compact" | "full" = "full") {
-  const errorRows = Math.min(3, Math.max(1, Math.ceil(error.length / 56)));
+  const errorRows = wrappedTextHeight(error, 3);
   if (mode === "compact") {
     return ui.Box(
       {
@@ -3383,8 +3400,44 @@ function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
     ...(draft.harness === "opencode"
       ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
       : []),
-    renderSelectField(ui, "MODEL", currentModelLabel(draft), draft.field === "model"),
+    renderModelField(ui, draft, state.agents, state.providers),
     renderDraftErrorRow(ui, draft),
+  );
+}
+
+/**
+ * MODEL renders as a plain select field until it's focused with an active
+ * type-to-filter query, at which point it swaps to a two-line search box:
+ * the typed query + match count on top, the currently-selected match (or
+ * "no matches") below. Locked (unfocusable) while PROVIDER is "Use Agent
+ * Profile Default" — currentModelLabel already reads that label in this
+ * state, so the plain-select branch below renders it correctly with no
+ * special-casing needed here.
+ */
+function renderModelField(ui: OpenTui, draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[]) {
+  const focused = draft.field === "model";
+  if (!focused) {
+    return renderSelectField(ui, "MODEL", currentModelLabel(draft), false);
+  }
+
+  const query = draft.modelQuery ?? "";
+  const matches = filteredModelOptions(draft, agents, providers);
+  const selectedLabel = matches.length === 0 ? "no matches" : draft.model ? modelLabel(draft.model) : "type to narrow, ↑/↓ to pick";
+
+  return renderFieldShell(
+    ui,
+    "MODEL",
+    true,
+    4,
+    ui.Box(
+      { flexDirection: "column", height: 2, gap: 0 },
+      ui.Box(
+        { flexDirection: "row", height: 1 },
+        ui.Text({ content: `⌕ ${query}▍`, fg: COLORS.accentBright, flexGrow: 1, height: 1, truncate: true }),
+        ui.Text({ content: `${matches.length} match${matches.length === 1 ? "" : "es"}`, fg: COLORS.dim, height: 1, truncate: true }),
+      ),
+      ui.Text({ content: selectedLabel, fg: matches.length ? COLORS.text : COLORS.dim, height: 1, truncate: true }),
+    ),
   );
 }
 
@@ -3466,50 +3519,62 @@ function renderPermissionOverrideControl(ui: OpenTui, draft: NewTaskDraft) {
 // Step E — read-only summary of every selection. Enter creates/saves the
 // card only — it never runs it; `r` (twice) remains the only run path,
 // entirely outside this overlay.
+// Grouped by which earlier wizard screen each field came from (identity /
+// harness+model / agent profile / isolation+permissions) with a gap between
+// groups — a flat, ungrouped list of a dozen rows read as one dense,
+// undifferentiated block, unlike every field screen before it.
 function renderConfirmStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    ui.Box(
-      { flexDirection: "column", gap: 0 },
-      ...confirmSummaryRows(draft, state).map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.text)),
+    ...confirmSummaryGroups(draft, state).map((group) =>
+      ui.Box(
+        { flexDirection: "column", gap: 0 },
+        ...group.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.text)),
+      ),
     ),
     renderDraftErrorRow(ui, draft),
   );
 }
 
-function confirmSummaryRows(draft: NewTaskDraft, state: TuiState): MetaRow[] {
-  const rows: MetaRow[] = [
+function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][] {
+  const identity: MetaRow[] = [
     { label: "TYPE", value: draft.type === "manual" ? "Manual" : "Agent", color: COLORS.text },
     { label: "TITLE", value: draft.title || "(untitled)", color: COLORS.text },
     { label: draft.type === "manual" ? "NOTES" : "PROMPT", value: draft.description || "(empty)", color: COLORS.text },
+    ...(draft.type === "manual" ? [{ label: "ASSIGNED TO", value: draft.assignedTo || "(unassigned)", color: COLORS.text }] : []),
+    { label: "DIR", value: shortPath(draft.directory), color: COLORS.text },
   ];
 
-  if (draft.type === "manual") {
-    rows.push({ label: "ASSIGNED TO", value: draft.assignedTo || "(unassigned)", color: COLORS.text });
-    rows.push({ label: "DIR", value: shortPath(draft.directory), color: COLORS.text });
-    return rows;
-  }
+  if (draft.type === "manual") return [identity];
 
-  rows.push({ label: "HARNESS", value: currentHarnessLabel(draft), color: COLORS.text });
-  if (draft.harness === "opencode") {
-    rows.push({ label: "PROVIDER", value: currentProviderLabel(draft, state.providers), color: COLORS.text });
-  }
-  rows.push({ label: "MODEL", value: currentModelLabel(draft), color: COLORS.text });
-  rows.push(
+  const harnessModel: MetaRow[] = [
+    { label: "HARNESS", value: currentHarnessLabel(draft), color: COLORS.text },
+    ...(draft.harness === "opencode"
+      ? [{ label: "PROVIDER", value: currentProviderLabel(draft, state.providers), color: COLORS.text }]
+      : []),
+    { label: "MODEL", value: currentModelLabel(draft), color: COLORS.text },
+  ];
+
+  const agentProfile: MetaRow[] = [
     draft.harness === "claude-code"
       ? { label: "PERMS", value: currentPermissionModeLabel(draft), color: COLORS.text }
       : { label: "AGENT PROFILE", value: currentAgentLabel(draft), color: COLORS.text },
-  );
-  rows.push({ label: "DIR", value: shortPath(draft.directory), color: COLORS.text });
-  rows.push({ label: "ISOLATION", value: draft.isolation === "worktree" ? "Worktree" : "None (in-place)", color: COLORS.text });
-  if (draft.harness === "opencode") {
-    rows.push({
-      label: "PERMISSIONS",
-      value: draft.isolation === "worktree" ? "Automatic (worktree-fenced)" : permissionOverridesSummary(draft),
-      color: COLORS.text,
-    });
-  }
-  return rows;
+  ];
+
+  const isolation: MetaRow[] = [
+    { label: "ISOLATION", value: draft.isolation === "worktree" ? "Worktree" : "in_place", color: COLORS.text },
+    ...(draft.harness === "opencode"
+      ? [
+          {
+            label: "PERMISSIONS",
+            value: draft.isolation === "worktree" ? "Automatic (worktree-fenced)" : permissionOverridesSummary(draft),
+            color: COLORS.text,
+          },
+        ]
+      : []),
+  ];
+
+  return [identity, harnessModel, agentProfile, isolation];
 }
 
 function permissionOverridesSummary(draft: NewTaskDraft): string {
@@ -3519,7 +3584,7 @@ function permissionOverridesSummary(draft: NewTaskDraft): string {
 }
 
 function currentProviderLabel(draft: NewTaskDraft, providers: RosterProvider[]): string {
-  if (!draft.providerId) return "any (from agent roster)";
+  if (!draft.providerId) return AGENT_PROFILE_DEFAULT_LABEL;
   return providers.find((provider) => provider.id === draft.providerId)?.name ?? draft.providerId;
 }
 
@@ -3561,6 +3626,10 @@ function wizardFooterHint(draft: NewTaskDraft, isEditing: boolean): string {
   const isFirst = steps.indexOf(draft.step) === 0;
   if (draft.step === "confirm") {
     return `${isFirst ? "" : "b back · "}enter ${isEditing ? "save" : "create"}`;
+  }
+  if (draft.field === "model") {
+    // 'b' types a literal "b" into the filter query here, not "back" — say so instead of the usual hint.
+    return "type to filter · ↑/↓ pick match · tab next field · enter continue";
   }
   return `tab next field · shift+tab previous${isFirst ? "" : " · b back"} · enter continue`;
 }
@@ -3636,7 +3705,7 @@ function renderSelectField(ui: OpenTui, label: string, value: string, focused: b
 
 function renderIsolationField(ui: OpenTui, draft: NewTaskDraft) {
   const segments: Array<{ label: string; value?: TaskIsolationMode; disabled?: boolean }> = [
-    { label: "none", value: "in-place" },
+    { label: "in_place", value: "in-place" },
     { label: "worktree", value: "worktree" },
     { label: "container", disabled: true },
   ];
@@ -4329,7 +4398,11 @@ function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
     description: task.description,
     directory: task.directory,
     harness: task.harness ?? "opencode",
-    providerId: "",
+    // Reverse-engineer the provider from an existing explicit model (ModelRef
+    // already carries providerID) so editing a task that has one shows the
+    // harness screen unlocked with that provider/model, not falsely "locked"
+    // to Use Agent Profile Default.
+    providerId: task.model?.providerID ?? "",
     agentId: task.agent ?? defaultAgentId(state.agents),
     claudePermissionMode: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
     assignedTo: task.assignedTo ?? "",
@@ -4615,6 +4688,12 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
     return;
   }
 
+  if (handleModelQueryKey(draft, key)) {
+    draft.error = undefined;
+    actions.render();
+    return;
+  }
+
   if (isWizardBackKey(key, draft)) {
     advanceWizardStep(draft, -1);
     actions.render();
@@ -4644,7 +4723,29 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
  */
 function isWizardBackKey(key: KeyEvent, draft: NewTaskDraft): boolean {
   if (isTextInputField(draft.field)) return false;
+  if (draft.field === "model") return false;
   return key.sequence === "b" || key.sequence === "B";
+}
+
+/**
+ * The MODEL field is a type-to-filter picker, not a plain select — a
+ * provider like OpenRouter can carry hundreds of models, too many to arrow
+ * through one at a time. Typed characters narrow `draft.modelQuery`;
+ * left/right/up/down (handled separately by cycleFocusedField -> cycleModel)
+ * move through whatever the current query matches. Only active while MODEL
+ * is focused, which itself is only reachable once a real PROVIDER is picked
+ * (see stepFieldOrder) — "Use Agent Profile Default" locks MODEL out entirely.
+ */
+function handleModelQueryKey(draft: NewTaskDraft, key: KeyEvent): boolean {
+  if (draft.field !== "model") return false;
+
+  if (key.name === "backspace" || key.sequence === "" || key.sequence === "\b") {
+    draft.modelQuery = (draft.modelQuery ?? "").slice(0, -1) || undefined;
+    return true;
+  }
+  if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
+  draft.modelQuery = (draft.modelQuery ?? "") + key.sequence;
+  return true;
 }
 
 /**
@@ -4742,18 +4843,20 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
 
 function createNewTaskDraft(state: TuiState): NewTaskDraft {
   const agentId = defaultAgentId(state.agents);
-  const agent = state.agents.find((item) => item.id === agentId);
   return {
     type: "agent",
     title: "",
     description: "",
     directory: state.cwd,
     harness: "opencode",
+    // providerId "" (Use Agent Profile Default) always pairs with model
+    // undefined — MODEL is locked to that label until a real provider is
+    // picked, so the agent profile's own model is what actually runs.
     providerId: "",
     agentId,
     claudePermissionMode: DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
     assignedTo: "",
-    model: agent?.model,
+    model: undefined,
     isolation: "worktree",
     permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
     step: "identity",
@@ -4770,6 +4873,7 @@ function moveDraftField(draft: NewTaskDraft, delta: number): void {
   const current = order.includes(draft.field) ? draft.field : order[0];
   const index = order.indexOf(current);
   draft.field = order[(index + delta + order.length) % order.length];
+  if (current === "model" && draft.field !== "model") draft.modelQuery = undefined;
 }
 
 function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number): boolean {
@@ -4786,6 +4890,7 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
         draft.providerId = "";
         draft.model = undefined;
       }
+      draft.modelQuery = undefined;
       if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
       return true;
     case "provider":
@@ -4827,12 +4932,16 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
  * of just picking an agent and moving on.
  */
 function cycleAgent(draft: NewTaskDraft, agents: RosterAgent[], delta: number): void {
+  // While PROVIDER is "Use Agent Profile Default" (providerId ""), MODEL is
+  // locked to that same label regardless of which agent is selected — nothing
+  // to sync. Only an explicit provider/model pick (unlocked) needs the
+  // preserve-vs-sync heuristic below.
   const previousAgentModel = agents.find((agent) => agent.id === draft.agentId)?.model;
   const modelMatchesPreviousAgentDefault = sameModel(draft.model, previousAgentModel);
   const ids = ["", ...agents.map((agent) => agent.id)];
   const current = Math.max(0, ids.indexOf(draft.agentId));
   draft.agentId = ids[(current + delta + ids.length) % ids.length] ?? "";
-  if (modelMatchesPreviousAgentDefault) {
+  if (draft.providerId && modelMatchesPreviousAgentDefault) {
     draft.model = agents.find((agent) => agent.id === draft.agentId)?.model;
   }
 }
@@ -4843,6 +4952,7 @@ function cycleProvider(draft: NewTaskDraft, providers: RosterProvider[], delta: 
   draft.providerId = ids[(current + delta + ids.length) % ids.length] ?? "";
   const provider = providers.find((item) => item.id === draft.providerId);
   draft.model = provider ? modelRefFromProvider(provider) : undefined;
+  draft.modelQuery = undefined; // a new provider means a new candidate list — any stale filter no longer applies
 }
 
 function modelRefFromProvider(provider: RosterProvider): ModelRef | undefined {
@@ -4862,7 +4972,8 @@ function cyclePermissionOverride(draft: NewTaskDraft, category: PermissionOverri
 }
 
 function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[], delta: number): void {
-  const options = modelOptions(draft, agents, providers);
+  const options = filteredModelOptions(draft, agents, providers);
+  if (options.length === 0) return; // no matches for the current query — nothing to move to
   const current = Math.max(
     0,
     options.findIndex((model) => sameModel(model, draft.model)),
@@ -5125,7 +5236,8 @@ function stepFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
     case "identity":
       return draft.type === "manual" ? IDENTITY_FIELDS_MANUAL : IDENTITY_FIELDS_AGENT;
     case "harness":
-      return draft.harness === "claude-code" ? HARNESS_FIELDS_CLAUDE : HARNESS_FIELDS_OPENCODE;
+      if (draft.harness === "claude-code") return HARNESS_FIELDS_CLAUDE;
+      return draft.providerId ? HARNESS_FIELDS_OPENCODE : HARNESS_FIELDS_OPENCODE_LOCKED;
     case "agentProfile":
       return draft.harness === "claude-code" ? AGENT_PROFILE_FIELDS_CLAUDE : AGENT_PROFILE_FIELDS_OPENCODE;
     case "isolation":
@@ -5150,6 +5262,7 @@ function advanceWizardStep(draft: NewTaskDraft, delta: number): void {
   const nextIndex = Math.max(0, Math.min(steps.length - 1, (currentIndex === -1 ? 0 : currentIndex) + delta));
   draft.step = steps[nextIndex] ?? steps[0];
   draft.field = stepFieldOrder(draft)[0] ?? "type";
+  draft.modelQuery = undefined; // leaving the harness screen always leaves MODEL too
 }
 
 async function handleWorkspaceGateKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
@@ -5630,7 +5743,7 @@ function currentModelLabel(draft: NewTaskDraft): string {
   if (draft.harness === "claude-code") {
     return draft.model?.id ?? "Claude default";
   }
-  return draft.model ? modelLabel(draft.model) : "agent default";
+  return draft.model ? modelLabel(draft.model) : AGENT_PROFILE_DEFAULT_LABEL;
 }
 
 function defaultAgentId(agents: RosterAgent[]): string {
@@ -5652,6 +5765,14 @@ function modelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: Ros
   const provider = draft.providerId ? providers.find((item) => item.id === draft.providerId) : undefined;
   if (provider) return provider.models.map((model) => ({ providerID: provider.id, id: model.id }));
   return [undefined, ...uniqueModels(agents)];
+}
+
+/** modelOptions() narrowed by the MODEL field's live type-to-filter query — a provider like OpenRouter can carry hundreds of models, too many to arrow through one at a time. */
+function filteredModelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[]): Array<ModelRef | undefined> {
+  const options = modelOptions(draft, agents, providers);
+  const query = (draft.modelQuery ?? "").trim().toLowerCase();
+  if (!query) return options;
+  return options.filter((model): model is ModelRef => model !== undefined && modelLabel(model).toLowerCase().includes(query));
 }
 
 function sameModel(left: ModelRef | undefined, right: ModelRef | undefined): boolean {

@@ -100,15 +100,19 @@ screen — no card exists yet while you're filling this in.
    change, where, and how to verify. **`DIR`**: the directory the agent works
    in — point it at a scratch repo, not something precious, for your first run.
 2. **Harness & model.** **`HARNESS`**: leave it on OpenCode for now.
-   **`PROVIDER`**: which of your currently-connected OpenCode providers to use
-   (leave unset to pick from any model already attached to an agent).
-   **`MODEL`**: pick one, or leave it unset to use the agent's default.
+   **`PROVIDER`**: which of your currently-connected OpenCode providers to use,
+   or leave it at **`Use Agent Profile Default`** to let the agent profile you
+   pick next (step 3) supply its own model — while that's selected, `MODEL` is
+   locked and shows the same label, since there's nothing to pick yet.
+   **`MODEL`**: once a real provider is selected, type a few letters to filter
+   (a provider like OpenRouter can carry hundreds of models — arrowing through
+   them one at a time isn't practical) and use `↑`/`↓` to move between matches.
 3. **Agent.** **`AGENT PROFILE`**: pick `build` (the general-purpose worker) —
    this is synced live from your OpenCode agent roster.
-4. **Isolation.** Arrow between **`none`** and **`worktree`** — a description
+4. **Isolation.** Arrow between **`in_place`** and **`worktree`** — a description
    of each appears as you move. Worktree isolation also shows a fixed
    **`PERMISSIONS`** note (automatic, not editable — see §9); switch to
-   **`none`** to get an editable EDIT/BASH/WEBFETCH permission control instead.
+   **`in_place`** to get an editable EDIT/BASH/WEBFETCH permission control instead.
 5. **Confirm.** A read-only summary of everything above. Press **`enter`** to
    create the card — this does *not* run it. Press **`b`** to go back and fix
    anything first.
@@ -305,11 +309,14 @@ Every card has a `HARNESS` field, chosen on the wizard's Harness screen.
 PROFILE`, its own wizard screen) and a model. `PROVIDER`/`MODEL` are synced
 live from `GET /api/providers` — the AI providers your OpenCode install is
 currently connected to and authenticated for — not just whatever models
-happen to already be attached to an agent; leave `PROVIDER` unset to fall back
-to that agent-derived list. Agent profiles themselves are defined in your
-OpenCode config (`~/.config/opencode/agent/<name>.md` or `opencode.jsonc`).
-One catch: OpenCode reads agent config at boot only, so after adding or
-editing an agent, restart the board instance to see it in the roster.
+happen to already be attached to an agent. Leave `PROVIDER` at **`Use Agent
+Profile Default`** to let the agent profile you pick on the next screen
+supply its own model (`MODEL` locks to that same label until you pick a real
+provider); pick a specific provider to unlock `MODEL` and type-to-filter its
+models directly. Agent profiles themselves are defined in your OpenCode
+config (`~/.config/opencode/agent/<name>.md` or `opencode.jsonc`). One catch:
+OpenCode reads agent config at boot only, so after adding or editing an agent,
+restart the board instance to see it in the roster.
 
 **Claude Code.** The card dispatches a background Claude Code session instead.
 This is unchanged from before the wizard — just relocated into its screens.
@@ -339,7 +346,7 @@ edit permissions, the base-checkout escape detector, worktree-cwd prompt
 hygiene, and sandboxed bash — and that stack is **not configurable** from the
 wizard; the screen just shows a note confirming it's active. Loosening it
 per-task would undermine the whole point of isolating a run in the first
-place. Select isolation **`none`** instead to get an editable `EDIT`/`BASH`/
+place. Select isolation **`in_place`** instead to get an editable `EDIT`/`BASH`/
 `WEBFETCH` control (each `allow`/`ask`/`deny`), which defaults to `allow`
 everywhere — i.e., today's behavior — until you actively tighten one.
 "Container" isolation is a disabled placeholder in this same segmented

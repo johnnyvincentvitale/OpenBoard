@@ -1231,6 +1231,111 @@ describe("TUI board view command strip", () => {
   });
 });
 
+describe("TUI move-to-Done confirmation sizes body text to content, not a fixed height", () => {
+  const LONG_RESIDUAL_RISK =
+    "The target working tree at /Users/johnnyvitale/code/openboard-content-planner-test had an uncommitted change to a config file that was left untouched, so a manual review of that file is still recommended before this is treated as fully verified.";
+
+  function reportedTask(id: string, column: Column): Task {
+    return {
+      ...task(id, column),
+      completionSource: "reported",
+      completion: {
+        outcome: "complete",
+        summary: "done",
+        changedFiles: [],
+        verification: [{ command: "git log --oneline -3 && git status", result: "Commit bc1d371 created on top of 556eab1; working tree clean" }],
+        residualRisk: LONG_RESIDUAL_RISK,
+        reportedAt: 1,
+      },
+    };
+  }
+
+  it("sizes the Residual risk line to its actual wrapped length instead of clipping at 2 rows", () => {
+    const reviewTask = reportedTask("review-card", "review");
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewTask],
+      selectedTaskId: "review-card",
+      pendingConfirmation: { action: "move-to-done", taskId: "review-card" },
+    }));
+
+    const residualRiskNode = textNodesContaining(app, "Residual risk:")[0];
+    expect(residualRiskNode).toBeTruthy();
+    expect(residualRiskNode.props.content).toContain(LONG_RESIDUAL_RISK);
+    // At the sidebar's ~56-column text width this line needs well more than
+    // 2 rows — the old fixed height:2 would have clipped it mid-sentence.
+    expect(residualRiskNode.props.height).toBeGreaterThan(2);
+  });
+
+  it("also fixes the inline 'm'-move-to-Done confirmation, not just the 'x' shortcut path", () => {
+    const reviewTask = reportedTask("review-card", "review");
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewTask],
+      selectedTaskId: "review-card",
+      moveTargetColumn: "done",
+      pendingConfirmation: { action: "move-to-done", taskId: "review-card" },
+    }));
+
+    const residualRiskNode = textNodesContaining(app, "Residual risk:")[0];
+    expect(residualRiskNode).toBeTruthy();
+    expect(residualRiskNode.props.content).toContain(LONG_RESIDUAL_RISK);
+    expect(residualRiskNode.props.height).toBeGreaterThan(2);
+  });
+
+  it("keeps short body lines at a single row (no wasted space)", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reportedTask("review-card", "review")],
+      selectedTaskId: "review-card",
+      pendingConfirmation: { action: "move-to-done", taskId: "review-card" },
+    }));
+
+    const sourceNode = textNodesContaining(app, "Source: agent-reported")[0];
+    expect(sourceNode.props.height).toBe(1);
+  });
+});
+
+describe("TUI run confirmation reflects the actual isolation choice", () => {
+  it("pressing r on a worktree-isolated card shows the worktree-specific message", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("todo-card", "todo"), type: "agent", harness: "opencode", isolation: "worktree" }],
+      selectedTaskId: "todo-card",
+    });
+
+    await handleKeypress({ name: "r", sequence: "r" } as any, s, actions());
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("Isolation: worktree - a new git worktree will be created for this task.");
+    expect(text).not.toContain("A git worktree will be created if worktree isolation is enabled.");
+  });
+
+  it("pressing r on an in-place card shows the in_place message and configured permissions", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [
+        {
+          ...task("todo-card", "todo"),
+          type: "agent",
+          harness: "opencode",
+          isolation: "in-place",
+          permissionOverrides: { edit: "ask", bash: "deny" },
+        },
+      ],
+      selectedTaskId: "todo-card",
+    });
+
+    await handleKeypress({ name: "r", sequence: "r" } as any, s, actions());
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain(
+      "Isolation: in_place — no worktree is created; the agent works directly in this directory and its edits modify your live working tree.",
+    );
+    expect(text).toContain("Permissions: edit: ask, bash: deny");
+  });
+});
+
 describe("TUI Enter key shows inline selected-card details", () => {
   it("Enter on a selected card shows prompt tab in the Selected column", async () => {
     const s = state({
@@ -2484,6 +2589,167 @@ describe("TUI new-task wizard navigation", () => {
     expect(s.newTask.field).toBe("isolation");
   });
 
+  it("PROVIDER unset (Use Agent Profile Default) locks MODEL out of the Tab order", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "harness", field: "provider", providerId: "", model: undefined }),
+    });
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+
+    // Only harness/provider exist on this step while locked — Tab from
+    // "provider" wraps back to "harness", never reaching "model".
+    expect(s.newTask.field).toBe("harness");
+  });
+
+  it("selecting a real PROVIDER unlocks MODEL in the Tab order", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [{ id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }] }],
+      newTask: agentDraft({ step: "harness", field: "provider", providerId: "anthropic", model: { providerID: "anthropic", id: "claude-sonnet-5" } }),
+    });
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+
+    expect(s.newTask.field).toBe("model");
+  });
+
+  it("renders 'Use Agent Profile Default' for both PROVIDER and MODEL while locked", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "harness", field: "provider", providerId: "", model: undefined }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("PROVIDER");
+    expect(text).toContain("MODEL");
+    const occurrences = text.split("Use Agent Profile Default").length - 1;
+    expect(occurrences).toBe(2);
+    expect(text).not.toContain("any (from agent roster)");
+  });
+
+  const OPENROUTER_PROVIDER = {
+    id: "openrouter",
+    name: "OpenRouter",
+    models: [
+      { id: "z-ai/glm-5.2", name: "GLM 5.2" },
+      { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5" },
+      { id: "anthropic/claude-opus-4-8", name: "Claude Opus 4.8" },
+      { id: "openai/gpt-5.5", name: "GPT-5.5" },
+      { id: "google/gemini-3-pro", name: "Gemini 3 Pro" },
+    ],
+  };
+
+  it("typing on the MODEL field narrows modelQuery instead of navigating back or advancing", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [OPENROUTER_PROVIDER],
+      newTask: agentDraft({ step: "harness", field: "model", providerId: "openrouter" }),
+    });
+
+    await handleKeypress({ name: "c", sequence: "c" } as any, s, actions());
+    await handleKeypress({ name: "l", sequence: "l" } as any, s, actions());
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, actions());
+    await handleKeypress({ name: "u", sequence: "u" } as any, s, actions());
+    // Includes the letter "b" — must filter, not trigger back-navigation.
+    await handleKeypress({ name: "b", sequence: "b" } as any, s, actions());
+
+    expect(s.newTask.modelQuery).toBe("claub");
+    expect(s.newTask.step).toBe("harness");
+  });
+
+  it("backspace edits the MODEL query", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [OPENROUTER_PROVIDER],
+      newTask: agentDraft({ step: "harness", field: "model", providerId: "openrouter", modelQuery: "claude" }),
+    });
+
+    await handleKeypress({ name: "backspace", sequence: "" } as any, s, actions());
+
+    expect(s.newTask.modelQuery).toBe("claud");
+  });
+
+  it("up/down on the MODEL field cycles only through the filtered matches", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [OPENROUTER_PROVIDER],
+      newTask: agentDraft({
+        step: "harness",
+        field: "model",
+        providerId: "openrouter",
+        modelQuery: "claude",
+        model: { providerID: "openrouter", id: "anthropic/claude-sonnet-5" },
+      }),
+    });
+
+    await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
+    expect(s.newTask.model).toEqual({ providerID: "openrouter", id: "anthropic/claude-opus-4-8" });
+
+    // Wraps within the 2 Claude matches — never lands on a non-matching model (e.g. GPT-5.5).
+    await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
+    expect(s.newTask.model).toEqual({ providerID: "openrouter", id: "anthropic/claude-sonnet-5" });
+  });
+
+  it("MODEL query resets when Tabbing away from the field", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [OPENROUTER_PROVIDER],
+      newTask: agentDraft({ step: "harness", field: "model", providerId: "openrouter", modelQuery: "claude" }),
+    });
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+
+    expect(s.newTask.field).not.toBe("model");
+    expect(s.newTask.modelQuery).toBeUndefined();
+  });
+
+  it("MODEL query resets when a different PROVIDER is picked", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [OPENROUTER_PROVIDER, { id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }] }],
+      newTask: agentDraft({ step: "harness", field: "provider", providerId: "openrouter", modelQuery: "claude" }),
+    });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
+
+    expect(s.newTask.providerId).toBe("anthropic");
+    expect(s.newTask.modelQuery).toBeUndefined();
+  });
+
+  it("renders the MODEL search box with query, match count, and current selection while focused", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [OPENROUTER_PROVIDER],
+      newTask: agentDraft({
+        step: "harness",
+        field: "model",
+        providerId: "openrouter",
+        modelQuery: "claude",
+        model: { providerID: "openrouter", id: "anthropic/claude-sonnet-5" },
+      }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("⌕ claude");
+    expect(text).toContain("2 matches");
+    // modelOptions() only carries {providerID, id} through from RosterModel — the friendly
+    // "name" field isn't preserved, so the label is the raw provider/id slug, not "Claude Sonnet 5".
+    expect(text).toContain("openrouter/anthropic/claude-sonnet-5");
+  });
+
+  it("renders 'no matches' when the MODEL query matches nothing", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      providers: [OPENROUTER_PROVIDER],
+      newTask: agentDraft({ step: "harness", field: "model", providerId: "openrouter", modelQuery: "xyz-nonexistent" }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("0 matches");
+    expect(text).toContain("no matches");
+  });
+
   it("in-place isolation exposes editable EDIT/BASH/WEBFETCH controls defaulting to allow", () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
@@ -2510,6 +2776,24 @@ describe("TUI new-task wizard navigation", () => {
     expect(text).not.toContain("EDIT");
   });
 
+  it("labels the non-worktree isolation option 'in_place', not 'none'", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "isolation", field: "isolation", isolation: "in-place" }),
+    });
+
+    const isolationText = textOf(renderApp(fakeUi(), s));
+    expect(isolationText).toContain("in_place");
+    expect(isolationText).not.toContain("none");
+
+    const confirmText = textOf(renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ isolation: "in-place", step: "confirm" }),
+    })));
+    expect(confirmText).toContain("in_place");
+    expect(confirmText).not.toContain("None (in-place)");
+  });
+
   it("cycling a permission-override field only changes that category", async () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
@@ -2523,13 +2807,15 @@ describe("TUI new-task wizard navigation", () => {
     expect(s.newTask.permissionOverrides.webfetch).toBe("allow");
   });
 
-  it("cycling AGENT PROFILE syncs MODEL to the new agent's default when the model was untouched", async () => {
+  it("cycling AGENT PROFILE syncs MODEL to the new agent's default when the model was untouched (provider unlocked)", async () => {
     const build = { id: "build", mode: "primary" as const, model: { providerID: "opencode", id: "north-mini-code-free" } };
     const plan = { id: "plan", mode: "primary" as const, model: { providerID: "openai", id: "gpt-5.5" } };
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       agents: [build, plan],
-      newTask: agentDraft({ step: "agentProfile", field: "agent", agentId: "build", model: build.model }),
+      // providerId must be non-empty (unlocked) — while it's "" (Use Agent
+      // Profile Default), MODEL stays locked and cycleAgent never touches it.
+      newTask: agentDraft({ step: "agentProfile", field: "agent", agentId: "build", model: build.model, providerId: "opencode" }),
     });
 
     await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
@@ -2546,13 +2832,29 @@ describe("TUI new-task wizard navigation", () => {
       viewState: { view: "board", previousView: "launch" },
       agents: [build, plan],
       // Model was explicitly picked on the (earlier) harness screen and no longer matches build's own default.
-      newTask: agentDraft({ step: "agentProfile", field: "agent", agentId: "build", model: explicitModel }),
+      newTask: agentDraft({ step: "agentProfile", field: "agent", agentId: "build", model: explicitModel, providerId: "anthropic" }),
     });
 
     await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
 
     expect(s.newTask.agentId).toBe("plan");
     expect(s.newTask.model).toEqual(explicitModel);
+  });
+
+  it("cycling AGENT PROFILE never touches MODEL while PROVIDER is locked to Use Agent Profile Default", async () => {
+    const build = { id: "build", mode: "primary" as const, model: { providerID: "opencode", id: "north-mini-code-free" } };
+    const plan = { id: "plan", mode: "primary" as const, model: { providerID: "openai", id: "gpt-5.5" } };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      agents: [build, plan],
+      newTask: agentDraft({ step: "agentProfile", field: "agent", agentId: "build", model: undefined, providerId: "" }),
+    });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
+
+    expect(s.newTask.agentId).toBe("plan");
+    expect(s.newTask.model).toBeUndefined();
+    expect(s.newTask.providerId).toBe("");
   });
 
   it("submits an in-place task with a non-default permission override", async () => {
@@ -2613,6 +2915,36 @@ describe("TUI new-task wizard navigation", () => {
 
     expect(createTask).toHaveBeenCalled();
     expect(runTask).not.toHaveBeenCalled();
+  });
+
+  function confirmScreenGroupCount(s: any): number {
+    const app = renderApp(fakeUi(), s);
+    const selectedPanel = nodesByType(app, "Box").find((node) => node.props?.title === "Selected");
+    expect(selectedPanel).toBeTruthy();
+    // renderConfirmStep's own wrapper is the only gap:1 + flexGrow:1 box in the
+    // panel while step === "confirm" — its direct children are one gap:0 box
+    // per field group, plus the trailing error row (not a gap:0 box).
+    const confirmBody = nodesByType(selectedPanel, "Box").find((node) => node.props?.gap === 1 && node.props?.flexGrow === 1);
+    expect(confirmBody).toBeTruthy();
+    return confirmBody.children.filter((child: any) => child?.type === "Box" && child.props?.gap === 0).length;
+  }
+
+  it("confirm screen groups summary rows (identity / harness+model / agent / isolation) instead of one dense list", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ title: "Grouped task", step: "confirm" }),
+    });
+
+    expect(confirmScreenGroupCount(s)).toBe(4); // identity, harness+model, agent profile, isolation+permissions
+  });
+
+  it("confirm screen for a manual card has only the identity group", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ type: "manual", title: "Manual task", step: "confirm", field: "assignedTo" }),
+    });
+
+    expect(confirmScreenGroupCount(s)).toBe(1);
   });
 });
 
