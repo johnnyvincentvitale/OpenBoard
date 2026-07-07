@@ -23,7 +23,8 @@ import { detectTaskBaseCheckoutEscape, markTaskBaseCheckoutEscape } from "./base
 import { eventLiveState, eventSessionId } from "./events/session-status";
 import { createPermissionResponderPool, type PermissionResponderPool } from "./permission-responder";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
-import { ClaudeCodeRunner, type ClaudeCodeRunnerLike } from "./claude-code-runner";
+import { ClaudeAcpRunner } from "./claude-acp-runner";
+import type { ClaudeCodeRunnerLike } from "./claude-code-runner";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
 import {
   isExternalDirectoriesAllowed,
@@ -395,7 +396,7 @@ export class TaskDispatcher implements Dispatcher {
     const instanceName = deps.instanceName ?? (envInstanceName || undefined);
     this.claudeRunner =
       deps.claudeRunner ??
-      new ClaudeCodeRunner({
+      new ClaudeAcpRunner({
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
