@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -69,6 +69,7 @@ import {
   toggleFileSelectionLock as toggleDiffFileSelectionLock,
   diffViewHeaderLabel,
   diffViewKeyHints,
+  diffFileCommitState,
   renderDiffView,
   editorTargetForSelection,
   DIFF_FILE_COLUMN_WIDTH,
@@ -76,6 +77,7 @@ import {
   DIFF_PATCH_SCROLL_ID,
   type DiffViewState,
   type DiffViewTheme,
+  type DiffFileCommitState,
 } from "./diff-view";
 import { formatDiffStat } from "./diff-stat";
 import {
@@ -559,10 +561,20 @@ interface FilesDetailState {
   mode: "list" | "patch";
 }
 
+interface IntegrateCommitReviewState {
+  taskId: string;
+  status: WorktreeCommitStatus;
+}
+
 type ReviewDiffStatState =
   | { taskId: string; taskUpdatedAt: number; status: "loading" }
   | { taskId: string; taskUpdatedAt: number; status: "success"; label: string; response?: DiffResponse }
   | { taskId: string; taskUpdatedAt: number; status: "error"; label: string };
+
+type ReviewCommitStatusState =
+  | { taskId: string; taskUpdatedAt: number; status: "loading" }
+  | { taskId: string; taskUpdatedAt: number; status: "success"; response: WorktreeCommitStatus }
+  | { taskId: string; taskUpdatedAt: number; status: "error" };
 
 /** In-progress compose state for a new top-level comment or a reply. */
 interface CommentDraftState {
@@ -620,10 +632,14 @@ interface TuiState {
   commentDraft?: CommentDraftState;
   // Files detail tab
   filesDetail?: FilesDetailState;
+  // Commit-state review shown before integrating a dirty worktree.
+  integrateCommitReview?: IntegrateCommitReviewState;
   // Full-screen diff view (v on a selected Review card)
   diffView?: DiffViewState;
   // Inline selected-card diff stat for Review cards, fetched once per selected task identity.
   reviewDiffStat?: ReviewDiffStatState;
+  // File-level dirty-vs-committed state for Review worktrees.
+  reviewCommitStatus?: ReviewCommitStatusState;
   // Set by diff keyboard scroll/hunk-nav so the next render() treats `detailScrollTop`
   // as authoritative (applies it to the diff renderable) instead of capturing the live
   // renderable's scrollY. Mouse-wheel scroll leaves it false so that scroll is captured.
@@ -908,7 +924,11 @@ export async function runOpenBoardTui(
       state.acpConfig = acpConfig;
       state.selectedTaskId = resolveSelectedTaskId(tasks, state.selectedTaskId);
       state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selectedTask(state));
+      state.reviewCommitStatus = reconcileReviewCommitStatusCache(state.reviewCommitStatus, selectedTask(state));
       state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
+      if (state.integrateCommitReview && state.integrateCommitReview.taskId !== state.selectedTaskId) {
+        state.integrateCommitReview = undefined;
+      }
       if (healthResult.ok) {
         state.health = healthResult.health;
         state.healthError = undefined;
@@ -920,6 +940,7 @@ export async function runOpenBoardTui(
       state.status = tasks.length === 0 ? "board is empty" : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
       state.lastRefresh = new Date();
       void fetchSelectedReviewDiffStat(state, currentClient, render);
+      void fetchSelectedReviewCommitStatus(state, currentClient, render);
     } catch (error) {
       state.error = errorMessage(error);
       state.status = "board unavailable";
@@ -2791,6 +2812,20 @@ function reviewDiffStatRow(state: TuiState, task: Task): MetaRow | undefined {
   if (!canOpenDiffView(task)) return undefined;
   const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
   if (!cache || cache.status === "loading") return { label: "DIFF", value: "loading...", color: COLORS.muted };
+  const commitStatus = reviewCommitStatusForTask(state, task);
+  if (
+    cache.status === "success" &&
+    commitStatus &&
+    commitStatus.committedFiles.length > 0 &&
+    commitStatus.uncommittedFiles.length === 0
+  ) {
+    const fileWord = commitStatus.committedFiles.length === 1 ? "file" : "files";
+    return {
+      label: "DIFF",
+      value: `${commitStatus.committedFiles.length} ${fileWord} · committed ›`,
+      color: COLORS.muted,
+    };
+  }
   return {
     label: "DIFF",
     value: cache.label,
@@ -3008,12 +3043,13 @@ function renderFilesTab(ui: OpenTui, state: TuiState, task: Task) {
   }
   const detail = filesDetailState(state, task.id, cache.response.files.length);
   const selectedFile = cache.response.files[detail.selectedIndex];
+  const commitStatus = reviewCommitStatusForTask(state, task);
   if (detail.mode === "patch") {
     return renderDetailViewport(
       ui,
       state,
       scrollId,
-      renderChangedFileListRow(ui, selectedFile, true),
+      renderChangedFileListRow(ui, selectedFile, true, diffFileCommitState(commitStatus, selectedFile.file)),
       ...renderPatchLines(ui, selectedFile.patch),
     );
   }
@@ -3022,7 +3058,7 @@ function renderFilesTab(ui: OpenTui, state: TuiState, task: Task) {
     ui,
     state,
     scrollId,
-    ...cache.response.files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex)),
+    ...cache.response.files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex, diffFileCommitState(commitStatus, file.file))),
   );
 }
 
@@ -3030,8 +3066,8 @@ function filesTabFooter(state: TuiState, task: Task): string {
   const files = reviewDiffFiles(state, task);
   const detail = filesDetailState(state, task.id, files.length);
   return detail.mode === "patch"
-    ? "↑/↓ scroll · esc files · ←/→ tabs"
-    : "↑/↓ files · enter patch · esc details · ←/→ tabs";
+    ? "↑/↓ scroll · c commit · esc files · ←/→ tabs"
+    : "↑/↓ files · enter patch · c commit · esc details · ←/→ tabs";
 }
 
 function reviewDiffFiles(state: TuiState, task: Task | undefined): Array<{ file: string; additions: number; deletions: number; patch?: string }> {
@@ -3039,14 +3075,20 @@ function reviewDiffFiles(state: TuiState, task: Task | undefined): Array<{ file:
   return cache?.status === "success" && cache.response?.kind === "diff" ? cache.response.files : [];
 }
 
-function renderChangedFileListRow(ui: OpenTui, file: { file: string; additions: number | null; deletions: number | null }, selected = false): VChild {
+function renderChangedFileListRow(ui: OpenTui, file: { file: string; additions: number | null; deletions: number | null }, selected = false, commitState: DiffFileCommitState = undefined): VChild {
+  const committed = commitState === "committed";
   return ui.Box(
     { width: "100%", height: 2, flexDirection: "column", gap: 0, flexShrink: 0, ...boxBg(selected ? COLORS.panelRaised : COLORS.panel) },
-    ui.Text({ content: `${selected ? "▸ " : "  "}${file.file}`, fg: COLORS.bright, height: 1, truncate: true }),
+    ui.Text({ content: `${selected ? "▸ " : "  "}${file.file}`, fg: committed && !selected ? COLORS.dim : COLORS.bright, height: 1, truncate: true }),
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1 },
-      ui.Text({ content: file.additions === null ? "+?" : `+${file.additions}`, fg: COLORS.diffAdd, height: 1, width: 8, truncate: true }),
-      ui.Text({ content: file.deletions === null ? "-?" : `-${file.deletions}`, fg: COLORS.diffDelete, height: 1, width: 8, truncate: true }),
+      committed
+        ? ui.Text({ content: "committed", fg: COLORS.dim, height: 1, width: 12, truncate: true })
+        : ui.Text({ content: file.additions === null ? "+?" : `+${file.additions}`, fg: COLORS.diffAdd, height: 1, width: 8, truncate: true }),
+      committed
+        ? ui.Box({ width: 0 })
+        : ui.Text({ content: file.deletions === null ? "-?" : `-${file.deletions}`, fg: COLORS.diffDelete, height: 1, width: 8, truncate: true }),
+      commitState === "dirty" ? ui.Text({ content: "dirty", fg: COLORS.muted, height: 1, width: 6, truncate: true }) : ui.Box({ width: 0 }),
     ),
   );
 }
@@ -3202,7 +3244,11 @@ function flattenComments(items: TaskComment[]): TaskComment[] {
   return result;
 }
 
-function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Task, action: ConfirmableAction) {
+function renderPendingConfirmationDetail(ui: OpenTui, state: TuiState, task: Task, action: ConfirmableAction) {
+  if (action === "integrate" && state.integrateCommitReview?.taskId === task.id) {
+    return renderIntegrateCommitConfirmation(ui, task, state.integrateCommitReview.status);
+  }
+
   const copy = buildConfirmationCopy(action, task);
   const confidence = action === "run" || action === "retry" ? buildRunConfidenceDetails(task) : [];
 
@@ -3234,6 +3280,33 @@ function renderPendingConfirmationDetail(ui: OpenTui, _state: TuiState, task: Ta
     ui.Box({ flexGrow: 1 }),
     ui.Text({ content: copy.confirmHint, fg: COLORS.accentBright, height: 1, truncate: true }),
     ui.Text({ content: "esc cancel · changing selection clears", fg: COLORS.dim, height: 1, truncate: true }),
+  );
+}
+
+function renderIntegrateCommitConfirmation(ui: OpenTui, task: Task, status: WorktreeCommitStatus) {
+  const committed = status.committedFiles.length > 0 ? status.committedFiles : ["(none yet)"];
+  const uncommitted = status.uncommittedFiles.length > 0 ? status.uncommittedFiles : ["(none)"];
+  const maxListRows = 6;
+
+  return ui.Box(
+    {
+      flexGrow: 1,
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
+    },
+    ui.Text({ content: "Commit remaining files and integrate?", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
+    ui.Text({ content: task.title, fg: COLORS.bright, height: 2, wrapMode: "word" }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ui.Text({ content: "Already committed on task branch", fg: COLORS.dim, height: 1, truncate: true }),
+    ...committed.slice(0, maxListRows).map((file) => ui.Text({ content: `  ${file}`, fg: COLORS.text, height: 1, truncate: true })),
+    ...(committed.length > maxListRows ? [ui.Text({ content: `  ...${committed.length - maxListRows} more`, fg: COLORS.muted, height: 1, truncate: true })] : []),
+    ui.Text({ content: "Remaining uncommitted files", fg: COLORS.dim, height: 1, truncate: true }),
+    ...uncommitted.slice(0, maxListRows).map((file) => ui.Text({ content: `  ${file}`, fg: COLORS.bright, height: 1, truncate: true })),
+    ...(uncommitted.length > maxListRows ? [ui.Text({ content: `  ...${uncommitted.length - maxListRows} more`, fg: COLORS.muted, height: 1, truncate: true })] : []),
+    ui.Box({ flexGrow: 1 }),
+    ui.Text({ content: "Press i again to commit remaining files and integrate.", fg: COLORS.accentBright, height: 1, truncate: true }),
+    ui.Text({ content: "esc cancel · worktree stays intact", fg: COLORS.dim, height: 1, truncate: true }),
   );
 }
 
@@ -4339,6 +4412,10 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       actions.render();
       return;
     }
+    if (key.sequence === "c") {
+      await commitSelectedFilesTabFile(state, actions);
+      return;
+    }
     if ((key.name || key.sequence) === "down" || (key.name || key.sequence) === "up") {
       const detail = filesDetailState(state, ownerId, files.length);
       if (task && files.length > 0 && detail.mode === "list") {
@@ -4467,8 +4544,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       return;
     case "i":
       if (!canUseSelectedCardAction(state, actions, "integrate")) return;
-      clearPendingConfirmation(state);
-      await actions.runAction("integrate", (task) => actions.client.integrateTask(task.id));
+      await handleIntegrateRequested(state, actions);
       return;
     case "g":
       clearPendingConfirmation(state);
@@ -4517,6 +4593,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     if (state.detailTab) closeInlineDetail(state);
     else state.detailTab = "prompt";
     void fetchSelectedReviewDiffStat(state, actions.client, actions.render);
+    void fetchSelectedReviewCommitStatus(state, actions.client, actions.render);
     actions.render();
     return;
   }
@@ -4530,8 +4607,13 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     else if (keyName === "left") state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, -1);
     else state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, 1);
     state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selectedTask(state));
+    state.reviewCommitStatus = reconcileReviewCommitStatusCache(state.reviewCommitStatus, selectedTask(state));
     state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
+    if (state.integrateCommitReview && state.integrateCommitReview.taskId !== state.selectedTaskId) {
+      state.integrateCommitReview = undefined;
+    }
     void fetchSelectedReviewDiffStat(state, actions.client, actions.render);
+    void fetchSelectedReviewCommitStatus(state, actions.client, actions.render);
     actions.render();
   }
 }
@@ -4628,6 +4710,48 @@ async function confirmMoveToDone(state: TuiState, actions: TuiActions): Promise<
   );
 }
 
+async function handleIntegrateRequested(state: TuiState, actions: TuiActions): Promise<void> {
+  const task = selectedTask(state);
+  if (!task) {
+    state.status = "no task selected";
+    actions.render();
+    return;
+  }
+
+  if (state.pendingConfirmation?.action === "integrate" && state.pendingConfirmation.taskId === task.id) {
+    clearPendingConfirmation(state);
+    await actions.runAction("integrate", (selected) =>
+      actions.client.integrateTask(selected.id, undefined, { commitRemaining: true }),
+    );
+    return;
+  }
+
+  state.status = "checking worktree files...";
+  state.error = undefined;
+  actions.render();
+
+  try {
+    const status = await actions.client.getTaskCommitStatus(task.id);
+    if (status.uncommittedFiles.length === 0) {
+      clearPendingConfirmation(state);
+      await actions.runAction("integrate", (selected) => actions.client.integrateTask(selected.id));
+      return;
+    }
+
+    const result = requestConfirmation(state, "integrate", task.id);
+    state.pendingConfirmation = result.state.pendingConfirmation;
+    state.integrateCommitReview = { taskId: task.id, status };
+    state.detailTab = undefined;
+    state.moveTargetColumn = undefined;
+    state.status = `Integrating "${task.title}"? Press i again to commit remaining files and integrate.`;
+    actions.render();
+  } catch (error) {
+    state.error = errorMessage(error);
+    state.status = "integrate preflight failed";
+    actions.render();
+  }
+}
+
 function moveTaskToDone(state: TuiState, actions: TuiActions, task: Task): Promise<unknown> {
   const endOfDone = state.tasks.filter((item) => item.column === "done" && item.id !== task.id).length;
   return actions.client.moveTask(task.id, "done", endOfDone, "User");
@@ -4651,6 +4775,7 @@ async function openDiffViewForSelection(state: TuiState, actions: TuiActions): P
   try {
     const response = await actions.client.getTaskDiff(task!.id);
     if (state.diffView?.taskId === task!.id) state.diffView = applyDiffResponse(state.diffView, response);
+    await refreshDiffViewCommitStatus(state, actions);
   } catch (error) {
     if (state.diffView?.taskId === task!.id) state.diffView = applyDiffError(state.diffView, errorMessage(error));
   }
@@ -4730,6 +4855,10 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
   if (key.sequence === "m") {
     state.diffView = toggleDiffFileReviewed(state.diffView);
     actions.render();
+    return;
+  }
+  if (key.sequence === "c") {
+    await commitSelectedDiffViewFile(state, actions);
     return;
   }
   if (key.sequence === "t") {
@@ -4822,6 +4951,75 @@ async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): P
   await launchEditorCommand(resolution.command, root, state, actions);
 }
 
+async function commitSelectedDiffViewFile(state: TuiState, actions: TuiActions): Promise<void> {
+  const diffView = state.diffView;
+  if (!diffView || diffView.kind !== "diff") {
+    state.status = "no diff file selected";
+    actions.render();
+    return;
+  }
+  const file = diffView.files[diffView.selectedFileIndex]?.file;
+  if (!file) {
+    state.status = "no diff file selected";
+    actions.render();
+    return;
+  }
+  await commitTaskFileAndRefresh(state, actions, diffView.taskId, file, "diff");
+}
+
+async function commitSelectedFilesTabFile(state: TuiState, actions: TuiActions): Promise<void> {
+  const task = selectedTask(state);
+  const files = reviewDiffFiles(state, task);
+  if (!task || files.length === 0) {
+    state.status = "no file selected";
+    actions.render();
+    return;
+  }
+  const detail = filesDetailState(state, task.id, files.length);
+  const file = files[detail.selectedIndex]?.file;
+  if (!file) {
+    state.status = "no file selected";
+    actions.render();
+    return;
+  }
+  await commitTaskFileAndRefresh(state, actions, task.id, file, "files");
+}
+
+async function commitTaskFileAndRefresh(
+  state: TuiState,
+  actions: TuiActions,
+  taskId: string,
+  file: string,
+  source: "diff" | "files",
+): Promise<void> {
+  state.status = `committing ${file}...`;
+  state.error = undefined;
+  actions.render();
+
+  try {
+    const outcome = await actions.client.commitTaskFile(taskId, file);
+    if (!outcome.ok) {
+      state.status = outcome.message;
+      actions.render();
+      return;
+    }
+    state.status = outcome.commit ? `committed ${file} (${outcome.commit})` : `committed ${file}`;
+    state.integrateCommitReview = undefined;
+    if (source === "diff") {
+      await refreshDiffViewAfterEditor(state, actions);
+    } else {
+      state.reviewDiffStat = undefined;
+      state.reviewCommitStatus = undefined;
+      await fetchSelectedReviewDiffStat(state, actions.client, actions.render);
+      await fetchSelectedReviewCommitStatus(state, actions.client, actions.render);
+    }
+  } catch (error) {
+    state.error = errorMessage(error);
+    state.status = `commit ${file} failed`;
+    actions.render();
+  }
+}
+
 async function launchEditorCommand(
   command: EditorCommand,
   root: string,
@@ -4881,6 +5079,7 @@ async function refreshDiffViewAfterEditor(state: TuiState, actions: TuiActions):
       };
     }
     state.diffView = next;
+    await refreshDiffViewCommitStatus(state, actions);
     state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
   } catch (error) {
     if (state.diffView?.taskId === diffView.taskId) {
@@ -4890,8 +5089,33 @@ async function refreshDiffViewAfterEditor(state: TuiState, actions: TuiActions):
   actions.render();
 }
 
+async function refreshDiffViewCommitStatus(state: TuiState, actions: TuiActions): Promise<void> {
+  const diffView = state.diffView;
+  if (!diffView) return;
+  const task = state.tasks.find((item) => item.id === diffView.taskId);
+  if (!canFetchReviewCommitStatus(task)) {
+    state.diffView = { ...diffView, commitStatus: undefined };
+    return;
+  }
+
+  try {
+    const commitStatus = await actions.client.getTaskCommitStatus(diffView.taskId);
+    if (state.diffView?.taskId === diffView.taskId) {
+      state.diffView = { ...state.diffView, commitStatus };
+    }
+    if (state.selectedTaskId === diffView.taskId) {
+      state.reviewCommitStatus = { ...reviewDiffStatCacheKey(task), status: "success", response: commitStatus };
+    }
+  } catch {
+    if (state.diffView?.taskId === diffView.taskId) {
+      state.diffView = { ...state.diffView, commitStatus: undefined };
+    }
+  }
+}
+
 function clearPendingConfirmation(state: TuiState): void {
   state.pendingConfirmation = clearConfirmation(state).pendingConfirmation;
+  state.integrateCommitReview = undefined;
 }
 
 function clearPendingForSelection(state: Pick<TuiState, "pendingConfirmation">, selectedTaskId: string | undefined): PendingConfirmation | undefined {
@@ -4905,6 +5129,7 @@ function closeInlineDetail(state: TuiState): void {
   state.comments = undefined;
   state.commentDraft = undefined;
   state.filesDetail = undefined;
+  state.integrateCommitReview = undefined;
 }
 
 // ── Edit mode (E/e) ─────────────────────────────────────────────────────────────
@@ -6486,6 +6711,24 @@ function reconcileReviewDiffStatCache(cache: ReviewDiffStatState | undefined, ta
   return isSameReviewDiffStatIdentity(cache, task) ? cache : undefined;
 }
 
+function isSameReviewCommitStatusIdentity(cache: ReviewCommitStatusState | undefined, task: Pick<Task, "id" | "updatedAt"> | undefined): boolean {
+  return Boolean(cache && task && cache.taskId === task.id && cache.taskUpdatedAt === task.updatedAt);
+}
+
+function canFetchReviewCommitStatus(task: Task | undefined): task is Task {
+  return Boolean(task && canOpenDiffView(task) && task.worktreePath);
+}
+
+function reconcileReviewCommitStatusCache(cache: ReviewCommitStatusState | undefined, task: Task | undefined): ReviewCommitStatusState | undefined {
+  if (!canFetchReviewCommitStatus(task)) return undefined;
+  return isSameReviewCommitStatusIdentity(cache, task) ? cache : undefined;
+}
+
+function reviewCommitStatusForTask(state: TuiState, task: Task | undefined): WorktreeCommitStatus | undefined {
+  const cache = isSameReviewCommitStatusIdentity(state.reviewCommitStatus, task) ? state.reviewCommitStatus : undefined;
+  return cache?.status === "success" ? cache.response : undefined;
+}
+
 async function fetchSelectedReviewDiffStat(
   state: TuiState,
   client: Pick<BoardClient, "getTaskDiff">,
@@ -6509,6 +6752,33 @@ async function fetchSelectedReviewDiffStat(
   } catch {
     if (!isSameReviewDiffStatIdentity(state.reviewDiffStat, task)) return;
     state.reviewDiffStat = { ...key, status: "error", label: "diff unavailable" };
+  }
+  render();
+}
+
+async function fetchSelectedReviewCommitStatus(
+  state: TuiState,
+  client: Pick<BoardClient, "getTaskCommitStatus">,
+  render: () => void,
+): Promise<void> {
+  const task = selectedTask(state);
+  if (!canFetchReviewCommitStatus(task)) {
+    state.reviewCommitStatus = undefined;
+    return;
+  }
+  if (isSameReviewCommitStatusIdentity(state.reviewCommitStatus, task)) return;
+
+  const key = reviewDiffStatCacheKey(task);
+  state.reviewCommitStatus = { ...key, status: "loading" };
+  render();
+
+  try {
+    const response = await client.getTaskCommitStatus(task.id);
+    if (!isSameReviewCommitStatusIdentity(state.reviewCommitStatus, task)) return;
+    state.reviewCommitStatus = { ...key, status: "success", response };
+  } catch {
+    if (!isSameReviewCommitStatusIdentity(state.reviewCommitStatus, task)) return;
+    state.reviewCommitStatus = { ...key, status: "error" };
   }
   render();
 }

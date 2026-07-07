@@ -389,6 +389,37 @@ describe("board client", () => {
     );
   });
 
+  it("fetches task commit status from GET /api/tasks/:id/commit-status", async () => {
+    const response = { committedFiles: ["src/a.ts"], uncommittedFiles: ["src/b.ts"] };
+    const fetchMock = vi.fn(async () => jsonResponse(response));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.getTaskCommitStatus("task-1", "dev");
+
+    expect(result).toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${DEFAULT_BOARD_URL}/api/tasks/task-1/commit-status?targetBranch=dev`,
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("commits one task file through POST /api/tasks/:id/commit-file", async () => {
+    const response = { task: createdTask("task-1", { title: "A", description: "", directory: CWD }), ok: true, file: "src/a.ts", message: "committed" };
+    const fetchMock = vi.fn(async () => jsonResponse(response));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.commitTaskFile("task-1", "src/a.ts");
+
+    expect(result).toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${DEFAULT_BOARD_URL}/api/tasks/task-1/commit-file`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ file: "src/a.ts" }),
+      }),
+    );
+  });
+
   it("getTaskDiff returns no-git variant when there is no git evidence", async () => {
     const noGitResponse: DiffResponse = {
       kind: "no-git",

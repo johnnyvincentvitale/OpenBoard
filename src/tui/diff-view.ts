@@ -6,7 +6,7 @@
  */
 import type { RGBA, VChild } from "@opentui/core";
 import { truncateText } from "./model";
-import type { DiffFile, DiffResponse, Task } from "../shared";
+import type { DiffFile, DiffResponse, Task, WorktreeCommitStatus } from "../shared";
 
 type OpenTui = typeof import("@opentui/core");
 type ThemeColor = string | RGBA;
@@ -44,6 +44,7 @@ export interface DiffViewState {
   selectedHunk?: SelectedHunk;
   reviewedFiles: Set<string>;
   viewOverride?: DiffPatchView;
+  commitStatus?: WorktreeCommitStatus;
   /** Absolute path of the tree the diff was computed against (worktree or in-place dir), from
    * the diff response's `root`. Undefined when the server didn't send one — callers (the `e`
    * open-in-editor wiring) must treat a missing root as blocked, never guess a path. */
@@ -92,6 +93,17 @@ export function applyDiffResponse(state: DiffViewState, response: DiffResponse):
     selectedHunk: undefined,
     root: response.root,
   };
+}
+
+export type DiffFileCommitState = "committed" | "dirty" | undefined;
+
+export function diffFileCommitState(status: WorktreeCommitStatus | undefined, file: string): DiffFileCommitState {
+  if (!status) return undefined;
+  const committed = status.committedFiles.includes(file);
+  const dirty = status.uncommittedFiles.includes(file);
+  if (dirty && committed) return "dirty";
+  if (committed) return "committed";
+  return undefined;
 }
 
 export function applyDiffError(state: DiffViewState, message: string): DiffViewState {
@@ -440,7 +452,7 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
 
 export function diffViewKeyHints(state?: DiffViewState): string {
   const vertical = state?.fileSelectionLocked ? "↑/↓ scroll · enter files" : "↑/↓ files · enter scroll";
-  return `${vertical} · ←/→ hunks · m mark · t split/inline · e edit · r refresh · b back · q quit`;
+  return `${vertical} · ←/→ hunks · m mark · c commit · t split/inline · e edit · r refresh · b back · q quit`;
 }
 
 export interface DiffViewTheme {
@@ -462,12 +474,14 @@ function fileRow(
   file: DiffFile,
   selected: boolean,
   reviewed: boolean,
+  commitState: DiffFileCommitState = undefined,
 ): VChild {
   const nameColor = reviewed ? theme.dim : selected ? theme.bright : theme.text;
   const namePrefix = selected ? "▸ " : "  ";
   const name = `${namePrefix}${truncateText(file.file, DIFF_FILE_COLUMN_WIDTH - namePrefix.length - 2)}`;
   const additions = truncateText(`+${file.additions}`, 7);
   const deletions = truncateText(`-${file.deletions}`, 7);
+  const committed = commitState === "committed";
   return ui.Box(
     {
       width: "100%",
@@ -485,8 +499,13 @@ function fileRow(
     }),
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1 },
-      ui.Text({ content: additions, fg: reviewed ? theme.dim : theme.laneDone, height: 1, width: 7, truncate: true }),
-      ui.Text({ content: deletions, fg: reviewed ? theme.dim : theme.laneError, height: 1, width: 7, truncate: true }),
+      committed
+        ? ui.Text({ content: "committed", fg: theme.dim, height: 1, width: 14, truncate: true })
+        : ui.Text({ content: additions, fg: reviewed ? theme.dim : theme.laneDone, height: 1, width: 7, truncate: true }),
+      committed
+        ? ui.Box({ width: 0 })
+        : ui.Text({ content: deletions, fg: reviewed ? theme.dim : theme.laneError, height: 1, width: 7, truncate: true }),
+      commitState === "dirty" ? ui.Text({ content: "dirty", fg: theme.muted, height: 1, width: 6, truncate: true }) : ui.Box({ width: 0 }),
       ui.Box({ flexGrow: 1 }),
       reviewed ? ui.Text({ content: "✓", fg: theme.dim, height: 1, width: 1 }) : ui.Box({ width: 1 }),
     ),
@@ -551,7 +570,14 @@ export function renderDiffView(
       truncate: true,
     }),
     ...visibleFiles.map((file, index) =>
-      fileRow(ui, theme, file, window.offset + index === state.selectedFileIndex, isFileReviewed(state, file.file)),
+      fileRow(
+        ui,
+        theme,
+        file,
+        window.offset + index === state.selectedFileIndex,
+        isFileReviewed(state, file.file),
+        diffFileCommitState(state.commitStatus, file.file),
+      ),
     ),
     ...Array.from({ length: fillerCount }, () => fileListFillerRow(ui, theme)),
   );

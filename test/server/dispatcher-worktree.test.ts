@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { TaskDispatcher } from "../../src/server/dispatcher";
 import { GitWorktreeManager, type WorktreeManager } from "../../src/server/worktree";
+import { INTEGRATED_COMPLETED_BY } from "../../src/shared";
 
 function g(cwd: string, args: string[]): string {
   const env: NodeJS.ProcessEnv = {};
@@ -202,11 +203,17 @@ describe("TaskDispatcher — worktree isolation", () => {
 
     const outcome = await dispatcher.integrate(task.id);
     expect(outcome.ok).toBe(true);
-    // base has the feature, worktree gone, branch kept, task.worktreePath cleared.
+    // base has the feature, worktree gone, branch kept, task accepted.
     expect(existsSync(join(repo, "feature.txt"))).toBe(true);
     expect(existsSync(wtPath)).toBe(false);
     expect(g(repo, ["branch", "--list", `board/${task.id}`])).toContain(`board/${task.id}`);
-    expect(store.get(task.id)?.worktreePath).toBeUndefined();
+    expect(outcome.task.column).toBe("done");
+    expect(outcome.task.completedBy).toBe(INTEGRATED_COMPLETED_BY);
+    expect(outcome.task.worktreePath).toBeUndefined();
+    const completed = store.get(task.id);
+    expect(completed?.column).toBe("done");
+    expect(completed?.completedBy).toBe(INTEGRATED_COMPLETED_BY);
+    expect(completed?.worktreePath).toBeUndefined();
   });
 
   it("maps integrate rebase conflicts to pending rebase-conflict without clearing the worktree", async () => {
@@ -221,6 +228,8 @@ describe("TaskDispatcher — worktree isolation", () => {
       currentBranch: async () => "main",
       createWorktree: async () => ({ worktreePath, branch: "board/task-conflict", baseBranch: "main" }),
       syncUpstream: async () => ({ ok: true, conflict: false, message: "synced" }),
+      commitStatus: async () => ({ committedFiles: [], uncommittedFiles: [] }),
+      commitFile: async (_worktreePath, file) => ({ ok: true, file, message: "committed" }),
       integrate: async () => ({ ok: false, conflict: true, conflictPaths: ["file.txt"], message: "conflict" }),
       isWorktreeDirty: async () => false,
       cleanupWorktree: async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "removed", worktreePath }),
@@ -229,6 +238,7 @@ describe("TaskDispatcher — worktree isolation", () => {
     };
     const dispatcher = buildDispatcher(makeFakeClient(), worktrees);
     const task = store.create({ title: "t", description: "d", directory: repo });
+    store.move(task.id, "review", 0);
     store.update(task.id, {
       worktreePath,
       worktreeBranch: "board/task-conflict",
@@ -243,8 +253,59 @@ describe("TaskDispatcher — worktree isolation", () => {
     expect(outcome.conflict).toBe(true);
     expect(outcome.rebaseConflictPaths).toEqual(["file.txt"]);
     const blocked = store.get(task.id);
+    expect(blocked?.column).toBe("review");
+    expect(blocked?.completedBy).toBeNull();
     expect(blocked?.pending).toBe("rebase-conflict");
     expect(blocked?.rebaseConflictPaths).toEqual(["file.txt"]);
+    expect(blocked?.worktreePath).toBe(worktreePath);
+  });
+
+  it("keeps Review cards in Review when integrate still needs remaining files committed", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const worktreePath = join(tmp, "worktrees", "task-dirty");
+    mkdirSync(worktreePath, { recursive: true });
+    const worktrees: WorktreeManager = {
+      isGitRepo: async () => true,
+      initRepo: async () => undefined,
+      repoRoot: async (dir) => dir,
+      currentBranch: async () => "main",
+      createWorktree: async () => ({ worktreePath, branch: "board/task-dirty", baseBranch: "main" }),
+      syncUpstream: async () => ({ ok: true, conflict: false, message: "synced" }),
+      commitStatus: async () => ({ committedFiles: ["src/a.ts"], uncommittedFiles: ["src/b.ts"] }),
+      commitFile: async (_worktreePath, file) => ({ ok: true, file, message: "committed" }),
+      integrate: async () => ({
+        ok: false,
+        conflict: false,
+        needsCommit: true,
+        committedFiles: ["src/a.ts"],
+        uncommittedFiles: ["src/b.ts"],
+        message: "remaining files need commit",
+      }),
+      isWorktreeDirty: async () => true,
+      cleanupWorktree: async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "removed", worktreePath }),
+      listManagedWorktrees: async () => [],
+      removeWorktree: async () => undefined,
+    };
+    const dispatcher = buildDispatcher(makeFakeClient(), worktrees);
+    const task = store.create({ title: "t", description: "d", directory: repo });
+    store.move(task.id, "review", 0);
+    store.update(task.id, {
+      worktreePath,
+      worktreeBranch: "board/task-dirty",
+      baseBranch: "main",
+      runState: "idle",
+      baseCheckoutSnapshot: "",
+    });
+
+    const outcome = await dispatcher.integrate(task.id);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.conflict).toBe(false);
+    expect(outcome.needsCommit).toBe(true);
+    const blocked = store.get(task.id);
+    expect(blocked?.column).toBe("review");
+    expect(blocked?.completedBy).toBeNull();
     expect(blocked?.worktreePath).toBe(worktreePath);
   });
 

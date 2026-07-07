@@ -13,8 +13,8 @@
  * `shutdown()` stops consuming the event stream.
  */
 import { basename, dirname, join, resolve } from "node:path";
-import type { AcpTaskHarness, MergeOutcome, OpencodeEvent, Task, TaskStore, WorktreeCleanupOutcome } from "../shared";
-import { AdapterError, resolveOpenCodePermissionRules } from "../shared";
+import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, OpencodeEvent, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import { AdapterError, INTEGRATED_COMPLETED_BY, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import type { SandboxStatus } from "./sandbox";
@@ -762,7 +762,31 @@ export class TaskDispatcher implements Dispatcher {
     return { task: this.store.get(taskId) ?? task, ...result };
   }
 
-  async integrate(taskId: string, targetBranch?: string): Promise<MergeOutcome> {
+  async getWorktreeCommitStatus(taskId: string, targetBranch?: string): Promise<WorktreeCommitStatus> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (!task.worktreePath) {
+      throw AdapterError.validation("Task has no worktree");
+    }
+    const baseRef = task.baseCommit ?? targetBranch ?? task.baseBranch;
+    if (!baseRef) throw AdapterError.validation("No base reference for commit status");
+    return this.worktrees.commitStatus(task.worktreePath, baseRef);
+  }
+
+  async commitFile(taskId: string, file: string, message?: string): Promise<FileCommitOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (!task.worktreePath) {
+      throw AdapterError.validation("Task has no worktree");
+    }
+    if (task.runState === "running") {
+      throw AdapterError.validation("Cannot commit task files while its session is still running");
+    }
+    const result = await this.worktrees.commitFile(task.worktreePath, file, message);
+    return { task: this.store.get(taskId) ?? task, ...result };
+  }
+
+  async integrate(taskId: string, targetBranch?: string, options: { commitRemaining?: boolean } = {}): Promise<MergeOutcome> {
     const task = this.store.get(taskId);
     if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
     if (!task.worktreePath || !task.worktreeBranch) {
@@ -807,6 +831,7 @@ export class TaskDispatcher implements Dispatcher {
       task.worktreeBranch,
       target,
       task.worktreePath,
+      { commitRemaining: options.commitRemaining, baseRef: task.baseCommit ?? target },
     );
     if (result.conflict) {
       const paths = result.conflictPaths ?? [];
@@ -821,9 +846,11 @@ export class TaskDispatcher implements Dispatcher {
         rebaseConflictPaths: paths,
       };
     }
-    // On success the worktree is gone (branch kept) — drop the stale path.
+    // On success the worktree is gone (branch kept), so the review is accepted.
     if (result.ok) {
+      this.store.move(taskId, "done", END_OF_COLUMN);
       this.store.update(taskId, {
+        completedBy: INTEGRATED_COMPLETED_BY,
         worktreePath: undefined,
         pending: undefined,
         rebaseConflictPaths: undefined,

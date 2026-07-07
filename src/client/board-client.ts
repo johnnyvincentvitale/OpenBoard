@@ -6,6 +6,7 @@ import type {
   CreateTaskInput,
   CompletionReport,
   DiffResponse,
+  FileCommitOutcome,
   MergeOutcome,
   ModelRef,
   AcpConfigCatalog,
@@ -25,6 +26,7 @@ import type {
   TaskType,
   ClaudeCodePermissionMode,
   UpdateTaskInput,
+  WorktreeCommitStatus,
   WorktreeCleanupOutcome,
 } from "../shared";
 import {
@@ -157,7 +159,9 @@ export interface BoardClient {
   deleteTask(id: string, options?: { forceWorktree?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; message?: string }>;
   initGitAndRun(id: string): Promise<Task>;
   syncTask(id: string): Promise<MergeOutcome>;
-  integrateTask(id: string, targetBranch?: string): Promise<MergeOutcome>;
+  getTaskCommitStatus(id: string, targetBranch?: string): Promise<WorktreeCommitStatus>;
+  commitTaskFile(id: string, file: string, message?: string): Promise<FileCommitOutcome>;
+  integrateTask(id: string, targetBranch?: string, options?: { commitRemaining?: boolean }): Promise<MergeOutcome>;
   discardWorktree(id: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
   linkTasks(parentId: string, childId: string): Promise<Task>;
   unlinkTasks(parentId: string, childId: string): Promise<Task>;
@@ -301,11 +305,30 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     },
     initGitAndRun: (id) => postJson<Task>(resolved, buildTaskPath.initGit(id), {}),
     syncTask: (id) => postJson<MergeOutcome>(resolved, buildTaskPath.sync(id), {}),
-    integrateTask: (id, targetBranch) =>
+    getTaskCommitStatus: (id, targetBranch) => {
+      const params = new URLSearchParams();
+      if (targetBranch) params.set("targetBranch", targetBranch);
+      const suffix = params.toString();
+      return requestJson<WorktreeCommitStatus>(
+        resolved,
+        `${buildTaskPath.commitStatus(id)}${suffix ? `?${suffix}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    commitTaskFile: (id, file, message) =>
+      postJson<FileCommitOutcome>(
+        resolved,
+        buildTaskPath.commitFile(id),
+        { file, ...(message !== undefined ? { message } : {}) },
+      ),
+    integrateTask: (id, targetBranch, options) =>
       postJson<MergeOutcome>(
         resolved,
         buildTaskPath.integrate(id),
-        targetBranch === undefined ? {} : { targetBranch },
+        {
+          ...(targetBranch === undefined ? {} : { targetBranch }),
+          ...(options?.commitRemaining ? { commitRemaining: true } : {}),
+        },
       ),
     discardWorktree: (id, options) =>
       postJson<WorktreeCleanupOutcome>(resolved, buildTaskPath.discardWorktree(id), options ?? {}),

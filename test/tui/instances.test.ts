@@ -1784,7 +1784,7 @@ describe("TUI Enter key shows inline selected-card details", () => {
 
 describe("TUI selected Review diff stat", () => {
   it("renders loading, success, empty, no-git, and error states in the selected-card details", () => {
-    const reviewCard = task("review-card", "review");
+    const reviewCard = { ...task("review-card", "review"), worktreePath: "/repo/wt", worktreeBranch: "board/review-card", baseBranch: "main" };
     const base = {
       viewState: { view: "board", previousView: "launch" },
       tasks: [reviewCard],
@@ -1863,7 +1863,7 @@ describe("TUI selected Review diff stat", () => {
   });
 
   it("renders a read-only Files tab with changed files only", async () => {
-    const reviewCard = task("review-card", "review");
+    const reviewCard = { ...task("review-card", "review"), worktreePath: "/repo/wt", worktreeBranch: "board/review-card", baseBranch: "main" };
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [reviewCard],
@@ -1925,6 +1925,135 @@ describe("TUI selected Review diff stat", () => {
     await handleKeypress({ name: "m", sequence: "m" } as any, s, actions());
     expect(s.detailTab).toBe("files");
     expect(s.moveTargetColumn).toBeUndefined();
+  });
+
+  it("files tab c commits the selected file and refreshes the selected-card diff", async () => {
+    const reviewCard = { ...task("review-card", "review"), worktreePath: "/repo/wt", worktreeBranch: "board/review-card", baseBranch: "main" };
+    const commitTaskFile = vi.fn(async (_id: string, file: string) => ({
+      task: reviewCard,
+      ok: true,
+      file,
+      message: "committed",
+      commit: "abc123",
+    }));
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      capped: false,
+      files: [{ file: "src/a.ts", additions: 1, deletions: 0, status: "modified" as const }],
+    }));
+    const getTaskCommitStatus = vi.fn(async () => ({
+      committedFiles: ["src/a.ts"],
+      uncommittedFiles: [],
+    }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+      detailTab: "files",
+      reviewDiffStat: {
+        taskId: "review-card",
+        taskUpdatedAt: 1,
+        status: "success",
+        label: "1 file · +1 -0 ›",
+        response: {
+          kind: "diff" as const,
+          capped: false,
+          files: [{ file: "src/a.ts", additions: 1, deletions: 0, status: "modified" as const }],
+        },
+      },
+    });
+
+    await handleKeypress({ name: "c", sequence: "c" } as any, s, actions({ client: { commitTaskFile, getTaskDiff, getTaskCommitStatus } }));
+
+    expect(commitTaskFile).toHaveBeenCalledWith("review-card", "src/a.ts");
+    expect(getTaskDiff).toHaveBeenCalledWith("review-card");
+    expect(getTaskCommitStatus).toHaveBeenCalledWith("review-card");
+    expect(s.status).toContain("committed src/a.ts");
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("committed");
+    expect(text).not.toContain("+1");
+  });
+
+  it("diff view c commits the selected file and refreshes the diff", async () => {
+    const reviewCard = { ...task("review-card", "review"), worktreePath: "/repo/wt", worktreeBranch: "board/review-card", baseBranch: "main" };
+    const commitTaskFile = vi.fn(async (_id: string, file: string) => ({
+      task: reviewCard,
+      ok: true,
+      file,
+      message: "committed",
+      commit: "def456",
+    }));
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      capped: false,
+      root: "/repo/wt",
+      files: [{ file: "src/a.ts", additions: 1, deletions: 0, status: "modified" as const, patch: "@@ -1 +1 @@\n+a" }],
+    }));
+    const getTaskCommitStatus = vi.fn(async () => ({
+      committedFiles: ["src/a.ts"],
+      uncommittedFiles: [],
+    }));
+    const s = state({
+      viewState: { view: "diff", previousView: "board" },
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+      diffView: {
+        taskId: "review-card",
+        sourceLabel: "worktree diff",
+        dirtyAtDispatch: false,
+        loading: false,
+        kind: "diff",
+        capped: false,
+        files: [{ file: "src/a.ts", additions: 1, deletions: 0, status: "modified" as const, patch: "@@ -1 +1 @@\n+a" }],
+        selectedFileIndex: 0,
+        fileSelectionLocked: false,
+        reviewedFiles: new Set(),
+        root: "/repo/wt",
+      },
+    });
+
+    await handleKeypress({ name: "c", sequence: "c" } as any, s, actions({ client: { commitTaskFile, getTaskDiff, getTaskCommitStatus } }));
+
+    expect(commitTaskFile).toHaveBeenCalledWith("review-card", "src/a.ts");
+    expect(getTaskDiff).toHaveBeenCalledWith("review-card");
+    expect(getTaskCommitStatus).toHaveBeenCalledWith("review-card");
+    expect(s.status).toContain("committed src/a.ts");
+    expect(s.diffView?.commitStatus).toEqual({ committedFiles: ["src/a.ts"], uncommittedFiles: [] });
+  });
+
+  it("integrate prompts with committed and remaining files before committing dirty worktree files", async () => {
+    const reviewCard = {
+      ...task("review-card", "review"),
+      worktreePath: "/repo/wt",
+      worktreeBranch: "board/review-card",
+      baseBranch: "main",
+    };
+    const getTaskCommitStatus = vi.fn(async () => ({
+      committedFiles: ["src/a.ts"],
+      uncommittedFiles: ["src/b.ts", "src/c.ts"],
+    }));
+    const integrateTask = vi.fn(async () => ({ task: reviewCard, ok: true, conflict: false, message: "integrated" }));
+    const runAction = vi.fn(async (_label: string, action: (task: typeof reviewCard) => Promise<unknown>) => {
+      await action(reviewCard);
+    });
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+    });
+
+    await handleKeypress({ name: "i", sequence: "i" } as any, s, actions({ client: { getTaskCommitStatus, integrateTask }, runAction }));
+
+    expect(s.pendingConfirmation).toEqual({ action: "integrate", taskId: "review-card" });
+    const prompt = textOf(renderApp(fakeUi(), s));
+    expect(prompt).toContain("Already committed on task branch");
+    expect(prompt).toContain("src/a.ts");
+    expect(prompt).toContain("Remaining uncommitted files");
+    expect(prompt).toContain("src/b.ts");
+    expect(integrateTask).not.toHaveBeenCalled();
+
+    await handleKeypress({ name: "i", sequence: "i" } as any, s, actions({ client: { getTaskCommitStatus, integrateTask }, runAction }));
+    expect(integrateTask).toHaveBeenCalledWith("review-card", undefined, { commitRemaining: true });
   });
 
   it("files tab selection scrolls only when the selected file leaves the visible window", async () => {
@@ -3911,6 +4040,8 @@ function actions(overrides: Record<string, unknown> = {}) {
       moveTask: vi.fn(async () => []),
       updateTask: vi.fn(async (id: string) => ({ ...task(id, "todo"), id })),
       getTaskDiff: vi.fn(async () => ({ kind: "diff", capped: false, files: [] })),
+      getTaskCommitStatus: vi.fn(async () => ({ committedFiles: [], uncommittedFiles: [] })),
+      commitTaskFile: vi.fn(async (_id: string, file: string) => ({ task: task("review-card", "review"), ok: true, file, message: "committed" })),
       listComments: vi.fn(async () => []),
       addComment: vi.fn(async () => ({ id: "comment-1", taskId: "todo-card", author: "User", body: "", createdAt: 1 })),
     },

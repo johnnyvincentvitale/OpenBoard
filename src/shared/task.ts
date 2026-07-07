@@ -9,6 +9,22 @@ export interface DiffFile {
   status: "added" | "deleted" | "modified";
 }
 
+/** File-level commit state for a Review worktree before integration. */
+export interface WorktreeCommitStatus {
+  committedFiles: string[];
+  uncommittedFiles: string[];
+}
+
+/** Result of committing one changed file on a task worktree branch. */
+export interface FileCommitOutcome {
+  task: Task;
+  ok: boolean;
+  file: string;
+  message: string;
+  commit?: string;
+  remainingUncommittedFiles?: string[];
+}
+
 /**
  * Structured diff response from GET /api/tasks/:id/diff.
  * - `kind: "diff"` carries the file-level patches. `capped` is true when
@@ -318,6 +334,8 @@ export interface Task {
 
 /** A sentinel value for manual (UI/CLI/API) task completion moves. */
 export const USER_COMPLETED_BY = "User" as const;
+/** Attribution used when Integrate successfully merges and cleans up a task. */
+export const INTEGRATED_COMPLETED_BY = "Integrated by User" as const;
 
 export interface MoveTaskBody {
   column: Column;
@@ -499,8 +517,12 @@ export interface Dispatcher {
   initGitAndRun(taskId: string): Promise<Task>;
   /** Merge the upstream base branch into the task's worktree branch. */
   syncUpstream(taskId: string): Promise<MergeOutcome>;
+  /** File-level commit state for the task worktree. */
+  getWorktreeCommitStatus(taskId: string, targetBranch?: string): Promise<WorktreeCommitStatus>;
+  /** Commit one file's current worktree changes onto the task branch. */
+  commitFile(taskId: string, file: string, message?: string): Promise<FileCommitOutcome>;
   /** Merge the task's worktree branch into `targetBranch`, remove the worktree, keep the branch. */
-  integrate(taskId: string, targetBranch?: string): Promise<MergeOutcome>;
+  integrate(taskId: string, targetBranch?: string, options?: { commitRemaining?: boolean }): Promise<MergeOutcome>;
   /** Delete a task and, when safe/confirmed, remove its worktree while keeping the branch. */
   removeTask(taskId: string, options?: { force?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; worktree?: WorktreeCleanupOutcome; message?: string }>;
   /** Remove a Review card's worktree without merging; keeps the branch and card. */
@@ -519,6 +541,9 @@ export interface MergeOutcome {
   conflict: boolean;
   message: string;
   rebaseConflictPaths?: string[];
+  needsCommit?: boolean;
+  committedFiles?: string[];
+  uncommittedFiles?: string[];
 }
 
 /** Result of a non-integrate worktree cleanup path. */
@@ -545,6 +570,8 @@ export const TASK_ROUTE_PATTERNS = {
   initGit: "/api/tasks/:id/init-git",
   sync: "/api/tasks/:id/sync",
   integrate: "/api/tasks/:id/integrate",
+  commitStatus: "/api/tasks/:id/commit-status",
+  commitFile: "/api/tasks/:id/commit-file",
   discardWorktree: "/api/tasks/:id/discard-worktree",
   diff: "/api/tasks/:id/diff",
   comments: "/api/tasks/:id/comments",
@@ -564,6 +591,8 @@ export const buildTaskPath = {
   initGit: (id: string) => `/api/tasks/${encodeURIComponent(id)}/init-git`,
   sync: (id: string) => `/api/tasks/${encodeURIComponent(id)}/sync`,
   integrate: (id: string) => `/api/tasks/${encodeURIComponent(id)}/integrate`,
+  commitStatus: (id: string) => `/api/tasks/${encodeURIComponent(id)}/commit-status`,
+  commitFile: (id: string) => `/api/tasks/${encodeURIComponent(id)}/commit-file`,
   discardWorktree: (id: string) => `/api/tasks/${encodeURIComponent(id)}/discard-worktree`,
   diff: (id: string) => `/api/tasks/${encodeURIComponent(id)}/diff`,
   links: (id: string) => `/api/tasks/${encodeURIComponent(id)}/links`,

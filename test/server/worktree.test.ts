@@ -164,7 +164,7 @@ describe("GitWorktreeManager", () => {
     expect(g(repo, ["branch", "--list", "board/task-1"])).toContain("board/task-1");
   });
 
-  it("integrate commits dirty worktree changes before merging and removing the worktree", async () => {
+  it("integrate refuses dirty worktree changes until remaining files are explicitly committed", async () => {
     const repo = join(tmp, "repo");
     makeRepo(repo);
     const wtPath = join(tmp, "wt");
@@ -173,12 +173,47 @@ describe("GitWorktreeManager", () => {
     writeFileSync(join(wtPath, "calendar.txt"), "agent calendar work\n");
 
     const res = await mgr.integrate(repo, "board/task-dirty", "main", wtPath);
+    expect(res.ok).toBe(false);
+    expect(res.needsCommit).toBe(true);
+    expect(res.uncommittedFiles).toEqual(["calendar.txt"]);
+    expect(existsSync(wtPath)).toBe(true);
+    expect(existsSync(join(repo, "calendar.txt"))).toBe(false);
+  });
+
+  it("integrate commits dirty worktree changes after explicit confirmation", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const wtPath = join(tmp, "wt");
+    await mgr.createWorktree(repo, "board/task-dirty", wtPath);
+
+    writeFileSync(join(wtPath, "calendar.txt"), "agent calendar work\n");
+
+    const res = await mgr.integrate(repo, "board/task-dirty", "main", wtPath, { commitRemaining: true });
     expect(res.ok).toBe(true);
 
     expect(readFileSync(join(repo, "calendar.txt"), "utf8")).toBe("agent calendar work\n");
     expect(existsSync(wtPath)).toBe(false);
     expect(g(repo, ["branch", "--list", "board/task-dirty"])).toContain("board/task-dirty");
     expect(g(repo, ["log", "--oneline"])).toContain("openboard: save board/task-dirty");
+  });
+
+  it("commitFile commits only the selected dirty file on the task branch", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const wtPath = join(tmp, "wt");
+    await mgr.createWorktree(repo, "board/task-files", wtPath);
+
+    writeFileSync(join(wtPath, "one.txt"), "one\n");
+    writeFileSync(join(wtPath, "two.txt"), "two\n");
+
+    const first = await mgr.commitFile(wtPath, "one.txt");
+    expect(first.ok).toBe(true);
+    expect(first.remainingUncommittedFiles).toEqual(["two.txt"]);
+
+    const status = await mgr.commitStatus(wtPath, "main");
+    expect(status.committedFiles).toEqual(["one.txt"]);
+    expect(status.uncommittedFiles).toEqual(["two.txt"]);
+    expect(g(wtPath, ["show", "--name-only", "--format=", "HEAD"]).trim()).toBe("one.txt");
   });
 
   it("integrate rebases the task branch onto the target, fast-forwards base, and removes the worktree", async () => {

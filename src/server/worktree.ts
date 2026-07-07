@@ -47,6 +47,23 @@ export interface MergeResult {
   message: string;
   /** Files reported by git as unmerged/conflicted. */
   conflictPaths?: string[];
+  /** True when integration stopped because dirty files need an explicit commit decision. */
+  needsCommit?: boolean;
+  committedFiles?: string[];
+  uncommittedFiles?: string[];
+}
+
+export interface WorktreeCommitStatus {
+  committedFiles: string[];
+  uncommittedFiles: string[];
+}
+
+export interface FileCommitResult {
+  ok: boolean;
+  file: string;
+  message: string;
+  commit?: string;
+  remainingUncommittedFiles?: string[];
 }
 
 export interface WorktreeCleanupResult {
@@ -71,6 +88,10 @@ export interface WorktreeManager {
   createWorktree(dir: string, branch: string, worktreePath: string): Promise<WorktreeInfo>;
   /** Merge `baseBranch` into the branch checked out in `worktreePath`. */
   syncUpstream(worktreePath: string, baseBranch: string): Promise<MergeResult>;
+  /** File-level commit state relative to `baseRef`. */
+  commitStatus(worktreePath: string, baseRef: string): Promise<WorktreeCommitStatus>;
+  /** Commit one file's dirty changes on the task branch. */
+  commitFile(worktreePath: string, file: string, message?: string): Promise<FileCommitResult>;
   /**
    * Commit dirty worktree changes, merge `branch` into `targetBranch` in the
    * main repo, then remove `worktreePath` (keep branch).
@@ -80,6 +101,7 @@ export interface WorktreeManager {
     branch: string,
     targetBranch: string,
     worktreePath: string,
+    options?: { commitRemaining?: boolean; baseRef?: string },
   ): Promise<MergeResult>;
   /** True when tracked/untracked worktree changes exist, including unmerged paths. */
   isWorktreeDirty(worktreePath: string): Promise<boolean>;
@@ -149,6 +171,14 @@ function conflictPaths(status: string): string[] {
   return [...paths].filter(Boolean).sort();
 }
 
+function uniqueSorted(lines: string): string[] {
+  return [...new Set(lines.split("\n").map((line) => line.trim()).filter(Boolean))].sort();
+}
+
+function defaultCommitMessage(file: string): string {
+  return `openboard: save ${file}`;
+}
+
 export class GitWorktreeManager implements WorktreeManager {
   async isGitRepo(dir: string): Promise<boolean> {
     const result = await git(dir, ["rev-parse", "--is-inside-work-tree"]);
@@ -215,11 +245,66 @@ export class GitWorktreeManager implements WorktreeManager {
     return toMergeResult(result, `merge ${baseBranch} into worktree`);
   }
 
+  async commitStatus(worktreePath: string, baseRef: string): Promise<WorktreeCommitStatus> {
+    const committed = await git(worktreePath, ["diff", "--name-only", baseRef, "HEAD"]);
+    if (committed.code !== 0) fail(committed, `diff --name-only ${baseRef} HEAD`);
+
+    const dirtyTracked = await git(worktreePath, ["diff", "--name-only", "HEAD"]);
+    if (dirtyTracked.code !== 0) fail(dirtyTracked, "diff --name-only HEAD");
+
+    const untracked = await git(worktreePath, ["ls-files", "--others", "--exclude-standard"]);
+    if (untracked.code !== 0) fail(untracked, "ls-files --others");
+
+    return {
+      committedFiles: uniqueSorted(committed.stdout),
+      uncommittedFiles: [...new Set([...uniqueSorted(dirtyTracked.stdout), ...uniqueSorted(untracked.stdout)])].sort(),
+    };
+  }
+
+  async commitFile(worktreePath: string, file: string, message = defaultCommitMessage(file)): Promise<FileCommitResult> {
+    if (!file || file.startsWith("/") || file.includes("\0")) {
+      return { ok: false, file, message: "file must be a repo-relative path" };
+    }
+
+    const dirtyBefore = await this.commitStatus(worktreePath, "HEAD");
+    if (!dirtyBefore.uncommittedFiles.includes(file)) {
+      return { ok: false, file, message: "file has no uncommitted changes" };
+    }
+
+    const add = await git(worktreePath, ["add", "--", file]);
+    if (add.code !== 0) return { ok: false, file, message: `add file: ${errText(add)}` };
+
+    const commit = await git(worktreePath, [
+      "-c",
+      "user.name=openboard",
+      "-c",
+      "user.email=openboard@localhost",
+      "commit",
+      "--no-gpg-sign",
+      "-m",
+      message,
+      "--",
+      file,
+    ]);
+    if (commit.code !== 0) return { ok: false, file, message: `commit file: ${errText(commit)}` };
+
+    const head = await git(worktreePath, ["rev-parse", "--short", "HEAD"]);
+    const dirtyAfter = await this.commitStatus(worktreePath, "HEAD");
+    return {
+      ok: true,
+      file,
+      message: `committed ${file}`,
+      ...(head.code === 0 ? { commit: head.stdout.trim() } : {}),
+      remainingUncommittedFiles: dirtyAfter.uncommittedFiles,
+    };
+  }
+
   async integrate(
     repoDir: string,
     branch: string,
     targetBranch: string,
     worktreePath: string,
+    options: { commitRemaining?: boolean; baseRef?: string } = {},
   ): Promise<MergeResult> {
     // Agents normally leave file edits uncommitted. Capture those edits on the
     // task branch first, or integration would merge an unchanged branch and then
@@ -233,6 +318,18 @@ export class GitWorktreeManager implements WorktreeManager {
         ok: false,
         conflict: true,
         message: "worktree has unresolved merge conflicts — resolve them before integrate",
+      };
+    }
+    const baseRef = options.baseRef ?? targetBranch;
+    const commitStatus = await this.commitStatus(worktreePath, baseRef);
+    if (commitStatus.uncommittedFiles.length > 0 && !options.commitRemaining) {
+      return {
+        ok: false,
+        conflict: false,
+        needsCommit: true,
+        committedFiles: commitStatus.committedFiles,
+        uncommittedFiles: commitStatus.uncommittedFiles,
+        message: "worktree has uncommitted files; confirm committing remaining files before integrate",
       };
     }
     if (status.stdout.trim().length > 0) {

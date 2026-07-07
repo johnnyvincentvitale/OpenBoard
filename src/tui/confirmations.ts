@@ -4,7 +4,7 @@ import type { Column, PermissionOverrides, Task } from "../shared";
  * Card-level actions that require a second press to confirm before executing.
  * These are bound to single keys in board view (run/retry/abort/move-to-done/archive/delete/discard).
  */
-export type ConfirmableAction = "run" | "retry" | "abort" | "move-to-done" | "archive" | "delete" | "discard-worktree";
+export type ConfirmableAction = "run" | "retry" | "abort" | "move-to-done" | "archive" | "delete" | "discard-worktree" | "integrate";
 
 /** Canonical display order for confirmable actions. */
 export const CONFIRMABLE_ACTIONS: readonly ConfirmableAction[] = [
@@ -15,6 +15,7 @@ export const CONFIRMABLE_ACTIONS: readonly ConfirmableAction[] = [
   "archive",
   "delete",
   "discard-worktree",
+  "integrate",
 ];
 
 /** A pending confirmation waiting for the same action/key on the same task. */
@@ -155,6 +156,8 @@ function actionKey(action: ConfirmableAction): string {
       return "d";
     case "discard-worktree":
       return "D";
+    case "integrate":
+      return "i";
   }
 }
 
@@ -174,6 +177,8 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
       return presentParticiple ? "deleting" : "delete";
     case "discard-worktree":
       return presentParticiple ? "discarding worktree" : "discard worktree";
+    case "integrate":
+      return presentParticiple ? "integrating" : "integrate";
   }
 }
 
@@ -247,6 +252,12 @@ export function buildConfirmationCopy(
         `Remove the task worktree for "${task.title}".`,
         "The Review card and board/* branch stay in place.",
         "Use this for audit/review cards that should never integrate.",
+      ];
+      break;
+    case "integrate":
+      body = [
+        `Commit remaining worktree files for "${task.title}", then integrate the task branch.`,
+        "Already committed task files stay as their own commits.",
       ];
       break;
   }

@@ -634,19 +634,67 @@ export function registerTaskRoutes(
     }
   });
 
+  app.get(TASK_ROUTE_PATTERNS.commitStatus, async (c) => {
+    const id = c.req.param("id");
+    try {
+      const targetBranch = c.req.query("targetBranch") || undefined;
+      const status = await dispatcher.getWorktreeCommitStatus(id, targetBranch);
+      return c.json(status);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
+  app.post(TASK_ROUTE_PATTERNS.commitFile, async (c) => {
+    const id = c.req.param("id");
+    try {
+      let body: { file?: unknown; message?: unknown };
+      try {
+        body = await c.req.json();
+      } catch {
+        throw AdapterError.validation("Request body must be valid JSON");
+      }
+      if (typeof body.file !== "string" || body.file.trim().length === 0) {
+        throw AdapterError.validation("file must be a non-empty string");
+      }
+      const message = typeof body.message === "string" && body.message.trim().length > 0
+        ? body.message
+        : undefined;
+      const outcome = await dispatcher.commitFile(id, body.file, message);
+      store.addEvent({ taskId: id, type: "task_file_committed", body: { ok: outcome.ok, file: outcome.file, message: outcome.message, commit: outcome.commit } });
+      return c.json(outcome, outcome.ok ? 200 : 409);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
+
   // Merge the worktree branch into the target (base) branch, remove the worktree, keep the branch.
   app.post(TASK_ROUTE_PATTERNS.integrate, async (c) => {
     const id = c.req.param("id");
     try {
       let target: string | undefined;
+      let commitRemaining = false;
       try {
-        const body = (await c.req.json()) as { targetBranch?: unknown };
+        const body = (await c.req.json()) as { targetBranch?: unknown; commitRemaining?: unknown };
         if (typeof body?.targetBranch === "string") target = body.targetBranch;
+        commitRemaining = body?.commitRemaining === true;
       } catch {
         // Body optional — integrate falls back to the task's recorded base branch.
       }
-      const outcome = await dispatcher.integrate(id, target);
-      store.addEvent({ taskId: id, type: "task_integrated", body: { ok: outcome.ok, conflict: outcome.conflict, message: outcome.message, targetBranch: target } });
+      const outcome = await dispatcher.integrate(id, target, { commitRemaining });
+      store.addEvent({
+        taskId: id,
+        type: "task_integrated",
+        body: {
+          ok: outcome.ok,
+          conflict: outcome.conflict,
+          message: outcome.message,
+          targetBranch: target,
+          needsCommit: outcome.needsCommit,
+          column: outcome.task.column,
+          completedBy: outcome.task.completedBy,
+        },
+      });
       return c.json(outcome, outcome.ok ? 200 : 409);
     } catch (err) {
       return respondWithError(c, err);

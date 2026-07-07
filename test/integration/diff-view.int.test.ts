@@ -41,6 +41,8 @@ function makeDispatcher(store: SqliteTaskStore): Dispatcher {
     abort: vi.fn(async () => undefined),
     initGitAndRun: vi.fn(async (taskId: string) => store.get(taskId)!),
     syncUpstream: vi.fn(async (taskId: string) => ({ task: store.get(taskId)!, ok: true, conflict: false, message: "ok" })),
+    getWorktreeCommitStatus: vi.fn(async () => ({ committedFiles: [], uncommittedFiles: [] })),
+    commitFile: vi.fn(async (taskId: string, file: string) => ({ task: store.get(taskId)!, ok: true, file, message: "committed" })),
     integrate: vi.fn(async (taskId: string) => ({ task: store.get(taskId)!, ok: true, conflict: false, message: "ok" })),
     removeTask: vi.fn(async (taskId: string) => {
       store.remove(taskId);

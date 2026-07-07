@@ -105,7 +105,12 @@ export const CompleteTaskInputSchema = z
   .strict();
 export const CommentTaskInputSchema = z.object({ taskId: IdSchema, author: z.string(), body: z.string() }).strict();
 export const IntegrateTaskInputSchema = z
-  .object({ taskId: IdSchema, confirmReviewed: z.literal(true), targetBranch: z.string().optional() })
+  .object({
+    taskId: IdSchema,
+    confirmReviewed: z.literal(true),
+    targetBranch: z.string().optional(),
+    commitRemaining: z.boolean().optional(),
+  })
   .strict();
 export const SelectInstanceInputSchema = z.object({ name: IdSchema }).strict();
 
@@ -284,7 +289,7 @@ export async function syncTask(input: unknown, options: McpToolOptions = {}): Pr
 export async function integrateTask(input: unknown, options: McpToolOptions = {}): Promise<MergeResult> {
   const parsed = IntegrateTaskInputSchema.parse(input);
   const client = await createMcpBoardClient(options);
-  const outcome = await client.integrateTask(parsed.taskId, parsed.targetBranch);
+  const outcome = await client.integrateTask(parsed.taskId, parsed.targetBranch, { commitRemaining: parsed.commitRemaining });
   return { boardUrl: client.boardUrl, outcome: { ...outcome, task: toTaskSummary(outcome.task) } };
 }
 

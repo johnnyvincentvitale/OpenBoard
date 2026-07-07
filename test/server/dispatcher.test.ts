@@ -1058,6 +1058,11 @@ describe("TaskDispatcher", () => {
       const ran = await dispatcher.run(task.id);
       const wtPath = ran.worktreePath!;
       writeFileSync(join(wtPath, "feature.txt"), "work\n");
+      execFileSync("git", ["add", "feature.txt"], { cwd: wtPath, env: cleanGitEnv() });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "--no-gpg-sign", "-m", "feature"], {
+        cwd: wtPath,
+        env: cleanGitEnv(),
+      });
 
       // integrate() refuses to run against a still-running session (TOCTOU
       // guard), so let the run reach its normal idle/review completion first

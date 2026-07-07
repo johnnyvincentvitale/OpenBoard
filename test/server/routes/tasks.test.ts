@@ -37,6 +37,8 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
   abort: ReturnType<typeof vi.fn>;
   initGitAndRun: ReturnType<typeof vi.fn>;
   syncUpstream: ReturnType<typeof vi.fn>;
+  getWorktreeCommitStatus: ReturnType<typeof vi.fn>;
+  commitFile: ReturnType<typeof vi.fn>;
   integrate: ReturnType<typeof vi.fn>;
   removeTask: ReturnType<typeof vi.fn>;
   discardWorktree: ReturnType<typeof vi.fn>;
@@ -69,6 +71,12 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
       const task = store.get(taskId);
       if (!task) throw new Error(`unknown task ${taskId}`);
       return { task, ok: true, conflict: false, message: "merged" };
+    }),
+    getWorktreeCommitStatus: vi.fn(async () => ({ committedFiles: [], uncommittedFiles: [] })),
+    commitFile: vi.fn(async (taskId: string, file: string) => {
+      const task = store.get(taskId);
+      if (!task) throw new Error(`unknown task ${taskId}`);
+      return { task, ok: true, file, message: "committed" };
     }),
     integrate: vi.fn(async (taskId: string, _targetBranch?: string) => {
       const task = store.get(taskId);
@@ -166,6 +174,14 @@ class FakeWorktrees implements WorktreeManager {
 
   async syncUpstream() {
     return { ok: true, conflict: false, message: "merged" };
+  }
+
+  async commitStatus() {
+    return { committedFiles: [], uncommittedFiles: [] };
+  }
+
+  async commitFile(_worktreePath: string, file: string) {
+    return { ok: true, file, message: "committed" };
   }
 
   async integrate() {
@@ -1549,7 +1565,48 @@ describe("worktree isolation routes", () => {
       body: JSON.stringify({ targetBranch: "dev" }),
     });
     expect(res.status).toBe(200);
-    expect(dispatcher.integrate).toHaveBeenCalledWith(task.id, "dev");
+    expect(dispatcher.integrate).toHaveBeenCalledWith(task.id, "dev", { commitRemaining: false });
+  });
+
+  it("GET /commit-status delegates to dispatcher", async () => {
+    const task = store.create({ title: "A", description: "", directory: repoDir });
+    dispatcher.getWorktreeCommitStatus.mockResolvedValueOnce({
+      committedFiles: ["src/a.ts"],
+      uncommittedFiles: ["src/b.ts"],
+    });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/commit-status?targetBranch=dev`);
+
+    expect(res.status).toBe(200);
+    expect(dispatcher.getWorktreeCommitStatus).toHaveBeenCalledWith(task.id, "dev");
+    expect(await res.json()).toEqual({ committedFiles: ["src/a.ts"], uncommittedFiles: ["src/b.ts"] });
+  });
+
+  it("POST /commit-file commits one file and records an event", async () => {
+    const task = store.create({ title: "A", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/commit-file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: "src/a.ts" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatcher.commitFile).toHaveBeenCalledWith(task.id, "src/a.ts", undefined);
+    const events = store.listEvents(task.id);
+    expect(events.at(-1)?.type).toBe("task_file_committed");
+  });
+
+  it("POST /integrate passes commitRemaining through", async () => {
+    const task = store.create({ title: "A", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/integrate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetBranch: "dev", commitRemaining: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(dispatcher.integrate).toHaveBeenCalledWith(task.id, "dev", { commitRemaining: true });
   });
 
   it("POST /discard-worktree delegates to dispatcher and records the outcome", async () => {
