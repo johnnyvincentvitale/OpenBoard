@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { ClaudeAcpRunner, decideClaudeAcpPermission } from "../../src/server/claude-acp-runner";
+import { ClaudeAcpRunner, CodexAcpRunner, decideClaudeAcpPermission } from "../../src/server/claude-acp-runner";
 import type { Task } from "../../src/shared";
 
 const task: Task = {
@@ -209,5 +209,59 @@ describe("ClaudeAcpRunner", () => {
     expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "cat /tmp/secret" } }), "/repo", "manual")).toBe("reject");
     expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "mcp__openboard__complete_task" } }, rawInput: {} }), "/repo", "manual")).toBe("allow");
     expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "/repo", "bypassPermissions")).toBe("allow");
+  });
+});
+
+describe("CodexAcpRunner", () => {
+  it("starts a Codex ACP session with OpenBoard MCP and Codex/OpenAI model metadata", async () => {
+    const harness = makeAcpHarness();
+    const runner = new CodexAcpRunner({
+      adapterBaseUrl: "http://127.0.0.1:4097",
+      boardToken: "token",
+      instanceName: "alpha",
+      command: "codex-acp",
+      commandArgs: ["--stdio"],
+      spawn: harness.spawn as never,
+      env: {},
+    });
+    const codexTask: Task = { ...task, harness: "codex", model: { providerID: "codex", id: "gpt-5-codex" } };
+
+    const runPromise = runner.run({ task: codexTask, directory: "/repo", prompt: "Do Codex work", runStartedAt: 456 });
+    harness.respond(await harness.nextMessage("initialize"), { protocolVersion: 1 });
+    const sessionNew = await harness.nextMessage("session/new");
+    harness.respond(sessionNew, { sessionId: "codex-session-1" });
+    harness.respond(await harness.nextMessage("session/set_mode"), {});
+    const prompt = await harness.nextMessage("session/prompt");
+    const result = await runPromise;
+
+    expect(result).toEqual({ sessionId: "codex-session-1", sessionName: "openboard-task_1-456", status: "running" });
+    expect(harness.spawn).toHaveBeenCalledWith("codex-acp", ["--stdio"], {
+      cwd: "/repo",
+      env: {},
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    expect(sessionNew.params).toEqual({
+      cwd: "/repo",
+      mcpServers: [{ name: "openboard", command: "openboard", args: ["mcp", "--instance", "alpha"], env: [] }],
+      _meta: {
+        codex: { options: { model: "gpt-5-codex" } },
+        openai: { options: { model: "gpt-5-codex" } },
+      },
+    });
+    const promptText = ((prompt.params?.prompt as Array<{ text?: string }> | undefined)?.[0]?.text) ?? "";
+    expect(promptText).toContain("OPENBOARD CODEX ACP WORKER CONTRACT");
+    expect(promptText).toContain('complete_task with { taskId: "task_1", runStartedAt: 456');
+  });
+
+  it("allows OpenBoard report tools by bare or namespaced ACP tool name", () => {
+    const request = (toolCall: Record<string, unknown>) => ({
+      sessionId: "session",
+      toolCall,
+      options: [{ optionId: "allow", kind: "allow" }, { optionId: "reject", kind: "reject" }],
+    });
+
+    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "complete_task" } }), "/repo", "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "openboard.block_task" } }), "/repo", "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "other.complete_task" } }), "/repo", "manual")).toBe("reject");
   });
 });

@@ -52,7 +52,7 @@ export interface DiffViewState {
 
 /** Diff-source label shown in the header, derived from how the task's session ran. */
 export function diffSourceLabel(task: Pick<Task, "harness" | "isolation">): string {
-  if (task.harness === "claude-code") return "harness diff";
+  if (task.harness && task.harness !== "opencode") return "harness diff";
   if (task.isolation === "worktree") return "worktree diff";
   return "working tree diff";
 }

@@ -356,6 +356,33 @@ describe("POST /api/tasks", () => {
     expect(store.get(body.id)?.model).toEqual(model);
   });
 
+  it("creates a Gemini ACP task without resolving an OpenCode model", async () => {
+    const app = buildApp(store, dispatcher, async () => {
+      throw new Error("roster should not be fetched for Gemini ACP tasks");
+    });
+
+    const model = { providerID: "gemini-acp", id: "gemini-2.5-pro" };
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "agent",
+        harness: "gemini-acp",
+        title: "Gemini worker",
+        description: "Use Gemini ACP",
+        directory: repoDir,
+        agent: "stale-opencode-profile",
+        model,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Task;
+    expect(body.harness).toBe("gemini-acp");
+    expect(body.agent).toBeUndefined();
+    expect(body.model).toEqual(model);
+  });
+
   it("rejects claude-code tasks with a non-Claude model provider", async () => {
     const app = buildApp(store, dispatcher);
 

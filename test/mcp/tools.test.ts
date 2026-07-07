@@ -233,6 +233,44 @@ describe("MCP add_tasks", () => {
     });
   });
 
+  it("creates Codex ACP tasks through POST /api/tasks", async () => {
+    const options = makeOptions([`${CWD}/app`]);
+
+    const result = await addTasks(
+      {
+        tasks: [
+          {
+            title: " Codex worker ",
+            description: "Launch Codex ACP",
+            directory: `${CWD}/app`,
+            harness: "codex",
+            model: "codex/gpt-5-codex",
+            isolation: "worktree",
+          },
+        ],
+      },
+      options,
+    );
+
+    expect(result.created[0]).toMatchObject({
+      id: "task-1",
+      type: "agent",
+      harness: "codex",
+      title: "Codex worker",
+      model: { providerID: "codex", id: "gpt-5-codex" },
+      isolation: "worktree",
+    });
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      type: "agent",
+      harness: "codex",
+      title: "Codex worker",
+      description: "Launch Codex ACP",
+      directory: `${CWD}/app`,
+      model: { providerID: "codex", id: "gpt-5-codex" },
+      isolation: "worktree",
+    });
+  });
+
   it("creates multiple tasks without calling any run endpoint", async () => {
     const options = makeOptions([`${CWD}/one`, `${CWD}/two`]);
 

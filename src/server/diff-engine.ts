@@ -307,8 +307,8 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     };
   }
 
-  // --- Claude Code cards with harness worktree metadata ---
-  if (task.harness === "claude-code" && task.harnessCwd) {
+  // --- ACP harness cards with harness worktree metadata ---
+  if (isAcpHarness(task) && task.harnessCwd) {
     const worktreeRef = task.harnessBranch ?? task.harnessCommit;
     if (worktreeRef) {
       const ref = task.baseCommit ?? "HEAD";
@@ -387,8 +387,12 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
   return {
     kind: "no-git",
     reason: "No git evidence available for this task." +
-      (task.harness === "claude-code"
-        ? " Claude Code harness metadata was not recorded at dispatch."
+      (isAcpHarness(task)
+        ? " ACP harness metadata was not recorded at dispatch."
         : " This card was dispatched without a base commit."),
   };
+}
+
+function isAcpHarness(task: Pick<Task, "harness">): boolean {
+  return task.harness !== undefined && task.harness !== "opencode";
 }

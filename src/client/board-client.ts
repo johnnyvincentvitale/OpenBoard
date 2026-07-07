@@ -27,8 +27,13 @@ import {
   buildTaskPath,
   CLAUDE_CODE_MODEL_PROVIDER,
   CLAUDE_CODE_PERMISSION_MODES,
+  CODEX_MODEL_PROVIDER,
+  CURSOR_ACP_MODEL_PROVIDER,
+  GEMINI_ACP_MODEL_PROVIDER,
+  HERMES_MODEL_PROVIDER,
   PERMISSION_OVERRIDE_ACTIONS,
   PERMISSION_OVERRIDE_CATEGORIES,
+  PI_CODING_AGENT_MODEL_PROVIDER,
   TASK_HARNESSES,
   TASK_ISOLATION_MODES,
 } from "../shared";
@@ -169,6 +174,29 @@ const VALID_CLAUDE_PERMISSION_MODE = new Set<ClaudeCodePermissionMode>(CLAUDE_CO
 const VALID_PERMISSION_OVERRIDE_CATEGORY = new Set<PermissionOverrideCategory>(PERMISSION_OVERRIDE_CATEGORIES);
 const VALID_PERMISSION_OVERRIDE_ACTION = new Set<PermissionOverrideAction>(PERMISSION_OVERRIDE_ACTIONS);
 
+function harnessList(): string {
+  return TASK_HARNESSES.join(", ");
+}
+
+function modelProviderForHarness(harness: TaskHarness | undefined): string | null {
+  switch (harness) {
+    case "claude-code":
+      return CLAUDE_CODE_MODEL_PROVIDER;
+    case "codex":
+      return CODEX_MODEL_PROVIDER;
+    case "gemini-acp":
+      return GEMINI_ACP_MODEL_PROVIDER;
+    case "hermes":
+      return HERMES_MODEL_PROVIDER;
+    case "pi-coding-agent":
+      return PI_CODING_AGENT_MODEL_PROVIDER;
+    case "cursor-acp":
+      return CURSOR_ACP_MODEL_PROVIDER;
+    default:
+      return null;
+  }
+}
+
 function normalizePermissionOverrides(overrides: PermissionOverrides): PermissionOverrides {
   const result: PermissionOverrides = {};
   for (const [key, value] of Object.entries(overrides)) {
@@ -280,7 +308,7 @@ function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): Upda
   const payload: UpdateTaskInput = {};
   if (task.type !== undefined) payload.type = task.type;
   if (task.harness !== undefined) {
-    if (!VALID_HARNESS.has(task.harness)) throw new Error("harness must be 'opencode' or 'claude-code'");
+    if (!VALID_HARNESS.has(task.harness)) throw new Error(`harness must be one of: ${harnessList()}`);
     payload.harness = task.harness;
   }
   if (task.title !== undefined) {
@@ -390,13 +418,13 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
   };
   if (payload.type === "agent" && task.harness !== undefined) {
     if (!VALID_HARNESS.has(task.harness)) {
-      throw new Error("harness must be 'opencode' or 'claude-code'");
+      throw new Error(`harness must be one of: ${harnessList()}`);
     }
     payload.harness = task.harness;
   }
 
   const agent = task.agent?.trim();
-  if (payload.type === "agent" && payload.harness !== "claude-code" && agent) payload.agent = agent;
+  if (payload.type === "agent" && (payload.harness === undefined || payload.harness === "opencode") && agent) payload.agent = agent;
 
   const claudePermissionMode = task.claudePermissionMode?.trim();
   if (claudePermissionMode) {
@@ -414,8 +442,9 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
 
   if (payload.type === "agent" && task.model !== undefined) {
     const model = typeof task.model === "string" ? parseModelRef(task.model) : task.model;
-    if (payload.harness === "claude-code" && model.providerID !== CLAUDE_CODE_MODEL_PROVIDER) {
-      throw new Error(`claude-code task model must use "${CLAUDE_CODE_MODEL_PROVIDER}/model-id"`);
+    const expectedProvider = modelProviderForHarness(payload.harness);
+    if (expectedProvider && model.providerID !== expectedProvider) {
+      throw new Error(`${payload.harness} task model must use "${expectedProvider}/model-id"`);
     }
     payload.model = model;
   }
@@ -428,7 +457,7 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
   }
 
   if (task.permissionOverrides !== undefined) {
-    if (payload.type !== "agent" || payload.harness === "claude-code" || payload.isolation !== "in-place") {
+    if (payload.type !== "agent" || (payload.harness !== undefined && payload.harness !== "opencode") || payload.isolation !== "in-place") {
       throw new Error("permissionOverrides can only be set for in-place OpenCode agent tasks");
     }
     payload.permissionOverrides = normalizePermissionOverrides(task.permissionOverrides);

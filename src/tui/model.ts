@@ -664,7 +664,7 @@ export function taskManualFilterValue(task: Pick<Task, "type" | "assignedTo">): 
 /** The agent/harness label a card filters by. Claude Code cards group by harness; OpenCode cards by roster agent id. */
 export function taskAgentFilterValue(task: Pick<Task, "type" | "harness" | "agent">): string | undefined {
   if (task.type === "manual") return undefined;
-  if (task.harness === "claude-code") return "claude-code";
+  if (task.harness && task.harness !== "opencode") return task.harness;
   return task.agent?.trim() || "unassigned";
 }
 

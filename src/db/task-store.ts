@@ -9,6 +9,7 @@ import type {
   ModelRef,
   PermissionOverrides,
   Task,
+  TaskHarness,
   ClaudeCodePermissionMode,
   TaskComment,
   TaskCompletionLocation,
@@ -18,7 +19,7 @@ import type {
   TaskRunState,
   TaskStore,
 } from "../shared";
-import { DEFAULT_COLUMN } from "../shared";
+import { DEFAULT_COLUMN, TASK_HARNESSES } from "../shared";
 import { bootstrap } from "./schema";
 
 const TASK_SCHEMA_SQL = `
@@ -209,10 +210,11 @@ interface TaskEventRowRecord {
 }
 
 function toTask(record: TaskRowRecord): Task {
+  const harness = (TASK_HARNESSES as readonly string[]).includes(record.harness) ? record.harness as TaskHarness : "opencode";
   const task: Task = {
     id: record.id,
     type: record.task_type === "manual" ? "manual" : "agent",
-    harness: record.harness === "claude-code" ? "claude-code" : "opencode",
+    harness,
     title: record.title,
     description: record.description,
     directory: record.directory,

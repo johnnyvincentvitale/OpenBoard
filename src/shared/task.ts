@@ -51,12 +51,27 @@ export type TaskIsolationMode = (typeof TASK_ISOLATION_MODES)[number];
 export const TASK_TYPES = ["manual", "agent"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
-export const TASK_HARNESSES = ["opencode", "claude-code"] as const;
+export const TASK_HARNESSES = ["opencode", "claude-code", "codex", "gemini-acp", "hermes", "pi-coding-agent", "cursor-acp"] as const;
 export type TaskHarness = (typeof TASK_HARNESSES)[number];
+export type AcpTaskHarness = Exclude<TaskHarness, "opencode">;
 
 export const CLAUDE_CODE_MODEL_PROVIDER = "claude-code" as const;
 export const CLAUDE_CODE_MODEL_IDS = ["sonnet", "opus", "fable"] as const;
 export type ClaudeCodeModelId = (typeof CLAUDE_CODE_MODEL_IDS)[number];
+
+export const CODEX_MODEL_PROVIDER = "codex" as const;
+export const CODEX_MODEL_IDS = ["gpt-5.1-codex", "gpt-5-codex"] as const;
+export type CodexModelId = (typeof CODEX_MODEL_IDS)[number];
+
+export const GEMINI_ACP_MODEL_PROVIDER = "gemini-acp" as const;
+export const GEMINI_ACP_MODEL_IDS = ["gemini-2.5-pro", "gemini-2.5-flash"] as const;
+export type GeminiAcpModelId = (typeof GEMINI_ACP_MODEL_IDS)[number];
+
+export const HERMES_MODEL_PROVIDER = "hermes" as const;
+export const PI_CODING_AGENT_MODEL_PROVIDER = "pi-coding-agent" as const;
+export const PI_CODING_AGENT_MODEL_IDS = ["default"] as const;
+export type PiCodingAgentModelId = (typeof PI_CODING_AGENT_MODEL_IDS)[number];
+export const CURSOR_ACP_MODEL_PROVIDER = "cursor-acp" as const;
 
 export const CLAUDE_CODE_PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"] as const;
 export type ClaudeCodePermissionMode = (typeof CLAUDE_CODE_PERMISSION_MODES)[number];
@@ -130,6 +145,25 @@ export const CLAUDE_CODE_MODELS: readonly ModelRef[] = CLAUDE_CODE_MODEL_IDS.map
   providerID: CLAUDE_CODE_MODEL_PROVIDER,
   id,
 }));
+
+export const CODEX_MODELS: readonly ModelRef[] = CODEX_MODEL_IDS.map((id) => ({
+  providerID: CODEX_MODEL_PROVIDER,
+  id,
+}));
+
+export const GEMINI_ACP_MODELS: readonly ModelRef[] = GEMINI_ACP_MODEL_IDS.map((id) => ({
+  providerID: GEMINI_ACP_MODEL_PROVIDER,
+  id,
+}));
+
+export const HERMES_MODELS: readonly ModelRef[] = [{ providerID: HERMES_MODEL_PROVIDER, id: "default" }];
+
+export const PI_CODING_AGENT_MODELS: readonly ModelRef[] = PI_CODING_AGENT_MODEL_IDS.map((id) => ({
+  providerID: PI_CODING_AGENT_MODEL_PROVIDER,
+  id,
+}));
+
+export const CURSOR_ACP_MODELS: readonly ModelRef[] = [{ providerID: CURSOR_ACP_MODEL_PROVIDER, id: "default" }];
 
 export interface Task {
   id: string;

@@ -5,7 +5,23 @@
  */
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, TASK_ROUTE_PATTERNS, TASK_HARNESSES, TASK_ISOLATION_MODES, TASK_TYPES, USER_COMPLETED_BY, isColumn } from "../../shared";
+import {
+  CLAUDE_CODE_MODEL_PROVIDER,
+  CLAUDE_CODE_PERMISSION_MODES,
+  CODEX_MODEL_PROVIDER,
+  CURSOR_ACP_MODEL_PROVIDER,
+  GEMINI_ACP_MODEL_PROVIDER,
+  HERMES_MODEL_PROVIDER,
+  PERMISSION_OVERRIDE_ACTIONS,
+  PERMISSION_OVERRIDE_CATEGORIES,
+  PI_CODING_AGENT_MODEL_PROVIDER,
+  TASK_ROUTE_PATTERNS,
+  TASK_HARNESSES,
+  TASK_ISOLATION_MODES,
+  TASK_TYPES,
+  USER_COMPLETED_BY,
+  isColumn,
+} from "../../shared";
 import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
@@ -44,6 +60,33 @@ function isTaskHarness(value: unknown): value is TaskHarness {
 
 function isClaudePermissionMode(value: unknown): value is ClaudeCodePermissionMode {
   return typeof value === "string" && (CLAUDE_CODE_PERMISSION_MODES as readonly string[]).includes(value);
+}
+
+function isAcpHarness(harness: TaskHarness): boolean {
+  return harness !== "opencode";
+}
+
+function harnessLabel(harness: TaskHarness): string {
+  return harness;
+}
+
+function modelProviderForHarness(harness: TaskHarness): string | null {
+  switch (harness) {
+    case "opencode":
+      return null;
+    case "claude-code":
+      return CLAUDE_CODE_MODEL_PROVIDER;
+    case "codex":
+      return CODEX_MODEL_PROVIDER;
+    case "gemini-acp":
+      return GEMINI_ACP_MODEL_PROVIDER;
+    case "hermes":
+      return HERMES_MODEL_PROVIDER;
+    case "pi-coding-agent":
+      return PI_CODING_AGENT_MODEL_PROVIDER;
+    case "cursor-acp":
+      return CURSOR_ACP_MODEL_PROVIDER;
+  }
 }
 
 function isPermissionOverrides(value: unknown): value is PermissionOverrides {
@@ -88,15 +131,26 @@ export function registerTaskRoutes(
   }
 
   function resolveClaudeModel(explicitModel: unknown): ModelRef | undefined {
-    if (explicitModel === undefined) return undefined;
+    return resolveAcpModel("claude-code", explicitModel);
+  }
+
+  function resolveAcpModel(harness: TaskHarness, explicitModel: unknown): ModelRef | undefined {
+    const providerID = modelProviderForHarness(harness);
+    if (explicitModel === undefined || providerID === null) return undefined;
     const model = validateExplicitModel(explicitModel);
-    if (model.providerID !== CLAUDE_CODE_MODEL_PROVIDER) {
-      throw AdapterError.validation(`claude-code task model.providerID must be '${CLAUDE_CODE_MODEL_PROVIDER}'`);
+    if (model.providerID !== providerID) {
+      throw AdapterError.validation(`${harnessLabel(harness)} task model.providerID must be '${providerID}'`);
     }
     if (model.variant !== undefined) {
-      throw AdapterError.validation("claude-code task models cannot define variant");
+      throw AdapterError.validation(`${harnessLabel(harness)} task models cannot define variant`);
     }
     return model;
+  }
+
+  function compatibleAcpModel(model: ModelRef | null | undefined, harness: TaskHarness): ModelRef | null {
+    const providerID = modelProviderForHarness(harness);
+    if (providerID === null) return null;
+    return model?.providerID === providerID && model.variant === undefined ? model : null;
   }
 
   app.post(TASK_ROUTE_PATTERNS.create, async (c) => {
@@ -119,7 +173,7 @@ export function registerTaskRoutes(
         throw AdapterError.validation("type must be 'manual' or 'agent'");
       }
       if (!isTaskHarness(harness)) {
-        throw AdapterError.validation("harness must be 'opencode' or 'claude-code'");
+        throw AdapterError.validation(`harness must be one of: ${TASK_HARNESSES.join(", ")}`);
       }
       if (typeof directory !== "string" || directory.trim().length === 0) {
         throw AdapterError.validation("directory must be a non-empty string");
@@ -142,6 +196,9 @@ export function registerTaskRoutes(
       if (claudePermissionMode !== undefined && (taskType !== "agent" || harness !== "claude-code")) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
       }
+      if (taskType === "agent" && isAcpHarness(harness) && harness !== "claude-code" && claudePermissionMode !== undefined) {
+        throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
+      }
       if (permissionOverrides !== undefined && !isPermissionOverrides(permissionOverrides)) {
         throw AdapterError.validation(
           `permissionOverrides must be an object mapping ${PERMISSION_OVERRIDE_CATEGORIES.join("/")} to ${PERMISSION_OVERRIDE_ACTIONS.join("/")}`,
@@ -160,7 +217,7 @@ export function registerTaskRoutes(
       const resolvedModel = taskType === "agent"
         ? harness === "opencode"
           ? await resolveModel(agent, model)
-          : resolveClaudeModel(model)
+          : resolveAcpModel(harness, model)
         : undefined;
 
       const task = store.create({
@@ -355,7 +412,7 @@ export function registerTaskRoutes(
     const nextType = body.type === undefined ? (existing.type ?? "agent") : body.type;
     const nextHarness = body.harness === undefined ? (existing.harness ?? "opencode") : body.harness;
     if (!isTaskType(nextType)) throw AdapterError.validation("type must be 'manual' or 'agent'");
-    if (!isTaskHarness(nextHarness)) throw AdapterError.validation("harness must be 'opencode' or 'claude-code'");
+    if (!isTaskHarness(nextHarness)) throw AdapterError.validation(`harness must be one of: ${TASK_HARNESSES.join(", ")}`);
 
     const patch: UpdateTaskInput = {};
     if (body.title !== undefined) {
@@ -434,15 +491,19 @@ export function registerTaskRoutes(
       throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
     }
 
-    if (patch.harness === "claude-code") {
-      if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation("claude-code tasks cannot define agent");
-      // permissionOverrides is OpenCode-only — a task moving to (or staying on) claude-code
+    if (isAcpHarness(patch.harness)) {
+      if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation(`${harnessLabel(patch.harness)} tasks cannot define agent`);
+      // permissionOverrides is OpenCode-only — a task moving to (or staying on) an ACP
       // harness always drops any override, same as claudePermissionMode drops for opencode below.
       if (body.permissionOverrides !== undefined && body.permissionOverrides !== null) {
         throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
       }
+      if (patch.harness !== "claude-code" && body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
+        throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
+      }
       patch.agent = null;
-      patch.model = body.model === undefined ? existing.model : body.model === null ? null : resolveClaudeModel(body.model);
+      patch.model = body.model === undefined ? compatibleAcpModel(existing.model, patch.harness) : body.model === null ? null : resolveAcpModel(patch.harness, body.model);
+      if (patch.harness !== "claude-code") patch.claudePermissionMode = null;
       patch.permissionOverrides = null;
     } else {
       if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {

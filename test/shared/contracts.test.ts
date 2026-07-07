@@ -19,6 +19,12 @@ import {
   resolveOpenCodePermissionRules,
   UNATTENDED_PERMISSION,
   WRITE_FENCED_PERMISSION,
+  TASK_HARNESSES,
+  CODEX_MODELS,
+  GEMINI_ACP_MODELS,
+  HERMES_MODELS,
+  PI_CODING_AGENT_MODELS,
+  CURSOR_ACP_MODELS,
 } from "../../src/shared/index";
 
 describe("frozen contracts", () => {
@@ -57,6 +63,23 @@ describe("frozen contracts", () => {
   it("server defaults are distinct ports", () => {
     expect(OPENCODE_DEFAULTS.port).toBe(4096);
     expect(BOARD_SERVER_DEFAULTS.port).toBe(4097);
+  });
+
+  it("exposes all ACP task harnesses and their visible model rosters", () => {
+    expect(TASK_HARNESSES).toEqual([
+      "opencode",
+      "claude-code",
+      "codex",
+      "gemini-acp",
+      "hermes",
+      "pi-coding-agent",
+      "cursor-acp",
+    ]);
+    expect(CODEX_MODELS.map((model) => model.providerID)).toEqual(["codex", "codex"]);
+    expect(GEMINI_ACP_MODELS.map((model) => model.providerID)).toEqual(["gemini-acp", "gemini-acp"]);
+    expect(HERMES_MODELS).toEqual([{ providerID: "hermes", id: "default" }]);
+    expect(PI_CODING_AGENT_MODELS).toEqual([{ providerID: "pi-coding-agent", id: "default" }]);
+    expect(CURSOR_ACP_MODELS).toEqual([{ providerID: "cursor-acp", id: "default" }]);
   });
 
   it("AdapterError carries code -> status + envelope", () => {

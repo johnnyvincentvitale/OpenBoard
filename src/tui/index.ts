@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -309,6 +309,7 @@ const ISOLATION_FIELDS_LOCKED = ["isolation"] as const;
 const ISOLATION_FIELDS_EDITABLE = ["isolation", "permEdit", "permBash", "permWebfetch"] as const;
 const CONFIRM_FIELDS: readonly never[] = [];
 const TEXT_INPUT_COLUMNS = 56;
+const HARNESS_CYCLE: readonly TaskHarness[] = TASK_HARNESSES;
 type Overlay = "none" | "help" | "newTask" | "addInstance" | "renameInstance";
 type NewTaskField =
   | (typeof IDENTITY_FIELDS_MANUAL)[number]
@@ -318,6 +319,53 @@ type NewTaskField =
   | (typeof ISOLATION_FIELDS_EDITABLE)[number];
 type TextInputField = Extract<NewTaskField, "title" | "description" | "directory" | "assignedTo">;
 type AddInstanceField = "name" | "workspace";
+
+function isAcpHarness(harness: TaskHarness | undefined): boolean {
+  return harness !== undefined && harness !== "opencode";
+}
+
+function isClaudeHarness(harness: TaskHarness | undefined): boolean {
+  return harness === "claude-code";
+}
+
+function acpHarnessModels(harness: TaskHarness): readonly ModelRef[] {
+  switch (harness) {
+    case "claude-code":
+      return CLAUDE_CODE_MODELS;
+    case "codex":
+      return CODEX_MODELS;
+    case "gemini-acp":
+      return GEMINI_ACP_MODELS;
+    case "hermes":
+      return HERMES_MODELS;
+    case "pi-coding-agent":
+      return PI_CODING_AGENT_MODELS;
+    case "cursor-acp":
+      return CURSOR_ACP_MODELS;
+    case "opencode":
+      return [];
+  }
+}
+
+function harnessDisplayName(harness: TaskHarness | undefined): string {
+  switch (harness) {
+    case "claude-code":
+      return "Claude Code";
+    case "codex":
+      return "Codex ACP";
+    case "gemini-acp":
+      return "Gemini ACP";
+    case "hermes":
+      return "Hermes ACP";
+    case "pi-coding-agent":
+      return "Pi Coding Agent";
+    case "cursor-acp":
+      return "Cursor ACP";
+    case "opencode":
+    default:
+      return "OpenCode";
+  }
+}
 type RenameInstanceField = "newName";
 
 interface GlobalArchiveRecord {
@@ -2443,13 +2491,13 @@ function renderTask(ui: OpenTui, state: TuiState, task: Task) {
 function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   const dir: MetaRow = { label: "DIR", value: shortPath(task.directory), color: COLORS.muted };
   const agent: MetaRow = {
-    label: task.harness === "claude-code" ? "CLAUDE" : "AGENT",
-    value: task.agent ?? "agent",
+    label: isAcpHarness(task.harness) ? "HARNESS" : "AGENT",
+    value: isAcpHarness(task.harness) ? harnessDisplayName(task.harness) : task.agent ?? "agent",
     color: COLORS.muted,
   };
   const model: MetaRow = {
     label: "MODEL",
-    value: task.harness === "claude-code" ? task.model?.id ?? "default" : modelLabel(task.model ?? undefined),
+    value: isAcpHarness(task.harness) ? task.model?.id ?? "default" : modelLabel(task.model ?? undefined),
     color: COLORS.muted,
   };
   const type: MetaRow = { label: "TYPE", value: task.type ?? "agent", color: COLORS.muted };
@@ -2461,8 +2509,11 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   if (task.type === "manual") {
     return [type, assigned];
   }
-  if (task.harness === "claude-code") {
+  if (isClaudeHarness(task.harness)) {
     return [{ label: "PERMS", value: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE, color: COLORS.muted }, model];
+  }
+  if (isAcpHarness(task.harness)) {
+    return [agent, model];
   }
   if (task.column === "done" && task.completionSource === "reported") {
     const second = task.worktreeBranch
@@ -2545,10 +2596,12 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
     ...(task.type === "manual"
       ? [{ label: "ASSIGNED TO", value: task.assignedTo ?? "unassigned", color: COLORS.text }]
       : [
-          { label: task.harness === "claude-code" ? "HARNESS" : "AGENT", value: agentLabel(task, state.agents), color: COLORS.text },
-          ...(task.harness === "claude-code"
+          { label: isAcpHarness(task.harness) ? "HARNESS" : "AGENT", value: isAcpHarness(task.harness) ? harnessDisplayName(task.harness) : agentLabel(task, state.agents), color: COLORS.text },
+          ...(isAcpHarness(task.harness)
             ? [
-                { label: "PERMS", value: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE, color: COLORS.text },
+                ...(isClaudeHarness(task.harness)
+                  ? [{ label: "PERMS", value: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE, color: COLORS.text }]
+                  : []),
                 ...(task.harnessWarning ? [{ label: "WARN", value: task.harnessWarning, color: COLORS.bright }] : []),
                 ...(task.harnessCwd && task.harnessCwd !== task.directory
                   ? [{ label: "RUN DIR", value: shortPath(task.harnessCwd), color: COLORS.bright }]
@@ -3446,7 +3499,7 @@ function renderModelField(ui: OpenTui, draft: NewTaskDraft, agents: RosterAgent[
 function renderAgentProfileStep(ui: OpenTui, draft: NewTaskDraft) {
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    draft.harness === "claude-code"
+    isClaudeHarness(draft.harness)
       ? renderSelectField(ui, "PERMS", currentPermissionModeLabel(draft), draft.field === "permissionMode")
       : renderSelectField(ui, "AGENT PROFILE", currentAgentLabel(draft), draft.field === "agent"),
     renderDraftErrorRow(ui, draft),
@@ -3556,7 +3609,7 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
   ];
 
   const agentProfile: MetaRow[] = [
-    draft.harness === "claude-code"
+    isClaudeHarness(draft.harness)
       ? { label: "PERMS", value: currentPermissionModeLabel(draft), color: COLORS.text }
       : { label: "AGENT PROFILE", value: currentAgentLabel(draft), color: COLORS.text },
   ];
@@ -4802,8 +4855,8 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           title,
           description: draft.description,
           directory,
-          agent: draft.harness === "claude-code" ? null : draft.agentId || null,
-          claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : null,
+          agent: draft.harness === "opencode" ? draft.agentId || null : null,
+          claudePermissionMode: isClaudeHarness(draft.harness) ? draft.claudePermissionMode : null,
           model: draft.model ?? null,
           isolation: draft.isolation,
           permissionOverrides: draftPermissionOverridesPayload(draft) ?? null,
@@ -4820,8 +4873,8 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           title,
           description: draft.description,
           directory,
-          agent: draft.harness === "claude-code" ? undefined : draft.agentId || undefined,
-          claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : undefined,
+          agent: draft.harness === "opencode" ? draft.agentId || undefined : undefined,
+          claudePermissionMode: isClaudeHarness(draft.harness) ? draft.claudePermissionMode : undefined,
           model: draft.model,
           isolation: draft.isolation,
           permissionOverrides: draftPermissionOverridesPayload(draft),
@@ -4883,9 +4936,12 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
       return true;
     case "harness":
-      draft.harness = draft.harness === "opencode" ? "claude-code" : "opencode";
-      if (draft.harness === "claude-code") {
-        draft.model = CLAUDE_CODE_MODELS[0];
+      {
+        const current = Math.max(0, HARNESS_CYCLE.indexOf(draft.harness));
+        draft.harness = HARNESS_CYCLE[(current + delta + HARNESS_CYCLE.length) % HARNESS_CYCLE.length] ?? "opencode";
+      }
+      if (isAcpHarness(draft.harness)) {
+        draft.model = acpHarnessModels(draft.harness)[0];
       } else {
         draft.providerId = "";
         draft.model = undefined;
@@ -5225,9 +5281,11 @@ function lineRangeAtCursor(value: string, cursor: number): { start: number; end:
 
 /** The wizard screens for the current draft's card type — manual cards skip straight from identity to confirm. */
 function wizardSteps(draft: NewTaskDraft): readonly WizardStep[] {
-  return draft.type === "manual"
-    ? (["identity", "confirm"] as const)
-    : (["identity", "harness", "agentProfile", "isolation", "confirm"] as const);
+  if (draft.type === "manual") return ["identity", "confirm"] as const;
+  if (draft.harness !== "opencode" && !isClaudeHarness(draft.harness)) {
+    return ["identity", "harness", "isolation", "confirm"] as const;
+  }
+  return ["identity", "harness", "agentProfile", "isolation", "confirm"] as const;
 }
 
 /** The focusable field order for the draft's *current* step, branched by harness/isolation where relevant. */
@@ -5236,10 +5294,11 @@ function stepFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
     case "identity":
       return draft.type === "manual" ? IDENTITY_FIELDS_MANUAL : IDENTITY_FIELDS_AGENT;
     case "harness":
-      if (draft.harness === "claude-code") return HARNESS_FIELDS_CLAUDE;
+      if (isAcpHarness(draft.harness)) return HARNESS_FIELDS_CLAUDE;
       return draft.providerId ? HARNESS_FIELDS_OPENCODE : HARNESS_FIELDS_OPENCODE_LOCKED;
     case "agentProfile":
-      return draft.harness === "claude-code" ? AGENT_PROFILE_FIELDS_CLAUDE : AGENT_PROFILE_FIELDS_OPENCODE;
+      if (isClaudeHarness(draft.harness)) return AGENT_PROFILE_FIELDS_CLAUDE;
+      return draft.harness === "opencode" ? AGENT_PROFILE_FIELDS_OPENCODE : CONFIRM_FIELDS;
     case "isolation":
       return draft.harness === "opencode" && draft.isolation === "in-place" ? ISOLATION_FIELDS_EDITABLE : ISOLATION_FIELDS_LOCKED;
     case "confirm":
@@ -5738,7 +5797,7 @@ function currentAgentLabel(draft: NewTaskDraft): string {
 }
 
 function currentHarnessLabel(draft: NewTaskDraft): string {
-  return draft.harness === "claude-code" ? "Claude Code" : "OpenCode";
+  return harnessDisplayName(draft.harness);
 }
 
 function currentPermissionModeLabel(draft: NewTaskDraft): string {
@@ -5746,8 +5805,8 @@ function currentPermissionModeLabel(draft: NewTaskDraft): string {
 }
 
 function currentModelLabel(draft: NewTaskDraft): string {
-  if (draft.harness === "claude-code") {
-    return draft.model?.id ?? "Claude default";
+  if (isAcpHarness(draft.harness)) {
+    return draft.model?.id ?? `${harnessDisplayName(draft.harness)} default`;
   }
   return draft.model ? modelLabel(draft.model) : AGENT_PROFILE_DEFAULT_LABEL;
 }
@@ -5767,7 +5826,7 @@ function uniqueModels(agents: RosterAgent[]): ModelRef[] {
 }
 
 function modelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[]): Array<ModelRef | undefined> {
-  if (draft.harness === "claude-code") return [...CLAUDE_CODE_MODELS];
+  if (isAcpHarness(draft.harness)) return [...acpHarnessModels(draft.harness)];
   const provider = draft.providerId ? providers.find((item) => item.id === draft.providerId) : undefined;
   if (provider) return provider.models.map((model) => ({ providerID: provider.id, id: model.id }));
   return [undefined, ...uniqueModels(agents)];

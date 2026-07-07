@@ -13,7 +13,7 @@
  * `shutdown()` stops consuming the event stream.
  */
 import { basename, dirname, join, resolve } from "node:path";
-import type { MergeOutcome, OpencodeEvent, Task, TaskStore, WorktreeCleanupOutcome } from "../shared";
+import type { AcpTaskHarness, MergeOutcome, OpencodeEvent, Task, TaskStore, WorktreeCleanupOutcome } from "../shared";
 import { AdapterError, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -23,7 +23,7 @@ import { detectTaskBaseCheckoutEscape, markTaskBaseCheckoutEscape } from "./base
 import { eventLiveState, eventSessionId } from "./events/session-status";
 import { createPermissionResponderPool, type PermissionResponderPool } from "./permission-responder";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
-import { ClaudeAcpRunner } from "./claude-acp-runner";
+import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, GeminiAcpRunner, HermesAcpRunner, PiAcpRunner } from "./claude-acp-runner";
 import type { ClaudeCodeRunnerLike } from "./claude-code-runner";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
 import {
@@ -71,6 +71,12 @@ export interface TaskDispatcherDeps {
   boardToken?: string;
   /** Claude Code background-session launcher for `claude-code` harness tasks. */
   claudeRunner?: ClaudeCodeRunnerLike;
+  /** ACP background-session launchers for non-OpenCode harness tasks. */
+  codexRunner?: ClaudeCodeRunnerLike;
+  geminiRunner?: ClaudeCodeRunnerLike;
+  hermesRunner?: ClaudeCodeRunnerLike;
+  piRunner?: ClaudeCodeRunnerLike;
+  cursorRunner?: ClaudeCodeRunnerLike;
   /** Git worktree engine for isolated runs. Defaults to a real GitWorktreeManager. */
   worktrees?: WorktreeManager;
   /**
@@ -140,6 +146,31 @@ function sleep(ms: number): Promise<void> {
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
   });
+}
+
+function isAcpHarness(harness: Task["harness"]): harness is AcpTaskHarness {
+  return harness !== undefined && harness !== "opencode";
+}
+
+function asAcpHarness(harness: Task["harness"]): AcpTaskHarness {
+  return isAcpHarness(harness) ? harness : "claude-code";
+}
+
+function harnessDisplayName(harness: AcpTaskHarness): string {
+  switch (harness) {
+    case "claude-code":
+      return "Claude Code";
+    case "codex":
+      return "Codex ACP";
+    case "gemini-acp":
+      return "Gemini ACP";
+    case "hermes":
+      return "Hermes ACP";
+    case "pi-coding-agent":
+      return "Pi Coding Agent ACP";
+    case "cursor-acp":
+      return "Cursor ACP";
+  }
 }
 
 /** The session create response shape differs across OpenCode SDK surfaces. Unwrap defensively. */
@@ -363,7 +394,7 @@ export class TaskDispatcher implements Dispatcher {
   private readonly worktreeBaseDir: (repoRoot: string) => string;
   private readonly adapterBaseUrl: string;
   private readonly boardToken?: string;
-  private readonly claudeRunner: ClaudeCodeRunnerLike;
+  private readonly acpRunners: Record<AcpTaskHarness, ClaudeCodeRunnerLike>;
   private readonly workspace: string;
   private readonly allowExternalDirectories: boolean;
   private readonly resolveDirectory: (raw: string) => string;
@@ -394,13 +425,38 @@ export class TaskDispatcher implements Dispatcher {
     this.boardToken = deps.boardToken;
     const envInstanceName = process.env.OPENBOARD_INSTANCE_NAME?.trim();
     const instanceName = deps.instanceName ?? (envInstanceName || undefined);
-    this.claudeRunner =
-      deps.claudeRunner ??
-      new ClaudeAcpRunner({
+    this.acpRunners = {
+      "claude-code": deps.claudeRunner ?? new ClaudeAcpRunner({
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
-      });
+      }),
+      codex: deps.codexRunner ?? new CodexAcpRunner({
+        adapterBaseUrl: this.adapterBaseUrl,
+        boardToken: this.boardToken,
+        instanceName,
+      }),
+      "gemini-acp": deps.geminiRunner ?? new GeminiAcpRunner({
+        adapterBaseUrl: this.adapterBaseUrl,
+        boardToken: this.boardToken,
+        instanceName,
+      }),
+      hermes: deps.hermesRunner ?? new HermesAcpRunner({
+        adapterBaseUrl: this.adapterBaseUrl,
+        boardToken: this.boardToken,
+        instanceName,
+      }),
+      "pi-coding-agent": deps.piRunner ?? new PiAcpRunner({
+        adapterBaseUrl: this.adapterBaseUrl,
+        boardToken: this.boardToken,
+        instanceName,
+      }),
+      "cursor-acp": deps.cursorRunner ?? new CursorAcpRunner({
+        adapterBaseUrl: this.adapterBaseUrl,
+        boardToken: this.boardToken,
+        instanceName,
+      }),
+    };
     this.workspace = deps.workspace ?? resolveBoardWorkspace();
     this.allowExternalDirectories = deps.allowExternalDirectories ?? isExternalDirectoriesAllowed();
     this.worktreeBaseDir =
@@ -482,8 +538,8 @@ export class TaskDispatcher implements Dispatcher {
 
     await this.captureDispatchBaseline(task, isolatedRun, execDirectory);
 
-    if (task.harness === "claude-code") {
-      return this.runClaudeTask(task, execDirectory, task.description, "run");
+    if (isAcpHarness(task.harness)) {
+      return this.runAcpTask(task, execDirectory, task.description, "run");
     }
 
     // The legacy session/message surface is the one that actually wakes the
@@ -550,7 +606,7 @@ export class TaskDispatcher implements Dispatcher {
     return fresh;
   }
 
-  private async runClaudeTask(
+  private async runAcpTask(
     task: Task,
     execDirectory: string,
     prompt: string,
@@ -559,11 +615,14 @@ export class TaskDispatcher implements Dispatcher {
     const runStartedAt = Date.now();
     const warning = await dirtyWarning(execDirectory);
     const gitInfo = await inspectGitDirectory(execDirectory);
+    const harness = asAcpHarness(task.harness);
+    const runner = this.acpRunners[harness];
+    const label = harnessDisplayName(harness);
     try {
-      const launched = await this.claudeRunner[action]({
+      const launched = await runner[action]({
         task,
         directory: execDirectory,
-        prompt: this.withClaudePreflightContext(this.withParentHandoffs(task, prompt), warning),
+        prompt: this.withAcpPreflightContext(this.withParentHandoffs(task, prompt), warning, label),
         runStartedAt,
       });
       this.store.update(task.id, {
@@ -585,11 +644,11 @@ export class TaskDispatcher implements Dispatcher {
         this.store.addEvent({ taskId: task.id, type: "task_warning", body: { warning } });
       }
       this.store.move(task.id, "in_progress", END_OF_COLUMN);
-      this.startClaudeWatcher(task.id, launched.sessionName);
+      this.startAcpWatcher(task.id, launched.sessionName, harness);
     } catch (err) {
       const updated = this.store.update(task.id, {
         runState: "error",
-        error: errorMessage(err, "Failed to launch Claude Code background session"),
+        error: errorMessage(err, `Failed to launch ${label} background session`),
       });
       if (!updated) throw AdapterError.notFound(`Task not found: ${task.id}`);
       return updated;
@@ -955,9 +1014,9 @@ export class TaskDispatcher implements Dispatcher {
     return `OPENBOARD REBASE CONFLICT RESOLUTION\nThis is the same session and worktree from the failed Integrate attempt. The worktree is already in the middle of a git rebase, with conflict markers on disk. Do not create a fresh commit. Resolve the conflicts below, stage the resolutions, then run git rebase --continue. Report via /complete when the rebase continues cleanly, or /block if it cannot be resolved.\nConflicted paths:\n${paths}\n---\n\n${prompt}`;
   }
 
-  private withClaudePreflightContext(prompt: string, warning: string | undefined): string {
+  private withAcpPreflightContext(prompt: string, warning: string | undefined, label: string): string {
     if (!warning) return prompt;
-    return `${prompt}\n\n---\nOPENBOARD PREFLIGHT WARNING\n${warning}\nIf you avoid the dirty target by using a Claude-managed worktree or branch, report the actual cwd, branch, and commit in your final OpenBoard report.`;
+    return `${prompt}\n\n---\nOPENBOARD PREFLIGHT WARNING\n${warning}\nIf you avoid the dirty target by using a ${label}-managed worktree or branch, report the actual cwd, branch, and commit in your final OpenBoard report.`;
   }
 
   async retry(taskId: string, feedback?: string): Promise<Task> {
@@ -966,12 +1025,12 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
     this.assertNotArchived(task, "retry");
-    if (task.harness === "claude-code") {
+    if (isAcpHarness(task.harness)) {
       this.assertParentsSatisfied(task);
       this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
       const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
       await this.captureDispatchBaseline(task, wantsWorktree(task, this.store), execDirectory);
-      return this.runClaudeTask(task, execDirectory, feedback ?? task.description, "retry");
+      return this.runAcpTask(task, execDirectory, feedback ?? task.description, "retry");
     }
 
     if (!task.sessionId) {
@@ -1051,15 +1110,17 @@ export class TaskDispatcher implements Dispatcher {
 
   async abort(taskId: string): Promise<void> {
     const task = this.store.get(taskId);
-    if (task?.harness === "claude-code") {
+    if (task && isAcpHarness(task.harness)) {
       if (task.harnessSessionName) {
         this.cancelCompletionWatcher(task.harnessSessionName);
+        const runner = this.acpRunners[task.harness];
+        const label = harnessDisplayName(task.harness);
         try {
-          await this.claudeRunner.abort(task.harnessSessionName);
+          await runner.abort(task.harnessSessionName);
         } catch (err) {
           this.store.update(taskId, {
             runState: "error",
-            error: errorMessage(err, "Claude Code background abort failed"),
+            error: errorMessage(err, `${label} background abort failed`),
           });
           return;
         }
@@ -1110,11 +1171,11 @@ export class TaskDispatcher implements Dispatcher {
     void this.watchCompletion(taskId, sessionId, watcher);
   }
 
-  private startClaudeWatcher(taskId: string, sessionName: string): void {
+  private startAcpWatcher(taskId: string, sessionName: string, harness: AcpTaskHarness): void {
     this.cancelCompletionWatcher(sessionName);
     const watcher = { cancelled: false };
     this.completionWatchers.set(sessionName, watcher);
-    void this.watchClaudeCompletion(taskId, sessionName, watcher);
+    void this.watchAcpCompletion(taskId, sessionName, harness, watcher);
   }
 
   private cancelCompletionWatcher(sessionId: string): void {
@@ -1344,12 +1405,15 @@ export class TaskDispatcher implements Dispatcher {
     }
   }
 
-  private async watchClaudeCompletion(
+  private async watchAcpCompletion(
     taskId: string,
     sessionName: string,
+    harness: AcpTaskHarness,
     watcher: { cancelled: boolean },
   ): Promise<void> {
     const startedAt = Date.now();
+    const runner = this.acpRunners[harness];
+    const label = harnessDisplayName(harness);
 
     try {
       while (!watcher.cancelled) {
@@ -1357,19 +1421,19 @@ export class TaskDispatcher implements Dispatcher {
         if (watcher.cancelled) return;
 
         const task = this.getTaskForWatcher(taskId);
-        if (!task || task.harness !== "claude-code" || task.harnessSessionName !== sessionName || task.runState !== "running") return;
+        if (!task || task.harness !== harness || task.harnessSessionName !== sessionName || task.runState !== "running") return;
 
         if (Date.now() - startedAt > COMPLETION_WATCH_TIMEOUT_MS) {
           this.updateTaskForWatcher(taskId, {
             runState: "error",
-            error: "Timed out waiting for Claude Code background session completion",
+            error: `Timed out waiting for ${label} background session completion`,
           });
           return;
         }
 
         let status;
         try {
-          status = await this.claudeRunner.poll(sessionName);
+          status = await runner.poll(sessionName);
         } catch {
           continue;
         }
@@ -1398,7 +1462,7 @@ export class TaskDispatcher implements Dispatcher {
         if (status.error) {
           this.updateTaskForWatcher(taskId, {
             runState: "error",
-            error: `Claude Code session ended with status: ${status.error}`,
+            error: `${label} session ended with status: ${status.error}`,
           });
           return;
         }

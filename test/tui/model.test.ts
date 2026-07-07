@@ -369,11 +369,12 @@ runState: "unstarted",
     const tasks = [
       agentTask("a1", { harness: "opencode", agent: "build" }),
       agentTask("a2", { harness: "claude-code" }),
+      agentTask("a4", { harness: "codex" }),
       agentTask("a3", { harness: "opencode" }),
       { ...agentTask("m1"), type: "manual" as const, assignedTo: "Priya" },
     ];
 
-    expect(boardFilterOptions(tasks, "agent")).toEqual(["build", "claude-code", "unassigned"]);
+    expect(boardFilterOptions(tasks, "agent")).toEqual(["build", "claude-code", "codex", "unassigned"]);
   });
 
   it("matches and filters tasks by the selected filter value", () => {

@@ -26,11 +26,7 @@ interface AcpToolCall {
   kind?: string;
   rawInput?: unknown;
   locations?: Array<{ path?: unknown }>;
-  _meta?: {
-    claudeCode?: {
-      toolName?: unknown;
-    };
-  };
+  _meta?: Record<string, unknown>;
 }
 
 interface AcpPermissionParams {
@@ -53,9 +49,24 @@ interface AcpSessionState {
   permissionMode: ClaudeCodePermissionMode;
 }
 
+interface AcpRunnerServiceConfig {
+  envCommand: string;
+  fallbackCommand: string;
+  packageName?: string;
+  metaKeys: string[];
+  contractName: string;
+  sessionLabel: string;
+  displayName: string;
+  mcpCommandEnv?: string;
+  omitModelIds?: readonly string[];
+  extraMeta?: Record<string, unknown>;
+}
+
 export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
   spawn?: Spawn;
   commandArgs?: string[];
+  service?: AcpRunnerServiceConfig;
+  mcpCommand?: string;
 }
 
 const READ_TOOL_NAMES = new Set(["Read", "LS", "Glob", "Grep", "TodoRead", "TaskList", "TaskGet"]);
@@ -63,22 +74,86 @@ const OPENBOARD_REPORT_TOOLS = new Set([
   "mcp__openboard__complete_task",
   "mcp__openboard__block_task",
 ]);
+const OPENBOARD_REPORT_TOOL_NAMES = new Set(["complete_task", "block_task"]);
 
 const requireFromHere = createRequire(import.meta.url);
 
-function defaultCommand(): { command: string; args: string[] } {
-  const configured = process.env.OPENBOARD_CLAUDE_ACP_COMMAND?.trim();
+const CLAUDE_ACP_SERVICE: AcpRunnerServiceConfig = {
+  envCommand: "OPENBOARD_CLAUDE_ACP_COMMAND",
+  fallbackCommand: "claude-agent-acp",
+  packageName: "@agentclientprotocol/claude-agent-acp",
+  metaKeys: ["claudeCode"],
+  contractName: "OPENBOARD CLAUDE ACP WORKER CONTRACT",
+  sessionLabel: "Claude",
+  displayName: "Claude ACP",
+};
+
+const CODEX_ACP_SERVICE: AcpRunnerServiceConfig = {
+  envCommand: "OPENBOARD_CODEX_ACP_COMMAND",
+  fallbackCommand: "codex-acp",
+  packageName: "@agentclientprotocol/codex-agent-acp",
+  metaKeys: ["codex", "openai"],
+  contractName: "OPENBOARD CODEX ACP WORKER CONTRACT",
+  sessionLabel: "Codex ACP",
+  displayName: "Codex ACP",
+};
+
+const GEMINI_ACP_SERVICE: AcpRunnerServiceConfig = {
+  envCommand: "OPENBOARD_GEMINI_ACP_COMMAND",
+  fallbackCommand: "gemini-agent-acp",
+  packageName: "@agentclientprotocol/gemini-agent-acp",
+  metaKeys: ["gemini"],
+  contractName: "OPENBOARD GEMINI ACP WORKER CONTRACT",
+  sessionLabel: "Gemini ACP",
+  displayName: "Gemini ACP",
+};
+
+const HERMES_ACP_SERVICE: AcpRunnerServiceConfig = {
+  envCommand: "OPENBOARD_HERMES_ACP_COMMAND",
+  fallbackCommand: "hermes-agent-acp",
+  metaKeys: ["hermes"],
+  contractName: "OPENBOARD HERMES ACP WORKER CONTRACT",
+  sessionLabel: "Hermes ACP",
+  displayName: "Hermes ACP",
+  extraMeta: { openboard: { harness: "hermes" } },
+};
+
+const PI_ACP_SERVICE: AcpRunnerServiceConfig = {
+  envCommand: "OPENBOARD_PI_ACP_COMMAND",
+  fallbackCommand: "pi-coding-agent-acp",
+  metaKeys: ["piCodingAgent"],
+  contractName: "OPENBOARD PI CODING AGENT ACP WORKER CONTRACT",
+  sessionLabel: "Pi Coding Agent",
+  displayName: "Pi ACP",
+  omitModelIds: ["default"],
+};
+
+const CURSOR_ACP_SERVICE: AcpRunnerServiceConfig = {
+  envCommand: "OPENBOARD_CURSOR_ACP_COMMAND",
+  fallbackCommand: "cursor-agent-acp",
+  metaKeys: ["cursor"],
+  contractName: "OPENBOARD CURSOR ACP WORKER CONTRACT",
+  sessionLabel: "Cursor ACP",
+  displayName: "Cursor ACP",
+  mcpCommandEnv: "OPENBOARD_CURSOR_ACP_MCP_COMMAND",
+};
+
+function defaultCommand(service: AcpRunnerServiceConfig, env: NodeJS.ProcessEnv): { command: string; args: string[] } {
+  const configured = env[service.envCommand]?.trim();
   if (configured) return { command: configured, args: [] };
 
-  try {
-    const packageJsonPath = requireFromHere.resolve("@agentclientprotocol/claude-agent-acp/package.json");
-    return {
-      command: process.execPath,
-      args: [join(dirname(packageJsonPath), "dist/index.js")],
-    };
-  } catch {
-    return { command: "claude-agent-acp", args: [] };
+  if (service.packageName) {
+    try {
+      const packageJsonPath = requireFromHere.resolve(`${service.packageName}/package.json`);
+      return {
+        command: process.execPath,
+        args: [join(dirname(packageJsonPath), "dist/index.js")],
+      };
+    } catch {
+      // Fall through to the adapter binary name.
+    }
   }
+  return { command: service.fallbackCommand, args: [] };
 }
 
 function normalizeMode(mode: ClaudeCodePermissionMode): string {
@@ -118,14 +193,26 @@ function commandLooksOutsideFence(command: string, cwd: string): boolean {
 }
 
 function toolName(toolCall: AcpToolCall): string | undefined {
-  const fromMeta = toolCall._meta?.claudeCode?.toolName;
-  if (typeof fromMeta === "string" && fromMeta) return fromMeta;
   const raw = toolCall.rawInput;
   if (raw !== null && typeof raw === "object") {
-    const name = (raw as Record<string, unknown>).toolName ?? (raw as Record<string, unknown>).tool_name;
+    const name = (raw as Record<string, unknown>).toolName ?? (raw as Record<string, unknown>).tool_name ?? (raw as Record<string, unknown>).name;
     if (typeof name === "string" && name) return name;
   }
+  for (const value of Object.values(toolCall._meta ?? {})) {
+    if (value !== null && typeof value === "object") {
+      const name = (value as Record<string, unknown>).toolName ?? (value as Record<string, unknown>).tool_name;
+      if (typeof name === "string" && name) return name;
+    }
+  }
   return undefined;
+}
+
+function isOpenBoardReportToolName(name: string): boolean {
+  if (OPENBOARD_REPORT_TOOLS.has(name)) return true;
+  const parts = name.trim().split(/__|[.:/]/).filter(Boolean);
+  const last = parts[parts.length - 1] ?? name;
+  if (!OPENBOARD_REPORT_TOOL_NAMES.has(last)) return false;
+  return parts.length === 1 || parts.includes("openboard");
 }
 
 export function decideClaudeAcpPermission(
@@ -137,7 +224,7 @@ export function decideClaudeAcpPermission(
 
   const call = params.toolCall;
   const name = toolName(call);
-  if (name && (READ_TOOL_NAMES.has(name) || OPENBOARD_REPORT_TOOLS.has(name))) return "allow";
+  if (name && (READ_TOOL_NAMES.has(name) || isOpenBoardReportToolName(name))) return "allow";
 
   const kind = call.kind;
   if (kind === "read" || kind === "search" || kind === "fetch" || kind === "think") return "allow";
@@ -169,7 +256,8 @@ function chooseOption(options: AcpPermissionParams["options"], decision: "allow"
     const match = options.find((option) => option.optionId === id || option.kind === id);
     if (match) return match.optionId;
   }
-  return options[0]?.optionId ?? (decision === "allow" ? "allow" : "reject");
+  if (decision === "allow") return options[0]?.optionId ?? "allow";
+  return "reject";
 }
 
 function errorFromRpc(error: unknown): Error {
@@ -188,7 +276,9 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   private readonly env: NodeJS.ProcessEnv;
   private readonly command: string;
   private readonly commandArgs: string[];
+  private readonly mcpCommand: string;
   private readonly permissionMode: ClaudeCodePermissionMode;
+  private readonly service: AcpRunnerServiceConfig;
   private readonly sessions = new Map<string, AcpSessionState>();
 
   constructor(deps: ClaudeAcpRunnerDeps) {
@@ -197,10 +287,12 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     this.instanceName = deps.instanceName;
     this.spawn = deps.spawn ?? nodeSpawn;
     this.env = deps.env ?? process.env;
-    const command = deps.command ? { command: deps.command, args: deps.commandArgs ?? [] } : defaultCommand();
+    this.service = deps.service ?? CLAUDE_ACP_SERVICE;
+    const command = deps.command ? { command: deps.command, args: deps.commandArgs ?? [] } : defaultCommand(this.service, this.env);
     this.command = command.command;
     this.commandArgs = command.args;
-    const envPermissionMode = process.env.OPENBOARD_CLAUDE_PERMISSION_MODE?.trim();
+    this.mcpCommand = (deps.mcpCommand ?? (this.service.mcpCommandEnv ? this.env[this.service.mcpCommandEnv]?.trim() : undefined)) || "openboard";
+    const envPermissionMode = this.env.OPENBOARD_CLAUDE_PERMISSION_MODE?.trim();
     this.permissionMode = (deps.permissionMode as ClaudeCodePermissionMode | undefined) ?? (envPermissionMode as ClaudeCodePermissionMode | undefined) ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE;
   }
 
@@ -267,17 +359,11 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     const created = await this.request(state, "session/new", {
       cwd: input.directory,
       mcpServers: this.mcpServers(),
-      _meta: {
-        claudeCode: {
-          options: {
-            ...(input.task.model?.id ? { model: input.task.model.id } : {}),
-          },
-        },
-      },
+      _meta: this.sessionMeta(input),
     });
     const sessionId = (created as { sessionId?: unknown })?.sessionId;
     if (typeof sessionId !== "string" || !sessionId) {
-      throw new Error("Claude ACP session/new returned no sessionId");
+      throw new Error(`${this.service.displayName} session/new returned no sessionId`);
     }
     state.sessionId = sessionId;
 
@@ -306,6 +392,21 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     return { sessionId, sessionName, status: "running" };
   }
 
+  private sessionMeta(input: ClaudeCodeRunInput): Record<string, unknown> {
+    const model = input.task.model?.id && !this.service.omitModelIds?.includes(input.task.model.id)
+      ? { model: input.task.model.id }
+      : {};
+    const meta: Record<string, unknown> = { ...(this.service.extraMeta ?? {}) };
+    for (const key of this.service.metaKeys) {
+      meta[key] = {
+        options: {
+          ...model,
+        },
+      };
+    }
+    return meta;
+  }
+
   private async trySetMode(state: AcpSessionState, mode: ClaudeCodePermissionMode): Promise<void> {
     try {
       await this.request(state, "session/set_mode", {
@@ -323,7 +424,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       return [
         {
           name: "openboard",
-          command: "openboard",
+          command: this.mcpCommand,
           args: ["mcp", "--instance", this.instanceName],
           env: [],
         },
@@ -333,7 +434,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     return [
       {
         name: "openboard",
-        command: "openboard",
+        command: this.mcpCommand,
         args: ["mcp"],
         env: [
           { name: "OPENCODE_BOARD_URL", value: this.adapterBaseUrl },
@@ -344,7 +445,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   }
 
   private withWorkerContract(input: ClaudeCodeRunInput): string {
-    return `${input.prompt}\n\n---\nOPENBOARD CLAUDE ACP WORKER CONTRACT\nTask id: ${input.task.id}\nBoard URL: ${this.adapterBaseUrl}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this Claude session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk. When all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
+    return `${input.prompt}\n\n---\n${this.service.contractName}\nTask id: ${input.task.id}\nBoard URL: ${this.adapterBaseUrl}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this ${this.service.sessionLabel} session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk. When all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
   }
 
   private request(state: AcpSessionState, method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -371,7 +472,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     state.child.on("error", (error) => this.failSession(state, error));
     state.child.on("close", () => {
       if (!state.terminal) {
-        this.failSession(state, new Error(state.error ?? "Claude ACP process exited"));
+        this.failSession(state, new Error(state.error ?? `${this.service.displayName} process exited`));
       }
     });
   }
@@ -438,5 +539,35 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     state.error = error.message;
     for (const pending of state.pending.values()) pending.reject(error);
     state.pending.clear();
+  }
+}
+
+export class CodexAcpRunner extends ClaudeAcpRunner {
+  constructor(deps: Omit<ClaudeAcpRunnerDeps, "service">) {
+    super({ ...deps, service: CODEX_ACP_SERVICE });
+  }
+}
+
+export class GeminiAcpRunner extends ClaudeAcpRunner {
+  constructor(deps: Omit<ClaudeAcpRunnerDeps, "service">) {
+    super({ ...deps, service: GEMINI_ACP_SERVICE });
+  }
+}
+
+export class HermesAcpRunner extends ClaudeAcpRunner {
+  constructor(deps: Omit<ClaudeAcpRunnerDeps, "service">) {
+    super({ ...deps, service: HERMES_ACP_SERVICE });
+  }
+}
+
+export class PiAcpRunner extends ClaudeAcpRunner {
+  constructor(deps: Omit<ClaudeAcpRunnerDeps, "service">) {
+    super({ ...deps, service: PI_ACP_SERVICE });
+  }
+}
+
+export class CursorAcpRunner extends ClaudeAcpRunner {
+  constructor(deps: Omit<ClaudeAcpRunnerDeps, "service">) {
+    super({ ...deps, service: CURSOR_ACP_SERVICE });
   }
 }

@@ -12,7 +12,7 @@ import {
   type TaskSummary,
 } from "../client/board-client";
 import type { Column, MergeOutcome, RosterAgent, TaskComment, TaskEvent } from "../shared";
-import { CLAUDE_CODE_PERMISSION_MODES } from "../shared";
+import { CLAUDE_CODE_PERMISSION_MODES, TASK_HARNESSES } from "../shared";
 import {
   currentSelectionFromOptions,
   listInstances as listRegisteredInstances,
@@ -46,7 +46,7 @@ const ManualTaskInputSchema = z
 const AgentTaskInputSchema = z
   .object({
     type: z.literal("agent").optional(),
-    harness: z.enum(["opencode", "claude-code"]).optional(),
+    harness: z.enum(TASK_HARNESSES).optional(),
     title: z.string(),
     description: z.string().optional(),
     directory: z.string().optional(),
@@ -62,7 +62,7 @@ export const CreateTaskInputSchema = z.union([ManualTaskInputSchema, AgentTaskIn
 export const AddTaskInputSchema = z
   .object({
     type: z.enum(["manual", "agent"]).optional(),
-    harness: z.enum(["opencode", "claude-code"]).optional(),
+    harness: z.enum(TASK_HARNESSES).optional(),
     title: z.string(),
     description: z.string().optional(),
     directory: z.string().optional(),

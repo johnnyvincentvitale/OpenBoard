@@ -79,6 +79,7 @@ describe("diff view entry gate", () => {
 describe("diff source label", () => {
   it("labels by harness/isolation", () => {
     expect(diffSourceLabel(task({ harness: "claude-code" }))).toBe("harness diff");
+    expect(diffSourceLabel(task({ harness: "codex" }))).toBe("harness diff");
     expect(diffSourceLabel(task({ harness: "opencode", isolation: "worktree" }))).toBe("worktree diff");
     expect(diffSourceLabel(task({ harness: "opencode", isolation: "in-place" }))).toBe("working tree diff");
   });

@@ -70,13 +70,13 @@ async function handleCompletion(
       const updated = store.update(id, {
         completionSource: "reported",
         error: undefined,
-        finalSessionOutput: task.harness === "claude-code"
+        finalSessionOutput: isAcpHarness(task)
           ? null
           : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
             ? finalSessionOutput ?? null
             : task.finalSessionOutput ?? null,
         ...completionMetadata,
-        ...(task.harness === "claude-code" ? { harnessStatus: "blocked" } : {}),
+        ...(isAcpHarness(task) ? { harnessStatus: "blocked" } : {}),
       });
       if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
       store.addEvent({
@@ -94,13 +94,13 @@ async function handleCompletion(
     const updated = store.update(id, {
       runState: outcome === "complete" ? "idle" : "error",
       error: outcome === "complete" ? undefined : payload.residualRisk,
-      finalSessionOutput: task.harness === "claude-code"
+      finalSessionOutput: isAcpHarness(task)
         ? null
         : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
           ? finalSessionOutput ?? null
           : task.finalSessionOutput ?? null,
       ...completionMetadata,
-      ...(task.harness === "claude-code"
+      ...(isAcpHarness(task)
         ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }
         : {}),
     });
@@ -119,7 +119,7 @@ async function completionPatch(
   task: Task,
   report: CompletionReport,
 ): Promise<Partial<Omit<Task, "id" | "createdAt">>> {
-  if (task.harness !== "claude-code") return {};
+  if (!isAcpHarness(task)) return {};
   const inspected = await inspectCompletionResult(task, report);
   return {
     completionLocation: inspected.completionLocation,
@@ -130,6 +130,10 @@ async function completionPatch(
     ...(inspected.worktreeBranch ? { worktreeBranch: inspected.worktreeBranch } : {}),
     ...(inspected.baseBranch ? { baseBranch: inspected.baseBranch } : {}),
   };
+}
+
+function isAcpHarness(task: Pick<Task, "harness">): boolean {
+  return task.harness !== undefined && task.harness !== "opencode";
 }
 
 function staleRunMessage(c: Context, runStartedAt: number | undefined): string | undefined {

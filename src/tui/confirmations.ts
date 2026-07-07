@@ -268,7 +268,7 @@ export function buildConfirmationCopy(
  * so they're visible before the second `r` actually dispatches the run.
  */
 function runIsolationLines(task: Pick<Task, "isolation" | "harness" | "permissionOverrides">): string[] {
-  if (task.harness === "claude-code") return [];
+  if (task.harness && task.harness !== "opencode") return [];
   if (task.isolation === "worktree") {
     return ["Isolation: worktree - a new git worktree will be created for this task."];
   }
