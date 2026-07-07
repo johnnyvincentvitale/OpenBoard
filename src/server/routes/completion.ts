@@ -9,6 +9,7 @@ import type {
   TaskStore,
 } from "../../shared";
 import { AdapterError } from "../../shared/errors";
+import { detectTaskBaseCheckoutEscape, markTaskBaseCheckoutEscape } from "../base-checkout-escape";
 import { inspectCompletionResult } from "../git-inspect";
 
 const END_OF_COLUMN = Number.POSITIVE_INFINITY;
@@ -58,6 +59,34 @@ async function handleCompletion(
     const payload = parseCompletionBody(body);
     const { finalSessionOutput, ...reportPayload } = payload;
     const report: CompletionReport = { ...reportPayload, outcome, reportedAt: Date.now() };
+
+    const escapeCheck = await detectTaskBaseCheckoutEscape(task);
+    if (escapeCheck.escaped) {
+      const stored = store.setCompletion(id, report, "reported");
+      if (!stored) throw AdapterError.notFound(`Task not found: ${id}`);
+      const completionMetadata = await completionPatch(task, report);
+      const blocked = markTaskBaseCheckoutEscape(store, id, escapeCheck.changedPaths);
+      if (!blocked) throw AdapterError.notFound(`Task not found: ${id}`);
+      const updated = store.update(id, {
+        completionSource: "reported",
+        error: undefined,
+        finalSessionOutput: task.harness === "claude-code"
+          ? null
+          : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
+            ? finalSessionOutput ?? null
+            : task.finalSessionOutput ?? null,
+        ...completionMetadata,
+        ...(task.harness === "claude-code" ? { harnessStatus: "blocked" } : {}),
+      });
+      if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
+      store.addEvent({
+        taskId: id,
+        type: "task_blocked",
+        body: { ...report, pending: "base-checkout-escape", escapeDetectedPaths: escapeCheck.changedPaths },
+      });
+      return c.json(store.get(id) ?? updated, 200);
+    }
+
     const stored = store.setCompletion(id, report, "reported");
     if (!stored) throw AdapterError.notFound(`Task not found: ${id}`);
 

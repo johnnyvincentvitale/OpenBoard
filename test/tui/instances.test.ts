@@ -3317,11 +3317,12 @@ describe("TUI workspace gate", () => {
   it("renders a blocking setup view with directory prompt", () => {
     const app = renderApp(fakeUi(), state({ viewState: { view: "workspaceGate", previousView: "launch" } }));
     const text = textOf(app);
-    expect(text).toContain("SETUP");
     expect(text).toContain("Workspace Required");
     expect(text).toContain("Please specify a directory path");
     expect(text).toContain("DIRECTORY");
-    expect(text).toContain("type absolute path · enter confirm · esc quit");
+    expect(text).toContain("type a path then press enter · esc quit");
+    const focusedInput = textNodesContaining(app, "▍")[0]?.props?.content;
+    expect(focusedInput).toBe("▍");
   });
 
   it("shows current-project affordance only for project-like cwd", () => {

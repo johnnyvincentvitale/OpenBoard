@@ -923,6 +923,94 @@ describe("TaskDispatcher", () => {
       expect(blocked?.runState).toBe("idle");
     });
 
+    it("uses isolationAtDispatch instead of the current board default when blocking an escaped OpenCode run", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      client.nextSessionId = "ses_escape_default_drift";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-escape-default-drift"),
+      });
+
+      await dispatcher.run(task.id);
+      expect(store.get(task.id)?.isolationAtDispatch).toBe("worktree");
+
+      store.updateSettings({ worktreeDefault: false });
+      writeFileSync(join(gitProjectDir, "escaped-after-default-flip.txt"), "escaped write\n");
+
+      queueFinishedTurn();
+      await waitFor(() => store.get(task.id)?.runState !== "running", 3000);
+
+      const blocked = store.get(task.id);
+      expect(blocked?.column).toBe("in_progress");
+      expect(blocked?.pending).toBe("base-checkout-escape");
+      expect(blocked?.escapeDetectedPaths).toEqual(["escaped-after-default-flip.txt"]);
+    });
+
+    it("blocks a Claude Code worktree task at idle fallback when the base checkout was mutated", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = store.create({
+        title: "Claude isolated escape",
+        description: "mutate base",
+        directory: gitProjectDir,
+        harness: "claude-code",
+      });
+      const claudeRunner = makeClaudeRunner();
+      claudeRunner.poll.mockResolvedValue({ status: "idle", error: undefined, terminal: true });
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        claudeRunner,
+        worktreeBaseDir: () => join(workspace, "worktrees-claude-escape"),
+      });
+
+      await dispatcher.run(task.id);
+      expect(store.get(task.id)?.isolationAtDispatch).toBe("worktree");
+      writeFileSync(join(gitProjectDir, "claude-escaped.txt"), "escaped write\n");
+
+      await waitFor(() => store.get(task.id)?.runState !== "running", 3000);
+
+      const blocked = store.get(task.id);
+      expect(blocked?.column).toBe("in_progress");
+      expect(blocked?.pending).toBe("base-checkout-escape");
+      expect(blocked?.escapeDetectedPaths).toEqual(["claude-escaped.txt"]);
+      expect(blocked?.completionSource).toBeNull();
+    });
+
+    it("does not treat a Claude-managed worktreePath on an in-place task as a base-checkout escape", async () => {
+      const claudeWorktree = join(workspace, "claude-managed-worktree");
+      execFileSync("git", ["worktree", "add", "-b", "claude/self-isolated", claudeWorktree, "HEAD"], {
+        cwd: gitProjectDir,
+      });
+      const task = store.create({
+        title: "Claude in-place self isolate",
+        description: "self isolate",
+        directory: gitProjectDir,
+        harness: "claude-code",
+        isolation: "in-place",
+      });
+      const claudeRunner = makeClaudeRunner();
+      claudeRunner.poll.mockResolvedValue({
+        status: "idle",
+        error: undefined,
+        terminal: true,
+        cwd: claudeWorktree,
+      });
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+
+      await dispatcher.run(task.id);
+      expect(store.get(task.id)?.isolationAtDispatch).toBe("in-place");
+      writeFileSync(join(gitProjectDir, "expected-in-place-base-write.txt"), "expected\n");
+
+      await waitFor(() => store.get(task.id)?.column === "review", 3000);
+
+      const finished = store.get(task.id);
+      expect(finished?.pending).toBeUndefined();
+      expect(finished?.worktreePath).toBe(claudeWorktree);
+      expect(finished?.completionSource).toBe("idle-fallback");
+    });
+
     it("a normal worktree task (base checkout untouched) still reaches review", async () => {
       store.updateSettings({ worktreeDefault: true });
       const task = createTask({ directory: gitProjectDir });

@@ -1946,9 +1946,9 @@ function renderWorkspaceGateView(ui: OpenTui, state: TuiState) {
     renderInputField(
       ui,
       "DIRECTORY",
-      state.workspaceGateInput || shortPath(state.cwd),
+      state.workspaceGateInput,
       true,
-      shortPath(state.cwd),
+      "Type a path, e.g. ~/code/my-project",
       1,
       state.workspaceGateInput.length > 0 ? COLORS.text : COLORS.muted,
     ),
@@ -5505,10 +5505,16 @@ async function handleAddInstanceKey(key: KeyEvent, state: TuiState, actions: Tui
       actions.render();
       return;
     }
+    const workspace = validateWorkspacePath(draft.workspace, state.cwd);
+    if (!workspace.ok) {
+      draft.error = workspace.error;
+      actions.render();
+      return;
+    }
     draft.submitting = true;
     draft.error = undefined;
     actions.render();
-    await actions.addInstance(name.value, draft.workspace.trim());
+    await actions.addInstance(name.value, workspace.path);
     return;
   }
 

@@ -19,6 +19,7 @@ import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import type { SandboxStatus } from "./sandbox";
 import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "./escape-detector";
+import { detectTaskBaseCheckoutEscape, markTaskBaseCheckoutEscape } from "./base-checkout-escape";
 import { eventLiveState, eventSessionId } from "./events/session-status";
 import { createPermissionResponderPool, type PermissionResponderPool } from "./permission-responder";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
@@ -445,7 +446,8 @@ export class TaskDispatcher implements Dispatcher {
     // Resolve where the session actually runs. In worktree isolation the session
     // runs in a dedicated `git worktree`; a non-repo directory can't be isolated,
     // so we block the run and surface the "make it a git repo?" decision instead.
-    if (wantsWorktree(task, this.store)) {
+    const isolatedRun = wantsWorktree(task, this.store);
+    if (isolatedRun) {
       // Fail closed: a worktree-isolated task's write protection depends on
       // the sandbox wrapper being wired into OpenCode's `shell` at server
       // startup (macOS-only, see ./sandbox). If this process is responsible
@@ -477,26 +479,11 @@ export class TaskDispatcher implements Dispatcher {
       execDirectory = this.resolveDirectory(wt.worktreePath);
     }
 
-    // Record git baseline at dispatch time for diff computation later. The
-    // worktree lane's baseCommit is the main-repo HEAD (not the worktree
-    // checkout), captured via the original execDirectory before the worktree
-    // path swap above.
-    const isolatedForSnapshot = wantsWorktree(task, this.store);
-    const baseCommitDir = isolatedForSnapshot
-      ? await this.resolveRepoRoot(this.resolveDirectory(task.directory))
-      : execDirectory;
-    const [baseCommit, dirty, baseCheckoutSnapshot] = await Promise.all([
-      resolveHeadCommit(baseCommitDir),
-      isWorkingTreeDirty(baseCommitDir),
-      isolatedForSnapshot ? snapshotBaseCheckout(baseCommitDir) : Promise.resolve(null),
-    ]);
-    this.store.update(taskId, { baseCommit, dirtyAtDispatch: dirty, baseCheckoutSnapshot });
+    await this.captureDispatchBaseline(task, isolatedRun, execDirectory);
 
     if (task.harness === "claude-code") {
       return this.runClaudeTask(task, execDirectory, task.description, "run");
     }
-
-    const isolatedRun = wantsWorktree(task, this.store);
 
     // The legacy session/message surface is the one that actually wakes the
     // agent in OpenCode 1.17.13. It also honors an agent's configured default
@@ -571,12 +558,6 @@ export class TaskDispatcher implements Dispatcher {
     const runStartedAt = Date.now();
     const warning = await dirtyWarning(execDirectory);
     const gitInfo = await inspectGitDirectory(execDirectory);
-    // Record git baseline at dispatch for diff computation.
-    const baseCommit = gitInfo.isRepo
-      ? (await resolveHeadCommit(execDirectory))
-      : null;
-    const dirty = gitInfo.dirtySummary !== undefined;
-    this.store.update(task.id, { baseCommit, dirtyAtDispatch: dirty });
     try {
       const launched = await this.claudeRunner[action]({
         task,
@@ -616,6 +597,30 @@ export class TaskDispatcher implements Dispatcher {
     const fresh = this.store.get(task.id);
     if (!fresh) throw AdapterError.notFound(`Task not found: ${task.id}`);
     return fresh;
+  }
+
+  private async captureDispatchBaseline(
+    task: Task,
+    isolatedRun: boolean,
+    execDirectory: string,
+  ): Promise<void> {
+    // Record git baseline at dispatch time for diff computation later. The
+    // worktree lane's baseCommit is the main-repo HEAD (not the worktree
+    // checkout), captured via task.directory before the worktree path swap.
+    const baseCommitDir = isolatedRun
+      ? await this.resolveRepoRoot(this.resolveDirectory(task.directory))
+      : execDirectory;
+    const [baseCommit, dirty, baseCheckoutSnapshot] = await Promise.all([
+      resolveHeadCommit(baseCommitDir),
+      isWorkingTreeDirty(baseCommitDir),
+      isolatedRun ? snapshotBaseCheckout(baseCommitDir) : Promise.resolve(null),
+    ]);
+    this.store.update(task.id, {
+      baseCommit,
+      dirtyAtDispatch: dirty,
+      isolationAtDispatch: isolatedRun ? "worktree" : "in-place",
+      baseCheckoutSnapshot,
+    });
   }
 
   /**
@@ -964,6 +969,7 @@ export class TaskDispatcher implements Dispatcher {
       this.assertParentsSatisfied(task);
       this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
       const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
+      await this.captureDispatchBaseline(task, wantsWorktree(task, this.store), execDirectory);
       return this.runClaudeTask(task, execDirectory, feedback ?? task.description, "retry");
     }
 
@@ -978,6 +984,7 @@ export class TaskDispatcher implements Dispatcher {
     // retry() re-prompts an existing session — the worktree already exists from
     // run(), so its path comes off the task record rather than ensureWorktree().
     const isolatedRetry = wantsWorktree(task, this.store);
+    await this.captureDispatchBaseline(task, isolatedRetry, this.resolveDirectory(task.worktreePath ?? task.directory));
     const baseRetryPrompt = this.withRebaseConflictContext(task, feedback ?? task.description);
     const retryPrompt = isolatedRetry
       ? this.withWorktreeIsolationPreamble(
@@ -1008,7 +1015,7 @@ export class TaskDispatcher implements Dispatcher {
     });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
     this.startCompletionWatcher(taskId, task.sessionId);
-    if (wantsWorktree(task, this.store)) {
+    if (isolatedRetry) {
       this.startPermissionResponder(task.sessionId, this.resolveDirectory(task.worktreePath ?? task.directory));
     }
 
@@ -1188,7 +1195,7 @@ export class TaskDispatcher implements Dispatcher {
           return;
         }
 
-        if (wantsWorktree(beforeFallback, this.store) && (await this.blockOnBaseCheckoutEscape(taskId, beforeFallback))) {
+        if (await this.blockOnBaseCheckoutEscape(taskId, beforeFallback)) {
           return;
         }
 
@@ -1320,17 +1327,10 @@ export class TaskDispatcher implements Dispatcher {
    */
   private async blockOnBaseCheckoutEscape(taskId: string, task: Task): Promise<boolean> {
     try {
-      const baseRepoDir = await this.resolveRepoRoot(this.resolveDirectory(task.directory));
-      const { escaped, changedPaths } = await detectBaseCheckoutEscape(
-        baseRepoDir,
-        task.baseCheckoutSnapshot ?? null,
-      );
+      const { escaped, changedPaths } = await detectTaskBaseCheckoutEscape(task);
       if (!escaped) return false;
 
-      this.updateTaskForWatcher(taskId, {
-        runState: "idle",
-        pending: "base-checkout-escape",
-        escapeDetectedPaths: changedPaths,
+      markTaskBaseCheckoutEscape(this.store, taskId, changedPaths, {
         completion: null,
         completionSource: null,
       });
@@ -1404,6 +1404,9 @@ export class TaskDispatcher implements Dispatcher {
 
         const beforeFallback = this.getTaskForWatcher(taskId);
         if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
+          return;
+        }
+        if (await this.blockOnBaseCheckoutEscape(taskId, beforeFallback)) {
           return;
         }
         if (

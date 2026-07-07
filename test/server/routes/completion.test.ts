@@ -166,6 +166,139 @@ describe("completion routes", () => {
     expect(body.baseBranch).toBe("main");
   });
 
+  it("POST /complete blocks a worktree run with a base-checkout escape while preserving the report", async () => {
+    const { repo } = gitRepoWithClaudeWorktree();
+    const task = store.create({
+      title: "Escaped OpenCode report",
+      description: "do it",
+      directory: repo,
+    });
+    store.update(task.id, {
+      runState: "running",
+      isolationAtDispatch: "worktree",
+      baseCheckoutSnapshot: "",
+    });
+    store.move(task.id, "in_progress", 0);
+    writeFileSync(join(repo, "escaped.txt"), "escaped write\n");
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(validBody),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.column).toBe("in_progress");
+    expect(body.runState).toBe("idle");
+    expect(body.pending).toBe("base-checkout-escape");
+    expect(body.escapeDetectedPaths).toEqual(["escaped.txt"]);
+    expect(body.completionSource).toBe("reported");
+    expect(body.completion).toMatchObject({ ...validBody, outcome: "complete" });
+  });
+
+  it("POST /complete blocks a Claude Code worktree run with a base-checkout escape while preserving the report", async () => {
+    const { repo, worktree } = gitRepoWithClaudeWorktree();
+    const task = store.create({
+      harness: "claude-code",
+      title: "Escaped Claude report",
+      description: "do it",
+      directory: repo,
+    });
+    store.update(task.id, {
+      runState: "running",
+      harnessStatus: "busy",
+      harnessCwd: worktree,
+      isolationAtDispatch: "worktree",
+      baseCheckoutSnapshot: "",
+    });
+    store.move(task.id, "in_progress", 0);
+    writeFileSync(join(repo, "claude-escaped.txt"), "escaped write\n");
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, changedFiles: ["README.md"] }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.column).toBe("in_progress");
+    expect(body.runState).toBe("idle");
+    expect(body.harnessStatus).toBe("blocked");
+    expect(body.pending).toBe("base-checkout-escape");
+    expect(body.escapeDetectedPaths).toEqual(["claude-escaped.txt"]);
+    expect(body.completionSource).toBe("reported");
+    expect(body.completion).toMatchObject({ outcome: "complete", summary: validBody.summary });
+  });
+
+  it("POST /complete does not run escape detection for an in-place task with a Claude-managed worktreePath", async () => {
+    const { repo, worktree } = gitRepoWithClaudeWorktree();
+    const task = store.create({
+      harness: "claude-code",
+      title: "In-place Claude report",
+      description: "do it",
+      directory: repo,
+      isolation: "in-place",
+    });
+    store.update(task.id, {
+      runState: "running",
+      harnessStatus: "busy",
+      harnessCwd: worktree,
+      worktreePath: worktree,
+      isolationAtDispatch: "in-place",
+      baseCheckoutSnapshot: null,
+    });
+    store.move(task.id, "in_progress", 0);
+    writeFileSync(join(repo, "expected-base-change.txt"), "expected\n");
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, changedFiles: ["README.md"] }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.column).toBe("review");
+    expect(body.pending).toBeUndefined();
+    expect(body.completionSource).toBe("reported");
+    expect(body.completion).toMatchObject({ outcome: "complete", summary: validBody.summary });
+  });
+
+  it("POST /complete fail-closes a worktree run with a null dispatch snapshot against current base dirt", async () => {
+    const { repo } = gitRepoWithClaudeWorktree();
+    const task = store.create({
+      title: "Null snapshot escape",
+      description: "do it",
+      directory: repo,
+    });
+    store.update(task.id, {
+      runState: "running",
+      isolationAtDispatch: "worktree",
+      baseCheckoutSnapshot: null,
+    });
+    store.move(task.id, "in_progress", 0);
+    writeFileSync(join(repo, "preexisting-or-escaped.txt"), "dirty\n");
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(validBody),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.column).toBe("in_progress");
+    expect(body.pending).toBe("base-checkout-escape");
+    expect(body.escapeDetectedPaths).toEqual(["preexisting-or-escaped.txt"]);
+    expect(body.completion).toMatchObject({ outcome: "complete", summary: validBody.summary });
+  });
+
   it("POST /block on a running task stores a reported block and moves to review/error", async () => {
     const task = store.create({ title: "A", description: "do it", directory: "/repo" });
     store.update(task.id, { runState: "running" });

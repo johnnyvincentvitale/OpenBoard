@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { existsSync, realpathSync, renameSync, statSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { createInstanceDaemon, createInstanceRegistry } from "../instances";
 import type { Column, ModelRef, RosterAgent, Task, TaskRunState } from "../shared";
 import {
@@ -324,13 +324,15 @@ function canonicalPath(path: string): string {
 export function validateWorkspacePath(
   raw: string,
   cwd: string,
+  home = homedir(),
 ): { ok: true; path: string } | { ok: false; error: string } {
   const trimmed = raw.trim();
   if (!trimmed) return { ok: false, error: "Please specify a directory path." };
 
-  const requested = trimmed.startsWith("/") ? resolve(trimmed) : resolve(cwd, trimmed);
+  const expanded = expandHomePath(trimmed, home);
+  const requested = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
   const canonical = canonicalPath(requested);
-  if (unsafeWorkspacePaths().has(canonical)) {
+  if (unsafeWorkspacePaths(home).has(canonical)) {
     return { ok: false, error: "Cannot use home, root, Desktop, or Downloads as a board workspace." };
   }
 
@@ -343,6 +345,12 @@ export function validateWorkspacePath(
   }
 
   return { ok: true, path: canonical };
+}
+
+export function expandHomePath(path: string, home = homedir()): string {
+  if (path === "~") return home;
+  if (path.startsWith("~/")) return `${home}/${path.slice(2)}`;
+  return path;
 }
 
 export function isProjectLike(path: string): boolean {

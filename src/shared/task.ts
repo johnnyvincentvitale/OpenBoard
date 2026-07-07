@@ -197,6 +197,12 @@ export interface Task {
    */
   dirtyAtDispatch: boolean;
   /**
+   * Resolved isolation mode for the most recent dispatch/retry. Unlike
+   * `isolation`, this is not the user's override setting; it is the effective
+   * run intent after applying the board default at dispatch time.
+   */
+  isolationAtDispatch?: TaskIsolationMode | null;
+  /**
    * `git status --porcelain` of the BASE checkout (not the worktree) captured
    * at dispatch time, for worktree-isolated tasks only. Compared against the
    * same command re-run at completion/integrate time by the escape detector

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -250,6 +250,17 @@ describe("workspace gate validation", () => {
     tempDirs.push(child);
     const result = validateWorkspacePath("project", cwd);
     expect(result.ok).toBe(true);
+  });
+
+  it("expands ~/ workspace paths against the user's home instead of the current cwd", () => {
+    const fakeHome = makeTempDir();
+    const cwd = makeTempDir();
+    const project = join(fakeHome, "code", "openboard-content-planner-test");
+    mkdirSync(project, { recursive: true });
+
+    const result = validateWorkspacePath("~/code/openboard-content-planner-test", cwd, fakeHome);
+
+    expect(result).toEqual({ ok: true, path: realpathSync(project) });
   });
 
   it("detects project-like directories but never treats home as project-like", () => {
