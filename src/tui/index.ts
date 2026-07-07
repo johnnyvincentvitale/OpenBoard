@@ -2753,6 +2753,19 @@ function nextDetailTab(tab: TaskDetailTab, delta: number): TaskDetailTab {
   return DETAIL_TABS[(index + delta + DETAIL_TABS.length) % DETAIL_TABS.length];
 }
 
+function boardDetailScrollId(tab: TaskDetailTab, taskId: string): string | undefined {
+  switch (tab) {
+    case "prompt":
+      return `board-detail-prompt-${taskId}`;
+    case "handoff":
+      return `board-detail-handoff-${taskId}`;
+    case "output":
+      return `board-detail-output-${taskId}`;
+    case "comments":
+      return undefined;
+  }
+}
+
 function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
   const tab = state.detailTab ?? "prompt";
   const content: VChild =
@@ -2766,7 +2779,7 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
   const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY"].includes(row.label));
   const footer = tab === "comments"
     ? (state.commentDraft ? "enter submit · esc cancel" : "esc details · ←/→ tabs · c comment · r reply")
-    : "esc details · ←/→ tabs · m move card";
+    : "↑/↓ scroll · esc details · ←/→ tabs · m move card";
 
   return ui.Box(
     {
@@ -3242,6 +3255,11 @@ function renderDetail(ui: OpenTui, label: string, value: string, valueColor: Tui
 
 function renderCommandStrip(ui: OpenTui, state: TuiState) {
   const showBoardSummary = state.viewState.view !== "board";
+  const boardKeyHints = state.detailTab
+    ? state.detailTab === "comments"
+      ? "↑/↓ comments · ←/→ tabs · ↵ close details · c comment · r reply · esc close · q quit"
+      : "↑/↓ scroll detail · ←/→ tabs · ↵ close details · m move · esc close · q quit"
+    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · f filter · u refresh · ? help · q quit · A global archive";
 
   return ui.Box(
     {
@@ -3278,7 +3296,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
             : state.viewState.view === "diff"
             ? diffViewKeyHints(state.diffView)
-            : "↑/↓ cards · ←/→ lanes · b switch board · n new task · f filter · u refresh · ? help · q quit · A global archive",
+            : boardKeyHints,
         fg: COLORS.text,
         height: 1,
         flexGrow: 1,
@@ -3313,6 +3331,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["↑/↓", "move between cards"],
     ["←/→", "jump between lanes"],
     ["enter", "open Prompt/Handoff/Output/Comments"],
+    ["↑/↓", "scroll open detail tabs"],
     ["←/→/tab", "switch detail tabs"],
     ["c / r", "comment / reply (Comments tab)"],
     ["e", "edit selected To Do card"],
@@ -4004,6 +4023,16 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     if ((key.name || key.sequence) === "right" || key.sequence === "\t") {
       state.detailTab = nextDetailTab(state.detailTab, 1);
       if (state.detailTab === "comments") await loadCommentsForTask(state, actions, selectedTask(state));
+      actions.render();
+      return;
+    }
+    if ((key.name || key.sequence) === "down" || (key.name || key.sequence) === "up") {
+      const task = selectedTask(state);
+      const scrollId = task ? boardDetailScrollId(state.detailTab, task.id) : undefined;
+      if (scrollId) {
+        const delta = (key.name || key.sequence) === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+        state.detailScrollTop[scrollId] = Math.max(0, detailScrollOffset(state, scrollId) + delta);
+      }
       actions.render();
       return;
     }

@@ -1378,6 +1378,19 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(text).toContain("Handoff");
   });
 
+  it("inline detail footer and command strip mention up/down scrolling while locked", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+      detailTab: "prompt",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("↑/↓ scroll");
+    expect(text).toContain("↑/↓ scroll detail");
+  });
+
   it("Selected column grows on wider terminals", () => {
     const narrow = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -1621,6 +1634,69 @@ describe("TUI Enter key shows inline selected-card details", () => {
 
     await handleKeypress({ name: "left", sequence: "\u001b[D" } as any, s, actions());
     expect(s.detailTab).toBe("prompt");
+  });
+
+  it("inline detail up/down scrolls the active prompt viewport without changing card selection", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo"), task("second-card", "todo")],
+      selectedTaskId: "todo-card",
+      detailTab: "prompt",
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+
+    expect(s.selectedTaskId).toBe("todo-card");
+    expect(s.detailScrollTop["board-detail-prompt-todo-card"]).toBe(3);
+
+    await handleKeypress({ name: "up", sequence: "\u001b[A" } as any, s, actions());
+
+    expect(s.selectedTaskId).toBe("todo-card");
+    expect(s.detailScrollTop["board-detail-prompt-todo-card"]).toBe(0);
+  });
+
+  it("inline detail up/down targets the active handoff and output scroll ids", async () => {
+    const reported = {
+      ...task("review-card", "review"),
+      completion: {
+        outcome: "complete" as const,
+        summary: "done",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "none",
+        reportedAt: 1,
+      },
+      finalSessionOutput: "output",
+    };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reported, task("second-card", "review")],
+      selectedTaskId: "review-card",
+      detailTab: "handoff",
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.selectedTaskId).toBe("review-card");
+    expect(s.detailScrollTop["board-detail-handoff-review-card"]).toBe(3);
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, actions());
+    expect(s.detailTab).toBe("output");
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.selectedTaskId).toBe("review-card");
+    expect(s.detailScrollTop["board-detail-output-review-card"]).toBe(3);
+  });
+
+  it("closed inline details leave up/down as card navigation", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo"), task("second-card", "todo")],
+      selectedTaskId: "todo-card",
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+
+    expect(s.selectedTaskId).toBe("second-card");
   });
 
   it("inline detail tab cycles forward through all four tabs with tab key", async () => {
@@ -2079,6 +2155,34 @@ describe("TUI comments tab", () => {
     await handleKeypress({ name: "r", sequence: "r" } as any, s, actions());
 
     expect(s.commentDraft).toEqual({ taskId: "done-card", parentCommentId: "c1", text: "" });
+  });
+
+  it("up/down in the Comments tab preserves card selection and moves comment selection", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("done-card", "done"), task("other-card", "done")],
+      selectedTaskId: "done-card",
+      detailTab: "comments",
+      comments: {
+        taskId: "done-card",
+        items: [
+          { id: "c1", taskId: "done-card", author: "User", body: "first", createdAt: 1, parentCommentId: null },
+          { id: "c2", taskId: "done-card", author: "User", body: "second", createdAt: 2, parentCommentId: null },
+        ],
+        loading: false,
+        selectedIndex: 0,
+      },
+    });
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+
+    expect(s.selectedTaskId).toBe("done-card");
+    expect(s.comments?.selectedIndex).toBe(1);
+
+    await handleKeypress({ name: "up", sequence: "\u001b[A" } as any, s, actions());
+
+    expect(s.selectedTaskId).toBe("done-card");
+    expect(s.comments?.selectedIndex).toBe(0);
   });
 
   it("esc while composing cancels the draft without closing the detail view", async () => {
