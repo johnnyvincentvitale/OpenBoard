@@ -5,9 +5,10 @@
  * process. No mocks. Self-skips if an ephemeral OpenCode server can't be
  * started in this environment (e.g. CI without the binary).
  *
- * Most tests avoid invoking any model/prompt (cost/latency). The Push smoke
- * test deliberately admits one minimal task prompt to verify task -> session
- * dispatch against the real OpenCode server.
+ * Most tests avoid waiting on a real model turn (cost/latency). The Push smoke
+ * test admits one minimal task prompt to verify task -> session dispatch
+ * against the real OpenCode server, then drives the documented completion
+ * contract directly instead of depending on a provider response.
  */
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,6 +33,13 @@ import {
 const available = await opencodeAvailable();
 const BOARD_TOKEN = "test-token";
 const AUTH_HEADERS = { authorization: `Bearer ${BOARD_TOKEN}` } as const;
+
+const validCompletion = {
+  summary: "push route dispatch complete",
+  changedFiles: [],
+  verification: [{ command: "integration smoke", result: "passed" }],
+  residualRisk: "none",
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -157,7 +165,7 @@ describe.skipIf(!available)("session routes (integration)", () => {
   });
 
   it(
-    "runs a Push task in its requested directory and produces an assistant turn",
+    "runs a Push task in its requested directory and accepts a completion report",
     async () => {
       const taskDir = mkdtempSync(join(boardWorkspace, "task-"));
       let sessionId: string | undefined;
@@ -196,16 +204,31 @@ describe.skipIf(!available)("session routes (integration)", () => {
         const messages = await waitFor(async () => {
           const result = await handle.client.session.messages({ sessionID: sessionId! });
           if (result.error) throw new Error(`messages failed: ${JSON.stringify(result.error)}`);
-          const assistant = result.data?.find((message) => message.info.role === "assistant");
-          return assistant ? result.data : undefined;
+          const user = result.data?.find((message) => message.info.role === "user");
+          return user ? result.data : undefined;
         });
         expect(messages.some((message) => message.info.role === "user")).toBe(true);
-        expect(messages.some((message) => message.info.role === "assistant")).toBe(true);
+        const promptText = (
+          messages.find((message) => message.info.role === "user")?.parts as Array<{
+            type: string;
+            text?: string;
+          }>
+        )?.find((part) => part.type === "text")?.text;
+        expect(promptText).toContain("Reply OK only. Do not edit files.");
+        expect(promptText).toContain("OPENBOARD COMPLETION CONTRACT");
+        expect(promptText).toContain(`Task id: ${created.id}`);
 
-        await waitFor(() => {
-          const task = taskStore.get(created.id);
-          return task?.column === "review" && task.runState === "idle" ? task : undefined;
+        const completeRes = await app.request(`/api/tasks/${created.id}/complete`, {
+          method: "POST",
+          headers: { ...AUTH_HEADERS, "content-type": "application/json" },
+          body: JSON.stringify(validCompletion),
         });
+        expect(completeRes.status).toBe(200);
+        const completed = (await completeRes.json()) as Task;
+        expect(completed.column).toBe("review");
+        expect(completed.runState).toBe("idle");
+        expect(completed.completionSource).toBe("reported");
+        expect(completed.completion?.summary).toBe(validCompletion.summary);
       } finally {
         if (sessionId) {
           await handle.client.session.abort({ sessionID: sessionId }).catch(() => {});
