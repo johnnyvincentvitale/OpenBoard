@@ -4,7 +4,8 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type RosterAgent, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
+import { CLAUDE_CODE_MODELS, CLAUDE_CODE_PERMISSION_MODES, DEFAULT_CLAUDE_CODE_PERMISSION_MODE, USER_COMPLETED_BY, type ClaudeCodePermissionMode, type Column, type CompletionReport, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType } from "../shared";
+import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
 import { isLocalBoardUrl } from "../shared/instances";
@@ -284,12 +285,33 @@ function textBg(color: TuiColor): { bg: TuiColor } | Record<string, never> {
   return SAFE_COLOR_MODE ? {} : { bg: color };
 }
 
-const AGENT_FIELD_ORDER = ["type", "title", "description", "harness", "agent", "model", "directory", "isolation"] as const;
-const CLAUDE_FIELD_ORDER = ["type", "title", "description", "harness", "permissionMode", "model", "directory", "isolation"] as const;
-const MANUAL_FIELD_ORDER = ["type", "title", "description", "assignedTo"] as const;
+/**
+ * The 'n'/'e' new-task form is a 5-screen wizard (identity -> harness ->
+ * agentProfile -> isolation -> confirm). Manual cards skip straight from
+ * identity to confirm. Each screen owns its own field-order table below;
+ * `stepFieldOrder()` picks the right one for the current step/harness/
+ * isolation combination, and Tab/arrow cycling only ever moves within it.
+ */
+type WizardStep = "identity" | "harness" | "agentProfile" | "isolation" | "confirm";
+
+const IDENTITY_FIELDS_AGENT = ["type", "title", "description", "directory"] as const;
+const IDENTITY_FIELDS_MANUAL = ["type", "title", "description", "assignedTo", "directory"] as const;
+const HARNESS_FIELDS_OPENCODE = ["harness", "provider", "model"] as const;
+const HARNESS_FIELDS_CLAUDE = ["harness", "model"] as const;
+const AGENT_PROFILE_FIELDS_OPENCODE = ["agent"] as const;
+const AGENT_PROFILE_FIELDS_CLAUDE = ["permissionMode"] as const;
+/** No permission editor: worktree isolation (locked, automatic) or Claude Code harness (N/A). */
+const ISOLATION_FIELDS_LOCKED = ["isolation"] as const;
+const ISOLATION_FIELDS_EDITABLE = ["isolation", "permEdit", "permBash", "permWebfetch"] as const;
+const CONFIRM_FIELDS: readonly never[] = [];
 const TEXT_INPUT_COLUMNS = 56;
 type Overlay = "none" | "help" | "newTask" | "addInstance" | "renameInstance";
-type NewTaskField = (typeof AGENT_FIELD_ORDER)[number] | (typeof CLAUDE_FIELD_ORDER)[number] | (typeof MANUAL_FIELD_ORDER)[number];
+type NewTaskField =
+  | (typeof IDENTITY_FIELDS_MANUAL)[number]
+  | (typeof HARNESS_FIELDS_OPENCODE)[number]
+  | (typeof AGENT_PROFILE_FIELDS_OPENCODE)[number]
+  | (typeof AGENT_PROFILE_FIELDS_CLAUDE)[number]
+  | (typeof ISOLATION_FIELDS_EDITABLE)[number];
 type TextInputField = Extract<NewTaskField, "title" | "description" | "directory" | "assignedTo">;
 type AddInstanceField = "name" | "workspace";
 type RenameInstanceField = "newName";
@@ -339,11 +361,16 @@ interface NewTaskDraft {
   description: string;
   directory: string;
   harness: TaskHarness;
+  /** Selected OpenCode provider id ("" = unset — MODEL falls back to the agent-roster-derived list). */
+  providerId: string;
   agentId: string;
   claudePermissionMode: ClaudeCodePermissionMode;
   assignedTo: string;
   model?: ModelRef;
   isolation: TaskIsolationMode;
+  /** OpenCode permission-category overrides. Only ever submitted for in-place (non-worktree) OpenCode tasks. */
+  permissionOverrides: Record<PermissionOverrideCategory, PermissionOverrideAction>;
+  step: WizardStep;
   field: NewTaskField;
   textCursors?: Partial<Record<TextInputField, number>>;
   textScrolls?: Partial<Record<TextInputField, number>>;
@@ -411,6 +438,7 @@ interface CommentDraftState {
 interface TuiState {
   tasks: Task[];
   agents: RosterAgent[];
+  providers: RosterProvider[];
   boardUrl: string;
   selectedTaskId?: string;
   status: string;
@@ -609,6 +637,7 @@ export async function runOpenBoardTui(
   const state: TuiState = {
     tasks: [],
     agents: [],
+    providers: [],
     boardUrl: client.boardUrl,
     status: `connected to ${client.boardUrl}`,
     refreshing: false,
@@ -717,9 +746,14 @@ export async function runOpenBoardTui(
     }
 
     try {
-      const [tasks, agents, healthResult] = await Promise.all([
+      const [tasks, agents, providers, healthResult] = await Promise.all([
         currentClient.listTasks(),
         currentClient.listAgents(),
+        // Best-effort: an older board daemon without /api/providers (or any
+        // other provider-fetch failure) must never break the whole refresh —
+        // fall back to [], same contract as the server route's own best-effort
+        // GET /api/providers behavior.
+        currentClient.listProviders().catch(() => [] as RosterProvider[]),
         currentClient.getHealth().then(
           (health) => ({ ok: true as const, health }),
           (error) => ({ ok: false as const, error }),
@@ -727,6 +761,7 @@ export async function runOpenBoardTui(
       ]);
       state.tasks = tasks;
       state.agents = agents;
+      state.providers = providers;
       state.selectedTaskId = resolveSelectedTaskId(tasks, state.selectedTaskId);
       state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
       if (healthResult.ok) {
@@ -794,6 +829,7 @@ export async function runOpenBoardTui(
       state.cwd = item.definition.workspace;
       state.tasks = [];
       state.agents = [];
+      state.providers = [];
       state.selectedTaskId = undefined;
       state.viewState = transitionView(state.viewState, "board");
       state.status = `attached to ${item.definition.name} (${item.runtime.boardUrl})`;
@@ -809,6 +845,7 @@ export async function runOpenBoardTui(
     state.viewState = detachToLaunch(state.viewState);
     state.tasks = [];
     state.agents = [];
+    state.providers = [];
     state.selectedTaskId = undefined;
     state.status = "detached; back to instance list";
     render();
@@ -3229,6 +3266,15 @@ function renderHelpOverlay(ui: OpenTui) {
   );
 }
 
+/** Human-facing step title shown in the wizard header, e.g. "Step 2/5 · HARNESS & MODEL". */
+const WIZARD_STEP_LABELS: Record<WizardStep, string> = {
+  identity: "IDENTITY",
+  harness: "HARNESS & MODEL",
+  agentProfile: "AGENT",
+  isolation: "ISOLATION",
+  confirm: "CONFIRM",
+};
+
 function renderInlineNewTask(ui: OpenTui, state: TuiState) {
   const draft = state.newTask ?? createNewTaskDraft(state);
   const isEditing = Boolean(draft.editingTaskId);
@@ -3241,87 +3287,282 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
       gap: 1,
       ...boxBg(COLORS.panel),
     },
+    renderWizardHeader(ui, draft, isEditing),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    renderWizardBody(ui, state, draft),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    renderWizardFooter(ui, draft, isEditing),
+  );
+}
+
+function renderWizardHeader(ui: OpenTui, draft: NewTaskDraft, isEditing: boolean) {
+  const steps = wizardSteps(draft);
+  const index = steps.indexOf(draft.step);
+  const stepNumber = index === -1 ? 1 : index + 1;
+  return ui.Box(
+    { width: "100%", flexDirection: "row", height: 1 },
     ui.Text({
       content: isEditing ? "Edit Task" : "New Task",
       fg: COLORS.text,
       attributes: ui.TextAttributes.BOLD,
       height: 1,
+      flexGrow: 1,
       truncate: true,
     }),
-    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
-    ui.Box(
-      {
-        flexGrow: 1,
-        flexDirection: "column",
-        gap: 1,
-        ...boxBg(COLORS.panel),
-      },
-      renderSelectField(ui, "CARD TYPE", draft.type, draft.field === "type"),
-      renderInputField(ui, "TITLE", draft.title, draft.field === "title", "", 1, COLORS.text, draft, "title"),
-      renderInputField(
-        ui,
-        draft.type === "manual" ? "NOTES" : "PROMPT",
-        draft.description,
-        draft.field === "description",
-        draft.type === "manual" ? "Notes for the PM/manual card..." : "Describe the task for the agent...",
-        4,
-        COLORS.text,
-        draft,
-        "description",
-      ),
-      ...(draft.type === "manual"
-        ? [
-            renderInputField(ui, "ASSIGNED TO", draft.assignedTo, draft.field === "assignedTo", "Name or role", 1, COLORS.text, draft, "assignedTo"),
-          ]
-        : [
-            renderSelectField(ui, "HARNESS", currentHarnessLabel(draft), draft.field === "harness"),
-            draft.harness === "claude-code"
-              ? renderSelectField(ui, "PERMS", currentPermissionModeLabel(draft), draft.field === "permissionMode")
-              : renderSelectField(ui, "AGENT", currentAgentLabel(draft), draft.field === "agent"),
-            renderSelectField(ui, "MODEL", currentModelLabel(draft), draft.field === "model"),
-            renderInputField(
-              ui,
-              "DIR",
-              draft.field === "directory" ? draft.directory : shortPath(draft.directory),
-              draft.field === "directory",
-              state.cwd,
-              1,
-              COLORS.muted,
-              draft,
-              "directory",
-            ),
-            renderIsolationField(ui, draft),
-          ]),
-      draft.error
-        ? ui.Text({ content: draft.error, fg: COLORS.bright, wrapMode: "word", height: 2 })
-        : ui.Box({ height: 2 }),
-    ),
-    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
-    ui.Box(
-      { width: "100%", flexDirection: "row", height: 1, gap: 1 },
-      ui.Text({
-        content: draft.submitting
-          ? (isEditing ? "Saving..." : "Creating...")
-          : isEditing
-            ? "Save changes"
-            : draft.type === "manual" ? "Create manual task" : "Create agent task",
-        fg: COLORS.bright,
-        ...textBg(COLORS.accent),
-        height: 1,
-        width: 20,
-        truncate: true,
-      }),
-      ui.Text({ content: "esc cancel", fg: COLORS.muted, height: 1, flexGrow: 1, truncate: true }),
-    ),
     ui.Text({
-      content: isEditing
-        ? "tab next field · shift+tab previous · enter save"
-        : "tab next field · shift+tab previous · enter create",
+      content: `Step ${stepNumber}/${steps.length} · ${WIZARD_STEP_LABELS[draft.step]}`,
       fg: COLORS.dim,
       height: 1,
       truncate: true,
     }),
   );
+}
+
+function renderWizardBody(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  switch (draft.step) {
+    case "identity":
+      return renderIdentityStep(ui, state, draft);
+    case "harness":
+      return renderHarnessStep(ui, state, draft);
+    case "agentProfile":
+      return renderAgentProfileStep(ui, draft);
+    case "isolation":
+      return renderIsolationStep(ui, draft);
+    case "confirm":
+      return renderConfirmStep(ui, state, draft);
+  }
+}
+
+function renderDraftErrorRow(ui: OpenTui, draft: NewTaskDraft) {
+  return draft.error
+    ? ui.Text({ content: draft.error, fg: COLORS.bright, wrapMode: "word", height: 2 })
+    : ui.Box({ height: 2 });
+}
+
+// Step A — CARD TYPE, TITLE, PROMPT/NOTES, [ASSIGNED TO if manual], DIR.
+function renderIdentityStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    renderSelectField(ui, "CARD TYPE", draft.type, draft.field === "type"),
+    renderInputField(ui, "TITLE", draft.title, draft.field === "title", "", 1, COLORS.text, draft, "title"),
+    renderInputField(
+      ui,
+      draft.type === "manual" ? "NOTES" : "PROMPT",
+      draft.description,
+      draft.field === "description",
+      draft.type === "manual" ? "Notes for the PM/manual card..." : "Describe the task for the agent...",
+      4,
+      COLORS.text,
+      draft,
+      "description",
+    ),
+    ...(draft.type === "manual"
+      ? [renderInputField(ui, "ASSIGNED TO", draft.assignedTo, draft.field === "assignedTo", "Name or role", 1, COLORS.text, draft, "assignedTo")]
+      : []),
+    renderInputField(
+      ui,
+      "DIR",
+      draft.field === "directory" ? draft.directory : shortPath(draft.directory),
+      draft.field === "directory",
+      state.cwd,
+      1,
+      COLORS.muted,
+      draft,
+      "directory",
+    ),
+    renderDraftErrorRow(ui, draft),
+  );
+}
+
+// Step B — HARNESS, then (OpenCode) PROVIDER + MODEL synced to the live
+// /api/providers roster, or (Claude Code) the fixed MODEL alias list, unchanged.
+function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    renderSelectField(ui, "HARNESS", currentHarnessLabel(draft), draft.field === "harness"),
+    ...(draft.harness === "opencode"
+      ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
+      : []),
+    renderSelectField(ui, "MODEL", currentModelLabel(draft), draft.field === "model"),
+    renderDraftErrorRow(ui, draft),
+  );
+}
+
+// Step C — AGENT PROFILE (OpenCode roster, live-synced) or PERMS (Claude Code,
+// unchanged — full Claude "agent profile" support is a separate future workflow).
+function renderAgentProfileStep(ui: OpenTui, draft: NewTaskDraft) {
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    draft.harness === "claude-code"
+      ? renderSelectField(ui, "PERMS", currentPermissionModeLabel(draft), draft.field === "permissionMode")
+      : renderSelectField(ui, "AGENT PROFILE", currentAgentLabel(draft), draft.field === "agent"),
+    renderDraftErrorRow(ui, draft),
+  );
+}
+
+// Step D — ISOLATION (with a live description per option) and, for OpenCode
+// only: an automatic/locked note under worktree isolation (the existing
+// write-fenced + escape-detector + sandboxed-bash safety stack must never be
+// weakened by a per-task override), or an editable allow/ask/deny control
+// under in-place isolation, the only mode a permission override ever applies to.
+function renderIsolationStep(ui: OpenTui, draft: NewTaskDraft) {
+  const editable = draft.harness === "opencode" && draft.isolation === "in-place";
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    renderIsolationField(ui, draft),
+    ui.Text({ content: isolationDescription(draft.isolation), fg: COLORS.muted, wrapMode: "word", height: 2 }),
+    ...(draft.harness === "opencode" ? [editable ? renderPermissionOverrideControl(ui, draft) : renderLockedPermissionsNote(ui)] : []),
+    renderDraftErrorRow(ui, draft),
+  );
+}
+
+function isolationDescription(mode: TaskIsolationMode): string {
+  return mode === "worktree"
+    ? "Runs in a dedicated git worktree cut from DIR on a board/<taskId> branch — concurrent agents never share a working tree. Sync (s) and integrate (i) afterward."
+    : "Runs directly in DIR — no isolation. Concurrent agents sharing this directory can clobber each other; there is no file locking.";
+}
+
+function renderLockedPermissionsNote(ui: OpenTui) {
+  return ui.Box(
+    { width: "100%", flexDirection: "column", gap: 0 },
+    ui.Text({ content: "PERMISSIONS", fg: COLORS.dim, height: 1 }),
+    ui.Text({
+      content:
+        "Automatic for worktree isolation — write-fenced edits, the base-checkout escape detector, and sandboxed bash all apply and are not configurable here. Select ISOLATION \"none\" to set permissions directly.",
+      fg: COLORS.muted,
+      wrapMode: "word",
+      height: 3,
+    }),
+  );
+}
+
+const PERMISSION_OVERRIDE_FIELD_LABELS: Record<PermissionOverrideCategory, string> = {
+  edit: "EDIT",
+  bash: "BASH",
+  webfetch: "WEBFETCH",
+};
+
+const PERMISSION_OVERRIDE_FIELD_BY_CATEGORY: Record<PermissionOverrideCategory, NewTaskField> = {
+  edit: "permEdit",
+  bash: "permBash",
+  webfetch: "permWebfetch",
+};
+
+function renderPermissionOverrideControl(ui: OpenTui, draft: NewTaskDraft) {
+  return ui.Box(
+    { width: "100%", flexDirection: "column", gap: 0 },
+    ui.Text({ content: "PERMISSIONS", fg: COLORS.dim, height: 1 }),
+    ...PERMISSION_OVERRIDE_CATEGORIES.map((category) =>
+      renderSelectField(
+        ui,
+        PERMISSION_OVERRIDE_FIELD_LABELS[category],
+        draft.permissionOverrides[category],
+        draft.field === PERMISSION_OVERRIDE_FIELD_BY_CATEGORY[category],
+      ),
+    ),
+  );
+}
+
+// Step E — read-only summary of every selection. Enter creates/saves the
+// card only — it never runs it; `r` (twice) remains the only run path,
+// entirely outside this overlay.
+function renderConfirmStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    ui.Box(
+      { flexDirection: "column", gap: 0 },
+      ...confirmSummaryRows(draft, state).map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.text)),
+    ),
+    renderDraftErrorRow(ui, draft),
+  );
+}
+
+function confirmSummaryRows(draft: NewTaskDraft, state: TuiState): MetaRow[] {
+  const rows: MetaRow[] = [
+    { label: "TYPE", value: draft.type === "manual" ? "Manual" : "Agent", color: COLORS.text },
+    { label: "TITLE", value: draft.title || "(untitled)", color: COLORS.text },
+    { label: draft.type === "manual" ? "NOTES" : "PROMPT", value: draft.description || "(empty)", color: COLORS.text },
+  ];
+
+  if (draft.type === "manual") {
+    rows.push({ label: "ASSIGNED TO", value: draft.assignedTo || "(unassigned)", color: COLORS.text });
+    rows.push({ label: "DIR", value: shortPath(draft.directory), color: COLORS.text });
+    return rows;
+  }
+
+  rows.push({ label: "HARNESS", value: currentHarnessLabel(draft), color: COLORS.text });
+  if (draft.harness === "opencode") {
+    rows.push({ label: "PROVIDER", value: currentProviderLabel(draft, state.providers), color: COLORS.text });
+  }
+  rows.push({ label: "MODEL", value: currentModelLabel(draft), color: COLORS.text });
+  rows.push(
+    draft.harness === "claude-code"
+      ? { label: "PERMS", value: currentPermissionModeLabel(draft), color: COLORS.text }
+      : { label: "AGENT PROFILE", value: currentAgentLabel(draft), color: COLORS.text },
+  );
+  rows.push({ label: "DIR", value: shortPath(draft.directory), color: COLORS.text });
+  rows.push({ label: "ISOLATION", value: draft.isolation === "worktree" ? "Worktree" : "None (in-place)", color: COLORS.text });
+  if (draft.harness === "opencode") {
+    rows.push({
+      label: "PERMISSIONS",
+      value: draft.isolation === "worktree" ? "Automatic (worktree-fenced)" : permissionOverridesSummary(draft),
+      color: COLORS.text,
+    });
+  }
+  return rows;
+}
+
+function permissionOverridesSummary(draft: NewTaskDraft): string {
+  const changed = PERMISSION_OVERRIDE_CATEGORIES.filter((category) => draft.permissionOverrides[category] !== "allow");
+  if (changed.length === 0) return "Default (allow all)";
+  return changed.map((category) => `${category}: ${draft.permissionOverrides[category]}`).join(", ");
+}
+
+function currentProviderLabel(draft: NewTaskDraft, providers: RosterProvider[]): string {
+  if (!draft.providerId) return "any (from agent roster)";
+  return providers.find((provider) => provider.id === draft.providerId)?.name ?? draft.providerId;
+}
+
+function renderWizardFooter(ui: OpenTui, draft: NewTaskDraft, isEditing: boolean) {
+  const onConfirm = draft.step === "confirm";
+  return ui.Box(
+    { width: "100%", flexDirection: "column", gap: 0 },
+    ui.Box(
+      { width: "100%", flexDirection: "row", height: 1, gap: 1 },
+      ...(onConfirm
+        ? [
+            ui.Text({
+              content: draft.submitting
+                ? (isEditing ? "Saving..." : "Creating...")
+                : isEditing
+                  ? "Save changes"
+                  : draft.type === "manual" ? "Create manual task" : "Create agent task",
+              fg: COLORS.bright,
+              ...textBg(COLORS.accent),
+              height: 1,
+              width: 20,
+              truncate: true,
+            }),
+          ]
+        : []),
+      ui.Text({ content: "esc cancel", fg: COLORS.muted, height: 1, flexGrow: 1, truncate: true }),
+    ),
+    ui.Text({
+      content: wizardFooterHint(draft, isEditing),
+      fg: COLORS.dim,
+      height: 1,
+      truncate: true,
+    }),
+  );
+}
+
+function wizardFooterHint(draft: NewTaskDraft, isEditing: boolean): string {
+  const steps = wizardSteps(draft);
+  const isFirst = steps.indexOf(draft.step) === 0;
+  if (draft.step === "confirm") {
+    return `${isFirst ? "" : "b back · "}enter ${isEditing ? "save" : "create"}`;
+  }
+  return `tab next field · shift+tab previous${isFirst ? "" : " · b back"} · enter continue`;
 }
 
 function renderInputField(
@@ -4088,11 +4329,18 @@ function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
     description: task.description,
     directory: task.directory,
     harness: task.harness ?? "opencode",
+    providerId: "",
     agentId: task.agent ?? defaultAgentId(state.agents),
     claudePermissionMode: task.claudePermissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
     assignedTo: task.assignedTo ?? "",
     model: task.model ?? undefined,
     isolation: task.isolation ?? "worktree",
+    permissionOverrides: {
+      edit: task.permissionOverrides?.edit ?? "allow",
+      bash: task.permissionOverrides?.bash ?? "allow",
+      webfetch: task.permissionOverrides?.webfetch ?? "allow",
+    },
+    step: "identity",
     field: "title",
     textCursors: {},
     textScrolls: {},
@@ -4352,12 +4600,23 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
   }
 
   if (isEnterKey(key)) {
-    await createDraftTask(state, actions);
+    if (draft.step === "confirm") {
+      await createDraftTask(state, actions);
+      return;
+    }
+    advanceWizardStep(draft, 1);
+    actions.render();
     return;
   }
 
   if (handleDraftTextKey(draft, key)) {
     draft.error = undefined;
+    actions.render();
+    return;
+  }
+
+  if (isWizardBackKey(key, draft)) {
+    advanceWizardStep(draft, -1);
     actions.render();
     return;
   }
@@ -4373,6 +4632,36 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
   }
 
   if (applyTextInput(draft, key)) actions.render();
+}
+
+/**
+ * `b`/`B` navigates to the previous wizard screen — but only when focus
+ * isn't on a text-input field, so typing a title/prompt containing the
+ * letter "b" still inserts it literally (handleDraftTextKey/applyTextInput
+ * already consume the key first in that case; this check is belt-and-suspenders
+ * self-documentation of that same contract, mirroring how "n" is typable
+ * inside these same fields today).
+ */
+function isWizardBackKey(key: KeyEvent, draft: NewTaskDraft): boolean {
+  if (isTextInputField(draft.field)) return false;
+  return key.sequence === "b" || key.sequence === "B";
+}
+
+/**
+ * Only OpenCode's in-place (non-worktree) tasks may carry a permission
+ * override — worktree tasks always get the automatic write-fenced ruleset
+ * (see resolveOpenCodePermissionRules) and the wizard never shows an
+ * editable control for them. Returns undefined for an untouched (all-allow)
+ * draft so its create/update payload stays byte-identical to a plain task.
+ */
+function draftPermissionOverridesPayload(draft: NewTaskDraft): PermissionOverrides | undefined {
+  if (draft.harness !== "opencode" || draft.isolation !== "in-place") return undefined;
+  const overrides: PermissionOverrides = {};
+  for (const category of PERMISSION_OVERRIDE_CATEGORIES) {
+    const action = draft.permissionOverrides[category];
+    if (action !== "allow") overrides[category] = action;
+  }
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
 async function createDraftTask(state: TuiState, actions: TuiActions): Promise<void> {
@@ -4416,6 +4705,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : null,
           model: draft.model ?? null,
           isolation: draft.isolation,
+          permissionOverrides: draftPermissionOverridesPayload(draft) ?? null,
         })
       : await actions.client.createTask(draft.type === "manual" ? {
           type: "manual",
@@ -4433,6 +4723,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           claudePermissionMode: draft.harness === "claude-code" ? draft.claudePermissionMode : undefined,
           model: draft.model,
           isolation: draft.isolation,
+          permissionOverrides: draftPermissionOverridesPayload(draft),
         });
     state.overlay = "none";
     state.newTask = undefined;
@@ -4458,11 +4749,14 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
     description: "",
     directory: state.cwd,
     harness: "opencode",
+    providerId: "",
     agentId,
     claudePermissionMode: DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
     assignedTo: "",
     model: agent?.model,
     isolation: "worktree",
+    permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+    step: "identity",
     field: "type",
     textCursors: {},
     textScrolls: {},
@@ -4471,8 +4765,9 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
 }
 
 function moveDraftField(draft: NewTaskDraft, delta: number): void {
-  const order = newTaskFieldOrder(draft);
-  const current = order.includes(draft.field) ? draft.field : "type";
+  const order = stepFieldOrder(draft);
+  if (order.length === 0) return; // confirm screen has no focusable fields — Tab is a no-op
+  const current = order.includes(draft.field) ? draft.field : order[0];
   const index = order.indexOf(current);
   draft.field = order[(index + delta + order.length) % order.length];
 }
@@ -4481,12 +4776,20 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
   switch (draft.field) {
     case "type":
       draft.type = draft.type === "agent" ? "manual" : "agent";
-      if (!newTaskFieldOrder(draft).includes(draft.field)) draft.field = "type";
+      if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
       return true;
     case "harness":
       draft.harness = draft.harness === "opencode" ? "claude-code" : "opencode";
-      draft.model = defaultModelForHarness(draft, state.agents);
-      if (!newTaskFieldOrder(draft).includes(draft.field)) draft.field = "type";
+      if (draft.harness === "claude-code") {
+        draft.model = CLAUDE_CODE_MODELS[0];
+      } else {
+        draft.providerId = "";
+        draft.model = undefined;
+      }
+      if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
+      return true;
+    case "provider":
+      cycleProvider(draft, state.providers, delta);
       return true;
     case "agent":
       cycleAgent(draft, state.agents, delta);
@@ -4495,21 +4798,56 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       cyclePermissionMode(draft, delta);
       return true;
     case "model":
-      cycleModel(draft, state.agents, delta);
+      cycleModel(draft, state.agents, state.providers, delta);
       return true;
     case "isolation":
       draft.isolation = draft.isolation === "worktree" ? "in-place" : "worktree";
+      if (!stepFieldOrder(draft).includes(draft.field)) draft.field = stepFieldOrder(draft)[0] ?? draft.field;
+      return true;
+    case "permEdit":
+      cyclePermissionOverride(draft, "edit", delta);
+      return true;
+    case "permBash":
+      cyclePermissionOverride(draft, "bash", delta);
+      return true;
+    case "permWebfetch":
+      cyclePermissionOverride(draft, "webfetch", delta);
       return true;
     default:
       return false;
   }
 }
 
+/**
+ * Cycling AGENT PROFILE keeps MODEL in sync with the newly-selected agent's
+ * own default — but only when the current model still matches the *previous*
+ * agent's default, i.e. the user never deviated from it on the earlier MODEL
+ * screen. This preserves an explicit model choice (MODEL now has its own
+ * screen ahead of AGENT PROFILE) while still auto-syncing for the common case
+ * of just picking an agent and moving on.
+ */
 function cycleAgent(draft: NewTaskDraft, agents: RosterAgent[], delta: number): void {
+  const previousAgentModel = agents.find((agent) => agent.id === draft.agentId)?.model;
+  const modelMatchesPreviousAgentDefault = sameModel(draft.model, previousAgentModel);
   const ids = ["", ...agents.map((agent) => agent.id)];
   const current = Math.max(0, ids.indexOf(draft.agentId));
   draft.agentId = ids[(current + delta + ids.length) % ids.length] ?? "";
-  draft.model = defaultModelForHarness(draft, agents);
+  if (modelMatchesPreviousAgentDefault) {
+    draft.model = agents.find((agent) => agent.id === draft.agentId)?.model;
+  }
+}
+
+function cycleProvider(draft: NewTaskDraft, providers: RosterProvider[], delta: number): void {
+  const ids = ["", ...providers.map((provider) => provider.id)];
+  const current = Math.max(0, ids.indexOf(draft.providerId));
+  draft.providerId = ids[(current + delta + ids.length) % ids.length] ?? "";
+  const provider = providers.find((item) => item.id === draft.providerId);
+  draft.model = provider ? modelRefFromProvider(provider) : undefined;
+}
+
+function modelRefFromProvider(provider: RosterProvider): ModelRef | undefined {
+  const modelId = provider.defaultModelId ?? provider.models[0]?.id;
+  return modelId ? { providerID: provider.id, id: modelId } : undefined;
 }
 
 function cyclePermissionMode(draft: NewTaskDraft, delta: number): void {
@@ -4517,8 +4855,14 @@ function cyclePermissionMode(draft: NewTaskDraft, delta: number): void {
   draft.claudePermissionMode = CLAUDE_CODE_PERMISSION_MODES[(current + delta + CLAUDE_CODE_PERMISSION_MODES.length) % CLAUDE_CODE_PERMISSION_MODES.length];
 }
 
-function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], delta: number): void {
-  const options = modelOptions(draft, agents);
+function cyclePermissionOverride(draft: NewTaskDraft, category: PermissionOverrideCategory, delta: number): void {
+  const current = Math.max(0, PERMISSION_OVERRIDE_ACTIONS.indexOf(draft.permissionOverrides[category]));
+  draft.permissionOverrides[category] =
+    PERMISSION_OVERRIDE_ACTIONS[(current + delta + PERMISSION_OVERRIDE_ACTIONS.length) % PERMISSION_OVERRIDE_ACTIONS.length];
+}
+
+function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[], delta: number): void {
+  const options = modelOptions(draft, agents, providers);
   const current = Math.max(
     0,
     options.findIndex((model) => sameModel(model, draft.model)),
@@ -4768,9 +5112,44 @@ function lineRangeAtCursor(value: string, cursor: number): { start: number; end:
   return { start, end, nextCursor };
 }
 
-function newTaskFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
-  if (draft.type === "manual") return MANUAL_FIELD_ORDER;
-  return draft.harness === "claude-code" ? CLAUDE_FIELD_ORDER : AGENT_FIELD_ORDER;
+/** The wizard screens for the current draft's card type — manual cards skip straight from identity to confirm. */
+function wizardSteps(draft: NewTaskDraft): readonly WizardStep[] {
+  return draft.type === "manual"
+    ? (["identity", "confirm"] as const)
+    : (["identity", "harness", "agentProfile", "isolation", "confirm"] as const);
+}
+
+/** The focusable field order for the draft's *current* step, branched by harness/isolation where relevant. */
+function stepFieldOrder(draft: NewTaskDraft): readonly NewTaskField[] {
+  switch (draft.step) {
+    case "identity":
+      return draft.type === "manual" ? IDENTITY_FIELDS_MANUAL : IDENTITY_FIELDS_AGENT;
+    case "harness":
+      return draft.harness === "claude-code" ? HARNESS_FIELDS_CLAUDE : HARNESS_FIELDS_OPENCODE;
+    case "agentProfile":
+      return draft.harness === "claude-code" ? AGENT_PROFILE_FIELDS_CLAUDE : AGENT_PROFILE_FIELDS_OPENCODE;
+    case "isolation":
+      return draft.harness === "opencode" && draft.isolation === "in-place" ? ISOLATION_FIELDS_EDITABLE : ISOLATION_FIELDS_LOCKED;
+    case "confirm":
+      return CONFIRM_FIELDS;
+  }
+}
+
+/**
+ * Move to the next/previous wizard screen (Enter/`b`), clamped at either end
+ * — `b` on the first screen and Enter on the last are no-ops here (Enter on
+ * "confirm" is handled separately, as a submit rather than a step change).
+ * Focus always resets to the new screen's first field, falling back to the
+ * non-text "type" sentinel on the fieldless confirm screen so a stale
+ * text-field focus can never make `b` silently insert a literal "b" instead
+ * of navigating back.
+ */
+function advanceWizardStep(draft: NewTaskDraft, delta: number): void {
+  const steps = wizardSteps(draft);
+  const currentIndex = steps.indexOf(draft.step);
+  const nextIndex = Math.max(0, Math.min(steps.length - 1, (currentIndex === -1 ? 0 : currentIndex) + delta));
+  draft.step = steps[nextIndex] ?? steps[0];
+  draft.field = stepFieldOrder(draft)[0] ?? "type";
 }
 
 async function handleWorkspaceGateKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
@@ -5268,15 +5647,11 @@ function uniqueModels(agents: RosterAgent[]): ModelRef[] {
   return models;
 }
 
-function modelOptions(draft: NewTaskDraft, agents: RosterAgent[]): Array<ModelRef | undefined> {
-  return draft.harness === "claude-code"
-    ? [...CLAUDE_CODE_MODELS]
-    : [undefined, ...uniqueModels(agents)];
-}
-
-function defaultModelForHarness(draft: Pick<NewTaskDraft, "harness" | "agentId">, agents: RosterAgent[]): ModelRef | undefined {
-  if (draft.harness === "claude-code") return CLAUDE_CODE_MODELS[0];
-  return agents.find((item) => item.id === draft.agentId)?.model;
+function modelOptions(draft: NewTaskDraft, agents: RosterAgent[], providers: RosterProvider[]): Array<ModelRef | undefined> {
+  if (draft.harness === "claude-code") return [...CLAUDE_CODE_MODELS];
+  const provider = draft.providerId ? providers.find((item) => item.id === draft.providerId) : undefined;
+  if (provider) return provider.models.map((model) => ({ providerID: provider.id, id: model.id }));
+  return [undefined, ...uniqueModels(agents)];
 }
 
 function sameModel(left: ModelRef | undefined, right: ModelRef | undefined): boolean {

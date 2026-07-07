@@ -461,10 +461,13 @@ describe("TUI new-task prompt editor", () => {
         description: "delete me",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "description",
         submitting: false,
       },
@@ -486,10 +489,13 @@ describe("TUI new-task prompt editor", () => {
         description: "abc",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "description",
         textCursors: { description: 1 },
         submitting: false,
@@ -511,10 +517,13 @@ describe("TUI new-task prompt editor", () => {
         description: "first\nsecond\nthird",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "description",
         textCursors: { description: "first\nsec".length },
         submitting: false,
@@ -537,10 +546,13 @@ describe("TUI new-task prompt editor", () => {
         description: "first\nsecond\nthird",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "description",
         textCursors: { description: "first\nsec".length },
         submitting: false,
@@ -563,10 +575,13 @@ describe("TUI new-task prompt editor", () => {
         description: "",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "title",
         submitting: false,
       },
@@ -588,10 +603,13 @@ describe("TUI new-task prompt editor", () => {
         description: longPrompt,
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "description",
         textCursors: { description: 0 },
         textScrolls: { description: 0 },
@@ -616,10 +634,13 @@ describe("TUI new-task prompt editor", () => {
         description: "before\n",
         directory: "/repo",
         harness: "claude-code",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "in-place",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "description",
         textCursors: { description: "before\n".length },
         submitting: false,
@@ -643,10 +664,13 @@ describe("TUI new-task prompt editor", () => {
         description: "",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "title",
         submitting: false,
       },
@@ -1695,10 +1719,13 @@ describe("TUI edit mode (e)", () => {
         description: "desc",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "build",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "confirm",
         field: "title",
         submitting: false,
         editingTaskId: "todo-card",
@@ -2029,6 +2056,7 @@ describe("TUI manual task creation", () => {
     await handleKeypress({ name: "n", sequence: "n" } as any, s, actions());
 
     expect(s.overlay).toBe("none");
+    expect(s.newTask.step).toBe("identity");
     expect(s.newTask.field).toBe("type");
 
     const app = renderApp(fakeUi(), s);
@@ -2036,8 +2064,11 @@ describe("TUI manual task creation", () => {
       .find((node) => node.props?.title === "Selected");
     const text = textOf(app);
     expect(selected).toBeTruthy();
+    expect(text).toContain("Step 1/5");
     expect(text).toContain("CARD TYPE");
-    expect(text).toContain("Create agent task");
+    // The submit affordance only appears on the final confirm screen.
+    expect(text).not.toContain("Create agent task");
+    expect(text).toContain("enter continue");
   });
 
   it("renders manual card fields without agent-only controls", () => {
@@ -2049,21 +2080,25 @@ describe("TUI manual task creation", () => {
         description: "Check the copy",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "build",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "Johnny",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "identity",
         field: "assignedTo",
         submitting: false,
       },
     }));
 
     const text = textOf(app);
+    expect(text).toContain("Step 1/2");
     expect(text).toContain("CARD TYPE");
     expect(text).toContain("manual");
     expect(text).toContain("NOTES");
     expect(text).toContain("ASSIGNED TO");
-    expect(text).toContain("Create manual task");
+    // Manual cards skip harness/agent/isolation entirely — identity goes straight to confirm.
     expect(text).not.toContain("AGENT");
     expect(text).not.toContain("MODEL");
     expect(text).not.toContain("ISOLATION");
@@ -2083,25 +2118,38 @@ describe("TUI manual task creation", () => {
         description: "Run headlessly",
         directory: "/repo",
         harness: "claude-code",
+        providerId: "",
         agentId: "plan",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "",
         model: { providerID: "claude-code", id: "opus" },
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "harness",
         field: "model",
         submitting: false,
       },
     });
 
-    const text = textOf(renderApp(fakeUi(), s));
-    expect(text).toContain("HARNESS");
-    expect(text).toContain("Claude Code");
-    expect(text).toContain("PERMS");
-    expect(text).toContain("bypassPermissions");
-    expect(text).toContain("MODEL");
-    expect(text).toContain("opus");
-    expect(text).not.toContain("AGENT");
+    // Screen B (HARNESS & MODEL) — no PROVIDER for Claude Code, no PERMS yet (that's screen C).
+    const harnessText = textOf(renderApp(fakeUi(), s));
+    expect(harnessText).toContain("HARNESS");
+    expect(harnessText).toContain("Claude Code");
+    expect(harnessText).toContain("MODEL");
+    expect(harnessText).toContain("opus");
+    expect(harnessText).not.toContain("PROVIDER");
+    expect(harnessText).not.toContain("PERMS");
 
+    // Screen C (AGENT) — Claude Code shows PERMS, unchanged from today's behavior.
+    s.newTask.step = "agentProfile";
+    s.newTask.field = "permissionMode";
+    const profileText = textOf(renderApp(fakeUi(), s));
+    expect(profileText).toContain("PERMS");
+    expect(profileText).toContain("bypassPermissions");
+    expect(profileText).not.toContain("AGENT PROFILE");
+
+    // Screen E (confirm) — enter creates the card, never runs it.
+    s.newTask.step = "confirm";
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({
       client: { createTask },
     }));
@@ -2115,6 +2163,7 @@ describe("TUI manual task creation", () => {
       claudePermissionMode: "bypassPermissions",
       model: { providerID: "claude-code", id: "opus" },
       isolation: "worktree",
+      permissionOverrides: undefined,
     });
   });
 
@@ -2132,10 +2181,13 @@ describe("TUI manual task creation", () => {
         description: "Check the copy",
         directory: "/repo",
         harness: "opencode",
+        providerId: "",
         agentId: "build",
         claudePermissionMode: "bypassPermissions",
         assignedTo: "Johnny",
         isolation: "worktree",
+        permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+        step: "confirm",
         field: "assignedTo",
         submitting: false,
       },
@@ -2330,6 +2382,237 @@ describe("TUI manual task creation", () => {
 
     expect(syncTask).not.toHaveBeenCalled();
     expect(runAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("TUI new-task wizard navigation", () => {
+  function agentDraft(overrides: Record<string, unknown> = {}) {
+    return {
+      type: "agent",
+      title: "",
+      description: "",
+      directory: "/repo",
+      harness: "opencode",
+      providerId: "",
+      agentId: "",
+      claudePermissionMode: "bypassPermissions",
+      assignedTo: "",
+      isolation: "worktree",
+      permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+      step: "identity",
+      field: "type",
+      submitting: false,
+      ...overrides,
+    };
+  }
+
+  it("enter on the identity screen advances to harness without submitting", async () => {
+    const createTask = vi.fn();
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ title: "A title", field: "title" }),
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { createTask } }));
+
+    expect(createTask).not.toHaveBeenCalled();
+    expect(s.newTask.step).toBe("harness");
+    expect(s.newTask.field).toBe("harness");
+    expect(s.newTask).toBeDefined();
+  });
+
+  it("b on the harness screen returns to identity, resetting focus to its first field", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "harness", field: "harness" }),
+    });
+
+    await handleKeypress({ name: "b", sequence: "b" } as any, s, actions());
+
+    expect(s.newTask.step).toBe("identity");
+    expect(s.newTask.field).toBe("type");
+  });
+
+  it("b on the first (identity) screen is a no-op", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "identity", field: "type" }),
+    });
+
+    await handleKeypress({ name: "b", sequence: "b" } as any, s, actions());
+
+    expect(s.newTask.step).toBe("identity");
+  });
+
+  it("typing the letter 'b' into a text field inserts it instead of navigating back", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "harness", field: "title", description: "" }),
+    });
+    s.newTask.step = "identity";
+
+    await handleKeypress({ name: "b", sequence: "b" } as any, s, actions());
+
+    expect(s.newTask.title).toBe("b");
+    expect(s.newTask.step).toBe("identity");
+  });
+
+  it("escape cancels the wizard entirely from a mid-flow screen", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      overlay: "none",
+      newTask: agentDraft({ step: "isolation", field: "isolation" }),
+    });
+
+    await handleKeypress({ name: "escape", sequence: "" } as any, s, actions());
+
+    expect(s.newTask).toBeUndefined();
+  });
+
+  it("worktree isolation never exposes the permission-override fields via Tab", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "isolation", field: "isolation", isolation: "worktree" }),
+    });
+
+    for (let i = 0; i < 5; i++) {
+      await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    }
+
+    // "isolation" is the only field on this step while worktree is selected —
+    // Tab cycling can never land on permEdit/permBash/permWebfetch.
+    expect(s.newTask.field).toBe("isolation");
+  });
+
+  it("in-place isolation exposes editable EDIT/BASH/WEBFETCH controls defaulting to allow", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "isolation", field: "isolation", isolation: "in-place" }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("PERMISSIONS");
+    expect(text).toContain("EDIT");
+    expect(text).toContain("BASH");
+    expect(text).toContain("WEBFETCH");
+    expect(text).not.toContain("Automatic");
+  });
+
+  it("worktree isolation shows the locked permissions note, not an editable control", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "isolation", field: "isolation", isolation: "worktree" }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("PERMISSIONS");
+    expect(text).toContain("Automatic");
+    expect(text).not.toContain("EDIT");
+  });
+
+  it("cycling a permission-override field only changes that category", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "isolation", field: "permEdit", isolation: "in-place" }),
+    });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
+
+    expect(s.newTask.permissionOverrides.edit).toBe("ask");
+    expect(s.newTask.permissionOverrides.bash).toBe("allow");
+    expect(s.newTask.permissionOverrides.webfetch).toBe("allow");
+  });
+
+  it("cycling AGENT PROFILE syncs MODEL to the new agent's default when the model was untouched", async () => {
+    const build = { id: "build", mode: "primary" as const, model: { providerID: "opencode", id: "north-mini-code-free" } };
+    const plan = { id: "plan", mode: "primary" as const, model: { providerID: "openai", id: "gpt-5.5" } };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      agents: [build, plan],
+      newTask: agentDraft({ step: "agentProfile", field: "agent", agentId: "build", model: build.model }),
+    });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
+
+    expect(s.newTask.agentId).toBe("plan");
+    expect(s.newTask.model).toEqual(plan.model);
+  });
+
+  it("cycling AGENT PROFILE preserves a MODEL explicitly chosen on the harness screen", async () => {
+    const build = { id: "build", mode: "primary" as const, model: { providerID: "opencode", id: "north-mini-code-free" } };
+    const plan = { id: "plan", mode: "primary" as const, model: { providerID: "openai", id: "gpt-5.5" } };
+    const explicitModel = { providerID: "anthropic", id: "claude-sonnet-5" };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      agents: [build, plan],
+      // Model was explicitly picked on the (earlier) harness screen and no longer matches build's own default.
+      newTask: agentDraft({ step: "agentProfile", field: "agent", agentId: "build", model: explicitModel }),
+    });
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, actions());
+
+    expect(s.newTask.agentId).toBe("plan");
+    expect(s.newTask.model).toEqual(explicitModel);
+  });
+
+  it("submits an in-place task with a non-default permission override", async () => {
+    const createTask = vi.fn(async (payload: unknown) => ({ ...task("in-place-card", "todo"), ...(payload as object), id: "in-place-card" }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({
+        title: "In-place work",
+        description: "Do it here",
+        isolation: "in-place",
+        permissionOverrides: { edit: "ask", bash: "deny", webfetch: "allow" },
+        step: "confirm",
+      }),
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { createTask } }));
+
+    expect(createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isolation: "in-place",
+        permissionOverrides: { edit: "ask", bash: "deny" },
+      }),
+    );
+  });
+
+  it("omits permissionOverrides for an untouched (all-allow) draft, even on the in-place confirm screen", async () => {
+    const createTask = vi.fn(async (payload: unknown) => ({ ...task("plain-card", "todo"), ...(payload as object), id: "plain-card" }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ title: "Plain work", isolation: "in-place", step: "confirm" }),
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { createTask } }));
+
+    expect(createTask).toHaveBeenCalledWith(expect.objectContaining({ permissionOverrides: undefined }));
+  });
+
+  it("confirm screen renders a read-only summary and enter creates without ever running the card", async () => {
+    const runTask = vi.fn();
+    const createTask = vi.fn(async (payload: unknown) => ({ ...task("summary-card", "todo"), ...(payload as object), id: "summary-card" }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({
+        title: "Summarized task",
+        description: "Do the thing",
+        isolation: "worktree",
+        step: "confirm",
+      }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("TITLE");
+    expect(text).toContain("Summarized task");
+    expect(text).toContain("ISOLATION");
+    expect(text).toContain("Worktree");
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { createTask, runTask } }));
+
+    expect(createTask).toHaveBeenCalled();
+    expect(runTask).not.toHaveBeenCalled();
   });
 });
 

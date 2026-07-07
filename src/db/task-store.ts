@@ -7,6 +7,7 @@ import type {
   Column,
   CreateTaskInput,
   ModelRef,
+  PermissionOverrides,
   Task,
   ClaudeCodePermissionMode,
   TaskComment,
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS task (
   assigned_to TEXT,
   model       TEXT,
   isolation       TEXT,
+  permission_overrides TEXT,
   worktree_path   TEXT,
   worktree_branch TEXT,
   base_branch     TEXT,
@@ -135,6 +137,7 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["base_checkout_snapshot", "TEXT"],
   ["escape_detected_paths", "TEXT"],
   ["rebase_conflict_paths", "TEXT"],
+  ["permission_overrides", "TEXT"],
 ];
 
 const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
@@ -165,6 +168,7 @@ interface TaskRowRecord {
   assigned_to: string | null;
   model: string | null;
   isolation: string | null;
+  permission_overrides: string | null;
   worktree_path: string | null;
   worktree_branch: string | null;
   base_branch: string | null;
@@ -220,6 +224,7 @@ function toTask(record: TaskRowRecord): Task {
     archived: record.archived === 1,
     parentIds: [],
     completion: record.completion ? (JSON.parse(record.completion) as CompletionReport) : null,
+    permissionOverrides: record.permission_overrides ? (JSON.parse(record.permission_overrides) as PermissionOverrides) : null,
     finalSessionOutput: record.final_session_output,
     completionSource: record.completion_source as CompletionSource | null,
     completionLocation: record.completion_location as TaskCompletionLocation | null,
@@ -331,8 +336,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
-         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, claude_permission_mode, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
+         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @claudePermissionMode, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -359,6 +364,7 @@ export class SqliteTaskStore implements TaskStore {
            assigned_to = @assignedTo,
            model = @model,
            isolation = @isolation,
+           permission_overrides = @permissionOverrides,
            worktree_path = @worktreePath,
            worktree_branch = @worktreeBranch,
            base_branch = @baseBranch,
@@ -515,6 +521,7 @@ export class SqliteTaskStore implements TaskStore {
         assignedTo: data.assignedTo ?? null,
         model: data.model ? JSON.stringify(data.model) : null,
         isolation: data.isolation ?? null,
+        permissionOverrides: data.permissionOverrides ? JSON.stringify(data.permissionOverrides) : null,
         worktreePath: null,
         worktreeBranch: null,
         baseBranch: null,
@@ -573,6 +580,7 @@ export class SqliteTaskStore implements TaskStore {
         assignedTo: merged.assignedTo ?? null,
         model: merged.model ? JSON.stringify(merged.model) : null,
         isolation: merged.isolation ?? null,
+        permissionOverrides: merged.permissionOverrides ? JSON.stringify(merged.permissionOverrides) : null,
         worktreePath: merged.worktreePath ?? null,
         worktreeBranch: merged.worktreeBranch ?? null,
         baseBranch: merged.baseBranch ?? null,

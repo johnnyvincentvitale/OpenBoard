@@ -5,8 +5,8 @@
  */
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, TASK_ROUTE_PATTERNS, TASK_HARNESSES, TASK_ISOLATION_MODES, TASK_TYPES, USER_COMPLETED_BY, isColumn } from "../../shared";
-import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore, UpdateTaskInput } from "../../shared";
+import { CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, TASK_ROUTE_PATTERNS, TASK_HARNESSES, TASK_ISOLATION_MODES, TASK_TYPES, USER_COMPLETED_BY, isColumn } from "../../shared";
+import type { ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
@@ -44,6 +44,15 @@ function isTaskHarness(value: unknown): value is TaskHarness {
 
 function isClaudePermissionMode(value: unknown): value is ClaudeCodePermissionMode {
   return typeof value === "string" && (CLAUDE_CODE_PERMISSION_MODES as readonly string[]).includes(value);
+}
+
+function isPermissionOverrides(value: unknown): value is PermissionOverrides {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.entries(value as Record<string, unknown>).every(
+    ([key, action]) =>
+      (PERMISSION_OVERRIDE_CATEGORIES as readonly string[]).includes(key) &&
+      (PERMISSION_OVERRIDE_ACTIONS as readonly string[]).includes(action as string),
+  );
 }
 
 interface RetryTaskBody {
@@ -99,7 +108,7 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model, isolation, assignedTo, claudePermissionMode } = body;
+      const { title, description, directory, agent, model, isolation, assignedTo, claudePermissionMode, permissionOverrides } = body;
       const taskType = body.type ?? "agent";
       const harness = body.harness ?? "opencode";
 
@@ -133,6 +142,14 @@ export function registerTaskRoutes(
       if (claudePermissionMode !== undefined && (taskType !== "agent" || harness !== "claude-code")) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
       }
+      if (permissionOverrides !== undefined && !isPermissionOverrides(permissionOverrides)) {
+        throw AdapterError.validation(
+          `permissionOverrides must be an object mapping ${PERMISSION_OVERRIDE_CATEGORIES.join("/")} to ${PERMISSION_OVERRIDE_ACTIONS.join("/")}`,
+        );
+      }
+      if (permissionOverrides !== undefined && (taskType !== "agent" || harness !== "opencode" || isolation !== "in-place")) {
+        throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
+      }
 
       const workspace = resolveBoardWorkspace();
       const allowExternal = isExternalDirectoriesAllowed();
@@ -157,6 +174,7 @@ export function registerTaskRoutes(
         ...(taskType === "manual" && typeof assignedTo === "string" && assignedTo.trim() ? { assignedTo: assignedTo.trim() } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
+        ...(taskType === "agent" && harness === "opencode" && isolation === "in-place" && isPermissionOverrides(permissionOverrides) ? { permissionOverrides } : {}),
       });
       store.addEvent({ taskId: task.id, type: "task_created", body: { type: task.type ?? "agent" } });
 
@@ -327,6 +345,7 @@ export function registerTaskRoutes(
       "isolation",
       "harness",
       "claudePermissionMode",
+      "permissionOverrides",
     ]);
     for (const key of Object.keys(body)) {
       if (!allowed.has(key)) throw AdapterError.validation(`Unsupported task update field: ${key}`);
@@ -386,6 +405,14 @@ export function registerTaskRoutes(
       patch.claudePermissionMode = body.claudePermissionMode ?? null;
     }
 
+    if (body.permissionOverrides !== undefined && body.permissionOverrides !== null && !isPermissionOverrides(body.permissionOverrides)) {
+      throw AdapterError.validation(
+        `permissionOverrides must be an object mapping ${PERMISSION_OVERRIDE_CATEGORIES.join("/")} to ${PERMISSION_OVERRIDE_ACTIONS.join("/")}`,
+      );
+    }
+    // Effective isolation after this patch: the patched value if this PATCH touches it, else whatever is already on the row.
+    const effectiveIsolation: TaskIsolationMode | null = patch.isolation !== undefined ? patch.isolation : (existing.isolation ?? null);
+
     if (nextType === "manual") {
       if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation("manual tasks cannot define agent");
       if (body.model !== undefined && body.model !== null) throw AdapterError.validation("manual tasks cannot define model");
@@ -393,9 +420,13 @@ export function registerTaskRoutes(
       if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
       }
+      if (body.permissionOverrides !== undefined && body.permissionOverrides !== null) {
+        throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
+      }
       patch.agent = null;
       patch.model = null;
       patch.claudePermissionMode = null;
+      patch.permissionOverrides = null;
       return patch;
     }
 
@@ -405,8 +436,14 @@ export function registerTaskRoutes(
 
     if (patch.harness === "claude-code") {
       if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation("claude-code tasks cannot define agent");
+      // permissionOverrides is OpenCode-only — a task moving to (or staying on) claude-code
+      // harness always drops any override, same as claudePermissionMode drops for opencode below.
+      if (body.permissionOverrides !== undefined && body.permissionOverrides !== null) {
+        throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
+      }
       patch.agent = null;
       patch.model = body.model === undefined ? existing.model : body.model === null ? null : resolveClaudeModel(body.model);
+      patch.permissionOverrides = null;
     } else {
       if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
@@ -421,6 +458,18 @@ export function registerTaskRoutes(
         patch.model = body.model === null ? null : validateExplicitModel(body.model);
       } else if (typeof patch.agent === "string") {
         patch.model = await resolveModel(patch.agent, undefined);
+      }
+
+      // permissionOverrides only ever applies to in-place (non-worktree) runs — see
+      // resolveOpenCodePermissionRules. Any patch that leaves isolation at worktree
+      // (or unset) auto-clears a stale override instead of silently keeping it.
+      if (effectiveIsolation !== "in-place") {
+        if (body.permissionOverrides !== undefined && body.permissionOverrides !== null) {
+          throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
+        }
+        patch.permissionOverrides = null;
+      } else if (body.permissionOverrides !== undefined) {
+        patch.permissionOverrides = body.permissionOverrides === null ? null : (body.permissionOverrides as PermissionOverrides);
       }
     }
     return patch;

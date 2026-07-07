@@ -202,11 +202,21 @@ describe("TaskDispatcher", () => {
     cleanupTestWorkspace();
   });
 
-  function createTask(overrides: Partial<{ title: string; description: string; directory: string }> = {}) {
+  function createTask(
+    overrides: Partial<{
+      title: string;
+      description: string;
+      directory: string;
+      isolation: "worktree" | "in-place";
+      permissionOverrides: Record<string, "allow" | "ask" | "deny">;
+    }> = {},
+  ) {
     return store.create({
       title: overrides.title ?? "Fix the bug",
       description: overrides.description ?? "Please fix the bug in foo.ts",
       directory: overrides.directory ?? projectDir,
+      ...(overrides.isolation !== undefined ? { isolation: overrides.isolation } : {}),
+      ...(overrides.permissionOverrides !== undefined ? { permissionOverrides: overrides.permissionOverrides } : {}),
     });
   }
 
@@ -538,6 +548,52 @@ describe("TaskDispatcher", () => {
 
       await waitFor(() => client.permissionListCalls.length > 0);
       expect(client.permissionListCalls[0]?.directory).toBe(store.get(task.id)?.worktreePath);
+    });
+
+    it("in-place tasks with a permissionOverrides layer non-allow categories after the base allow-all rule", async () => {
+      const task = createTask({ permissionOverrides: { edit: "ask", bash: "deny" } });
+      client.nextSessionId = "ses_override";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      expect(client.createCalls[0]?.permission).toEqual([
+        { permission: "*", pattern: "**", action: "allow" },
+        { permission: "edit", pattern: "**", action: "ask" },
+        { permission: "bash", pattern: "**", action: "deny" },
+      ]);
+    });
+
+    it("in-place tasks with an all-allow permissionOverrides produce the same ruleset as no override", async () => {
+      const task = createTask({ permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" } });
+      client.nextSessionId = "ses_allow";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      expect(client.createCalls[0]?.permission).toEqual([{ permission: "*", pattern: "**", action: "allow" }]);
+    });
+
+    it("SAFETY: a worktree-isolated task with a permissionOverrides on its row still gets WRITE_FENCED_PERMISSION unchanged", async () => {
+      store.updateSettings({ worktreeDefault: true });
+      const task = createTask({ directory: gitProjectDir });
+      // Simulate an override somehow ending up on a worktree-isolated row (stale
+      // isolation flip, direct DB edit, bug elsewhere) — the dispatcher must never
+      // honor it once the run is worktree-isolated, regardless of how it got there.
+      store.update(task.id, { permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" } });
+      client.nextSessionId = "ses_fenced_override";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees"),
+      });
+
+      await dispatcher.run(task.id);
+
+      expect(client.createCalls[0]?.permission).toEqual([
+        { permission: "*", pattern: "**", action: "allow" },
+        { permission: "external_directory", pattern: "**", action: "ask" },
+      ]);
     });
 
     it("worktree-isolated tasks get the isolation preamble, before parent handoffs and the completion contract", async () => {

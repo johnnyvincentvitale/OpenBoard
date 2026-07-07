@@ -90,17 +90,30 @@ npm run tui
 ```
 
 This boots the board and its OpenCode backend and opens the TUI in your
-terminal. Then:
+terminal. Pressing **`n`** opens a 5-screen wizard — `enter` moves to the next
+screen, **`b`** goes back, `Tab` moves between fields on the current screen,
+and **`esc`** cancels the whole thing. Nothing is created until the final
+screen — no card exists yet while you're filling this in.
 
-1. Press **`n`** — new task.
-2. **`TITLE`**: name the card. **`PROMPT`**: the actual instruction the agent
-   receives. Write it like a work order: what to change, where, and how to
-   verify. `Tab` moves between fields.
-3. **`HARNESS`**: leave it on OpenCode for now. **`AGENT`**: pick `build` (the
-   general-purpose worker). **`MODEL`**: pick one, or leave the agent default.
-4. **`DIR`**: the directory the agent works in — point it at a scratch repo,
-   not something precious, for your first run.
-5. Press **`enter`** to create the card, then **`r`** to run it.
+1. **Identity.** **`TITLE`**: name the card. **`PROMPT`**: the actual
+   instruction the agent receives — write it like a work order: what to
+   change, where, and how to verify. **`DIR`**: the directory the agent works
+   in — point it at a scratch repo, not something precious, for your first run.
+2. **Harness & model.** **`HARNESS`**: leave it on OpenCode for now.
+   **`PROVIDER`**: which of your currently-connected OpenCode providers to use
+   (leave unset to pick from any model already attached to an agent).
+   **`MODEL`**: pick one, or leave it unset to use the agent's default.
+3. **Agent.** **`AGENT PROFILE`**: pick `build` (the general-purpose worker) —
+   this is synced live from your OpenCode agent roster.
+4. **Isolation.** Arrow between **`none`** and **`worktree`** — a description
+   of each appears as you move. Worktree isolation also shows a fixed
+   **`PERMISSIONS`** note (automatic, not editable — see §9); switch to
+   **`none`** to get an editable EDIT/BASH/WEBFETCH permission control instead.
+5. **Confirm.** A read-only summary of everything above. Press **`enter`** to
+   create the card — this does *not* run it. Press **`b`** to go back and fix
+   anything first.
+
+Once the card exists, press **`r`** to run it.
 
 A good starter task: *"Create a file called HELLO.md containing a haiku about
 kanban boards, then verify it exists."* Small, harmless, observable.
@@ -286,21 +299,31 @@ of silently doing nothing.
 
 ## 9. Harnesses: OpenCode and Claude Code
 
-Every card has a `HARNESS` field.
+Every card has a `HARNESS` field, chosen on the wizard's Harness screen.
 
-**OpenCode** (default). The card binds one of your OpenCode agents and any
-model your OpenCode install is authenticated for. Agents are defined in your
+**OpenCode** (default). The card binds one of your OpenCode agents (`AGENT
+PROFILE`, its own wizard screen) and a model. `PROVIDER`/`MODEL` are synced
+live from `GET /api/providers` — the AI providers your OpenCode install is
+currently connected to and authenticated for — not just whatever models
+happen to already be attached to an agent; leave `PROVIDER` unset to fall back
+to that agent-derived list. Agent profiles themselves are defined in your
 OpenCode config (`~/.config/opencode/agent/<name>.md` or `opencode.jsonc`).
 One catch: OpenCode reads agent config at boot only, so after adding or
 editing an agent, restart the board instance to see it in the roster.
 
 **Claude Code.** The card dispatches a background Claude Code session instead.
-What changes:
+This is unchanged from before the wizard — just relocated into its screens.
+Full Claude "agent profile" support (matching what OpenCode gets above) is a
+separate, later workflow. What changes today:
 
-- `MODEL` offers Claude aliases: `sonnet`, `opus`, `fable`.
-- The `AGENT` dropdown becomes `PERMS` — the permission mode for the run. The
-  default is `bypassPermissions`; stricter modes exist but tend to stall
-  headless work on permission prompts.
+- `MODEL` (Harness screen) offers Claude aliases: `sonnet`, `opus`, `fable`.
+  There's no `PROVIDER` screen for Claude Code — that concept is OpenCode-only.
+- The Agent screen shows `PERMS` instead of `AGENT PROFILE` — the permission
+  mode for the run. The default is `bypassPermissions`; stricter modes exist
+  but tend to stall headless work on permission prompts.
+- The isolation screen's `PERMISSIONS` section doesn't apply to Claude Code —
+  it's an OpenCode-only concept (see below) — so neither the locked note nor
+  the editable control appears there for a Claude Code card.
 - Claude reports completion through the same structured contract, so its cards
   participate in Review, handoffs, and dependencies like any other.
 - **Commit before dispatching Claude into a repo.** If the target has
@@ -308,6 +331,19 @@ What changes:
   into its own worktree instead of editing in place. The card's `RUN DIR` /
   `RUN BRANCH` / `RUN COMMIT` / `RESULT` rows show where the work actually
   landed, and harness-created worktrees feed the normal sync/integrate flow.
+
+**OpenCode permissions, and why worktree isolation locks them.** The wizard's
+isolation screen shows a `PERMISSIONS` section for OpenCode cards only.
+Worktree-isolated runs already carry a layered safety stack — write-fenced
+edit permissions, the base-checkout escape detector, worktree-cwd prompt
+hygiene, and sandboxed bash — and that stack is **not configurable** from the
+wizard; the screen just shows a note confirming it's active. Loosening it
+per-task would undermine the whole point of isolating a run in the first
+place. Select isolation **`none`** instead to get an editable `EDIT`/`BASH`/
+`WEBFETCH` control (each `allow`/`ask`/`deny`), which defaults to `allow`
+everywhere — i.e., today's behavior — until you actively tighten one.
+"Container" isolation is a disabled placeholder in this same segmented
+control; it isn't implemented yet and has no permissions story of its own.
 
 ## 10. Safety notes
 

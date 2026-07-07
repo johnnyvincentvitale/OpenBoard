@@ -8,7 +8,11 @@ import type {
   DiffResponse,
   MergeOutcome,
   ModelRef,
+  PermissionOverrideAction,
+  PermissionOverrideCategory,
+  PermissionOverrides,
   RosterAgent,
+  RosterProvider,
   Task,
   TaskHarness,
   TaskComment,
@@ -19,7 +23,15 @@ import type {
   UpdateTaskInput,
   WorktreeCleanupOutcome,
 } from "../shared";
-import { buildTaskPath, CLAUDE_CODE_MODEL_PROVIDER, CLAUDE_CODE_PERMISSION_MODES, TASK_HARNESSES, TASK_ISOLATION_MODES } from "../shared";
+import {
+  buildTaskPath,
+  CLAUDE_CODE_MODEL_PROVIDER,
+  CLAUDE_CODE_PERMISSION_MODES,
+  PERMISSION_OVERRIDE_ACTIONS,
+  PERMISSION_OVERRIDE_CATEGORIES,
+  TASK_HARNESSES,
+  TASK_ISOLATION_MODES,
+} from "../shared";
 
 export const DEFAULT_BOARD_URL = "http://127.0.0.1:4097";
 export const BOARD_UNAVAILABLE_MESSAGE = "Open OpenBoard first or set OPENCODE_BOARD_URL.";
@@ -76,17 +88,20 @@ export interface CreateBoardTaskInput {
   assignedTo?: string;
   model?: string | ModelRef;
   isolation?: string;
+  /** Only valid for in-place (non-worktree) OpenCode agent tasks — see resolveOpenCodePermissionRules. */
+  permissionOverrides?: PermissionOverrides;
 }
 
 export type UpdateBoardTaskInput = Omit<
   Partial<CreateBoardTaskInput>,
-  "agent" | "claudePermissionMode" | "assignedTo" | "model" | "isolation"
+  "agent" | "claudePermissionMode" | "assignedTo" | "model" | "isolation" | "permissionOverrides"
 > & {
   agent?: string | null;
   claudePermissionMode?: string | null;
   assignedTo?: string | null;
   model?: string | ModelRef | null;
   isolation?: string | null;
+  permissionOverrides?: PermissionOverrides | null;
 };
 
 /** GET /api/health response — adapter + OpenCode reachability and version. */
@@ -114,6 +129,7 @@ export interface BoardClient {
   listTasks(): Promise<Task[]>;
   listTaskSummaries(): Promise<TaskSummary[]>;
   listAgents(): Promise<RosterAgent[]>;
+  listProviders(): Promise<RosterProvider[]>;
   createTask(input: CreateBoardTaskInput): Promise<Task>;
   createTasks(input: CreateBoardTaskInput[]): Promise<Task[]>;
   updateTask(id: string, input: UpdateBoardTaskInput): Promise<Task>;
@@ -150,6 +166,22 @@ interface ResolvedOptions {
 const VALID_ISOLATION = new Set<TaskIsolationMode>(TASK_ISOLATION_MODES);
 const VALID_HARNESS = new Set<TaskHarness>(TASK_HARNESSES);
 const VALID_CLAUDE_PERMISSION_MODE = new Set<ClaudeCodePermissionMode>(CLAUDE_CODE_PERMISSION_MODES);
+const VALID_PERMISSION_OVERRIDE_CATEGORY = new Set<PermissionOverrideCategory>(PERMISSION_OVERRIDE_CATEGORIES);
+const VALID_PERMISSION_OVERRIDE_ACTION = new Set<PermissionOverrideAction>(PERMISSION_OVERRIDE_ACTIONS);
+
+function normalizePermissionOverrides(overrides: PermissionOverrides): PermissionOverrides {
+  const result: PermissionOverrides = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    if (!VALID_PERMISSION_OVERRIDE_CATEGORY.has(key as PermissionOverrideCategory)) {
+      throw new Error(`permissionOverrides key must be one of: ${PERMISSION_OVERRIDE_CATEGORIES.join(", ")}`);
+    }
+    if (!VALID_PERMISSION_OVERRIDE_ACTION.has(value as PermissionOverrideAction)) {
+      throw new Error(`permissionOverrides.${key} must be one of: ${PERMISSION_OVERRIDE_ACTIONS.join(", ")}`);
+    }
+    result[key as PermissionOverrideCategory] = value as PermissionOverrideAction;
+  }
+  return result;
+}
 
 export function createBoardClient(options: BoardClientOptions = {}): BoardClient {
   const resolved = resolveOptions(options);
@@ -163,6 +195,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       return tasks.map(toTaskSummary);
     },
     listAgents: () => requestJson<RosterAgent[]>(resolved, "/api/agents", { method: "GET" }),
+    listProviders: () => requestJson<RosterProvider[]>(resolved, "/api/providers", { method: "GET" }),
     createTask: async (input) => {
       const task = normalizeTaskInput(input, resolved.cwd);
       await assertExistingDirectory(task.directory, resolved.stat);
@@ -269,6 +302,9 @@ function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): Upda
   if (task.isolation !== undefined) {
     if (task.isolation !== null && !VALID_ISOLATION.has(task.isolation as TaskIsolationMode)) throw new Error("isolation must be 'worktree' or 'in-place'");
     payload.isolation = task.isolation as TaskIsolationMode | null;
+  }
+  if (task.permissionOverrides !== undefined) {
+    payload.permissionOverrides = task.permissionOverrides === null ? null : normalizePermissionOverrides(task.permissionOverrides);
   }
   return payload;
 }
@@ -389,6 +425,13 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
       throw new Error("isolation must be 'worktree' or 'in-place'");
     }
     payload.isolation = task.isolation as TaskIsolationMode;
+  }
+
+  if (task.permissionOverrides !== undefined) {
+    if (payload.type !== "agent" || payload.harness === "claude-code" || payload.isolation !== "in-place") {
+      throw new Error("permissionOverrides can only be set for in-place OpenCode agent tasks");
+    }
+    payload.permissionOverrides = normalizePermissionOverrides(task.permissionOverrides);
   }
 
   return payload;

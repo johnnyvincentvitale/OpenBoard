@@ -375,6 +375,102 @@ describe("POST /api/tasks", () => {
     expect(body.error.message).toContain("claude-code task model.providerID must be 'claude-code'");
   });
 
+  it("creates an in-place OpenCode agent task with a permission override", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "In-place worker",
+        directory: repoDir,
+        isolation: "in-place",
+        permissionOverrides: { edit: "ask", bash: "deny" },
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Task;
+    expect(body.permissionOverrides).toEqual({ edit: "ask", bash: "deny" });
+    expect(store.get(body.id)?.permissionOverrides).toEqual({ edit: "ask", bash: "deny" });
+  });
+
+  it("rejects permissionOverrides on worktree-isolated tasks", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad override",
+        directory: repoDir,
+        isolation: "worktree",
+        permissionOverrides: { edit: "ask" },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+  });
+
+  it("rejects permissionOverrides when isolation is unset (board default may resolve to worktree)", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad override",
+        directory: repoDir,
+        permissionOverrides: { edit: "ask" },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+  });
+
+  it("rejects permissionOverrides on claude-code tasks", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        harness: "claude-code",
+        title: "Bad override",
+        directory: repoDir,
+        isolation: "in-place",
+        permissionOverrides: { edit: "ask" },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+  });
+
+  it("rejects permissionOverrides with an unknown category or action", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad override shape",
+        directory: repoDir,
+        isolation: "in-place",
+        permissionOverrides: { edit: "sometimes" },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("permissionOverrides must be an object mapping");
+  });
+
   it("rejects manual tasks with agent metadata", async () => {
     const app = buildApp(store, dispatcher);
 
@@ -633,6 +729,131 @@ describe("POST /api/tasks", () => {
     expect(body.agent).toBeUndefined();
     expect(body.model).toBeUndefined();
     expect(store.get(body.id)?.model).toBeUndefined();
+  });
+});
+
+// --- PATCH /api/tasks/:id -------------------------------------------------------
+
+describe("PATCH /api/tasks/:id", () => {
+  let store: SqliteTaskStore;
+  let dispatcher: ReturnType<typeof makeFakeDispatcher>;
+
+  beforeEach(() => {
+    store = new SqliteTaskStore(":memory:");
+    dispatcher = makeFakeDispatcher(store);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  function patch(app: Hono, id: string, body: Record<string, unknown>) {
+    return app.request(`/api/tasks/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("sets permissionOverrides on an in-place OpenCode agent task", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ title: "T", description: "", directory: repoDir, isolation: "in-place" });
+
+    const res = await patch(app, task.id, { permissionOverrides: { edit: "ask" } });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.permissionOverrides).toEqual({ edit: "ask" });
+    expect(store.get(task.id)?.permissionOverrides).toEqual({ edit: "ask" });
+  });
+
+  it("rejects permissionOverrides on a worktree-isolated task", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ title: "T", description: "", directory: repoDir, isolation: "worktree" });
+
+    const res = await patch(app, task.id, { permissionOverrides: { edit: "ask" } });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+  });
+
+  it("rejects an invalid permissionOverrides shape", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ title: "T", description: "", directory: repoDir, isolation: "in-place" });
+
+    const res = await patch(app, task.id, { permissionOverrides: { edit: "sometimes" } });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("permissionOverrides must be an object mapping");
+  });
+
+  it("rejects permissionOverrides on manual tasks", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ type: "manual", title: "T", description: "", directory: repoDir });
+
+    const res = await patch(app, task.id, { permissionOverrides: { edit: "ask" } });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+  });
+
+  it("auto-clears an existing override when the same PATCH moves isolation away from in-place", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "in-place",
+      permissionOverrides: { edit: "ask" },
+    });
+    expect(store.get(task.id)?.permissionOverrides).toEqual({ edit: "ask" });
+
+    const res = await patch(app, task.id, { isolation: "worktree" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.permissionOverrides).toBeNull();
+    expect(store.get(task.id)?.permissionOverrides).toBeNull();
+  });
+
+  it("auto-clears an existing override when the same PATCH moves harness away from opencode", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "in-place",
+      permissionOverrides: { bash: "deny" },
+    });
+    expect(store.get(task.id)?.permissionOverrides).toEqual({ bash: "deny" });
+
+    const res = await patch(app, task.id, { harness: "claude-code" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.permissionOverrides).toBeNull();
+    expect(store.get(task.id)?.permissionOverrides).toBeNull();
+  });
+
+  it("leaves an in-place task's untouched permissionOverrides intact when unrelated fields change", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "in-place",
+      permissionOverrides: { edit: "ask" },
+    });
+
+    const res = await patch(app, task.id, { title: "Renamed" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.title).toBe("Renamed");
+    expect(body.permissionOverrides).toEqual({ edit: "ask" });
   });
 });
 

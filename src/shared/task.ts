@@ -172,6 +172,13 @@ export interface Task {
   error?: string;
   /** Per-task isolation override. Unset → the board-level default applies. */
   isolation?: TaskIsolationMode | null;
+  /**
+   * User-configured OpenCode permission override. Only ever honored for
+   * in-place (non-worktree) OpenCode tasks — see
+   * {@link resolveOpenCodePermissionRules}. Ignored (never read) for
+   * worktree-isolated runs, regardless of any value stored here.
+   */
+  permissionOverrides?: PermissionOverrides | null;
   /** Absolute path of the git worktree this task's session runs in (worktree mode, once run). */
   worktreePath?: string;
   /** The branch created for the worktree. */
@@ -253,6 +260,7 @@ export interface CreateTaskInput {
   assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
+  permissionOverrides?: PermissionOverrides;
 }
 
 export interface UpdateTaskInput {
@@ -266,6 +274,7 @@ export interface UpdateTaskInput {
   assignedTo?: string | null;
   model?: ModelRef | null;
   isolation?: TaskIsolationMode | null;
+  permissionOverrides?: PermissionOverrides | null;
 }
 
 /** Board-level settings (persisted). */
@@ -301,6 +310,53 @@ export const WRITE_FENCED_PERMISSION = [
   { permission: "*", pattern: "**", action: "allow" },
   { permission: "external_directory", pattern: "**", action: "ask" },
 ] as const;
+
+/** Curated OpenCode permission categories exposed as a user-configurable override (in-place isolation only). */
+export const PERMISSION_OVERRIDE_CATEGORIES = ["edit", "bash", "webfetch"] as const;
+export type PermissionOverrideCategory = (typeof PERMISSION_OVERRIDE_CATEGORIES)[number];
+
+/** OpenCode's per-tool permission action. */
+export const PERMISSION_OVERRIDE_ACTIONS = ["allow", "ask", "deny"] as const;
+export type PermissionOverrideAction = (typeof PERMISSION_OVERRIDE_ACTIONS)[number];
+
+/**
+ * A user-chosen override for one or more permission categories. Only ever
+ * honored for in-place (non-worktree) OpenCode tasks — see
+ * {@link resolveOpenCodePermissionRules}.
+ */
+export type PermissionOverrides = Partial<Record<PermissionOverrideCategory, PermissionOverrideAction>>;
+
+export interface OpenCodePermissionRule {
+  permission: string;
+  pattern: string;
+  action: PermissionOverrideAction;
+}
+
+/**
+ * The single choke point for what permission ruleset a dispatched OpenCode
+ * session runs with. Worktree-isolated runs ALWAYS get
+ * `WRITE_FENCED_PERMISSION` unchanged — `overrides` is not read at all in
+ * that branch — because the worktree safety stack (write-fencing, escape
+ * detection, worktree-cwd prompt hygiene, sandboxed bash) must never be
+ * weakened by a per-task override, regardless of how such data ended up on
+ * the row. Only in-place tasks may layer category overrides, and only after
+ * the base allow-all rule, since OpenCode 1.17.13 lets whichever rule is
+ * last in the array win (see `WRITE_FENCED_PERMISSION`'s doc comment above).
+ */
+export function resolveOpenCodePermissionRules(
+  isolatedRun: boolean,
+  overrides?: PermissionOverrides | null,
+): OpenCodePermissionRule[] {
+  if (isolatedRun) return WRITE_FENCED_PERMISSION.map((rule) => ({ ...rule }));
+  const rules: OpenCodePermissionRule[] = UNATTENDED_PERMISSION.map((rule) => ({ ...rule }));
+  if (overrides) {
+    for (const category of PERMISSION_OVERRIDE_CATEGORIES) {
+      const action = overrides[category];
+      if (action && action !== "allow") rules.push({ permission: category, pattern: "**", action });
+    }
+  }
+  return rules;
+}
 
 /** SSE frames the task board pushes to the browser. */
 export type TaskFrame =

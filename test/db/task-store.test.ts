@@ -328,6 +328,26 @@ describe("SqliteTaskStore", () => {
       expect(fetched.model).toBeUndefined();
     });
 
+    it("round-trips permissionOverrides through create/update/list/get", () => {
+      const task = store.create(input({ permissionOverrides: { edit: "ask", bash: "deny" } }));
+      expect(task.permissionOverrides).toEqual({ edit: "ask", bash: "deny" });
+      expect(store.get(task.id)!.permissionOverrides).toEqual({ edit: "ask", bash: "deny" });
+
+      const updated = store.update(task.id, { permissionOverrides: { webfetch: "deny" } });
+      expect(updated!.permissionOverrides).toEqual({ webfetch: "deny" });
+      expect(store.get(task.id)!.permissionOverrides).toEqual({ webfetch: "deny" });
+
+      const cleared = store.update(task.id, { permissionOverrides: null });
+      expect(cleared!.permissionOverrides).toBeNull();
+      expect(store.get(task.id)!.permissionOverrides).toBeNull();
+    });
+
+    it("leaves permissionOverrides null when not provided", () => {
+      const task = store.create(input());
+      expect(task.permissionOverrides).toBeNull();
+      expect(store.get(task.id)!.permissionOverrides).toBeNull();
+    });
+
     it("can set and clear completedBy", () => {
       const task = store.create(input());
       clock = 11_000;

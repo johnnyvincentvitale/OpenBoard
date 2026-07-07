@@ -16,6 +16,9 @@ import {
   BOARD_SERVER_DEFAULTS,
   AdapterError,
   buildTaskPath,
+  resolveOpenCodePermissionRules,
+  UNATTENDED_PERMISSION,
+  WRITE_FENCED_PERMISSION,
 } from "../../src/shared/index";
 
 describe("frozen contracts", () => {
@@ -119,5 +122,36 @@ describe("diff contract", () => {
       };
       expect(f.status).toBe(s);
     }
+  });
+});
+
+describe("resolveOpenCodePermissionRules", () => {
+  it("worktree-isolated runs always get WRITE_FENCED_PERMISSION unchanged, ignoring any override", () => {
+    expect(resolveOpenCodePermissionRules(true)).toEqual([...WRITE_FENCED_PERMISSION]);
+    expect(resolveOpenCodePermissionRules(true, { edit: "deny", bash: "deny", webfetch: "deny" })).toEqual([
+      ...WRITE_FENCED_PERMISSION,
+    ]);
+    expect(resolveOpenCodePermissionRules(true, null)).toEqual([...WRITE_FENCED_PERMISSION]);
+  });
+
+  it("in-place runs with no override (or all-allow) match today's UNATTENDED_PERMISSION exactly", () => {
+    expect(resolveOpenCodePermissionRules(false)).toEqual([...UNATTENDED_PERMISSION]);
+    expect(resolveOpenCodePermissionRules(false, null)).toEqual([...UNATTENDED_PERMISSION]);
+    expect(resolveOpenCodePermissionRules(false, {})).toEqual([...UNATTENDED_PERMISSION]);
+    expect(resolveOpenCodePermissionRules(false, { edit: "allow", bash: "allow", webfetch: "allow" })).toEqual([
+      ...UNATTENDED_PERMISSION,
+    ]);
+  });
+
+  it("in-place runs layer non-allow category overrides after the base allow-all rule (last-rule-wins order)", () => {
+    expect(resolveOpenCodePermissionRules(false, { edit: "ask" })).toEqual([
+      { permission: "*", pattern: "**", action: "allow" },
+      { permission: "edit", pattern: "**", action: "ask" },
+    ]);
+    expect(resolveOpenCodePermissionRules(false, { edit: "ask", bash: "deny", webfetch: "allow" })).toEqual([
+      { permission: "*", pattern: "**", action: "allow" },
+      { permission: "edit", pattern: "**", action: "ask" },
+      { permission: "bash", pattern: "**", action: "deny" },
+    ]);
   });
 });

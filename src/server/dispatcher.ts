@@ -14,7 +14,7 @@
  */
 import { basename, dirname, join, resolve } from "node:path";
 import type { MergeOutcome, OpencodeEvent, Task, TaskStore, WorktreeCleanupOutcome } from "../shared";
-import { AdapterError, UNATTENDED_PERMISSION, WRITE_FENCED_PERMISSION } from "../shared";
+import { AdapterError, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import type { SandboxStatus } from "./sandbox";
@@ -506,9 +506,7 @@ export class TaskDispatcher implements Dispatcher {
       agent: task.agent ?? undefined,
       model: task.model ?? undefined,
       directory: execDirectory,
-      permission: (isolatedRun ? WRITE_FENCED_PERMISSION : UNATTENDED_PERMISSION).map((rule) => ({
-        ...rule,
-      })),
+      permission: resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides),
     };
     const created = await this.client.session.create(createInput);
     if ((created as { error?: unknown }).error) {

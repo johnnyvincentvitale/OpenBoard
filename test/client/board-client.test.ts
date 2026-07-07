@@ -7,7 +7,7 @@ import {
   resolveBoardUrl,
 } from "../../src/client/board-client";
 import type { BoardClientOptions, BoardHealth } from "../../src/client/board-client";
-import type { BoardSettings, DiffResponse, MergeOutcome, RosterAgent, Task } from "../../src/shared";
+import type { BoardSettings, DiffResponse, MergeOutcome, RosterAgent, RosterProvider, Task } from "../../src/shared";
 
 const CWD = "/tmp/openboard-project";
 
@@ -159,8 +159,10 @@ describe("board client", () => {
       },
     ];
     const agents: RosterAgent[] = [{ id: "build", mode: "primary" }];
+    const providers: RosterProvider[] = [{ id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }] }];
     const fetchMock = vi.fn(async (url: string | URL) => {
       if (String(url).endsWith("/api/agents")) return jsonResponse(agents);
+      if (String(url).endsWith("/api/providers")) return jsonResponse(providers);
       return jsonResponse(tasks);
     });
     const client = createBoardClient(makeOptions([CWD], fetchMock));
@@ -179,6 +181,7 @@ describe("board client", () => {
       },
     ]);
     await expect(client.listAgents()).resolves.toEqual(agents);
+    await expect(client.listProviders()).resolves.toEqual(providers);
   });
 
   it("calls task action endpoints", async () => {
@@ -260,8 +263,46 @@ describe("board client", () => {
     await expect(client.createTask({ title: "Bad Claude permission", harness: "claude-code", claudePermissionMode: "root" })).rejects.toThrow(
       "claudePermissionMode must be a supported Claude Code permission mode",
     );
+    await expect(client.createTask({ title: "Bad override", permissionOverrides: { edit: "ask" } })).rejects.toThrow(
+      "permissionOverrides can only be set for in-place OpenCode agent tasks",
+    );
+    await expect(client.createTask({ title: "Bad override", harness: "claude-code", isolation: "in-place", permissionOverrides: { edit: "ask" } })).rejects.toThrow(
+      "permissionOverrides can only be set for in-place OpenCode agent tasks",
+    );
+    await expect(
+      client.createTask({ title: "Bad override shape", isolation: "in-place", permissionOverrides: { edit: "sometimes" as never } }),
+    ).rejects.toThrow("permissionOverrides.edit must be one of: allow, ask, deny");
     await expect(client.createTask({ title: "Missing dir", directory: "missing" })).rejects.toThrow(
       `directory does not exist: ${CWD}/missing`,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts permissionOverrides for an in-place OpenCode agent task and POSTs it verbatim", async () => {
+    const options = makeOptions([CWD], vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-override", input), 201);
+    }));
+    const client = createBoardClient(options);
+
+    await client.createTask({
+      title: "In-place worker",
+      isolation: "in-place",
+      permissionOverrides: { edit: "ask", bash: "deny" },
+    });
+
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      isolation: "in-place",
+      permissionOverrides: { edit: "ask", bash: "deny" },
+    });
+  });
+
+  it("rejects a bad permissionOverrides update on normalizeUpdateTaskInput", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(createdTask("task-1", {})));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    await expect(client.updateTask("task-1", { permissionOverrides: { edit: "sometimes" as never } })).rejects.toThrow(
+      "permissionOverrides.edit must be one of: allow, ask, deny",
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });
