@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -18,8 +18,10 @@ import type {
   InstanceRuntimeState,
 } from "../shared/instances";
 import type { BoardHealth } from "../shared/health";
+import type { AcpConfigCatalog, RosterAgent, Task } from "../shared/task";
+import type { RosterProvider } from "../shared/providers";
 import { createDefaultProvider } from "./default-provider";
-import type { InstanceLifecycleProvider } from "./provider";
+import type { InstanceLifecycleProvider, InstanceWorktreeSummary } from "./provider";
 
 /** Attach context handed to the attach implementation. */
 export interface AttachContext {
@@ -51,7 +53,7 @@ export interface RunOptions {
 type ParsedCommand =
   | { command: "help" }
   | { command: "selector" }
-  | { command: "list" }
+  | { command: "list"; json: boolean }
   | {
       command: "add";
       name: string;
@@ -66,7 +68,15 @@ type ParsedCommand =
   | { command: "mcp"; name?: string }
   | { command: "rename"; oldName: string; newName: string }
   | { command: "default"; action: "show" | "set" | "clear"; name?: string }
-  | { command: "status"; name: string }
+  | { command: "status"; name: string; json: boolean }
+  | { command: "doctor"; name: string; json: boolean }
+  | { command: "logs"; name: string; tail: number; follow: boolean }
+  | { command: "harnesses"; name: string }
+  | { command: "agents"; name: string }
+  | { command: "providers"; name: string }
+  | { command: "tasks"; name: string; review: boolean; running: boolean; json: boolean }
+  | { command: "worktrees"; name: string }
+  | { command: "restart"; name: string }
   | { command: "bare"; name?: string };
 
 const DEFAULT_FIRST_PORT = BOARD_SERVER_DEFAULTS.port;
@@ -126,10 +136,12 @@ export function parseArgs(argv: string[]): ParsedCommand {
   switch (first) {
     case "list": {
       if (rest.some(isHelpFlag)) return { command: "help" };
-      if (rest.length > 0) {
-        throw new Error(`list does not take arguments, got: ${rest.join(" ")}`);
+      let json = false;
+      for (const item of rest) {
+        if (item === "--json") json = true;
+        else throw new Error(`Unknown argument: ${item}`);
       }
-      return { command: "list" };
+      return { command: "list", json };
     }
     case "add": {
       if (rest.some(isHelpFlag)) return { command: "help" };
@@ -266,13 +278,68 @@ export function parseArgs(argv: string[]): ParsedCommand {
     }
     case "status": {
       if (rest.some(isHelpFlag)) return { command: "help" };
-      if (rest.length === 0) {
-        throw new Error("status requires an instance name");
+      const { name, json } = parseNamedReadCommand("status", rest, { json: true });
+      return { command: "status", name, json };
+    }
+    case "doctor": {
+      if (rest.some(isHelpFlag)) return { command: "help" };
+      const { name, json } = parseNamedReadCommand("doctor", rest, { json: true });
+      return { command: "doctor", name, json };
+    }
+    case "logs": {
+      if (rest.some(isHelpFlag)) return { command: "help" };
+      let name: string | undefined;
+      let tail = 80;
+      let follow = false;
+      for (let i = 0; i < rest.length;) {
+        const item = rest[i];
+        const tailFlag = parseFlag(rest, i, "--tail", "-n");
+        if (tailFlag.value !== undefined) {
+          const parsed = Number(tailFlag.value);
+          if (!Number.isInteger(parsed) || parsed < 0) throw new Error("--tail requires a non-negative integer");
+          tail = parsed;
+          i = tailFlag.nextIndex;
+          continue;
+        }
+        if (item === "--follow" || item === "-f") {
+          follow = true;
+          i += 1;
+          continue;
+        }
+        if (item.startsWith("-")) throw new Error(`Unknown argument: ${item}`);
+        if (name !== undefined) throw new Error(`Unexpected argument: ${item}`);
+        name = item;
+        i += 1;
       }
-      if (rest.length > 1) {
-        throw new Error("status does not take extra arguments");
+      if (name === undefined) throw new Error("logs requires an instance name");
+      return { command: "logs", name, tail, follow };
+    }
+    case "harnesses":
+    case "agents":
+    case "providers":
+    case "worktrees":
+    case "restart": {
+      if (rest.some(isHelpFlag)) return { command: "help" };
+      if (rest.length === 0) throw new Error(`${first} requires an instance name`);
+      if (rest.length > 1) throw new Error(`${first} does not take extra arguments`);
+      return { command: first, name: rest[0] } as ParsedCommand;
+    }
+    case "tasks": {
+      if (rest.some(isHelpFlag)) return { command: "help" };
+      let name: string | undefined;
+      let review = false;
+      let running = false;
+      let json = false;
+      for (const item of rest) {
+        if (item === "--review") review = true;
+        else if (item === "--running") running = true;
+        else if (item === "--json") json = true;
+        else if (!item.startsWith("-") && name === undefined) name = item;
+        else if (item.startsWith("-")) throw new Error(`Unknown argument: ${item}`);
+        else throw new Error(`Unexpected argument: ${item}`);
       }
-      return { command: "status", name: rest[0] };
+      if (name === undefined) throw new Error("tasks requires an instance name");
+      return { command: "tasks", name, review, running, json };
     }
     default: {
       // Exhaustive check; `first` is a CliCommand.
@@ -288,6 +355,28 @@ function parsePortArg(raw: string, label: string): number {
     throw new Error(`${label}: ${result.error}`);
   }
   return result.value;
+}
+
+function parseNamedReadCommand(
+  command: string,
+  rest: string[],
+  options: { json?: boolean } = {},
+): { name: string; json: boolean } {
+  let name: string | undefined;
+  let json = false;
+  for (const item of rest) {
+    if (options.json && item === "--json") {
+      json = true;
+    } else if (item.startsWith("-")) {
+      throw new Error(`Unknown argument: ${item}`);
+    } else if (name === undefined) {
+      name = item;
+    } else {
+      throw new Error(`${command} does not take extra arguments`);
+    }
+  }
+  if (name === undefined) throw new Error(`${command} requires an instance name`);
+  return { name, json };
 }
 
 function cliRepoRoot(): string {
@@ -333,6 +422,10 @@ function printTable(
   for (const row of rows) {
     stdout.write(`${line(row)}\n`);
   }
+}
+
+function writeJson(value: unknown, stdout: OutStream): void {
+  stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
 function printDefaultInfo(
@@ -418,6 +511,170 @@ function printStatus(
     stdout.write(`OpenCode health: ok (${health.opencode.version})\n`);
   } else {
     stdout.write("OpenCode health: unreachable\n");
+  }
+}
+
+function statusPayload(
+  definition: InstanceDefinition,
+  runtime: InstanceRuntimeState,
+  health: BoardHealth | undefined,
+): Record<string, unknown> {
+  return {
+    name: definition.name,
+    registry: {
+      port: definition.port,
+      workspace: definition.workspace,
+      dbPath: definition.dbPath,
+      opencodePort: definition.opencodePort,
+      boardTokenPresent: Boolean(definition.boardToken?.trim()),
+    },
+    runtime,
+    health: health ?? null,
+  };
+}
+
+function instancePayload(definition: InstanceDefinition): Record<string, unknown> {
+  return {
+    name: definition.name,
+    port: definition.port,
+    workspace: definition.workspace,
+    dbPath: definition.dbPath,
+    opencodePort: definition.opencodePort,
+    boardTokenPresent: Boolean(definition.boardToken?.trim()),
+  };
+}
+
+async function buildDoctorPayload(
+  provider: InstanceLifecycleProvider,
+  name: string,
+): Promise<Record<string, unknown>> {
+  const definition = await provider.get(name);
+  const runtime = await provider.getRuntime(name);
+  const health = await provider.getHealth(name);
+  const checks: Array<{ name: string; status: "ok" | "warn" | "fail"; detail: string }> = [];
+  checks.push({ name: "registry", status: "ok", detail: `${definition.name} on ${definition.port}` });
+  checks.push({ name: "daemon", status: runtime.status === "running" ? "ok" : "warn", detail: runtime.status });
+  checks.push({ name: "token", status: definition.boardToken?.trim() ? "ok" : "fail", detail: definition.boardToken?.trim() ? "present" : "absent" });
+  checks.push({ name: "health", status: health ? "ok" : "warn", detail: health ? "reachable" : "unavailable" });
+  checks.push({ name: "workspace", status: existsSync(definition.workspace) ? "ok" : "fail", detail: definition.workspace });
+  try {
+    execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: definition.workspace,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    checks.push({ name: "git", status: "ok", detail: "workspace is a git work tree" });
+  } catch {
+    checks.push({ name: "git", status: "warn", detail: "workspace is not a readable git work tree" });
+  }
+  if (health?.identity) {
+    checks.push({
+      name: "build-mismatch",
+      status: health.identity.port === definition.port && health.identity.workspace === definition.workspace ? "ok" : "fail",
+      detail: `live port ${health.identity.port}, workspace ${health.identity.workspace}`,
+    });
+  }
+  if (health?.opencode.status === "ok") checks.push({ name: "opencode", status: "ok", detail: health.opencode.version });
+  else checks.push({ name: "opencode", status: "warn", detail: "unreachable or not queried" });
+
+  if (runtime.status === "running") {
+    try {
+      const [agents, providers, acp, tasks, worktrees, log] = await Promise.all([
+        provider.listAgents(name),
+        provider.listProviders(name),
+        provider.getAcpConfig(name),
+        provider.listTasks(name),
+        provider.listWorktrees(name),
+        provider.readLog(name, 20),
+      ]);
+      checks.push({ name: "roster", status: agents.length > 0 ? "ok" : "warn", detail: `${agents.length} agents` });
+      checks.push({ name: "provider", status: providers.length > 0 ? "ok" : "warn", detail: `${providers.length} providers` });
+      const acpAvailable = Object.values(acp).filter((config) => config?.available).length;
+      checks.push({ name: "acp", status: acpAvailable > 0 ? "ok" : "warn", detail: `${acpAvailable} harnesses available` });
+      checks.push({ name: "tasks", status: "ok", detail: `${tasks.length} active tasks` });
+      checks.push({ name: "worktrees", status: worktrees.some((w) => w.orphanCandidate) ? "warn" : "ok", detail: `${worktrees.length} managed worktrees` });
+      checks.push({ name: "startup-log", status: log.missing ? "warn" : "ok", detail: log.missing ? "missing" : log.path });
+    } catch (error) {
+      checks.push({ name: "live-api", status: "warn", detail: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { name, runtime: runtime.status, boardUrl: runtime.boardUrl, build: health?.build ?? null, checks };
+}
+
+function printDoctor(payload: Record<string, unknown>, stdout: OutStream): void {
+  stdout.write(`Doctor: ${payload.name}\n`);
+  stdout.write(`Runtime: ${payload.runtime} (${payload.boardUrl})\n`);
+  const checks = payload.checks as Array<{ name: string; status: string; detail: string }>;
+  for (const check of checks) {
+    const marker = check.status === "ok" ? "✓" : check.status === "warn" ? "!" : "✗";
+    stdout.write(`${marker} ${check.name}: ${check.detail}\n`);
+  }
+}
+
+function printHarnesses(catalog: AcpConfigCatalog, stdout: OutStream): void {
+  const entries = Object.entries(catalog);
+  if (entries.length === 0) {
+    stdout.write("No ACP harnesses reported.\n");
+    return;
+  }
+  for (const [name, config] of entries) {
+    stdout.write(`${name}: ${config?.available ? "available" : "unavailable"}`);
+    if (config?.error) stdout.write(` (${config.error})`);
+    stdout.write("\n");
+    stdout.write(`  modes: ${config?.modes.map((m) => m.value).join(", ") || "none"}\n`);
+    stdout.write(`  models: ${config?.models.length ?? 0}\n`);
+    stdout.write(`  options: ${config?.options.length ?? 0}\n`);
+  }
+}
+
+function printAgents(agents: RosterAgent[], stdout: OutStream): void {
+  stdout.write(`Agents: ${agents.length}\n`);
+  for (const agent of agents) {
+    const model = agent.model ? `${agent.model.providerID}/${agent.model.id}` : "profile default/unset";
+    stdout.write(`- ${agent.id} (${agent.mode}) model: ${model}\n`);
+  }
+  stdout.write("Restart guidance: OpenCode agent/profile changes require openboard restart <name>.\n");
+}
+
+function printProviders(providers: RosterProvider[], stdout: OutStream): void {
+  stdout.write(`Providers: ${providers.length}\n`);
+  for (const provider of providers) {
+    stdout.write(`- ${provider.id} (${provider.name}): ${provider.models.length} models`);
+    if (provider.defaultModelId) stdout.write(`, default ${provider.defaultModelId}`);
+    stdout.write("\n");
+  }
+  stdout.write("Restart guidance: provider auth/model changes may require restarting OpenCode via openboard restart <name>.\n");
+}
+
+function summarizeTasks(tasks: Task[]): Record<string, unknown> {
+  const byColumn: Record<string, number> = {};
+  const byRunState: Record<string, number> = {};
+  for (const task of tasks) {
+    byColumn[task.column] = (byColumn[task.column] ?? 0) + 1;
+    byRunState[task.runState] = (byRunState[task.runState] ?? 0) + 1;
+  }
+  return { total: tasks.length, byColumn, byRunState, tasks };
+}
+
+function printTasks(tasks: Task[], stdout: OutStream): void {
+  const summary = summarizeTasks(tasks) as { total: number; byColumn: Record<string, number>; byRunState: Record<string, number> };
+  stdout.write(`Tasks: ${summary.total}\n`);
+  stdout.write(`Columns: ${Object.entries(summary.byColumn).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\n`);
+  stdout.write(`Run states: ${Object.entries(summary.byRunState).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\n`);
+  for (const task of tasks) {
+    stdout.write(`- ${task.id} [${task.column}/${task.runState}] ${task.title}\n`);
+  }
+}
+
+function printWorktrees(items: InstanceWorktreeSummary[], stdout: OutStream): void {
+  if (items.length === 0) {
+    stdout.write("No managed worktrees found in active/archive tasks.\n");
+    return;
+  }
+  for (const item of items) {
+    stdout.write(`- ${item.taskId} ${item.worktreeBranch ?? "(no branch)"} ${item.exists ? "exists" : "missing"} dirty=${item.dirty} ${item.orphanCandidate ? "orphan-candidate" : ""}\n`);
+    stdout.write(`  ${item.title}\n`);
+    if (item.worktreePath) stdout.write(`  path: ${item.worktreePath}\n`);
   }
 }
 
@@ -572,6 +829,7 @@ Running openboard with no arguments opens the instance selector.
 
 Commands:
   list                                    Show registered instances and identity
+  list --json                             Show registered instances as JSON
   add <name> --workspace <dir> [--port N]
                                             Register a new instance
   remove <name> [--force]                 Unregister an instance
@@ -582,7 +840,16 @@ Commands:
   default show                            Show explicit/inferred/default state
   default set <name>                      Set the default instance
   default clear                           Clear the explicit default instance
-  status <name>                           Show read-only instance diagnostics
+  status <name> [--json]                  Show read-only instance diagnostics
+  doctor <name> [--json]                  Run operator diagnostics
+  logs <name> [--tail N] [--follow]       Show daemon logs
+  harnesses <name>                        Summarize live ACP harness discovery
+  agents <name>                           Show live OpenCode agent roster
+  providers <name>                        Show live provider/model state
+  tasks <name> [--review|--running|--json]
+                                           Show read-only task summary
+  worktrees <name>                        Show managed worktree summary
+  restart <name>                          Stop/start and wait for health
   attach [name]                           Attach the TUI to an instance
   mcp [--instance <name>]                  Start MCP unbound, or bound to a running instance
   <name>                                  Start-if-stopped, then attach the TUI
@@ -634,7 +901,8 @@ export async function runOpenboard(
     switch (parsed.command) {
       case "list": {
         const entries = await provider.list();
-        printTable(entries, stdout);
+        if (parsed.json) writeJson(entries.map(({ definition, runtime }) => ({ instance: instancePayload(definition), runtime })), stdout);
+        else printTable(entries, stdout);
         return 0;
       }
       case "add": {
@@ -751,7 +1019,70 @@ export async function runOpenboard(
         const definition = await provider.get(parsed.name);
         const runtime = await provider.getRuntime(parsed.name);
         const health = await provider.getHealth(parsed.name);
-        printStatus(definition, runtime, health, stdout);
+        if (parsed.json) writeJson(statusPayload(definition, runtime, health), stdout);
+        else printStatus(definition, runtime, health, stdout);
+        return 0;
+      }
+      case "doctor": {
+        const payload = await buildDoctorPayload(provider, parsed.name);
+        if (parsed.json) writeJson(payload, stdout);
+        else printDoctor(payload, stdout);
+        return 0;
+      }
+      case "logs": {
+        const log = await provider.readLog(parsed.name, parsed.tail);
+        if (log.missing) {
+          stdout.write(`Log file not found: ${log.path}\n`);
+        } else {
+          stdout.write(`==> ${log.path}${log.truncated ? ` (last ${parsed.tail} lines)` : ""} <==\n`);
+          stdout.write(log.content.endsWith("\n") ? log.content : `${log.content}\n`);
+        }
+        if (parsed.follow) {
+          let last = log.content;
+          // Simple polling follower; intentionally no token/env output.
+          for (;;) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            const next = await provider.readLog(parsed.name, parsed.tail);
+            if (next.content !== last) {
+              stdout.write(next.content.endsWith("\n") ? next.content : `${next.content}\n`);
+              last = next.content;
+            }
+          }
+        }
+        return 0;
+      }
+      case "harnesses": {
+        printHarnesses(await provider.getAcpConfig(parsed.name), stdout);
+        return 0;
+      }
+      case "agents": {
+        printAgents(await provider.listAgents(parsed.name), stdout);
+        return 0;
+      }
+      case "providers": {
+        printProviders(await provider.listProviders(parsed.name), stdout);
+        return 0;
+      }
+      case "tasks": {
+        let tasks = await provider.listTasks(parsed.name);
+        if (parsed.review) tasks = tasks.filter((task) => task.column === "review");
+        if (parsed.running) tasks = tasks.filter((task) => task.runState === "running" || task.column === "in_progress");
+        if (parsed.json) writeJson(summarizeTasks(tasks), stdout);
+        else printTasks(tasks, stdout);
+        return 0;
+      }
+      case "worktrees": {
+        printWorktrees(await provider.listWorktrees(parsed.name), stdout);
+        return 0;
+      }
+      case "restart": {
+        stdout.write(`Stopping "${parsed.name}"...\n`);
+        await provider.stop(parsed.name);
+        stdout.write(`Starting "${parsed.name}"...\n`);
+        const runtime = await provider.start(parsed.name);
+        const health = await provider.getHealth(parsed.name);
+        stdout.write(`Instance "${parsed.name}" is ${runtime.status} at ${runtime.boardUrl}\n`);
+        stdout.write(`Health: ${health ? "ok" : "unavailable after start"}\n`);
         return 0;
       }
       case "mcp": {

@@ -56,6 +56,12 @@ function mockProvider(
     stop: vi.fn().mockResolvedValue(STOPPED_RUNTIME),
     getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME),
     getHealth: vi.fn().mockResolvedValue(undefined),
+    readLog: vi.fn().mockResolvedValue({ path: "/logs/openboard.log", content: "started\n", truncated: false, missing: false }),
+    listTasks: vi.fn().mockResolvedValue([]),
+    listAgents: vi.fn().mockResolvedValue([]),
+    listProviders: vi.fn().mockResolvedValue([]),
+    getAcpConfig: vi.fn().mockResolvedValue({}),
+    listWorktrees: vi.fn().mockResolvedValue([]),
     rename: vi.fn().mockImplementation(async (oldName, newName) => ({
       name: newName,
       port: DEFAULT_DEFINITION.port,
@@ -139,6 +145,9 @@ describe("openboard --help", () => {
     expect(out).not.toContain("--no-start");
     expect(out).toContain("default show");
     expect(out).toContain("status <name>");
+    expect(out).toContain("doctor <name>");
+    expect(out).toContain("logs <name>");
+    expect(out).toContain("tasks <name>");
   });
 });
 
@@ -191,6 +200,22 @@ describe("openboard list", () => {
     const { code, out } = await run(["list"], provider);
     expect(code).toBe(0);
     expect(out).toContain("No instances");
+  });
+
+  it("prints JSON when requested", async () => {
+    const provider = mockProvider({
+      list: vi.fn().mockResolvedValue([{ definition: DEFAULT_DEFINITION, runtime: RUNNING_RUNTIME }]),
+    });
+    const { code, out } = await run(["list", "--json"], provider);
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual([{ instance: {
+      name: "my-project",
+      port: 4097,
+      workspace: "/home/alice/repos/my-project",
+      dbPath: "my-project.sqlite",
+      boardTokenPresent: true,
+    }, runtime: RUNNING_RUNTIME }]);
+    expect(out).not.toContain("token-1");
   });
 });
 
@@ -523,6 +548,122 @@ describe("openboard status", () => {
     expect(out).toContain("OpenCode backend: http://127.0.0.1:4096");
     expect(out).toContain("Adapter build: version 0.0.1, commit abc123");
     expect(out).toContain("OpenCode health: ok (1.2.3)");
+  });
+
+  it("prints status JSON without exposing token value", async () => {
+    const provider = mockProvider({ getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME) });
+    const { code, out } = await run(["status", "my-project", "--json"], provider);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out);
+    expect(parsed.registry.boardTokenPresent).toBe(true);
+    expect(out).not.toContain("token-1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// diagnostics/control plane
+// ---------------------------------------------------------------------------
+
+describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/restart", () => {
+  const task: any = {
+    id: "task-1",
+    title: "Review me",
+    description: "",
+    directory: "/ws",
+    column: "review",
+    position: 0,
+    runState: "idle",
+    baseCommit: null,
+    dirtyAtDispatch: false,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+
+  it("prints doctor human diagnostics", async () => {
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "unreachable" } }),
+      listAgents: vi.fn().mockResolvedValue([{ id: "build", mode: "primary" }]),
+      listProviders: vi.fn().mockResolvedValue([]),
+      getAcpConfig: vi.fn().mockResolvedValue({ "claude-code": { available: true, modes: [], models: [], options: [] } }),
+      listTasks: vi.fn().mockResolvedValue([task]),
+    });
+    const { code, out } = await run(["doctor", "my-project"], provider);
+    expect(code).toBe(0);
+    expect(out).toContain("Doctor: my-project");
+    expect(out).toContain("roster");
+    expect(out).toContain("provider");
+  });
+
+  it("prints doctor JSON", async () => {
+    const provider = mockProvider({ getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME) });
+    const { code, out } = await run(["doctor", "my-project", "--json"], provider);
+    expect(code).toBe(0);
+    expect(JSON.parse(out).name).toBe("my-project");
+  });
+
+  it("tails logs", async () => {
+    const provider = mockProvider({
+      readLog: vi.fn().mockResolvedValue({ path: "/logs/openboard.log", content: "line\n", truncated: true, missing: false }),
+    });
+    const { code, out } = await run(["logs", "my-project", "--tail", "1"], provider);
+    expect(code).toBe(0);
+    expect(provider.readLog).toHaveBeenCalledWith("my-project", 1);
+    expect(out).toContain("/logs/openboard.log");
+    expect(out).toContain("line");
+  });
+
+  it("summarizes harnesses", async () => {
+    const provider = mockProvider({
+      getAcpConfig: vi.fn().mockResolvedValue({ "claude-code": { available: true, modes: [{ value: "bypassPermissions" }], models: [{ id: "sonnet" }], options: [] } }),
+    });
+    const { code, out } = await run(["harnesses", "my-project"], provider);
+    expect(code).toBe(0);
+    expect(out).toContain("claude-code: available");
+  });
+
+  it("shows agents and restart guidance", async () => {
+    const provider = mockProvider({ listAgents: vi.fn().mockResolvedValue([{ id: "build", mode: "primary" }]) });
+    const { code, out } = await run(["agents", "my-project"], provider);
+    expect(code).toBe(0);
+    expect(out).toContain("build");
+    expect(out).toContain("restart");
+  });
+
+  it("shows providers", async () => {
+    const provider = mockProvider({ listProviders: vi.fn().mockResolvedValue([{ id: "openrouter", name: "OpenRouter", models: [{ id: "m", name: "M" }] }]) });
+    const { code, out } = await run(["providers", "my-project"], provider);
+    expect(code).toBe(0);
+    expect(out).toContain("openrouter");
+    expect(out).toContain("1 models");
+  });
+
+  it("filters task summaries and supports JSON", async () => {
+    const provider = mockProvider({ listTasks: vi.fn().mockResolvedValue([task, { ...task, id: "task-2", column: "todo" }]) });
+    const { code, out } = await run(["tasks", "my-project", "--review", "--json"], provider);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out);
+    expect(parsed.total).toBe(1);
+    expect(parsed.tasks[0].id).toBe("task-1");
+  });
+
+  it("shows worktree summaries", async () => {
+    const provider = mockProvider({
+      listWorktrees: vi.fn().mockResolvedValue([{ taskId: "task-1", title: "Review me", column: "review", runState: "idle", worktreePath: "/wt", worktreeBranch: "board/task-1", exists: true, dirty: false, orphanCandidate: false }]),
+    });
+    const { code, out } = await run(["worktrees", "my-project"], provider);
+    expect(code).toBe(0);
+    expect(out).toContain("board/task-1");
+    expect(out).toContain("dirty=false");
+  });
+
+  it("restarts by stopping then starting", async () => {
+    const provider = mockProvider({ getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "ok", version: "1" } }) });
+    const { code, out } = await run(["restart", "my-project"], provider);
+    expect(code).toBe(0);
+    expect(provider.stop).toHaveBeenCalledWith("my-project");
+    expect(provider.start).toHaveBeenCalledWith("my-project");
+    expect(out).toContain("Health: ok");
   });
 });
 

@@ -3,6 +3,28 @@ import type {
   InstanceRuntimeState,
 } from "../shared/instances";
 import type { BoardHealth } from "../shared/health";
+import type { AcpConfigCatalog, RosterAgent, Task } from "../shared/task";
+import type { RosterProvider } from "../shared/providers";
+
+export interface InstanceLogResult {
+  path: string;
+  content: string;
+  truncated: boolean;
+  missing: boolean;
+}
+
+export interface InstanceWorktreeSummary {
+  taskId: string;
+  title: string;
+  column: string;
+  runState: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
+  baseBranch?: string;
+  exists: boolean;
+  dirty: boolean | "unknown";
+  orphanCandidate: boolean;
+}
 
 export type DefaultInstanceInfo =
   | { kind: "explicit"; definition: InstanceDefinition; instanceCount: number }
@@ -67,6 +89,16 @@ export interface InstanceLifecycleProvider {
 
   /** Live health for a running instance, or undefined if unavailable. */
   getHealth(name: string): Promise<BoardHealth | undefined>;
+
+  /** Tail the daemon log without exposing secrets. */
+  readLog(name: string, tailLines?: number): Promise<InstanceLogResult>;
+
+  /** Authenticated read-only board API helpers. */
+  listTasks(name: string): Promise<Task[]>;
+  listAgents(name: string): Promise<RosterAgent[]>;
+  listProviders(name: string): Promise<RosterProvider[]>;
+  getAcpConfig(name: string): Promise<AcpConfigCatalog>;
+  listWorktrees(name: string): Promise<InstanceWorktreeSummary[]>;
 
   /**
    * Rename an instance.

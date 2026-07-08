@@ -180,8 +180,16 @@ export class InstanceSpawnError extends InstanceError {
  * - `rename`: Rename an instance (stops/restarts if running).
  * - `default`: Show/set/clear the default instance used by attach.
  * - `status`: Read-only diagnostics for one instance.
+ * - `doctor`: Operator diagnostics for one instance.
+ * - `logs`: Read daemon logs for one instance.
+ * - `harnesses`: Show live ACP harness discovery.
+ * - `agents`: Show live OpenCode agent roster.
+ * - `providers`: Show live OpenCode provider/model roster.
+ * - `tasks`: Read-only task summary.
+ * - `worktrees`: Read-only managed worktree summary.
+ * - `restart`: Stop/start an instance and wait for health.
  */
-export const CLI_COMMANDS = ["list", "add", "remove", "start", "stop", "attach", "mcp", "rename", "default", "status"] as const;
+export const CLI_COMMANDS = ["list", "add", "remove", "start", "stop", "attach", "mcp", "rename", "default", "status", "doctor", "logs", "harnesses", "agents", "providers", "tasks", "worktrees", "restart"] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 /** Arguments for the `list` subcommand. */
