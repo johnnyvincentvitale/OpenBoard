@@ -87,6 +87,31 @@ When the requester asks to run work now, confirm both the card was dispatched an
 
 ## Review Worktrees
 
+### Stall Detection Protocol
+
+The dispatcher already does proactive stall detection: it auto-nudges a session
+that sits with no new messages for ~45s (`DEFAULT_STALL_THRESHOLD_MS`), sends up
+to two denial-aware nudges, and resets the counter on any progress. Give that
+recovery a beat before intervening — most "stalled" cards are mid-recovery, not
+hung.
+
+Operator intervention is for the stall shapes the auto-nudge **cannot** fix:
+
+1. **Broker / provider death** — `provider_unavailable` or a 502 in the OpenCode
+   log. A nudge will not resurrect a dead broker. Re-lane the card via per-card
+   model override (`agent=<working-profile> + model=<working-model>`); do not
+   edit profiles mid-run (restarts kill board state).
+2. **Plan-mode hang** — a read-only audit dispatched under
+   `claudePermissionMode: "plan"` will hang silently waiting for human plan
+   approval. Never use plan mode for read-only audits; use `bypassPermissions`
+   + a read-only prompt.
+3. **False-stale misread** — card `updatedAt` is not a liveness signal; the
+   board bumps it on internal state changes unrelated to worker activity. For
+   Claude Code cards, check `claude agents --json --all` or the session export
+   before treating a card as stalled or spawning a replacement. Do not infer
+   liveness from `/api/health` either — it has no version signal and returns
+   `ok` even when the adapter runs pre-integrate code.
+
 For each Review card:
 
 1. Check for a blocking `pending` state first. An escape detector gates Review
@@ -109,6 +134,24 @@ that recovery a beat before treating the card as hung, and distinguish
 board-state bugs from genuine OpenCode session hangs.
 
 ## Integrate Safely
+
+### Blocked-But-Verified Cards
+
+A card with `runState: "error"` may still contain valid, integrable code if the
+worker blocked on test-environment permissions, not on the patch itself. Do not
+treat `runState: "error"` as automatic proof the code is bad.
+
+Protocol when a card ended `error` but the worktree has a real diff:
+
+1. Read `git status --short` and the diff in the worktree.
+2. Independently run typecheck + the focused tests for the changed files in the
+   worktree (not the worker's self-report).
+3. If they pass, Integrate with a card note: "orchestrator-verified, worker
+   self-report failed (env block)."
+4. If they fail, treat as a normal failed card.
+
+Do not let environment-blocked cards sit in `error` forever — either verify
+and integrate, or re-dispatch with a fixed environment.
 
 Integrate is rebase-first: it rebases the task branch onto the target branch
 inside the worktree, then fast-forwards the base checkout (`--ff-only`) and
@@ -168,6 +211,10 @@ cards:
 
 If no exit condition or cap was declared, get them from the user before
 dispatching the loop's first card.
+
+6. **Revert-testing is mandatory for audit-fix cards.** The fixer must prove the
+   new regression tests fail when the fix is reverted. The auditor must
+   revert-test its own hollow-test suspicions before reporting them.
 
 ## Verification Discipline
 
@@ -275,6 +322,11 @@ responsibility, because orphaned worktrees are a real tester-day-one failure:
 
 ## Failure Modes
 
+- **Deleting a Claude Code card does not reliably stop its session.** The
+  session can respawn under the Claude daemon. After deleting a Claude card,
+  verify process state separately (`claude agents --json --all` or `ps`); if the
+  session persists, terminate the process group. Do not assume deletion =
+  cleanup for Claude-harness cards.
 - Treating Review as Done.
 - Leaving ephemeral agent profiles orphaned in the global OpenCode config after a run.
 - Dispatching cards before rechecking the Profile Manifest against the selected

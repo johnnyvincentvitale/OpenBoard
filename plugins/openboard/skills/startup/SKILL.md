@@ -36,12 +36,23 @@ Follow this sequence before any OpenBoard work:
 3. Do not dispatch work or judge cards until the board surface is established.
 4. After board proof, ask: "Would you like me to assess your repository's
    readiness for agentic development?"
-5. If yes, run `agent-readiness` and return the report.
-6. Then use `board-plan` to design the workflow, agents/profiles/models, and
+5. Probe ACP harness availability so downstream skills know which harnesses are
+   installed and launchable before they plan or create profiles. Call
+   `GET /api/acp-config` (cached ~30s on the server) and record, for each of the
+   six ACP harnesses (`claude-code`, `codex`, `gemini-acp`, `hermes`,
+   `pi-coding-agent`, `cursor-acp`), whether `available` is true and which
+   `modes`/`models` it reports. A harness with `available: false` (or an
+   `error` field) has no installed adapter and must not be assigned work. This
+   probe is the verified source of truth for `board-plan` (harness selection)
+   and `create-profile` (no point creating a profile for a harness the board
+   cannot launch). If the endpoint is unreachable, state that ACP availability
+   is unverified and treat all ACP harnesses as unproven.
+6. If yes, run `agent-readiness` and return the report.
+7. Then use `board-plan` to design the workflow, agents/profiles/models, and
    card shape.
-7. Use `create-profile` for any custom OpenCode agent profiles before cards
+8. Use `create-profile` for any custom OpenCode agent profiles before cards
    depend on them.
-8. Then use `openboard-orchestrator` to drive execution, keeping the user in
+9. Then use `openboard-orchestrator` to drive execution, keeping the user in
    control and reporting only verified board/work state.
 
 ## Step Completion Gate
@@ -156,6 +167,11 @@ When startup is complete, hand the orchestrator these facts:
 - Surface type: named-instance TUI, browser fallback, or API-only.
 - Whether the TUI is visible.
 - Agent roster summary.
+- ACP harness availability: which of `claude-code`, `codex`, `gemini-acp`,
+  `hermes`, `pi-coding-agent`, `cursor-acp` report `available: true` from
+  `GET /api/acp-config`, with their reported modes/models. Downstream skills
+  must not suggest or assign a harness that reported `available: false` or was
+  not probed.
 - Existing relevant card IDs and columns.
 - Any mismatch between visible GUI, API, and MCP.
 - Profile/roster restart target: for named instances, the exact instance name

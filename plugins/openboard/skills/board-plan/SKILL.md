@@ -153,6 +153,23 @@ stored.
   with no findings), and cap the loop (e.g. three round trips) so two agents
   cannot volley forever.
 
+
+### Cross-Provider Audit And Mid-Run Re-Lane
+
+- **Default to cross-provider review.** When planning a role loop, use a coding
+  lane, an auditor on a different provider, and a fixer on a third. Same-
+  provider review rubber-stamps; cross-provider audit catches defects the fix
+  wave itself introduced (a round-2 audit has caught a stale-lock bug that the
+  first fix introduced).
+- **Per-card model override is the mid-run escape hatch.** When a profile
+  breaks mid-run or a provider 502s, re-lane via `agent=<working-profile> +
+  model=<working-model>` instead of editing profiles (which needs a restart and
+  kills board state). Reserve profile edits for run boundaries.
+- **WIP salvage**: when a worker dies mid-stream with uncommitted work, commit
+  it on the `board/*` branch and have the takeover card merge it as unreviewed
+  input. State "treat merged WIP as unreviewed input" in the takeover card
+  prompt.
+
 OpenCode profile hygiene, regardless of case:
 
 - Give every profile a distinct `color` in its config so the board's agent
@@ -238,6 +255,24 @@ Every worktree branches from a verified-green commit:
    worktrees — no `node_modules`, no `.env`. Prove a fresh worktree can
    install and build before fan-out, or make setup step 1 of every card.
    Relative paths that escape the repo may also break inside a worktree.
+
+
+### Worktree Test-Environment Bootstrap
+
+The worktree bootstrap check above covers untracked files (node_modules, .env).
+It does NOT cover writable temp/dependency paths inside worktrees — and this
+has blocked real cards whose tests write temp files through base-repo
+`node_modules` and hit EPERM.
+
+- **Vitest/Vite temp paths**: set `VITEST_TMPDIR` and Vite `cacheDir` to a
+  worktree-local location, or agents hit EPERM writing through base-repo
+  `node_modules`.
+- **Python worktrees**: `.venv` is not in the worktree. Either commit it,
+  bootstrap it as step 1 of every card, or use absolute venv tools from the
+  base repo.
+- **Integration test bootstrap**: `tsx ENOENT` in fresh worktrees — add a
+  worktree bootstrap hook or a scoped test command.
+
 4. **macOS sandbox precondition (worktree + spawn mode).** A worktree card
    fails closed if the sandbox wrapper is expected but unavailable. Confirm the
    selected instance reports sandboxing available before planning a macOS
@@ -267,6 +302,24 @@ whole contract:
   or the opposing role inherits evidence instead of re-deriving it.
 
 Create cards through MCP `create_task`/`add_tasks`; check `list_tasks` first to
+avoid duplicates. Use guarded MCP control tools only from the orchestrator flow.
+
+### Absolute Paths In Card Body
+
+The card's `directory` field is absolute — that is correct. But absolute paths
+**in the prose body** of the card can defeat worktree isolation: the dispatcher
+injects a worktree-isolation preamble stating the agent's cwd and marking the
+base repo read-only, and a permission fence plus the `base-checkout-escape`
+detector catch absolute-path writes as a backstop. Despite that, absolute paths
+in the card body can still steer a worker to edit the main checkout directly,
+because the worker treats the body as authoritative.
+
+Rule: everything in the card body must be repo-relative. The `directory` field
+is the only absolute path that should appear. Every worktree card should rely on
+the injected preamble for cwd guidance rather than restating absolute paths in
+the body.
+
+
 avoid duplicates. Use guarded MCP control tools only from the orchestrator flow.
 
 ## Set The Failure Policy
