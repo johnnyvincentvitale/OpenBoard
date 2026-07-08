@@ -159,6 +159,8 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
       globalArchiveStore: new GlobalArchiveStore(":memory:"),
       sourceInstance: { port: 0, workspace: "/test", dbPath: ":memory:" },
       boardToken: TEST_TOKEN,
+      sandbox: { expected: false, enabled: false },
+      opencodeMode: "connect",
     }),
     taskStore,
     dispatcher,
@@ -910,6 +912,31 @@ describe("auth regression — route categories", () => {
     });
   });
 
+  // -- Diagnostics ------------------------------------------------------------
+
+  describe("GET /api/diagnostics", () => {
+    it("rejects with 401 when no token is provided", async () => {
+      const { app } = makeAuthedApp();
+      const res = await app.request("/api/diagnostics");
+      expect(res.status).toBe(401);
+    });
+
+    it("rejects with 401 when the token is wrong", async () => {
+      const { app } = makeAuthedApp();
+      const res = await app.request("/api/diagnostics", { headers: wrongAuthHeaders() });
+      expect(res.status).toBe(401);
+    });
+
+    it("returns 200 with the correct token", async () => {
+      const { app } = makeAuthedApp();
+      const res = await app.request("/api/diagnostics", { headers: authHeaders() });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.instance.apiTokenPresent).toBe(true);
+      expect(body.instance).not.toHaveProperty("apiToken");
+    });
+  });
+
   // -- Board settings ----------------------------------------------------------
 
   describe("board settings routes", () => {
@@ -931,7 +958,7 @@ describe("auth regression — route categories", () => {
         const res = await app.request("/api/settings", { headers: authHeaders() });
         expect(res.status).toBe(200);
         const body = await res.json();
-        expect(body).toEqual({ worktreeDefault: false });
+        expect(body).toEqual({ worktreeDefault: false, bashSandbox: false });
       });
     });
 

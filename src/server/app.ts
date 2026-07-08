@@ -8,7 +8,9 @@ import type { OpencodeHandle } from "./opencode";
 import { fetchRosterStrict } from "./agents";
 import { requireBoardToken } from "./auth";
 import { registerHealthRoutes } from "./routes/health";
+import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { resolveAdapterBuildInfo } from "./build-info";
+import type { SandboxStatus } from "./sandbox";
 import { registerTaskRoutes } from "./routes/tasks";
 import { registerTaskEventsRoutes } from "./routes/task-events";
 import { registerAgentRoutes } from "./routes/agents";
@@ -29,6 +31,10 @@ export interface AppDeps {
   sourceInstance: SourceInstanceInfo;
   /** Per-instance board API token. */
   boardToken: string;
+  /** Resolved macOS sandbox-wrapper status. */
+  sandbox: SandboxStatus;
+  /** The adapter connection mode ("spawn" | "connect"). */
+  opencodeMode: "spawn" | "connect";
 }
 
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
@@ -56,6 +62,19 @@ export function createApp(deps: AppDeps): Hono {
   // All remaining API routes require the board token.
   const auth = requireBoardToken(deps.boardToken);
   app.use("/api/*", auth);
+
+  // Diagnostics route — board-token protected because it reports workspace,
+  // DB paths, worktree paths, and editor configuration.
+  registerDiagnosticsRoutes(app, {
+    client: deps.client,
+    store: deps.taskStore,
+    sandbox: deps.sandbox,
+    opencodeBaseUrl: deps.opencodeBaseUrl,
+    mode: deps.opencodeMode,
+    identity: deps.sourceInstance,
+    boardTokenPresent: Boolean(deps.boardToken),
+    build: resolveAdapterBuildInfo(),
+  });
 
   registerAgentRoutes(app, { baseUrl: deps.opencodeBaseUrl });
   registerProviderRoutes(app, { client: deps.client });

@@ -22,6 +22,8 @@ export interface OpencodeHandle {
 export interface StartOrConnectDeps {
   /** Override for tests — defaults to the real resolveSandboxStatus. */
   resolveSandboxStatus?: typeof resolveSandboxStatus;
+  /** The persisted bashSandbox board setting — when false in spawn mode, sandbox is intentionally off. */
+  bashSandboxDesired?: boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -103,7 +105,7 @@ export async function startOrConnect(
     throw err;
   }
 
-  const sandbox = resolveSandbox({ mode: "spawn" });
+  const sandbox = resolveSandbox({ mode: "spawn", desired: deps.bashSandboxDesired });
 
   let server: { url: string; close(): void };
   try {

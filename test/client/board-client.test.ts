@@ -191,7 +191,7 @@ describe("board client", () => {
   it("calls task action endpoints", async () => {
     const task = createdTask("task-1", { title: "A", description: "", directory: CWD });
     const outcome: MergeOutcome = { task, ok: true, conflict: false, message: "merged" };
-    const settings: BoardSettings = { worktreeDefault: true };
+    const settings: BoardSettings = { worktreeDefault: true, bashSandbox: false };
     const fetchMock = vi.fn(async (url: string | URL) => {
       const path = new URL(String(url)).pathname;
       if (path.endsWith("/move")) return jsonResponse([task]);

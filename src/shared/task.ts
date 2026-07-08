@@ -1,4 +1,5 @@
 import type { Column } from "./columns";
+import type { WorktreeOrphan } from "./diagnostics";
 
 /** A single file in a task diff response. Mirrors OpenCode's server diff contract. */
 export interface DiffFile {
@@ -391,6 +392,8 @@ export interface UpdateTaskInput {
 export interface BoardSettings {
   /** Default isolation for runs when a task doesn't override it. */
   worktreeDefault: boolean;
+  /** Whether the bash sandbox wrapper should be wired for managed opencode serve. */
+  bashSandbox: boolean;
 }
 
 /** A roster agent (OpenCode agent) the board can assign tasks to — from GET /api/agent. */
@@ -500,6 +503,10 @@ export interface TaskStore {
   rememberWorktreeRepoRoot(repoRoot: string): void;
   /** Repo roots with OpenBoard-managed worktree history, used for startup orphan sweeps. */
   listKnownWorktreeRepoRoots(): string[];
+  /** Store the result of the last startup orphan worktree sweep. */
+  setSweepResult(result: WorktreeSweepResult): void;
+  /** Read the last stored orphan sweep result, or null. */
+  getSweepResult(): WorktreeSweepResult | null;
   addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment;
   listComments(taskId: string): TaskComment[];
   addEvent(input: { taskId: string; type: string; body?: Record<string, unknown> }): TaskEvent;
@@ -558,6 +565,14 @@ export interface WorktreeCleanupOutcome {
   kept: boolean;
   message: string;
   worktreePath?: string;
+}
+
+/** Stored result of the last startup orphan worktree sweep. */
+export interface WorktreeSweepResult {
+  sweptAt: number;
+  removedCleanCount: number;
+  keptDirtyCount: number;
+  dirtyOrphans: WorktreeOrphan[];
 }
 
 /** Canonical task REST + SSE routes. Namespace: /api/tasks. */

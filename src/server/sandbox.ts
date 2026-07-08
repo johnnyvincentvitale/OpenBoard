@@ -42,6 +42,13 @@ export function resolveSandboxWrapperPath(moduleUrl: string = import.meta.url): 
 export interface ResolveSandboxStatusOptions {
   /** "connect" never wires the wrapper — OpenBoard doesn't own that process's config. */
   mode: "connect" | "spawn";
+  /**
+   * The user's desired bash sandbox state from persisted board settings.
+   * When false in spawn mode, sandbox is treated as intentionally off —
+   * no wrapper is wired and worktree runs don't fail-close.
+   * Undefined / true preserves the original behaviour.
+   */
+  desired?: boolean;
   platform?: NodeJS.Platform;
   wrapperPath?: string;
   sandboxExecPath?: string;
@@ -60,6 +67,16 @@ export function resolveSandboxStatus(opts: ResolveSandboxStatusOptions): Sandbox
       expected: false,
       enabled: false,
       reason: "connect mode: OpenBoard does not manage the OpenCode process or its config",
+    };
+  }
+
+  // User explicitly turned off desire sandbox — treat as intentionally off,
+  // avoiding both wrapper wiring and worktree fail-close.
+  if (opts.desired === false) {
+    return {
+      expected: false,
+      enabled: false,
+      reason: "bash sandbox disabled by board setting",
     };
   }
 

@@ -133,6 +133,34 @@ function buildArgvFromTemplate(template: string, target: EditorTarget): string[]
   return hasFilePlaceholder ? substituted : [...substituted, target.file];
 }
 
+import type { EditorCommandDiagnostics } from "../shared/diagnostics";
+
+/**
+ * Resolve editor diagnostics for the settings/control panel — what editor
+ * is configured, from which env var, or whether no editor is set at all.
+ * Pure logic only; reads from the provided `env` map.
+ */
+export function resolveEditorDiagnostics(
+  env: Record<string, string | undefined>,
+): EditorCommandDiagnostics {
+  const openboardEditor = readEnv(env, "OPENBOARD_EDITOR");
+  if (openboardEditor !== undefined) {
+    return { resolved: openboardEditor, source: "openboard_editor", missing: false };
+  }
+
+  const visual = readEnv(env, "VISUAL");
+  if (visual !== undefined) {
+    return { resolved: visual, source: "visual", missing: false };
+  }
+
+  const editor = readEnv(env, "EDITOR");
+  if (editor !== undefined) {
+    return { resolved: editor, source: "editor", missing: false };
+  }
+
+  return { missing: true };
+}
+
 /**
  * Resolve the editor command to launch for `target`, in precedence order:
  *

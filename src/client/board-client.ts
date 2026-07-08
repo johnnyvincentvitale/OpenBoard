@@ -2,6 +2,7 @@ import { stat as defaultStat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type {
   BoardSettings,
+  BoardDiagnostics,
   Column,
   CreateTaskInput,
   CompletionReport,
@@ -46,6 +47,7 @@ import {
 } from "../shared";
 
 export type { BoardHealth } from "../shared/health";
+export type { BoardDiagnostics } from "../shared/diagnostics";
 
 export const DEFAULT_BOARD_URL = "http://127.0.0.1:4097";
 export const BOARD_UNAVAILABLE_MESSAGE = "Open OpenBoard first or set OPENCODE_BOARD_URL.";
@@ -159,8 +161,9 @@ export interface BoardClient {
   listTaskEvents(id: string): Promise<TaskEvent[]>;
   getTaskDiff(id: string): Promise<DiffResponse>;
   getSettings(): Promise<BoardSettings>;
-  updateSettings(patch: Pick<BoardSettings, "worktreeDefault">): Promise<BoardSettings>;
+  updateSettings(patch: Partial<Pick<BoardSettings, "worktreeDefault" | "bashSandbox">>): Promise<BoardSettings>;
   getHealth(): Promise<BoardHealth>;
+  getDiagnostics(): Promise<BoardDiagnostics>;
 }
 
 interface ResolvedOptions {
@@ -340,6 +343,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
         body: JSON.stringify(patch),
       }),
     getHealth: () => requestJson<BoardHealth>(resolved, "/api/health", { method: "GET" }),
+    getDiagnostics: () => requestJson<BoardDiagnostics>(resolved, "/api/diagnostics", { method: "GET" }),
   };
 }
 

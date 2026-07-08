@@ -18,6 +18,7 @@ import type {
   TaskPending,
   TaskRunState,
   TaskStore,
+  WorktreeSweepResult,
 } from "../shared";
 import { DEFAULT_COLUMN, TASK_HARNESSES } from "../shared";
 import { bootstrap } from "./schema";
@@ -147,8 +148,9 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["permission_overrides", "TEXT"],
 ];
 
-const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false };
+const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false, bashSandbox: false };
 const WORKTREE_REPO_ROOTS_SETTING = "worktreeRepoRoots";
+const LAST_SWEEP_SETTING = "lastSweep";
 
 interface TaskRowRecord {
   id: string;
@@ -700,15 +702,18 @@ export class SqliteTaskStore implements TaskStore {
   }
 
   getSettings(): BoardSettings {
-    const row = this.stmts.getSetting.get("worktreeDefault") as { value: string } | undefined;
+    const wtRow = this.stmts.getSetting.get("worktreeDefault") as { value: string } | undefined;
+    const bsRow = this.stmts.getSetting.get("bashSandbox") as { value: string } | undefined;
     return {
-      worktreeDefault: row ? row.value === "true" : DEFAULT_SETTINGS.worktreeDefault,
+      worktreeDefault: wtRow ? wtRow.value === "true" : DEFAULT_SETTINGS.worktreeDefault,
+      bashSandbox: bsRow ? bsRow.value === "true" : DEFAULT_SETTINGS.bashSandbox,
     };
   }
 
   updateSettings(patch: Partial<BoardSettings>): BoardSettings {
     const next = { ...this.getSettings(), ...patch };
     this.stmts.putSetting.run({ key: "worktreeDefault", value: next.worktreeDefault ? "true" : "false" });
+    this.stmts.putSetting.run({ key: "bashSandbox", value: next.bashSandbox ? "true" : "false" });
     return next;
   }
 
@@ -723,6 +728,20 @@ export class SqliteTaskStore implements TaskStore {
 
   listKnownWorktreeRepoRoots(): string[] {
     return parseStringArraySetting(this.stmts.getSetting.get(WORKTREE_REPO_ROOTS_SETTING) as { value: string } | undefined);
+  }
+
+  setSweepResult(result: WorktreeSweepResult): void {
+    this.stmts.putSetting.run({ key: LAST_SWEEP_SETTING, value: JSON.stringify(result) });
+  }
+
+  getSweepResult(): WorktreeSweepResult | null {
+    const row = this.stmts.getSetting.get(LAST_SWEEP_SETTING) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      return JSON.parse(row.value) as WorktreeSweepResult;
+    } catch {
+      return null;
+    }
   }
 
   addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment {

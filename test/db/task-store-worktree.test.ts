@@ -44,9 +44,9 @@ describe("SqliteTaskStore — isolation fields + settings", () => {
 
   it("defaults worktreeDefault to false and persists an update", () => {
     const store = new SqliteTaskStore(":memory:");
-    expect(store.getSettings()).toEqual({ worktreeDefault: false });
-    expect(store.updateSettings({ worktreeDefault: true })).toEqual({ worktreeDefault: true });
-    expect(store.getSettings()).toEqual({ worktreeDefault: true });
+    expect(store.getSettings()).toEqual({ worktreeDefault: false, bashSandbox: false });
+    expect(store.updateSettings({ worktreeDefault: true })).toEqual({ worktreeDefault: true, bashSandbox: false });
+    expect(store.getSettings()).toEqual({ worktreeDefault: true, bashSandbox: false });
     store.close();
   });
 

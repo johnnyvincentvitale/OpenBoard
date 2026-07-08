@@ -836,16 +836,30 @@ export function registerTaskRoutes(
 
   app.put(TASK_ROUTE_PATTERNS.settings, async (c) => {
     try {
-      let body: { worktreeDefault?: unknown };
+      let body: { worktreeDefault?: unknown; bashSandbox?: unknown };
       try {
         body = await c.req.json();
       } catch {
         throw AdapterError.validation("Request body must be valid JSON");
       }
-      if (typeof body.worktreeDefault !== "boolean") {
+      // Both keys are optional — but at least one must be provided.
+      if (body.worktreeDefault === undefined && body.bashSandbox === undefined) {
+        throw AdapterError.validation("Request body must contain at least one of: worktreeDefault, bashSandbox");
+      }
+      if (body.worktreeDefault !== undefined && typeof body.worktreeDefault !== "boolean") {
         throw AdapterError.validation("worktreeDefault must be a boolean");
       }
-      const settings = store.updateSettings({ worktreeDefault: body.worktreeDefault });
+      if (body.bashSandbox !== undefined && typeof body.bashSandbox !== "boolean") {
+        throw AdapterError.validation("bashSandbox must be a boolean");
+      }
+      const patch: Partial<{ worktreeDefault: boolean; bashSandbox: boolean }> = {};
+      if (body.worktreeDefault !== undefined) {
+        patch.worktreeDefault = body.worktreeDefault;
+      }
+      if (body.bashSandbox !== undefined) {
+        patch.bashSandbox = body.bashSandbox;
+      }
+      const settings = store.updateSettings(patch);
       return c.json(settings, 200);
     } catch (err) {
       return respondWithError(c, err);

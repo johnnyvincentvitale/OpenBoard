@@ -1649,7 +1649,7 @@ describe("worktree isolation routes", () => {
 
     const get1 = await app.request("/api/settings");
     expect(get1.status).toBe(200);
-    expect(await get1.json()).toEqual({ worktreeDefault: false });
+    expect(await get1.json()).toEqual({ worktreeDefault: false, bashSandbox: false });
 
     const put = await app.request("/api/settings", {
       method: "PUT",
@@ -1657,10 +1657,40 @@ describe("worktree isolation routes", () => {
       body: JSON.stringify({ worktreeDefault: true }),
     });
     expect(put.status).toBe(200);
-    expect(await put.json()).toEqual({ worktreeDefault: true });
+    expect(await put.json()).toEqual({ worktreeDefault: true, bashSandbox: false });
 
     const get2 = await app.request("/api/settings");
-    expect(await get2.json()).toEqual({ worktreeDefault: true });
+    expect(await get2.json()).toEqual({ worktreeDefault: true, bashSandbox: false });
+  });
+
+  it("PUT /api/settings accepts partial settings patches", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const bashOnly = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bashSandbox: true }),
+    });
+    expect(bashOnly.status).toBe(200);
+    expect(await bashOnly.json()).toEqual({ worktreeDefault: false, bashSandbox: true });
+
+    const both = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ worktreeDefault: true, bashSandbox: false }),
+    });
+    expect(both.status).toBe(200);
+    expect(await both.json()).toEqual({ worktreeDefault: true, bashSandbox: false });
+  });
+
+  it("PUT /api/settings rejects an empty patch", async () => {
+    const app = buildApp(store, dispatcher);
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
   });
 
   it("PUT /api/settings rejects a non-boolean with 400", async () => {

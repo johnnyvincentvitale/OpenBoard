@@ -26,10 +26,14 @@ export async function main(): Promise<void> {
   // so users don't paste it manually.
   const boardToken = resolveBoardToken(process.env);
 
-  const handle = await startOrConnect(config);
-
+  // Open the task store early so the bashSandbox setting can be read before
+  // spawning OpenCode. When the user has set bashSandbox: false, the sandbox
+  // wrapper is not wired, and worktree runs do not fail-close.
   const storePaths = deriveStorePaths(instance);
   const taskStore = new SqliteTaskStore(storePaths.taskDbPath);
+  const bashSandboxDesired = taskStore.getSettings().bashSandbox;
+
+  const handle = await startOrConnect(config, { bashSandboxDesired });
   const dispatcher = new TaskDispatcher({
     client: handle.client,
     store: taskStore,
@@ -39,7 +43,21 @@ export async function main(): Promise<void> {
     sandbox: handle.sandbox,
   });
   try {
-    await dispatcher.sweepOrphanedWorktrees();
+    const outcomes = await dispatcher.sweepOrphanedWorktrees();
+    const removedCleanCount = outcomes.filter((o) => o.ok && o.removed && !o.dirty).length;
+    const keptDirtyCount = outcomes.filter((o) => !o.removed && o.dirty).length;
+    const dirtyOrphans = outcomes
+      .filter((o) => !o.removed && o.dirty)
+      .map((o) => ({
+        worktreePath: o.worktreePath ?? "unknown",
+        taskId: o.worktreePath ? o.worktreePath.split("/").pop() ?? "unknown" : "unknown",
+      }));
+    taskStore.setSweepResult({
+      sweptAt: Date.now(),
+      removedCleanCount,
+      keptDirtyCount,
+      dirtyOrphans,
+    });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(`openboard orphan worktree sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
@@ -64,6 +82,8 @@ export async function main(): Promise<void> {
     globalArchiveStore,
     sourceInstance,
     boardToken,
+    sandbox: handle.sandbox,
+    opencodeMode: config.mode,
   });
   registerTerminalRoutes(app, { manager: terminalManager });
 
