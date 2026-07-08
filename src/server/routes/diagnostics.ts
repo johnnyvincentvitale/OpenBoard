@@ -1,7 +1,7 @@
 /**
  * Instance-scoped diagnostics route — read-only control panel surface for
- * sandbox, OpenCode server reachability, worktree health, instance identity,
- * and editor command status.
+ * OpenCode server reachability, worktree health, instance identity, and editor
+ * command status.
  *
  * Registered behind the board-token auth middleware (unlike /api/health which
  * is unauthenticated) because this reports workspace/db/worktree paths and
@@ -9,14 +9,11 @@
  */
 import type { Hono } from "hono";
 import type {
-  BashSandboxDiagnostics,
-  BashSandboxEffective,
   BoardDiagnostics,
   OpencodeDiagnostics,
   WorktreeHealthDiagnostics,
 } from "../../shared/diagnostics";
 import type { TaskStore } from "../../shared/task";
-import type { SandboxStatus } from "../sandbox";
 import { resolveEditorDiagnostics } from "../../tui/editor-command";
 import type { BoardIdentitySource } from "../../shared/health";
 import type { AdapterBuildInfo } from "../../shared/health";
@@ -30,9 +27,8 @@ type OpencodeClientLike = {
 export interface DiagnosticsDeps {
   client: OpencodeClientLike;
   store: TaskStore;
-  sandbox: SandboxStatus;
   opencodeBaseUrl: string;
-  /** The adapter's connection mode — used to determine sandbox effective state. */
+  /** The adapter's connection mode. */
   mode: "spawn" | "connect";
   identity?: BoardIdentitySource;
   boardTokenPresent?: boolean;
@@ -49,51 +45,8 @@ function portFromUrl(raw: string): number | undefined {
   }
 }
 
-/**
- * Resolve the effective bash sandbox state from SandboxStatus and the
- * persisted user setting.
- *
- * - "on":         sandbox wrapper is wired and active.
- * - "off":        user disabled sandbox (or sandbox not applicable in spawn).
- * - "unavailable": user wants sandbox but prerequisites are missing.
- * - "external":   connect mode — OpenBoard doesn't own the process.
- */
-export function resolveEffectiveSandbox(
-  sandbox: SandboxStatus,
-  mode: "spawn" | "connect",
-  desired: boolean,
-): BashSandboxEffective {
-  if (sandbox.enabled) return "on";
-  if (mode === "connect") return "external";
-  if (!desired) return "off";
-  // desired === true, sandbox not enabled
-  if (sandbox.expected) return "unavailable";
-  // spawn mode, platform doesn't support sandbox at all
-  return "off";
-}
-
-/** Compute restart-required: true when desired ≠ effective in a restart-mutable way. */
-export function restartRequired(
-  desired: boolean,
-  effective: BashSandboxEffective,
-): boolean {
-  if (effective === "external") return false;
-  const effectiveBool = effective === "on";
-  return desired !== effectiveBool;
-}
-
 export function registerDiagnosticsRoutes(app: Hono, deps: DiagnosticsDeps): void {
   app.get("/api/diagnostics", async (c) => {
-    const settings = deps.store.getSettings();
-    const desired = settings.bashSandbox;
-    const effective = resolveEffectiveSandbox(deps.sandbox, deps.mode, desired);
-
-    const sandbox: BashSandboxDiagnostics = {
-      desired: desired ? "on" : "off",
-      effective,
-      restartRequired: restartRequired(desired, effective),
-    };
-
     const opencode: OpencodeDiagnostics = await resolveOpencodeDiagnostics(deps.client, deps.opencodeBaseUrl);
 
     const sweepResult = deps.store.getSweepResult();
@@ -117,7 +70,6 @@ export function registerDiagnosticsRoutes(app: Hono, deps: DiagnosticsDeps): voi
     const editor = resolveEditorDiagnostics(process.env);
 
     const result: BoardDiagnostics = {
-      sandbox,
       opencode,
       worktree,
       instance,

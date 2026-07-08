@@ -167,7 +167,6 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
       globalArchiveStore: new GlobalArchiveStore(":memory:"),
       sourceInstance: { port: 0, workspace: "/test", dbPath: ":memory:" },
       boardToken: TEST_TOKEN,
-      sandbox: { expected: false, enabled: false },
       opencodeMode: "connect",
     }),
     taskStore,
@@ -942,64 +941,6 @@ describe("auth regression — route categories", () => {
       const body = await res.json();
       expect(body.instance.apiTokenPresent).toBe(true);
       expect(body.instance).not.toHaveProperty("apiToken");
-    });
-  });
-
-  // -- Board settings ----------------------------------------------------------
-
-  describe("board settings routes", () => {
-    describe("GET /api/settings", () => {
-      it("rejects with 401 when no token is provided", async () => {
-        const { app } = makeAuthedApp();
-        const res = await app.request("/api/settings");
-        expect(res.status).toBe(401);
-      });
-
-      it("rejects with 401 when the token is wrong", async () => {
-        const { app } = makeAuthedApp();
-        const res = await app.request("/api/settings", { headers: wrongAuthHeaders() });
-        expect(res.status).toBe(401);
-      });
-
-      it("returns 200 with the correct token", async () => {
-        const { app } = makeAuthedApp();
-        const res = await app.request("/api/settings", { headers: authHeaders() });
-        expect(res.status).toBe(200);
-        const body = await res.json();
-        expect(body).toEqual({ bashSandbox: false });
-      });
-    });
-
-    describe("PUT /api/settings", () => {
-      it("rejects with 401 when no token is provided", async () => {
-        const { app } = makeAuthedApp();
-        const res = await app.request("/api/settings", {
-          method: "PUT",
-          headers: jsonHeaders(),
-          body: JSON.stringify({ bashSandbox: true }),
-        });
-        expect(res.status).toBe(401);
-      });
-
-      it("rejects with 401 when the token is wrong", async () => {
-        const { app } = makeAuthedApp();
-        const res = await app.request("/api/settings", {
-          method: "PUT",
-          headers: jsonHeaders("wrong"),
-          body: JSON.stringify({ bashSandbox: true }),
-        });
-        expect(res.status).toBe(401);
-      });
-
-      it("returns 200 with the correct token", async () => {
-        const { app } = makeAuthedApp();
-        const res = await app.request("/api/settings", {
-          method: "PUT",
-          headers: jsonHeaders("correct"),
-          body: JSON.stringify({ bashSandbox: true }),
-        });
-        expect(res.status).toBe(200);
-      });
     });
   });
 

@@ -840,34 +840,6 @@ export function registerTaskRoutes(
     }
   });
 
-  app.get(TASK_ROUTE_PATTERNS.settings, (c) => {
-    try {
-      return c.json(store.getSettings(), 200);
-    } catch (err) {
-      return respondWithError(c, err);
-    }
-  });
-
-  app.put(TASK_ROUTE_PATTERNS.settings, async (c) => {
-    try {
-      let body: { bashSandbox?: unknown };
-      try {
-        body = await c.req.json();
-      } catch {
-        throw AdapterError.validation("Request body must be valid JSON");
-      }
-      if (body.bashSandbox === undefined) {
-        throw AdapterError.validation("Request body must contain bashSandbox");
-      }
-      if (body.bashSandbox !== undefined && typeof body.bashSandbox !== "boolean") {
-        throw AdapterError.validation("bashSandbox must be a boolean");
-      }
-      const settings = store.updateSettings({ bashSandbox: body.bashSandbox });
-      return c.json(settings, 200);
-    } catch (err) {
-      return respondWithError(c, err);
-    }
-  });
 }
 
 function validateExplicitModel(value: unknown): ModelRef {

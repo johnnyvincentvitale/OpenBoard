@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import type {
-  BoardSettings,
   CompletionReport,
   CompletionSource,
   Column,
@@ -151,7 +150,6 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["permission_overrides", "TEXT"],
 ];
 
-const DEFAULT_SETTINGS: BoardSettings = { bashSandbox: false };
 const WORKTREE_REPO_ROOTS_SETTING = "worktreeRepoRoots";
 const LAST_SWEEP_SETTING = "lastSweep";
 
@@ -713,19 +711,6 @@ export class SqliteTaskStore implements TaskStore {
     return (this.stmts.getChildIds.all(parentId) as Array<{ child_id: string }>).map(
       (row) => row.child_id,
     );
-  }
-
-  getSettings(): BoardSettings {
-    const bsRow = this.stmts.getSetting.get("bashSandbox") as { value: string } | undefined;
-    return {
-      bashSandbox: bsRow ? bsRow.value === "true" : DEFAULT_SETTINGS.bashSandbox,
-    };
-  }
-
-  updateSettings(patch: Partial<BoardSettings>): BoardSettings {
-    const next = { ...this.getSettings(), ...patch };
-    this.stmts.putSetting.run({ key: "bashSandbox", value: next.bashSandbox ? "true" : "false" });
-    return next;
   }
 
   rememberWorktreeRepoRoot(repoRoot: string): void {

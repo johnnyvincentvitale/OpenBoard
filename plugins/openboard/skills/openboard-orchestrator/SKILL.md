@@ -89,13 +89,8 @@ Starting cards is not enough. After Run, verify each card passes the crash windo
 - The task still carries the expected stored `model`.
 - Worktree metadata appears when isolation is enabled.
 - The OpenCode session is producing real messages or tool activity.
-- No fail-closed sandbox block. On macOS spawn mode, a worktree card whose
-  bash sandbox is desired but unavailable lands in `runState: "error"` before
-  any session starts. That is a precondition failure, not a worker failure —
-  surface it as an environment gap, restart if required, or ask whether to turn
-  desired sandboxing off. If desired sandboxing is already off, do not describe
-  OpenCode worktree bash as sandboxed; the file-tool fence and escape detector
-  still apply.
+- For OpenCode worktree cards, the file-tool fence and base-checkout escape
+  detector apply; do not describe shell commands as OS-fenced.
 
 If a card reaches Review suspiciously fast, inspect the OpenCode session messages. Intermediate tool-call steps are not final completion.
 

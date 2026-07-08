@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type BoardSettings, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -611,7 +611,6 @@ interface TuiState {
   lastRefresh?: Date;
   health?: BoardHealth;
   healthError?: string;
-  settings?: BoardSettings;
   diagnostics?: BoardDiagnostics;
   settingsLoading?: boolean;
   settingsError?: string;
@@ -743,7 +742,6 @@ interface TuiActions {
   setupWorkspace: () => Promise<void>;
   openSettings: () => Promise<void>;
   refreshSettings: () => Promise<void>;
-  toggleBashSandbox: () => Promise<void>;
   // Open-in-editor (e on a DiffView selection)
   editorSpawner: EditorSpawner;
 }
@@ -979,11 +977,7 @@ export async function runOpenBoardTui(
     state.status = "loading settings...";
     render();
     try {
-      const [settings, diagnostics] = await Promise.all([
-        currentClient.getSettings(),
-        currentClient.getDiagnostics(),
-      ]);
-      state.settings = settings;
+      const diagnostics = await currentClient.getDiagnostics();
       state.diagnostics = diagnostics;
       state.status = "settings loaded";
     } catch (error) {
@@ -998,21 +992,6 @@ export async function runOpenBoardTui(
   const openSettings = async () => {
     state.viewState = transitionView(state.viewState, "settings");
     await refreshSettings();
-  };
-
-  const toggleBashSandbox = async () => {
-    const next = !(state.settings?.bashSandbox ?? false);
-    state.status = `bash sandbox desired ${next ? "on" : "off"}...`;
-    render();
-    try {
-      state.settings = await currentClient.updateSettings({ bashSandbox: next });
-      state.diagnostics = await currentClient.getDiagnostics();
-      state.status = `bash sandbox desired ${next ? "enabled" : "disabled"}`;
-    } catch (error) {
-      state.settingsError = errorMessage(error);
-      state.status = "sandbox toggle failed";
-    }
-    render();
   };
 
   const runAction = async (label: string, action: (task: Task) => Promise<unknown>) => {
@@ -1361,7 +1340,6 @@ export async function runOpenBoardTui(
       setupWorkspace,
       openSettings,
       refreshSettings,
-      toggleBashSandbox,
       editorSpawner,
     }).catch((error) => {
       setError(error, "key handling failed");
@@ -2312,9 +2290,7 @@ function renderInstanceRow(ui: OpenTui, state: TuiState, item: InstanceListItem,
 function renderSettingsView(ui: OpenTui, state: TuiState) {
   if (state.settingsDirtyWorktrees) return renderSettingsDirtyWorktreesView(ui, state);
 
-  const settings = state.settings;
   const diagnostics = state.diagnostics;
-  const sandbox = diagnostics?.sandbox;
   const opencode = diagnostics?.opencode;
   const worktree = diagnostics?.worktree;
   const instance = diagnostics?.instance;
@@ -2322,8 +2298,6 @@ function renderSettingsView(ui: OpenTui, state: TuiState) {
   const dirtyCount = worktree?.dirtyOrphans?.length || worktree?.keptDirtyCount || 0;
 
   const rows: MetaRow[] = [
-    { label: "SANDBOX", value: `desired ${sandbox?.desired ?? (settings?.bashSandbox ? "on" : "off")} · effective ${sandbox?.effective ?? "unknown"}`, color: sandbox?.restartRequired ? COLORS.bright : COLORS.text },
-    { label: "RESTART", value: sandbox?.restartRequired ? "required for sandbox change" : "not required", color: sandbox?.restartRequired ? COLORS.bright : COLORS.muted },
     { label: "OPENCODE", value: opencode ? `${opencode.reachable ? "reachable" : "unreachable"} ${opencode.version ?? ""}`.trim() : "unknown", color: opencode?.reachable ? COLORS.accentBright : COLORS.bright },
     { label: "OC URL", value: opencode?.url ?? "unknown", color: COLORS.text },
     { label: "SWEEP", value: worktree ? `${worktree.removedCleanCount} clean removed · ${worktree.keptDirtyCount} dirty kept` : "unknown", color: COLORS.text },
@@ -3876,7 +3850,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             : state.viewState.view === "settings"
             ? state.settingsDirtyWorktrees
               ? "↑/↓ dirty worktrees · d delete · u refresh · b/esc back · q quit"
-              : "D dirty worktrees · s toggle sandbox desired · u refresh · b/esc back · q quit"
+              : "D dirty worktrees · u refresh · b/esc back · q quit"
             : boardKeyHints,
         fg: COLORS.text,
         height: 1,
@@ -4196,7 +4170,7 @@ function renderAgentProfileStep(ui: OpenTui, state: TuiState, draft: NewTaskDraf
 
 // Step D — ISOLATION (with a live description per option) and, for OpenCode
 // only: an automatic/locked note under worktree isolation (the existing
-// write-fenced + escape-detector + sandboxed-bash safety stack must never be
+// write-fenced + escape-detector safety stack must never be
 // weakened by a per-task override), or an editable allow/ask/deny control
 // under in-place isolation, the only mode a permission override ever applies to.
 function renderIsolationStep(ui: OpenTui, draft: NewTaskDraft) {
@@ -4264,7 +4238,7 @@ function renderLockedPermissionsNote(ui: OpenTui) {
     ui.Text({ content: "PERMISSIONS", fg: COLORS.dim, height: 1 }),
     ui.Text({
       content:
-        "Automatic for worktree isolation — write-fenced edits, the base-checkout escape detector, and sandboxed bash all apply and are not configurable here. Select ISOLATION \"none\" to set permissions directly.",
+        "Automatic for worktree isolation — write-fenced edits and the base-checkout escape detector apply and are not configurable here. Select ISOLATION \"none\" to set permissions directly.",
       fg: COLORS.muted,
       wrapMode: "word",
       height: 3,
@@ -4975,10 +4949,6 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
     }
     state.settingsDirtyWorktrees = { selectedIndex: 0 };
     actions.render();
-    return;
-  }
-  if (key.sequence === "s") {
-    await actions.toggleBashSandbox();
     return;
   }
 }

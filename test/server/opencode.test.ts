@@ -5,7 +5,6 @@ import { startOrConnect } from "../../src/server/opencode";
 import { findFreePort } from "../../src/server/config";
 import { AdapterError } from "../../src/shared/errors";
 import type { AdapterConfig } from "../../src/server/config";
-import type { SandboxStatus } from "../../src/server/sandbox";
 
 /**
  * Hermetic: no real `opencode serve` process is spawned anywhere in this
@@ -118,11 +117,9 @@ describe("startOrConnect — spawn-mode port collision", () => {
 
 /**
  * Hermetic: mocks the SDK's `createOpencodeServer` (via `vi.mock`) so no real
- * `opencode` binary is ever spawned, and injects `resolveSandboxStatus` (via
- * `startOrConnect`'s deps param) so every branch is deterministic regardless
- * of the host platform running this test. The mocked server always resolves
- * to the same unreachable http://127.0.0.1:1 the "connect mode" tests above
- * already rely on being unreachable, so the health check fails fast and
+ * `opencode` binary is ever spawned. The mocked server always resolves to the
+ * same unreachable http://127.0.0.1:1 the "connect mode" tests above already
+ * rely on being unreachable, so the health check fails fast and
  * `startOrConnect` rejects — we only care what `createOpencodeServer` was
  * called with before that happens.
  */
@@ -130,14 +127,10 @@ vi.mock("@opencode-ai/sdk/v2/server", () => ({
   createOpencodeServer: vi.fn(async () => ({ url: "http://127.0.0.1:1", close: () => {} })),
 }));
 
-describe("startOrConnect — spawn-mode sandbox wrapper wiring", () => {
+describe("startOrConnect — spawn mode", () => {
   afterEach(() => {
     vi.mocked(createOpencodeServer).mockClear();
   });
-
-  function fakeSandbox(overrides: Partial<SandboxStatus>): SandboxStatus {
-    return { expected: false, enabled: false, ...overrides };
-  }
 
   async function spawnConfig(): Promise<AdapterConfig> {
     return {
@@ -150,56 +143,18 @@ describe("startOrConnect — spawn-mode sandbox wrapper wiring", () => {
     };
   }
 
-  it("passes config.shell through to createOpencodeServer when the sandbox wrapper is enabled", async () => {
+  it("spawns OpenCode without injecting a configured shell", async () => {
     const config = await spawnConfig();
 
-    await expect(
-      startOrConnect(config, {
-        resolveSandboxStatus: () =>
-          fakeSandbox({
-            expected: true,
-            enabled: true,
-            wrapperPath: "/fake/repo/scripts/sandbox-wrapper.sh",
-          }),
-      }),
-    ).rejects.toMatchObject({ code: "opencode_unreachable" });
+    await expect(startOrConnect(config)).rejects.toMatchObject({ code: "opencode_unreachable" });
 
     expect(createOpencodeServer).toHaveBeenCalledWith(
       expect.objectContaining({
         hostname: config.hostname,
         port: config.port,
-        config: { shell: "/fake/repo/scripts/sandbox-wrapper.sh" },
       }),
     );
-  });
-
-  it("omits the config field entirely when the sandbox wrapper is not enabled", async () => {
-    const config = await spawnConfig();
-
-    await expect(
-      startOrConnect(config, {
-        resolveSandboxStatus: () => fakeSandbox({ reason: "sandbox wrapper is macOS-only" }),
-      }),
-    ).rejects.toMatchObject({ code: "opencode_unreachable" });
-
     const call = vi.mocked(createOpencodeServer).mock.calls[0]?.[0];
     expect(call).not.toHaveProperty("config");
-  });
-
-  it("resolves the real sandbox status (not injected) when no deps override is given", async () => {
-    const config = await spawnConfig();
-
-    await expect(startOrConnect(config)).rejects.toMatchObject({ code: "opencode_unreachable" });
-
-    // On this dev machine (darwin, wrapper + sandbox-exec present) the real
-    // resolver enables the wrapper; elsewhere it resolves disabled. Either
-    // way, createOpencodeServer must have been called with well-formed args
-    // reflecting whatever the real, un-mocked resolveSandboxStatus decided.
-    const call = vi.mocked(createOpencodeServer).mock.calls[0]?.[0] as
-      | { config?: { shell?: string } }
-      | undefined;
-    if (call?.config) {
-      expect(typeof call.config.shell).toBe("string");
-    }
   });
 });

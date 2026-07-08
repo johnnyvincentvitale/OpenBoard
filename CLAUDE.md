@@ -35,7 +35,7 @@ For plugin work, also read `plugins/openboard/README.md` and the relevant
 - `src/shared/` - shared task, route, provider, terminal, health, and instance
   contracts.
 - `src/server/` - Hono adapter, OpenCode/ACP dispatch, routes, worktree
-  lifecycle, auth, terminal, diff, sandbox, and event handling.
+  lifecycle, auth, terminal, diff, and event handling.
 - `src/db/` - SQLite task store, schema metadata, and global archive.
 - `src/tui/` - V1 OpenTUI board, launcher, runtime, lifecycle display,
   confirmations, diff view, and model helpers.

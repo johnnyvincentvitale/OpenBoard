@@ -393,12 +393,6 @@ export interface UpdateTaskInput {
   parentIds?: string[] | null;
 }
 
-/** Board-level settings (persisted). */
-export interface BoardSettings {
-  /** Whether the bash sandbox wrapper should be wired for managed opencode serve. */
-  bashSandbox: boolean;
-}
-
 /** A roster agent (OpenCode agent) the board can assign tasks to — from GET /api/agent. */
 export interface RosterAgent {
   id: string;
@@ -453,7 +447,7 @@ export interface OpenCodePermissionRule {
  * session runs with. Worktree-isolated runs ALWAYS get
  * `WRITE_FENCED_PERMISSION` unchanged — `overrides` is not read at all in
  * that branch — because the worktree safety stack (write-fencing, escape
- * detection, worktree-cwd prompt hygiene, sandboxed bash) must never be
+ * detection, worktree-cwd prompt hygiene) must never be
  * weakened by a per-task override, regardless of how such data ended up on
  * the row. Only in-place tasks may layer category overrides, and only after
  * the base allow-all rule, since OpenCode 1.17.13 lets whichever rule is
@@ -498,10 +492,6 @@ export interface TaskStore {
   removeLink(parentId: string, childId: string): void;
   getParentIds(childId: string): string[];
   getChildIds(parentId: string): string[];
-  /** Read the persisted board settings (defaults applied for a fresh store). */
-  getSettings(): BoardSettings;
-  /** Patch and persist board settings; returns the merged result. */
-  updateSettings(patch: Partial<BoardSettings>): BoardSettings;
   /** Remember a repo root that has had OpenBoard-managed worktrees. */
   rememberWorktreeRepoRoot(repoRoot: string): void;
   /** Repo roots with OpenBoard-managed worktree history, used for startup orphan sweeps. */
@@ -601,7 +591,6 @@ export const TASK_ROUTE_PATTERNS = {
   diff: "/api/tasks/:id/diff",
   comments: "/api/tasks/:id/comments",
   taskEvents: "/api/tasks/:id/events",
-  settings: "/api/settings",
 } as const;
 
 export const buildTaskPath = {
@@ -625,5 +614,4 @@ export const buildTaskPath = {
     `/api/tasks/${encodeURIComponent(id)}/links/${encodeURIComponent(parentId)}`,
   comments: (id: string) => `/api/tasks/${encodeURIComponent(id)}/comments`,
   taskEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/events`,
-  settings: () => "/api/settings",
 } as const;

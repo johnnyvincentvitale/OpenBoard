@@ -1667,64 +1667,6 @@ describe("worktree isolation routes", () => {
     expect(body.kept).toBe(true);
   });
 
-  it("GET /api/settings returns defaults; PUT updates them", async () => {
-    const app = buildApp(store, dispatcher);
-
-    const get1 = await app.request("/api/settings");
-    expect(get1.status).toBe(200);
-    expect(await get1.json()).toEqual({ bashSandbox: false });
-
-    const put = await app.request("/api/settings", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bashSandbox: true }),
-    });
-    expect(put.status).toBe(200);
-    expect(await put.json()).toEqual({ bashSandbox: true });
-
-    const get2 = await app.request("/api/settings");
-    expect(await get2.json()).toEqual({ bashSandbox: true });
-  });
-
-  it("PUT /api/settings accepts partial settings patches", async () => {
-    const app = buildApp(store, dispatcher);
-
-    const bashOnly = await app.request("/api/settings", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bashSandbox: true }),
-    });
-    expect(bashOnly.status).toBe(200);
-    expect(await bashOnly.json()).toEqual({ bashSandbox: true });
-
-    const off = await app.request("/api/settings", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bashSandbox: false }),
-    });
-    expect(off.status).toBe(200);
-    expect(await off.json()).toEqual({ bashSandbox: false });
-  });
-
-  it("PUT /api/settings rejects an empty patch", async () => {
-    const app = buildApp(store, dispatcher);
-    const res = await app.request("/api/settings", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("PUT /api/settings rejects a non-boolean with 400", async () => {
-    const app = buildApp(store, dispatcher);
-    const res = await app.request("/api/settings", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bashSandbox: "yes" }),
-    });
-    expect(res.status).toBe(400);
-  });
 });
 
 // --- Directory containment ---------------------------------------------------

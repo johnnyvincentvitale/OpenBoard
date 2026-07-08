@@ -101,7 +101,6 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
       globalArchiveStore: new GlobalArchiveStore(":memory:"),
       sourceInstance: { port: 0, workspace: "/test", dbPath: ":memory:" },
       boardToken: BOARD_TOKEN,
-      sandbox: handle.sandbox,
       opencodeMode: "connect",
     });
 

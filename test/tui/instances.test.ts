@@ -121,11 +121,6 @@ function state(overrides: Record<string, unknown> = {}) {
 
 function diagnostics(overrides: Partial<BoardDiagnostics> = {}): BoardDiagnostics {
   return {
-    sandbox: {
-      desired: "on",
-      effective: "on",
-      restartRequired: false,
-    },
     opencode: {
       reachable: true,
       url: "http://127.0.0.1:8080",
@@ -4148,9 +4143,7 @@ describe("TUI settings diagnostics view", () => {
   it("renders instance-scoped settings and diagnostics", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "settings", previousView: "board" },
-      settings: { bashSandbox: true },
       diagnostics: {
-        sandbox: { desired: "on", effective: "off", restartRequired: true },
         opencode: { url: "http://127.0.0.1:60793", version: "1.17.15", reachable: true },
         worktree: { removedCleanCount: 2, keptDirtyCount: 1, dirtyOrphans: [{ worktreePath: "/repo/.opencode-board-worktrees/task_dirty", taskId: "task_dirty" }] },
         instance: { instanceName: "alpha", boardUrl: "http://127.0.0.1:4098", port: 4098, workspace: "/repo/openboard", dbPath: "/data/alpha/board.sqlite", apiTokenPresent: true },
@@ -4162,8 +4155,8 @@ describe("TUI settings diagnostics view", () => {
     expect(text).toContain("Settings");
     expect(text).not.toContain("default on");
     expect(text).not.toContain("default off");
-    expect(text).toContain("desired on · effective off");
-    expect(text).toContain("required for sandbox change");
+    expect(text).not.toContain("SANDBOX");
+    expect(text).not.toContain("RESTART");
     expect(text).toContain("reachable 1.17.15");
     expect(text).toContain("2 clean removed · 1 dirty kept");
     expect(text).toContain("1 dirty worktree");
@@ -4176,7 +4169,6 @@ describe("TUI settings diagnostics view", () => {
     const s = state({
       viewState: { view: "settings", previousView: "board" },
       diagnostics: {
-        sandbox: { desired: "on", effective: "on", restartRequired: false },
         opencode: { reachable: true },
         worktree: {
           removedCleanCount: 0,
@@ -4216,7 +4208,6 @@ describe("TUI settings diagnostics view", () => {
       viewState: { view: "settings", previousView: "board" },
       settingsDirtyWorktrees: { selectedIndex: 0 },
       diagnostics: {
-        sandbox: { desired: "on", effective: "on", restartRequired: false },
         opencode: { reachable: true },
         worktree: {
           removedCleanCount: 0,
@@ -4242,33 +4233,17 @@ describe("TUI settings diagnostics view", () => {
   it("opens and controls settings from board keys", async () => {
     const openSettings = vi.fn(async () => undefined);
     const refreshSettings = vi.fn(async () => undefined);
-    const toggleBashSandbox = vi.fn(async () => undefined);
     const s = state({ viewState: { view: "board", previousView: "launch" } });
-    const a = actions({ openSettings, refreshSettings, toggleBashSandbox });
+    const a = actions({ openSettings, refreshSettings });
 
     await handleKeypress({ sequence: "p", name: "p" } as any, s, a);
     expect(openSettings).toHaveBeenCalledTimes(1);
 
     s.viewState = { view: "settings", previousView: "board" };
     await handleKeypress({ sequence: "w", name: "w" } as any, s, a);
-    await handleKeypress({ sequence: "s", name: "s" } as any, s, a);
     await handleKeypress({ sequence: "u", name: "u" } as any, s, a);
 
-    expect(toggleBashSandbox).toHaveBeenCalledTimes(1);
     expect(refreshSettings).toHaveBeenCalledTimes(1);
-  });
-
-  it("renders sandbox effective external state", () => {
-    const app = renderApp(fakeUi(), state({
-      viewState: { view: "settings", previousView: "board" },
-      diagnostics: diagnostics({
-        sandbox: { desired: "on", effective: "external", restartRequired: true },
-      }),
-    }));
-
-    const text = textOf(app);
-    expect(text).toContain("desired on · effective external");
-    expect(text).toContain("required for sandbox change");
   });
 
   it("reports no dirty orphan worktrees when D is pressed on an empty list", async () => {
@@ -4443,7 +4418,6 @@ function actions(overrides: Record<string, unknown> = {}) {
     setupWorkspace: vi.fn(async () => undefined),
     openSettings: vi.fn(async () => undefined),
     refreshSettings: vi.fn(async () => undefined),
-    toggleBashSandbox: vi.fn(async () => undefined),
     editorSpawner: {
       runTerminalEditor: vi.fn(async () => ({ code: 0 })),
       spawnGuiEditor: vi.fn(),

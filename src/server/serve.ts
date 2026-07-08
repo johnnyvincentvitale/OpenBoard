@@ -26,21 +26,16 @@ export async function main(): Promise<void> {
   // so users don't paste it manually.
   const boardToken = resolveBoardToken(process.env);
 
-  // Open the task store early so the bashSandbox setting can be read before
-  // spawning OpenCode. When the user has set bashSandbox: false, the sandbox
-  // wrapper is not wired, and worktree runs do not fail-close.
   const storePaths = deriveStorePaths(instance);
   const taskStore = new SqliteTaskStore(storePaths.taskDbPath);
-  const bashSandboxDesired = taskStore.getSettings().bashSandbox;
 
-  const handle = await startOrConnect(config, { bashSandboxDesired });
+  const handle = await startOrConnect(config);
   const dispatcher = new TaskDispatcher({
     client: handle.client,
     store: taskStore,
     adapterBaseUrl: `http://${config.hostname}:${config.boardPort}`,
     boardToken,
     instanceName: process.env.OPENBOARD_INSTANCE_NAME?.trim() || undefined,
-    sandbox: handle.sandbox,
   });
   try {
     const outcomes = await dispatcher.sweepOrphanedWorktrees();
@@ -83,7 +78,6 @@ export async function main(): Promise<void> {
     globalArchiveStore,
     sourceInstance,
     boardToken,
-    sandbox: handle.sandbox,
     opencodeMode: config.mode,
   });
   registerTerminalRoutes(app, { manager: terminalManager });

@@ -10,7 +10,6 @@ import { requireBoardToken } from "./auth";
 import { registerHealthRoutes } from "./routes/health";
 import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { resolveAdapterBuildInfo } from "./build-info";
-import type { SandboxStatus } from "./sandbox";
 import { registerTaskRoutes } from "./routes/tasks";
 import { registerTaskEventsRoutes } from "./routes/task-events";
 import { registerAgentRoutes } from "./routes/agents";
@@ -32,8 +31,6 @@ export interface AppDeps {
   sourceInstance: SourceInstanceInfo;
   /** Per-instance board API token. */
   boardToken: string;
-  /** Resolved macOS sandbox-wrapper status. */
-  sandbox: SandboxStatus;
   /** The adapter connection mode ("spawn" | "connect"). */
   opencodeMode: "spawn" | "connect";
 }
@@ -69,7 +66,6 @@ export function createApp(deps: AppDeps): Hono {
   registerDiagnosticsRoutes(app, {
     client: deps.client,
     store: deps.taskStore,
-    sandbox: deps.sandbox,
     opencodeBaseUrl: deps.opencodeBaseUrl,
     mode: deps.opencodeMode,
     identity: deps.sourceInstance,

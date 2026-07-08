@@ -1,7 +1,6 @@
 import { stat as defaultStat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type {
-  BoardSettings,
   BoardDiagnostics,
   Column,
   CreateTaskInput,
@@ -168,8 +167,6 @@ export interface BoardClient {
   listComments(id: string): Promise<TaskComment[]>;
   listTaskEvents(id: string): Promise<TaskEvent[]>;
   getTaskDiff(id: string): Promise<DiffResponse>;
-  getSettings(): Promise<BoardSettings>;
-  updateSettings(patch: Partial<Pick<BoardSettings, "bashSandbox">>): Promise<BoardSettings>;
   getHealth(): Promise<BoardHealth>;
   getDiagnostics(): Promise<BoardDiagnostics>;
 }
@@ -346,13 +343,6 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     listComments: (id) => requestJson<TaskComment[]>(resolved, buildTaskPath.comments(id), { method: "GET" }),
     listTaskEvents: (id) => requestJson<TaskEvent[]>(resolved, buildTaskPath.taskEvents(id), { method: "GET" }),
     getTaskDiff: (id) => requestJson<DiffResponse>(resolved, buildTaskPath.diff(id), { method: "GET" }),
-    getSettings: () => requestJson<BoardSettings>(resolved, buildTaskPath.settings(), { method: "GET" }),
-    updateSettings: (patch) =>
-      requestJson<BoardSettings>(resolved, buildTaskPath.settings(), {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(patch),
-      }),
     getHealth: () => requestJson<BoardHealth>(resolved, "/api/health", { method: "GET" }),
     getDiagnostics: () => requestJson<BoardDiagnostics>(resolved, "/api/diagnostics", { method: "GET" }),
   };

@@ -7,7 +7,7 @@ import {
   resolveBoardUrl,
 } from "../../src/client/board-client";
 import type { BoardClientOptions, BoardHealth } from "../../src/client/board-client";
-import type { BoardSettings, DiffResponse, MergeOutcome, RosterAgent, RosterProvider, Task } from "../../src/shared";
+import type { DiffResponse, MergeOutcome, RosterAgent, RosterProvider, Task } from "../../src/shared";
 
 const CWD = "/tmp/openboard-project";
 
@@ -196,14 +196,12 @@ describe("board client", () => {
   it("calls task action endpoints", async () => {
     const task = createdTask("task-1", { title: "A", description: "", directory: CWD });
     const outcome: MergeOutcome = { task, ok: true, conflict: false, message: "merged" };
-    const settings: BoardSettings = { bashSandbox: false };
     const fetchMock = vi.fn(async (url: string | URL) => {
       const path = new URL(String(url)).pathname;
       if (path.endsWith("/move")) return jsonResponse([task]);
       if (path.endsWith("/sync") || path.endsWith("/integrate")) return jsonResponse(outcome);
       if (path.endsWith("/comments")) return jsonResponse([{ id: "comment-1", taskId: "task-1", author: "me", body: "note", createdAt: 1 }]);
       if (path.endsWith("/events")) return jsonResponse([{ id: "event-1", taskId: "task-1", type: "task_run", body: {}, createdAt: 1 }]);
-      if (path === "/api/settings") return jsonResponse(settings);
       if (path === "/api/tasks/task-1") return jsonResponse({ ok: true });
       return jsonResponse(task);
     });
@@ -223,8 +221,6 @@ describe("board client", () => {
     await client.addComment("task-1", "me", "note");
     await client.listComments("task-1");
     await client.listTaskEvents("task-1");
-    await client.getSettings();
-    await client.updateSettings({ bashSandbox: true });
     await client.resolveOrphanWorktree("/repo/.opencode-board-worktrees/task_dirty");
     await client.deleteTask("task-1");
 
@@ -245,8 +241,6 @@ describe("board client", () => {
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/comments`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/comments`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/events`, "GET"],
-      [`${DEFAULT_BOARD_URL}/api/settings`, "GET"],
-      [`${DEFAULT_BOARD_URL}/api/settings`, "PUT"],
       [`${DEFAULT_BOARD_URL}/api/worktrees/orphans/resolve`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1`, "DELETE"],
     ]);

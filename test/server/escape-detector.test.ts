@@ -173,13 +173,9 @@ describe("detectBaseCheckoutEscape", () => {
   });
 
   it("catches a symlink write-through that dirties a tracked base-checkout file (CVE-2026-39861 shape)", async () => {
-    // Mirrors the sandbox-wrapper-probe symlink scenario: a worktree (here just
-    // a separate directory, since the detector never inspects the worktree
-    // itself) holds a symlink pointing at a tracked file in the base checkout.
-    // A bash write through that symlink lands as an ordinary content change to
-    // the base repo's own working tree - this is the failure mode the detector
-    // must catch on its own, independent of whether any wrapper's write-fence
-    // blocks the symlink write in the first place.
+    // A worktree can hold a symlink pointing at a tracked file in the base
+    // checkout. A write through that symlink lands as an ordinary content
+    // change to the base repo's own working tree; the detector must catch it.
     const snapshot = await snapshotBaseCheckout(repo);
     expect(snapshot).toBe("");
 

@@ -79,12 +79,9 @@ Plan around these guarantees:
 - **Escape detector.** The base checkout's git status is snapshotted at
   dispatch and re-checked before Review and before Integrate; a detected escape
   blocks the card with `pending: "base-checkout-escape"` instead of advancing.
-- **Bash sandbox (spawn mode, optional).** If the instance's desired bash
-  sandbox setting is on and the macOS Seatbelt wrapper is available, bash tool
-  calls run under that wrapper. If desired is on but unavailable, OpenCode
-  worktree cards fail closed at dispatch (`runState: "error"`) before any
-  session starts. If the user turns desired off, worktree cards still keep the
-  file-tool fence and escape detector, but bash commands are not syscall-fenced.
+- **Bash remains a general execution tool.** OpenBoard does not syscall-fence
+  shell commands; rely on worktree cwd discipline plus the base-checkout escape
+  detector, and prefer read tools for parent/sibling inspection when possible.
 
 File-disjoint decomposition remains a core part of the plan: it keeps merges
 clean and Review legible, and it is how concurrent lanes stay independent. The
@@ -93,11 +90,11 @@ single OpenCode file-tool mistake cannot reach the base checkout.
 
 The Claude Code lane — and every other ACP harness (`codex`, `gemini-acp`,
 `hermes`, `pi-coding-agent`, `cursor-acp`) — can still run in a task worktree,
-but it does not get OpenCode's file-tool permission fence or bash sandbox.
-OpenBoard still snapshots the base checkout for worktree ACP runs and blocks on
-detected base-checkout escape, but the worker process itself is UNFENCED. Label
-ACP worktree cards as "worktree cwd, unfenced tools" instead of implying the
-same protection as OpenCode worktree cards.
+but it does not get OpenCode's file-tool permission fence. OpenBoard still
+snapshots the base checkout for worktree ACP runs and blocks on detected
+base-checkout escape, but the worker process itself is UNFENCED. Label ACP
+worktree cards as "worktree cwd, unfenced tools" instead of implying the same
+protection as OpenCode worktree cards.
 
 ## Decompose Along The File Tree
 
@@ -288,14 +285,9 @@ has blocked real cards whose tests write temp files through base-repo
 - **Integration test bootstrap**: `tsx ENOENT` in fresh worktrees — add a
   worktree bootstrap hook or a scoped test command.
 
-4. **Bash sandbox desired/effective state (OpenCode worktree + spawn mode).**
-   Confirm the selected instance's diagnostics before planning a macOS OpenCode
-   worktree fan-out:
-   - desired on + effective on: bash wrapper is active.
-   - desired on + effective unavailable/off: worktree dispatch fails closed or
-     requires a restart.
-   - desired off: file-tool fence and escape detector remain, but bash commands
-     are intentionally not sandboxed.
+4. **External inspection plan.** For audit/synthesis cards that need parent or
+   sibling evidence, include explicit read-only inspection instructions and
+   prefer OpenCode read/grep/list tools over shell commands where possible.
 
 ## Choose Task Types And Dependencies
 

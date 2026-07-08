@@ -397,14 +397,12 @@ treat them as experimental.
 isolation screen shows a `PERMISSIONS` section for OpenCode cards only.
 Worktree-isolated runs already carry a layered safety stack — write-fenced
 edit permissions, the base-checkout escape detector, worktree-cwd prompt
-hygiene, and, when the board's bash sandbox setting is desired/effective, sandboxed bash.
+hygiene, and Review/Integrate checks.
 The worktree screen does not expose per-card permission overrides; it shows the
-automatic worktree protection state. The global settings panel controls desired
-bash sandboxing for managed OpenCode sessions; turning it off does not remove
-the file-tool fence or escape detector. Select isolation **`in_place`** instead
-to get an editable `EDIT`/`BASH`/`WEBFETCH` control (each `allow`/`ask`/`deny`),
-which defaults to `allow` everywhere — i.e., today's behavior — until you actively
-tighten one.
+automatic worktree protection state. Select isolation **`in_place`** instead to
+get an editable `EDIT`/`BASH`/`WEBFETCH` control (each `allow`/`ask`/`deny`),
+which defaults to `allow` everywhere — i.e., today's behavior — until you
+actively tighten one.
 "Container" isolation is a disabled placeholder in this same segmented
 control; it isn't implemented yet and has no permissions story of its own.
 
