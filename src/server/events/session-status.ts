@@ -1,4 +1,4 @@
-import type { OpencodeEvent } from "../../shared";
+import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
 import type { LiveState } from "../../shared";
 
 /**

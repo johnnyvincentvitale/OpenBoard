@@ -14,12 +14,8 @@ export default defineConfig({
       exclude: [
         "src/index.ts",
         "src/server/serve.ts",
-        "src/server/routes/board-events.ts",
         "src/server/routes/task-events.ts",
         "src/mcp/server.ts",
-        "src/web/main.tsx",
-        "src/web/App.tsx",
-        "src/web/api/taskSse.ts",
         "src/tui/index.ts",
         "src/tui/launcher.ts",
         "**/*.d.ts",

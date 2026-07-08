@@ -308,8 +308,7 @@ function toTaskEvent(record: TaskEventRowRecord): TaskEvent {
  * better-sqlite3-backed TaskStore. Fully synchronous. Positions are dense
  * integers starting at 0, unique within a column; every mutation that can
  * disturb sibling ordering runs inside a single db.transaction() so the
- * table never observes a duplicate or gapped position. Mirrors the
- * SqliteColumnStore pattern in board-store.ts.
+ * table never observes a duplicate or gapped position.
  */
 export class SqliteTaskStore implements TaskStore {
   private readonly db: Database.Database;

@@ -18,8 +18,7 @@ export function registerArchiveRoutes(app: Hono, deps: ArchiveRouteDeps): void {
 
   app.get("/api/archive", (c) => {
     try {
-      const records = globalArchiveStore.listAll();
-      return c.json(records, 200);
+      return c.json(globalArchiveStore.listAll(), 200);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -38,10 +37,6 @@ export function registerArchiveRoutes(app: Hono, deps: ArchiveRouteDeps): void {
       }
       const updated = store.setArchived(id, true);
       if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
-
-      // Mirror the freshly-archived task into the global cross-instance archive.
-      // This is best-effort — a mirroring failure is logged but does not undo
-      // the successful local archive.
       try {
         globalArchiveStore.mirrorTask(updated, sourceInstance, Date.now(), store.listComments(id));
       } catch (err) {

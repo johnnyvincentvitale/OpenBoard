@@ -162,12 +162,6 @@ requested directory. There is no home-directory default: named instances always 
 workspace explicitly (`--workspace` is required), and the raw-env server refuses to start
 unless `BOARD_WORKSPACE` points at an existing directory.
 
-Browser fallback (two terminals):
-```sh
-npm run dev:server     # spawns opencode + the API on :4097
-npm run dev            # Vite UI at http://localhost:5173
-```
-
 ## Running multiple instances
 
 OpenBoard supports two ways to run more than one independent board on a single
@@ -239,7 +233,7 @@ binary when you want multiple persistent daemons.
 ### Raw environment path (advanced / manual)
 
 You can still start independent instances directly by environment variables.
-Use this with `npm run dev:server`, custom scripts, or non-V1 surfaces.
+Use this with `npm run dev:server` or custom scripts.
 The instance-resolution env vars are resolved in `src/server/config.ts`:
 
 | Env var                    | Controls                                      | Default when unset                  |
@@ -346,9 +340,9 @@ tasks, or `?archived=all` to see both (any other value is a 400).
 npm test                  # unit + DOM (fast, no opencode) — runs on pre-commit + CI
 npm run test:integration  # integration vs a real ephemeral opencode (local)
 npm run typecheck
-npm run build:web         # build the frontend → dist/web
+npm run build:app         # build server, MCP, TUI, and CLI
 ```
-Branches: `main` (trusted) / `dev` (work). Husky runs the unit+DOM suite before every commit.
+Branches: `main` (trusted) / `dev` (work). Husky runs the unit suite before every commit.
 
 **Never commit generated or runtime files:** `dist/`, `*.sqlite*` (DB + WAL/SHM),
 `*.log`, `.env*` (env files), `node_modules/`, or ephemeral worktree artifacts.
@@ -357,13 +351,12 @@ IDs.
 
 ### Structure
 ```
-src/shared/    frozen contracts (Task, Column, ModelRef, RosterAgent, routes, events)
+src/shared/    frozen contracts (Task, Column, ModelRef, RosterAgent, routes)
 src/server/    Hono adapter — opencode client, dispatcher, task store wiring, routes, SSE, serve
-src/db/        better-sqlite3 task store + session-column sidecar
+src/db/        better-sqlite3 task store + global archive
 src/tui/       V1 OpenTUI board, selected-card details, instance switcher, launcher
 src/cli/       named-instance CLI (`openboard`)
-src/web/       non-V1 React web board
-test/          unit + DOM + integration
+test/          unit + integration
 ```
 
 ## Worktree isolation

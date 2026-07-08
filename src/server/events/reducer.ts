@@ -1,4 +1,5 @@
-import type { OpencodeEvent, LiveState } from "../../shared";
+import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
+import type { LiveState } from "../../shared";
 import { eventLiveState, eventSessionId } from "./session-status";
 
 /**

@@ -17,6 +17,14 @@ export interface BoardIdentity {
   boardTokenPresent: boolean;
 }
 
+export interface BoardIdentitySource {
+  name?: string;
+  port: number;
+  workspace: string;
+  dbPath: string;
+  opencodeBaseUrl?: string;
+}
+
 export interface BoardHealth {
   adapter: "ok";
   opencode: { status: "ok"; version: string } | { status: "unreachable" };

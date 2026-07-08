@@ -13,7 +13,8 @@
  * `shutdown()` stops consuming the event stream.
  */
 import { basename, dirname, join, resolve } from "node:path";
-import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, OpencodeEvent, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
+import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";

@@ -28,10 +28,8 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/server/config";
 import { startOrConnect, type OpencodeHandle } from "../../src/server/opencode";
-import { SqliteColumnStore } from "../../src/db/board-store";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { GlobalArchiveStore } from "../../src/db/global-archive-store";
-import { EventBridge } from "../../src/server/event-bridge";
 import { TaskDispatcher } from "../../src/server/dispatcher";
 import { createApp } from "../../src/server/app";
 import type { Task } from "../../src/shared";
@@ -72,10 +70,8 @@ const validCompletion = {
 describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
   let ephemeral: EphemeralOpencodeServer;
   let handle: OpencodeHandle;
-  let boardStore: SqliteColumnStore;
   let taskStore: SqliteTaskStore;
   let dispatcher: TaskDispatcher;
-  let bridge: EventBridge;
   let app: ReturnType<typeof createApp>;
   let boardWorkspace: string;
   let taskDir: string;
@@ -93,18 +89,12 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
     });
     handle = await startOrConnect(config);
 
-    boardStore = new SqliteColumnStore(":memory:");
-    bridge = new EventBridge({ client: handle.client, store: boardStore });
-    bridge.start();
-
     taskStore = new SqliteTaskStore(":memory:");
     dispatcher = new TaskDispatcher({ client: handle.client, store: taskStore, boardToken: BOARD_TOKEN });
     dispatcher.start();
 
     app = createApp({
       client: handle.client,
-      store: boardStore,
-      bridge,
       taskStore,
       dispatcher,
       opencodeBaseUrl: handle.baseUrl,
@@ -117,10 +107,8 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
   });
 
   afterAll(async () => {
-    bridge?.stop();
     dispatcher?.shutdown();
     await handle?.shutdown();
-    boardStore?.close();
     taskStore?.close();
     await ephemeral?.close();
     if (previousBoardWorkspace === undefined) delete process.env.BOARD_WORKSPACE;

@@ -1,26 +1,11 @@
 import type Database from "better-sqlite3";
 
 /**
- * DDL for the board's SQLite-backed column store. `board_row` is the sole
- * persisted table: one row per session, holding which column it's in and its
- * dense-integer position within that column. `schema_meta` holds a single
- * version row so future migrations have somewhere to check compatibility.
+ * Shared SQLite metadata used by stores before they install their own tables.
  */
 export const SCHEMA_VERSION = 1;
 
 export const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS board_row (
-  session_id TEXT PRIMARY KEY,
-  column     TEXT NOT NULL,
-  position   INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE(column, position)
-);
-
-CREATE INDEX IF NOT EXISTS idx_board_row_column ON board_row(column);
-CREATE INDEX IF NOT EXISTS idx_board_row_column_position ON board_row(column, position);
-
 CREATE TABLE IF NOT EXISTS schema_meta (
   version INTEGER NOT NULL
 );

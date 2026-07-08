@@ -16,7 +16,6 @@ V1 scope is TUI + named-instance CLI:
 - Primary launch path: `openboard attach <instance>` or `npm run tui`.
 - Ship/test surface: named-instance CLI, OpenTUI board, server/task lifecycle,
   MCP tools, and integration/source tests.
-- Web UI exists under `src/web/` but is not the V1 surface.
 - Electron packaging is not a V1 gate unless the user explicitly asks about it.
 
 ## Required Context
@@ -33,17 +32,16 @@ For plugin work, also read `plugins/openboard/README.md` and the relevant
 
 ## Source Map
 
-- `src/shared/` - shared task, route, event, provider, terminal, and card
+- `src/shared/` - shared task, route, provider, terminal, health, and instance
   contracts.
 - `src/server/` - Hono adapter, OpenCode/ACP dispatch, routes, worktree
   lifecycle, auth, terminal, diff, sandbox, and event handling.
-- `src/db/` - SQLite task store, board store, schema, and global archive.
+- `src/db/` - SQLite task store, schema metadata, and global archive.
 - `src/tui/` - V1 OpenTUI board, launcher, runtime, lifecycle display,
   confirmations, diff view, and model helpers.
 - `src/cli/` - named-instance CLI and provider wiring.
 - `src/mcp/` - OpenBoard MCP server and tool definitions.
-- `src/web/` - non-V1 React board.
-- `test/` - unit, DOM, server, TUI, MCP, plugin, and integration tests.
+- `test/` - unit, server, TUI, MCP, plugin, and integration tests.
 - `plugins/openboard/` - bundled OpenBoard plugin and shared skills.
 
 ## Validation
@@ -61,11 +59,11 @@ npm run build:app
 
 Script meanings:
 
-- `npm test` runs unit and DOM tests, excluding `test/integration/**`.
+- `npm test` runs unit tests, excluding `test/integration/**`.
 - `npm run test:integration` runs integration tests against a real ephemeral
   OpenCode server when available.
 - `npm run typecheck` runs TypeScript with `--noEmit`.
-- `npm run build:app` builds web, server, MCP, TUI, and CLI bundles.
+- `npm run build:app` builds server, MCP, TUI, and CLI bundles.
 
 Husky runs `npm test` before commit. Do not describe work as verified unless
 you ran the relevant command or clearly state what was not run.
@@ -133,4 +131,3 @@ paths, lifecycle semantics, or safety rules change.
 
 Do not turn readiness gaps into OpenBoard cards unless the user explicitly
 approves that planning step. The agent-readiness skill is report-only.
-

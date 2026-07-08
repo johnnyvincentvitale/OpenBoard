@@ -153,7 +153,6 @@ export function createAdapterEnv({
     ...env,
     BOARD_PORT: String(boardPortFromUrl(boardUrl)),
     OPENCODE_PORT: env.OPENCODE_PORT ?? String(OPENCODE_DEFAULTS.port),
-    BOARD_WEB_DIR: env.BOARD_WEB_DIR ?? join(repoRoot, "dist", "web"),
     BOARD_DB_PATH: env.BOARD_DB_PATH ?? join(dataDir, "board.sqlite"),
     BOARD_TASK_DB_PATH: env.BOARD_TASK_DB_PATH ?? join(dataDir, "board-tasks.sqlite"),
   };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { OpencodeEvent } from "../../../src/shared";
+import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
 import { classifyEvent } from "../../../src/server/events/reducer";
 
 const SESSION_ID = "ses_abc123";

@@ -7,8 +7,6 @@
  *  - Task CRUD (create / list / delete / move)
  *  - Task dispatch (run / retry / abort)
  *  - Git operations (init-git / sync / integrate)
- *  - Board routes (list / move card)
- *  - Card actions (prompt / interrupt / diff)
  *  - Archive (list / archive / unarchive)
  *  - Completion (complete / block)
  *  - Task links
@@ -29,10 +27,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { WebSocket, WebSocketServer } from "ws";
-import { SqliteColumnStore } from "../../../src/db/board-store";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { GlobalArchiveStore } from "../../../src/db/global-archive-store";
-import { EventBridge } from "../../../src/server/event-bridge";
 import { createApp } from "../../../src/server/app";
 import { registerTerminalRoutes } from "../../../src/server/routes/terminals";
 import { requireBoardToken } from "../../../src/server/auth";
@@ -117,8 +113,6 @@ function fakeClient(sessions: OpencodeSessions = []): FakeClient {
  */
 function makeAuthedApp(sessions: OpencodeSessions = []) {
   const client = fakeClient(sessions) as unknown as Parameters<typeof createApp>[0]["client"];
-  const store = new SqliteColumnStore(":memory:");
-  const bridge = new EventBridge({ client, store });
   const taskStore = new SqliteTaskStore(":memory:");
   const dispatcher = {
     run: vi.fn(async (taskId: string) => {
@@ -159,8 +153,6 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
   return {
     app: createApp({
       client,
-      store,
-      bridge,
       taskStore,
       dispatcher,
       opencodeBaseUrl: "http://127.0.0.1:0",
@@ -168,7 +160,6 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
       sourceInstance: { port: 0, workspace: "/test", dbPath: ":memory:" },
       boardToken: TEST_TOKEN,
     }),
-    store,
     taskStore,
     dispatcher,
   };
@@ -618,159 +609,6 @@ describe("auth regression — route categories", () => {
       });
       expect(res.status).toBe(200);
       expect(dispatcher.integrate).toHaveBeenCalledWith(task.id, undefined, { commitRemaining: false });
-    });
-  });
-
-  // -- Board routes ------------------------------------------------------------
-
-  describe("GET /api/board", () => {
-    it("rejects with 401 when no token is provided", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board");
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects with 401 when the token is wrong", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board", { headers: wrongAuthHeaders() });
-      expect(res.status).toBe(401);
-    });
-
-    it("returns 200 with the correct token", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board", { headers: authHeaders() });
-      expect(res.status).toBe(200);
-    });
-  });
-
-  describe("POST /api/board/cards/:id/move", () => {
-    it("rejects with 401 when no token is provided", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      await app.request("/api/board", { headers: authHeaders() }); // seed
-      const res = await app.request("/api/board/cards/ses_1/move", {
-        method: "POST",
-        headers: jsonHeaders(),
-        body: JSON.stringify({ column: "review", position: 0 }),
-      });
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects with 401 when the token is wrong", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      await app.request("/api/board", { headers: authHeaders() }); // seed
-      const res = await app.request("/api/board/cards/ses_1/move", {
-        method: "POST",
-        headers: jsonHeaders("wrong"),
-        body: JSON.stringify({ column: "review", position: 0 }),
-      });
-      expect(res.status).toBe(401);
-    });
-
-    it("returns 200 with the correct token", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      await app.request("/api/board", { headers: authHeaders() }); // seed
-      const res = await app.request("/api/board/cards/ses_1/move", {
-        method: "POST",
-        headers: jsonHeaders("correct"),
-        body: JSON.stringify({ column: "review", position: 0 }),
-      });
-      expect(res.status).toBe(200);
-    });
-  });
-
-  // -- Card actions ------------------------------------------------------------
-
-  describe("POST /api/board/cards/:id/prompt", () => {
-    it("rejects with 401 when no token is provided", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/prompt", {
-        method: "POST",
-        headers: jsonHeaders(),
-        body: JSON.stringify({ text: "hello" }),
-      });
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects with 401 when the token is wrong", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/prompt", {
-        method: "POST",
-        headers: jsonHeaders("wrong"),
-        body: JSON.stringify({ text: "hello" }),
-      });
-      expect(res.status).toBe(401);
-    });
-
-    it("returns 202 with the correct token", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/prompt", {
-        method: "POST",
-        headers: jsonHeaders("correct"),
-        body: JSON.stringify({ text: "hello" }),
-      });
-      expect(res.status).toBe(202);
-    });
-  });
-
-  describe("POST /api/board/cards/:id/interrupt", () => {
-    it("rejects with 401 when no token is provided", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/interrupt", { method: "POST" });
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects with 401 when the token is wrong", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/interrupt", {
-        method: "POST",
-        headers: wrongAuthHeaders(),
-      });
-      expect(res.status).toBe(401);
-    });
-
-    it("returns 200 with the correct token", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/interrupt", {
-        method: "POST",
-        headers: authHeaders(),
-      });
-      expect(res.status).toBe(200);
-    });
-  });
-
-  describe("GET /api/board/cards/:id/diff", () => {
-    it("rejects with 401 when no token is provided", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/diff");
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects with 401 when the token is wrong", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/diff", { headers: wrongAuthHeaders() });
-      expect(res.status).toBe(401);
-    });
-
-    it("returns 200 with the correct token", async () => {
-      const { app } = makeAuthedApp([makeSession("ses_1")]);
-      const res = await app.request("/api/board/cards/ses_1/diff", { headers: authHeaders() });
-      expect(res.status).toBe(200);
-    });
-  });
-
-  // -- Board events (SSE) -----------------------------------------------------
-
-  describe("GET /api/board/events (SSE)", () => {
-    it("rejects with 401 when no token is provided", async () => {
-      const { app } = makeAuthedApp();
-      const res = await app.request("/api/board/events");
-      expect(res.status).toBe(401);
-    });
-
-    it("rejects with 401 when the token is wrong", async () => {
-      const { app } = makeAuthedApp();
-      const res = await app.request("/api/board/events", { headers: wrongAuthHeaders() });
-      expect(res.status).toBe(401);
     });
   });
 

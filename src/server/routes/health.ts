@@ -7,9 +7,8 @@
  */
 import type { Hono } from "hono";
 import { ROUTE_PATTERNS } from "../../shared";
-import type { AdapterBuildInfo, BoardHealth, BoardIdentity } from "../../shared/health";
+import type { AdapterBuildInfo, BoardHealth, BoardIdentity, BoardIdentitySource } from "../../shared/health";
 import type { OpencodeHandle } from "../opencode";
-import type { SourceInstanceInfo } from "../../db/global-archive-store";
 import { resolveAdapterBuildInfo } from "../build-info";
 
 /** The OpenCode SDK client type, derived from the Phase-1 connection handle. */
@@ -18,10 +17,10 @@ type OpencodeClientLike = OpencodeHandle["client"];
 type OpencodeHealthStatus = BoardHealth["opencode"];
 
 /** Registers GET /api/health on the given Hono app. */
-export function registerHealthRoutes(app: Hono, deps: { client: OpencodeClientLike; identity?: SourceInstanceInfo; boardTokenPresent?: boolean; build?: AdapterBuildInfo }): void {
+export function registerHealthRoutes(app: Hono, deps: { client: OpencodeClientLike; identity?: BoardIdentitySource; boardTokenPresent?: boolean; build?: AdapterBuildInfo }): void {
   app.get(ROUTE_PATTERNS.health, async (c) => {
     const opencode = await checkOpencodeHealth(deps.client);
-    const source: SourceInstanceInfo = deps.identity ?? { port: 4097, workspace: process.cwd(), dbPath: "board-tasks.sqlite" };
+    const source: BoardIdentitySource = deps.identity ?? { port: 4097, workspace: process.cwd(), dbPath: "board-tasks.sqlite" };
     const identity: BoardIdentity = {
       ...(source.name !== undefined ? { instanceName: source.name } : {}),
       boardUrl: `http://127.0.0.1:${source.port}`,

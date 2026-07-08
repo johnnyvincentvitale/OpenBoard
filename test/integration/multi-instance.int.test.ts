@@ -93,7 +93,6 @@ async function spawnAdapter(opts: {
   env.OPENBOARD_OPENCODE_PORT = String(opts.opencodePort);
   env.OPENBOARD_DB = opts.dbPath;
   env.BOARD_WORKSPACE = opts.workspace;
-  env.BOARD_WEB_DIR = "/nonexistent-web-dir-for-tests";
   env.OPENBOARD_API_TOKEN = BOARD_TOKEN;
 
   const child = spawn(TSX_BIN, [SERVE_TS], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -253,7 +252,6 @@ describe.skipIf(!available)("multi-instance (real child-process integration)", (
       env.OPENBOARD_OPENCODE_PORT = String(opencodePortB);
       env.OPENBOARD_DB = join(instanceDirB, "board.sqlite");
       env.BOARD_WORKSPACE = workspace;
-      env.BOARD_WEB_DIR = "/nonexistent-web-dir-for-tests";
       env.OPENBOARD_API_TOKEN = BOARD_TOKEN;
 
       const exit = await new Promise<{ code: number | null; output: string }>((resolve) => {

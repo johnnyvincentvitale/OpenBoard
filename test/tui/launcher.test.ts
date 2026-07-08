@@ -62,7 +62,6 @@ describe("TUI launcher", () => {
 
     expect(env.BOARD_PORT).toBe("5010");
     expect(env.OPENCODE_PORT).toBe("4100");
-    expect(env.BOARD_WEB_DIR).toBe("/repo/dist/web");
     expect(env.BOARD_DB_PATH).toBe(join(dataDir, "board.sqlite"));
     expect(env.BOARD_TASK_DB_PATH).toBe(join(dataDir, "board-tasks.sqlite"));
   });

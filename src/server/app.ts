@@ -1,18 +1,14 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import type { ColumnStore, Dispatcher, TaskStore } from "../shared/index";
+import type { Dispatcher, TaskStore } from "../shared/index";
 import { AdapterError } from "../shared/index";
 import type { GlobalArchiveStore, SourceInstanceInfo } from "../db/global-archive-store";
 import type { OpencodeHandle } from "./opencode";
 import { fetchRosterStrict } from "./agents";
 import { requireBoardToken } from "./auth";
-import { EventBridge } from "./event-bridge";
 import { registerHealthRoutes } from "./routes/health";
 import { resolveAdapterBuildInfo } from "./build-info";
-import { registerBoardRoutes } from "./routes/board";
-import { registerCardActionRoutes } from "./routes/card-actions";
-import { registerBoardEventsRoutes } from "./routes/board-events";
 import { registerTaskRoutes } from "./routes/tasks";
 import { registerTaskEventsRoutes } from "./routes/task-events";
 import { registerAgentRoutes } from "./routes/agents";
@@ -25,16 +21,11 @@ import { registerTaskCommentRoutes } from "./routes/comments";
 
 export interface AppDeps {
   client: OpencodeHandle["client"];
-  store: ColumnStore;
-  bridge: EventBridge;
-  /** Task (Push) layer. */
   taskStore: TaskStore;
   dispatcher: Dispatcher;
   /** OpenCode base URL, for the agent roster proxy. */
   opencodeBaseUrl: string;
-  /** Global archive store for cross-instance mirrored task archival. */
   globalArchiveStore: GlobalArchiveStore;
-  /** Source instance identity written into every global archive mirror row. */
   sourceInstance: SourceInstanceInfo;
   /** Per-instance board API token. */
   boardToken: string;
@@ -66,11 +57,6 @@ export function createApp(deps: AppDeps): Hono {
   const auth = requireBoardToken(deps.boardToken);
   app.use("/api/*", auth);
 
-  registerBoardRoutes(app, { client: deps.client, store: deps.store });
-  registerCardActionRoutes(app, { client: deps.client });
-  registerBoardEventsRoutes(app, { bridge: deps.bridge });
-
-  // Push (task) layer: the roster, task CRUD/run, and the task SSE stream.
   registerAgentRoutes(app, { baseUrl: deps.opencodeBaseUrl });
   registerProviderRoutes(app, { client: deps.client });
   registerAcpConfigRoutes(app, { cwd: deps.sourceInstance.workspace });
