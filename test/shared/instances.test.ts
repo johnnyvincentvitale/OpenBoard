@@ -84,7 +84,7 @@ describe("INSTANCE_STATUSES", () => {
 // ---------------------------------------------------------------------------
 
 describe("CLI_COMMANDS", () => {
-  it("contains the ten subcommands", () => {
+  it("contains the supported subcommands", () => {
     expect(CLI_COMMANDS).toEqual([
       "list",
       "add",
@@ -96,6 +96,14 @@ describe("CLI_COMMANDS", () => {
       "rename",
       "default",
       "status",
+      "doctor",
+      "logs",
+      "harnesses",
+      "agents",
+      "providers",
+      "tasks",
+      "worktrees",
+      "restart",
     ]);
   });
 });

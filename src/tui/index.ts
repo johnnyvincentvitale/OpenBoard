@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type BoardSettings, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -123,7 +123,7 @@ const ARCHIVE_READER_MAX_BUFFER = 16 * 1024 * 1024;
 const DETAIL_SCROLL_STEP_ROWS = 3;
 
 export function shouldAutoRefresh(viewState: ViewState): boolean {
-  return !["archive", "diff", "launch", "workspaceGate"].includes(viewState.view);
+  return !["archive", "diff", "launch", "workspaceGate", "settings"].includes(viewState.view);
 }
 
 export function boardApiFetchInit(init: RequestInit = {}, boardToken = process.env.OPENBOARD_API_TOKEN): RequestInit {
@@ -604,6 +604,10 @@ interface TuiState {
   lastRefresh?: Date;
   health?: BoardHealth;
   healthError?: string;
+  settings?: BoardSettings;
+  diagnostics?: BoardDiagnostics;
+  settingsLoading?: boolean;
+  settingsError?: string;
   cwd: string;
   overlay: Overlay;
   newTask?: NewTaskDraft;
@@ -729,6 +733,10 @@ interface TuiActions {
   closeArchive: () => void;
   refreshArchive: () => Promise<void>;
   setupWorkspace: () => Promise<void>;
+  openSettings: () => Promise<void>;
+  refreshSettings: () => Promise<void>;
+  toggleWorktreeDefault: () => Promise<void>;
+  toggleBashSandbox: () => Promise<void>;
   // Open-in-editor (e on a DiffView selection)
   editorSpawner: EditorSpawner;
 }
@@ -956,6 +964,63 @@ export async function runOpenBoardTui(
       state.refreshing = false;
       render();
     }
+  };
+
+  const refreshSettings = async () => {
+    state.settingsLoading = true;
+    state.settingsError = undefined;
+    state.status = "loading settings...";
+    render();
+    try {
+      const [settings, diagnostics] = await Promise.all([
+        currentClient.getSettings(),
+        currentClient.getDiagnostics(),
+      ]);
+      state.settings = settings;
+      state.diagnostics = diagnostics;
+      state.status = "settings loaded";
+    } catch (error) {
+      state.settingsError = errorMessage(error);
+      state.status = "settings unavailable";
+    } finally {
+      state.settingsLoading = false;
+      render();
+    }
+  };
+
+  const openSettings = async () => {
+    state.viewState = transitionView(state.viewState, "settings");
+    await refreshSettings();
+  };
+
+  const toggleWorktreeDefault = async () => {
+    const next = !(state.settings?.worktreeDefault ?? false);
+    state.status = `worktree default ${next ? "on" : "off"}...`;
+    render();
+    try {
+      state.settings = await currentClient.updateSettings({ worktreeDefault: next });
+      state.diagnostics = await currentClient.getDiagnostics();
+      state.status = `worktree default ${next ? "enabled" : "disabled"}`;
+    } catch (error) {
+      state.settingsError = errorMessage(error);
+      state.status = "worktree toggle failed";
+    }
+    render();
+  };
+
+  const toggleBashSandbox = async () => {
+    const next = !(state.settings?.bashSandbox ?? false);
+    state.status = `bash sandbox desired ${next ? "on" : "off"}...`;
+    render();
+    try {
+      state.settings = await currentClient.updateSettings({ bashSandbox: next });
+      state.diagnostics = await currentClient.getDiagnostics();
+      state.status = `bash sandbox desired ${next ? "enabled" : "disabled"}`;
+    } catch (error) {
+      state.settingsError = errorMessage(error);
+      state.status = "sandbox toggle failed";
+    }
+    render();
   };
 
   const runAction = async (label: string, action: (task: Task) => Promise<unknown>) => {
@@ -1302,6 +1367,10 @@ export async function runOpenBoardTui(
       closeArchive,
       refreshArchive,
       setupWorkspace,
+      openSettings,
+      refreshSettings,
+      toggleWorktreeDefault,
+      toggleBashSandbox,
       editorSpawner,
     }).catch((error) => {
       setError(error, "key handling failed");
@@ -1430,6 +1499,8 @@ export function renderApp(ui: OpenTui, state: TuiState) {
           ? renderArchiveView(ui, state)
           : state.viewState.view === "diff"
             ? renderDiffViewMain(ui, state)
+            : state.viewState.view === "settings"
+              ? renderSettingsView(ui, state)
             : renderMain(ui, state);
   const children = state.viewState.view === "board"
     ? [mainView, renderCommandStrip(ui, state), renderHeader(ui, state)]
@@ -1585,6 +1656,12 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     healthLabel = "";
     workspaceLabel = "";
     dbLabel = "";
+  } else if (state.viewState.view === "settings") {
+    connection = "SETTINGS";
+    host = "";
+    taskLabel = "";
+    refreshed = "";
+    healthLabel = "";
   }
 
   return ui.Box(
@@ -2238,6 +2315,45 @@ function renderInstanceRow(ui: OpenTui, state: TuiState, item: InstanceListItem,
       height: 1,
       truncate: true,
     }),
+  );
+}
+
+function renderSettingsView(ui: OpenTui, state: TuiState) {
+  const settings = state.settings;
+  const diagnostics = state.diagnostics;
+  const sandbox = diagnostics?.sandbox;
+  const opencode = diagnostics?.opencode;
+  const worktree = diagnostics?.worktree;
+  const instance = diagnostics?.instance;
+  const editor = diagnostics?.editor;
+
+  const rows: MetaRow[] = [
+    { label: "WORKTREE", value: settings?.worktreeDefault ? "default on" : "default off", color: settings?.worktreeDefault ? COLORS.accentBright : COLORS.text },
+    { label: "SANDBOX", value: `desired ${sandbox?.desired ?? (settings?.bashSandbox ? "on" : "off")} · effective ${sandbox?.effective ?? "unknown"}`, color: sandbox?.restartRequired ? COLORS.bright : COLORS.text },
+    { label: "RESTART", value: sandbox?.restartRequired ? "required for sandbox change" : "not required", color: sandbox?.restartRequired ? COLORS.bright : COLORS.muted },
+    { label: "OPENCODE", value: opencode ? `${opencode.reachable ? "reachable" : "unreachable"} ${opencode.version ?? ""}`.trim() : "unknown", color: opencode?.reachable ? COLORS.accentBright : COLORS.bright },
+    { label: "OC URL", value: opencode?.url ?? "unknown", color: COLORS.text },
+    { label: "SWEEP", value: worktree ? `${worktree.removedCleanCount} clean removed · ${worktree.keptDirtyCount} dirty kept` : "unknown", color: COLORS.text },
+    { label: "DIRTY", value: worktree?.dirtyOrphans?.length ? worktree.dirtyOrphans.map((item) => shortPath(item.worktreePath)).join(", ") : "none kept", color: worktree?.dirtyOrphans?.length ? COLORS.bright : COLORS.muted },
+    { label: "INSTANCE", value: instance?.instanceName ?? "unnamed", color: COLORS.text },
+    { label: "BOARD URL", value: instance?.boardUrl ?? state.boardUrl, color: COLORS.text },
+    { label: "PORT", value: instance ? String(instance.port) : "unknown", color: COLORS.text },
+    { label: "WORKSPACE", value: instance?.workspace ? shortPath(instance.workspace) : shortPath(state.cwd), color: COLORS.text },
+    { label: "DB", value: instance?.dbPath ? shortPath(instance.dbPath) : "unknown", color: COLORS.text },
+    { label: "TOKEN", value: instance?.apiTokenPresent ? "present" : "missing", color: instance?.apiTokenPresent ? COLORS.muted : COLORS.bright },
+    { label: "EDITOR", value: editor?.missing ? "not configured" : `${editor?.source ?? "unknown"}: ${editor?.resolved ?? ""}`, color: editor?.missing ? COLORS.bright : COLORS.text },
+  ];
+
+  const bodyRows = rows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, row.color ?? COLORS.text));
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", border: true, borderStyle: "single", borderColor: COLORS.border, paddingX: 2, paddingY: 1, gap: 1, ...boxBg(COLORS.panel) },
+    ui.Text({ content: "Settings", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
+    ui.Text({ content: state.settingsLoading ? "Loading diagnostics..." : "Instance-scoped controls and diagnostics", fg: COLORS.muted, height: 1, truncate: true }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...bodyRows,
+    ...(state.settingsError ? [
+      ui.Text({ content: state.settingsError, fg: COLORS.bright, wrapMode: "word", height: 2 }),
+    ] : []),
   );
 }
 
@@ -3726,6 +3842,8 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
             : state.viewState.view === "diff"
             ? diffViewKeyHints(state.diffView)
+            : state.viewState.view === "settings"
+            ? "w toggle worktree · s toggle sandbox desired · u refresh · b/esc back · q quit"
             : boardKeyHints,
         fg: COLORS.text,
         height: 1,
@@ -4215,8 +4333,9 @@ function dependencySummaryRows(draft: NewTaskDraft, state: TuiState): MetaRow[] 
 }
 
 function dependencySummary(draft: NewTaskDraft, state: TuiState): string {
-  if (draft.parentIds.length === 0) return "None";
-  return draft.parentIds
+  const parentIds = draft.parentIds ?? [];
+  if (parentIds.length === 0) return "None";
+  return parentIds
     .map((id) => state.tasks.find((task) => task.id === id)?.title ?? id)
     .join(", ");
 }
@@ -4461,6 +4580,11 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.viewState.view === "settings") {
+    await handleSettingsViewKey(key, state, actions);
+    return;
+  }
+
   if (state.viewState.view === "workspaceGate") {
     await handleWorkspaceGateKey(key, state, actions);
     return;
@@ -4615,6 +4739,12 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       clearPendingConfirmation(state);
       await actions.refresh();
       return;
+    case "p":
+      clearPendingConfirmation(state);
+      closeInlineDetail(state);
+      state.moveTargetColumn = undefined;
+      await actions.openSettings();
+      return;
     case "r":
       if (!canUseSelectedCardAction(state, actions, "run")) return;
       await handleConfirmableCardAction("run", state, actions, (task) => actions.client.runTask(task.id), "run");
@@ -4731,6 +4861,30 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     void fetchSelectedReviewDiffStat(state, actions.client, actions.render);
     void fetchSelectedReviewCommitStatus(state, actions.client, actions.render);
     actions.render();
+  }
+}
+
+async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  if (key.sequence === "q") {
+    actions.shutdown();
+    return;
+  }
+  if (key.sequence === "b" || isEscapeKey(key)) {
+    state.viewState = transitionView(state.viewState, "board");
+    actions.render();
+    return;
+  }
+  if (key.sequence === "u") {
+    await actions.refreshSettings();
+    return;
+  }
+  if (key.sequence === "w") {
+    await actions.toggleWorktreeDefault();
+    return;
+  }
+  if (key.sequence === "s") {
+    await actions.toggleBashSandbox();
+    return;
   }
 }
 
@@ -5896,7 +6050,7 @@ function dependencyCandidates(state: TuiState, draft: NewTaskDraft): Task[] {
 
 function normalizedDependencyIndex(draft: NewTaskDraft, count: number): number {
   if (count <= 0) return 0;
-  return Math.max(0, Math.min(draft.dependencyIndex, count - 1));
+  return Math.max(0, Math.min(draft.dependencyIndex ?? 0, count - 1));
 }
 
 function moveDependencySelection(draft: NewTaskDraft, state: TuiState, delta: number): void {
@@ -5912,9 +6066,10 @@ function toggleSelectedDependency(draft: NewTaskDraft, state: TuiState): void {
   const candidates = dependencyCandidates(state, draft);
   const task = candidates[normalizedDependencyIndex(draft, candidates.length)];
   if (!task) return;
-  draft.parentIds = draft.parentIds.includes(task.id)
-    ? draft.parentIds.filter((id) => id !== task.id)
-    : [...draft.parentIds, task.id];
+  const parentIds = draft.parentIds ?? [];
+  draft.parentIds = parentIds.includes(task.id)
+    ? parentIds.filter((id) => id !== task.id)
+    : [...parentIds, task.id];
 }
 
 /**

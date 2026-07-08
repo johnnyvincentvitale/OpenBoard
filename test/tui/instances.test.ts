@@ -2769,7 +2769,7 @@ describe("TUI manual task creation", () => {
       .find((node) => node.props?.title === "Selected");
     const text = textOf(app);
     expect(selected).toBeTruthy();
-    expect(text).toContain("Step 1/5");
+    expect(text).toContain("Step 1/6");
     expect(text).toContain("CARD TYPE");
     // The submit affordance only appears on the final confirm screen.
     expect(text).not.toContain("Create agent task");
@@ -2798,7 +2798,7 @@ describe("TUI manual task creation", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("Step 1/2");
+    expect(text).toContain("Step 1/3");
     expect(text).toContain("CARD TYPE");
     expect(text).toContain("manual");
     expect(text).toContain("NOTES");
@@ -3661,22 +3661,22 @@ describe("TUI new-task wizard navigation", () => {
     return confirmBody.children.filter((child: any) => child?.type === "Box" && child.props?.gap === 0).length;
   }
 
-  it("confirm screen groups summary rows (identity / harness+model / agent / isolation) instead of one dense list", () => {
+  it("confirm screen groups summary rows (identity / harness+model / agent / isolation / dependencies) instead of one dense list", () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       newTask: agentDraft({ title: "Grouped task", step: "confirm" }),
     });
 
-    expect(confirmScreenGroupCount(s)).toBe(4); // identity, harness+model, agent profile, isolation+permissions
+    expect(confirmScreenGroupCount(s)).toBe(5); // identity, harness+model, agent profile, isolation+permissions, dependencies
   });
 
-  it("confirm screen for a manual card has only the identity group", () => {
+  it("confirm screen for a manual card has identity and dependencies groups", () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       newTask: agentDraft({ type: "manual", title: "Manual task", step: "confirm", field: "assignedTo" }),
     });
 
-    expect(confirmScreenGroupCount(s)).toBe(1);
+    expect(confirmScreenGroupCount(s)).toBe(2);
   });
 });
 
@@ -4103,6 +4103,53 @@ describe("TUI workspace gate", () => {
   });
 });
 
+describe("TUI settings diagnostics view", () => {
+  it("renders instance-scoped settings and diagnostics", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "settings", previousView: "board" },
+      settings: { worktreeDefault: true, bashSandbox: true },
+      diagnostics: {
+        sandbox: { desired: "on", effective: "off", restartRequired: true },
+        opencode: { url: "http://127.0.0.1:60793", version: "1.17.15", reachable: true },
+        worktree: { removedCleanCount: 2, keptDirtyCount: 1, dirtyOrphans: [{ worktreePath: "/repo/.opencode-board-worktrees/task_dirty", taskId: "task_dirty" }] },
+        instance: { instanceName: "alpha", boardUrl: "http://127.0.0.1:4098", port: 4098, workspace: "/repo/openboard", dbPath: "/data/alpha/board.sqlite", apiTokenPresent: true },
+        editor: { resolved: "code -g {file}:{line}", source: "openboard_editor", missing: false },
+      },
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("Settings");
+    expect(text).toContain("default on");
+    expect(text).toContain("desired on · effective off");
+    expect(text).toContain("required for sandbox change");
+    expect(text).toContain("reachable 1.17.15");
+    expect(text).toContain("2 clean removed · 1 dirty kept");
+    expect(text).toContain("alpha");
+    expect(text).toContain("present");
+  });
+
+  it("opens and controls settings from board keys", async () => {
+    const openSettings = vi.fn(async () => undefined);
+    const refreshSettings = vi.fn(async () => undefined);
+    const toggleWorktreeDefault = vi.fn(async () => undefined);
+    const toggleBashSandbox = vi.fn(async () => undefined);
+    const s = state({ viewState: { view: "board", previousView: "launch" } });
+    const a = actions({ openSettings, refreshSettings, toggleWorktreeDefault, toggleBashSandbox });
+
+    await handleKeypress({ sequence: "p", name: "p" } as any, s, a);
+    expect(openSettings).toHaveBeenCalledTimes(1);
+
+    s.viewState = { view: "settings", previousView: "board" };
+    await handleKeypress({ sequence: "w", name: "w" } as any, s, a);
+    await handleKeypress({ sequence: "s", name: "s" } as any, s, a);
+    await handleKeypress({ sequence: "u", name: "u" } as any, s, a);
+
+    expect(toggleWorktreeDefault).toHaveBeenCalledTimes(1);
+    expect(toggleBashSandbox).toHaveBeenCalledTimes(1);
+    expect(refreshSettings).toHaveBeenCalledTimes(1);
+  });
+});
+
 function archiveRecord(
   id: string,
   archivedAt: string,
@@ -4194,6 +4241,10 @@ function actions(overrides: Record<string, unknown> = {}) {
     closeArchive: vi.fn(),
     refreshArchive: vi.fn(async () => undefined),
     setupWorkspace: vi.fn(async () => undefined),
+    openSettings: vi.fn(async () => undefined),
+    refreshSettings: vi.fn(async () => undefined),
+    toggleWorktreeDefault: vi.fn(async () => undefined),
+    toggleBashSandbox: vi.fn(async () => undefined),
     editorSpawner: {
       runTerminalEditor: vi.fn(async () => ({ code: 0 })),
       spawnGuiEditor: vi.fn(),
