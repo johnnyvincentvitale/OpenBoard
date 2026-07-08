@@ -2209,5 +2209,134 @@ describe("TaskDispatcher", () => {
       });
       expect(client.promptCalls).toHaveLength(0);
     });
+
+    it("rejects run when parent reported blocked", async () => {
+      const parent = createTask({ title: "Blocked parent" });
+      const child = createTask({ title: "Child" });
+      store.addLink(parent.id, child.id);
+      store.setCompletion(
+        parent.id,
+        {
+          outcome: "blocked",
+          summary: "stuck on permissions",
+          changedFiles: [],
+          verification: [],
+          residualRisk: "blocked",
+          reportedAt: 1,
+        },
+        "reported",
+      );
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await expect(dispatcher.run(child.id)).rejects.toMatchObject({
+        status: 409,
+        unmetParents: [{ id: parent.id, title: "Blocked parent", why: "parent reported blocked" }],
+      });
+      expect(client.createCalls).toHaveLength(0);
+    });
+
+    it("rejects run when parent went idle without a completion report", async () => {
+      const parent = createTask({ title: "Idle parent" });
+      const child = createTask({ title: "Child" });
+      store.addLink(parent.id, child.id);
+      store.setCompletion(
+        parent.id,
+        {
+          outcome: "complete",
+          summary: "auto-detected idle",
+          changedFiles: [],
+          verification: [],
+          residualRisk: "unknown",
+          reportedAt: 1,
+        },
+        "idle-fallback",
+      );
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await expect(dispatcher.run(child.id)).rejects.toMatchObject({
+        status: 409,
+        unmetParents: [{ id: parent.id, title: "Idle parent", why: "parent went idle without a completion report" }],
+      });
+      expect(client.createCalls).toHaveLength(0);
+    });
+
+    it("rejects run when parent is in review but not reported complete", async () => {
+      const parent = createTask({ title: "Review parent" });
+      const child = createTask({ title: "Child" });
+      store.addLink(parent.id, child.id);
+      store.move(parent.id, "review", 0);
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await expect(dispatcher.run(child.id)).rejects.toMatchObject({
+        status: 409,
+        unmetParents: [{ id: parent.id, title: "Review parent", why: "parent is in review, not done" }],
+      });
+      expect(client.createCalls).toHaveLength(0);
+    });
+
+    it("rejects run when parent is in error", async () => {
+      const parent = createTask({ title: "Error parent" });
+      const child = createTask({ title: "Child" });
+      store.addLink(parent.id, child.id);
+      store.update(parent.id, { runState: "error", error: "OpenCode unreachable" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await expect(dispatcher.run(child.id)).rejects.toMatchObject({
+        status: 409,
+        unmetParents: [{ id: parent.id, title: "Error parent", why: "parent is in error: OpenCode unreachable" }],
+      });
+      expect(client.createCalls).toHaveLength(0);
+    });
+
+    it("retry prompt includes task-context, parent-context, and completion-contract chain", async () => {
+      const parent = createTask({ title: "Done parent" });
+      const child = store.create({
+        title: "Retry context child",
+        description: "keep working",
+        directory: myProjectDir,
+        taskKind: "build",
+      });
+      store.addLink(parent.id, child.id);
+      store.move(parent.id, "done", 0);
+      store.setCompletion(
+        parent.id,
+        {
+          outcome: "complete",
+          summary: "parent work done",
+          changedFiles: ["src/parent.ts"],
+          verification: [{ command: "npm test", result: "passed" }],
+          residualRisk: "none",
+          reportedAt: 1,
+        },
+        "reported",
+      );
+
+      client.nextSessionId = "ses_retry_ctx";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(child.id);
+
+      store.move(child.id, "review", 0);
+      store.update(child.id, { runState: "idle" });
+
+      await dispatcher.retry(child.id, "try once more");
+
+      const retryText = (client.promptCalls[client.promptCalls.length - 1]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(retryText).toContain("try once more");
+      expect(retryText).toContain("OPENBOARD TASK CONTEXT");
+      expect(retryText).toContain("Task type: build");
+      expect(retryText).toContain("PARENT CONTEXT");
+      expect(retryText).toContain("PARENT-000: Done parent");
+      expect(retryText).toContain("OPENBOARD COMPLETION CONTRACT");
+
+      // Verify ordering: task-context before parent-context before completion-contract
+      const taskCtxIdx = retryText.indexOf("OPENBOARD TASK CONTEXT");
+      const parentCtxIdx = retryText.indexOf("PARENT CONTEXT");
+      const contractIdx = retryText.indexOf("OPENBOARD COMPLETION CONTRACT");
+      expect(taskCtxIdx).toBeGreaterThan(-1);
+      expect(parentCtxIdx).toBeGreaterThan(-1);
+      expect(contractIdx).toBeGreaterThan(-1);
+      expect(taskCtxIdx).toBeLessThan(parentCtxIdx);
+      expect(parentCtxIdx).toBeLessThan(contractIdx);
+    });
   });
 });
