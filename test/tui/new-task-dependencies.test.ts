@@ -186,9 +186,19 @@ describe("TUI new-task dependency picker", () => {
       }
 
       const expectedOrder = ["None", "Research", "Synthesis", "Build", "Audit", "Fix", "None"];
+      const expectedUseFor = [
+        "Use for ordinary cards that do not need a workflow role.",
+        "Use for gathering facts, sources, and constraints without changing code.",
+        "Use for turning evidence or prior work into a plan, recommendation, or next card graph.",
+        "Use for creating or changing implementation, docs, tests, or artifacts.",
+        "Use for reviewing work and reporting findings without fixing them.",
+        "Use for resolving a known finding or defect with targeted changes.",
+        "Use for ordinary cards that do not need a workflow role.",
+      ];
       for (let i = 0; i < expectedOrder.length; i += 1) {
         expect(labels[i]).toContain("TASK TYPE");
         expect(labels[i]).toContain(expectedOrder[i]);
+        expect(labels[i]).toContain(expectedUseFor[i]);
       }
     });
   });

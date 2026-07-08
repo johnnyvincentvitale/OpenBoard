@@ -1,6 +1,10 @@
 import type { TaskKind } from "../shared";
 
-const TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
+type TaskContextOptions = {
+  hasParents?: boolean;
+};
+
+const LINKED_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
   build: [
     "Create or modify the requested implementation/artifact in cwd.",
     "If starting from scratch, establish the minimal structure needed for the requested result.",
@@ -32,9 +36,42 @@ const TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
   ],
 };
 
-export function taskExecutionContext(kind: TaskKind | null | undefined): string | null {
+const STANDALONE_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
+  build: [
+    "Create or modify the requested implementation/artifact in cwd.",
+    "If starting from scratch, establish the minimal structure needed for the requested result.",
+    "If modifying existing work, inspect the relevant cwd files before editing.",
+    "Use the card prompt and cwd evidence as the source of truth.",
+    "Run relevant verification.",
+    "Do not move/accept/integrate the card.",
+  ],
+  synthesis: [
+    "For synthesis, the mode is:",
+    "Use the card prompt and any named files as the input.",
+    "Evaluate evidence for agreement, conflict, evidence strength, gaps, and implications.",
+    "Preserve the user/card prompt as the authority for the actual output shape.",
+    "Do not implement build changes unless explicitly asked.",
+    "Surface unresolved questions or human decisions when they affect the requested output.",
+  ],
+  audit: [
+    "Inspect only unless explicitly told otherwise.",
+    "Do not fix issues.",
+    "Review the requested files, diffs, tests, and behavior in cwd.",
+    "Produce findings with severity/confidence and residual risk.",
+    "Keep output finding-oriented.",
+  ],
+  fix: [
+    "Resolve specific findings described in the card prompt or current cwd.",
+    "Tie each change back to the finding or defect it addresses.",
+    "Prefer targeted edits and targeted regression checks first, then broader checks when feasible.",
+    "Call out unfixed findings or assumptions.",
+  ],
+};
+
+export function taskExecutionContext(kind: TaskKind | null | undefined, options: TaskContextOptions = {}): string | null {
   const label = kind ?? "none";
-  const lines = TASK_CONTEXT[label];
+  const contextByKind = options.hasParents ? LINKED_TASK_CONTEXT : STANDALONE_TASK_CONTEXT;
+  const lines = contextByKind[label];
   if (!lines) return null;
   return ["OPENBOARD TASK CONTEXT", `Task type: ${label}`, ...lines].join("\n");
 }

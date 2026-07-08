@@ -313,7 +313,9 @@ handoff guidance: `research` reports factual evidence and source gaps,
 `synthesis` evaluates parent findings for agreement/conflict/evidence strength/gaps,
 `build` reports implementation output, `audit` reports findings, and `fix`
 reports resolved findings plus regression checks. Build, synthesis, audit, and
-fix cards also receive task-mode context before parent handoffs.
+fix cards also receive task-mode context before parent handoffs. Standalone
+cards get context that references the card prompt and cwd only; linked cards
+get parent-oriented context plus `PARENT CONTEXT`.
 The server stamps `outcome` (`complete`/`blocked`) and `reportedAt`, stores it as the
 task's `completion`, sets `completionSource: "reported"`, and — if the task was still in
 `todo`/`in_progress` — moves it to `review` (`complete` leaves `runState: "idle"`; `blocked`

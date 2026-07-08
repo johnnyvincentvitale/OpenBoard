@@ -87,7 +87,31 @@ describe("ClaudeCodeRunner", () => {
     expect(execFile.mock.calls[0][1].at(-1)).toContain("Task type: audit");
     expect(execFile.mock.calls[0][1].at(-1)).toContain("verdict plus findings");
     expect(execFile.mock.calls[0][1].at(-1)).toContain("Be finding-oriented, not implementation-oriented.");
+    expect(execFile.mock.calls[0][1].at(-1)).not.toContain("parent handoffs/raw files read");
     expect(execFile.mock.calls[0][1].at(-1)).toContain('complete_task with { taskId: "task_1", runStartedAt: 123');
+  });
+
+  it("uses parent handoff guidance for linked tasks", async () => {
+    const execFile = vi.fn((file, args, _options, callback) => {
+      callback(null, "started", "");
+    });
+    const runner = new ClaudeCodeRunner({
+      adapterBaseUrl: "http://127.0.0.1:4097",
+      pluginDir: "/plugins/openboard",
+      execFile: execFile as never,
+      env: {},
+    });
+
+    await runner.run({
+      task: { ...task, taskKind: "synthesis", parentIds: ["task_parent"] },
+      directory: "/repo",
+      prompt: "Synthesize linked work",
+      runStartedAt: 124,
+    });
+
+    const prompt = execFile.mock.calls[0][1].at(-1) as string;
+    expect(prompt).toContain("evaluation of parent findings");
+    expect(prompt).toContain("parent handoffs/raw files read");
   });
 
   it("writes an unbound env-backed MCP config when no instance name is available", async () => {

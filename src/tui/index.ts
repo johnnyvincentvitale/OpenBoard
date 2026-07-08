@@ -4119,7 +4119,7 @@ function renderIdentityStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
 function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    renderSelectField(ui, "TASK TYPE", currentTaskKindLabel(draft), draft.field === "taskKind"),
+    renderTaskKindField(ui, draft),
     renderSelectField(ui, "HARNESS", currentHarnessLabel(draft), draft.field === "harness"),
     ...(draft.harness === "opencode"
       ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
@@ -4516,6 +4516,24 @@ function renderSelectField(ui: OpenTui, label: string, value: string, focused: b
       { flexDirection: "row", height: 1 },
       ui.Text({ content: value, fg: COLORS.text, flexGrow: 1, height: 1, truncate: true }),
       ui.Text({ content: "▾", fg: COLORS.dim, width: 2, height: 1 }),
+    ),
+  );
+}
+
+function renderTaskKindField(ui: OpenTui, draft: NewTaskDraft) {
+  return renderFieldShell(
+    ui,
+    "TASK TYPE",
+    draft.field === "taskKind",
+    4,
+    ui.Box(
+      { flexDirection: "column", gap: 0 },
+      ui.Box(
+        { flexDirection: "row", height: 1 },
+        ui.Text({ content: currentTaskKindLabel(draft), fg: COLORS.text, flexGrow: 1, height: 1, truncate: true }),
+        ui.Text({ content: "▾", fg: COLORS.dim, width: 2, height: 1 }),
+      ),
+      ui.Text({ content: taskKindUseFor(draft.taskKind), fg: COLORS.muted, height: 1, truncate: true }),
     ),
   );
 }
@@ -7118,6 +7136,23 @@ function taskKindDisplayName(kind: TaskKind): string {
       return "Audit";
     case "fix":
       return "Fix";
+  }
+}
+
+function taskKindUseFor(kind: TaskKind): string {
+  switch (kind) {
+    case "none":
+      return "Use for ordinary cards that do not need a workflow role.";
+    case "research":
+      return "Use for gathering facts, sources, and constraints without changing code.";
+    case "synthesis":
+      return "Use for turning evidence or prior work into a plan, recommendation, or next card graph.";
+    case "build":
+      return "Use for creating or changing implementation, docs, tests, or artifacts.";
+    case "audit":
+      return "Use for reviewing work and reporting findings without fixing them.";
+    case "fix":
+      return "Use for resolving a known finding or defect with targeted changes.";
   }
 }
 

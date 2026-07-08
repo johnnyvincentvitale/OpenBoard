@@ -21,19 +21,28 @@ describe("completion handoff guidance", () => {
     expect(guidance).toContain("source gaps, confidence limits, unverified claims, missing access");
   });
 
-  it("describes synthesis handoffs as interpretation plus next action", () => {
+  it("describes standalone synthesis handoffs without implying parent handoffs", () => {
     const guidance = completionHandoffGuidance("synthesis");
 
     expect(guidance).toContain("Task type: synthesis");
-    expect(guidance).toContain("evaluation of parent findings");
-    expect(guidance).toContain("parent handoffs/raw files read");
+    expect(guidance).toContain("evaluation of the requested material");
+    expect(guidance).toContain("files/sources read");
+    expect(guidance).not.toContain("parent");
     expect(guidance).toContain("ideas to avoid, questions for human");
     expect(guidance).toContain("proposed build/audit graph");
+  });
+
+  it("preserves linked synthesis handoffs with parent wording", () => {
+    const guidance = completionHandoffGuidance("synthesis", { hasParents: true });
+
+    expect(guidance).toContain("evaluation of parent findings");
+    expect(guidance).toContain("parent handoffs/raw files read");
   });
 
   it("describes build, audit, and fix handoffs with role-specific expectations", () => {
     expect(completionHandoffGuidance("build")).toContain("implementation completed and behavior changed");
     expect(completionHandoffGuidance("audit")).toContain("Be finding-oriented, not implementation-oriented.");
-    expect(completionHandoffGuidance("fix")).toContain("which audit/build/synthesis finding it resolves");
+    expect(completionHandoffGuidance("fix")).toContain("which finding or defect it resolves");
+    expect(completionHandoffGuidance("fix", { hasParents: true })).toContain("which audit/build/synthesis finding it resolves");
   });
 });

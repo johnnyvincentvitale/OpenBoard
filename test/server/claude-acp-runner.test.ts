@@ -79,7 +79,7 @@ function makeAcpHarness() {
   return { child, nextMessage, requestPermission, respond, spawn };
 }
 
-async function launchRunner(harness = makeAcpHarness()) {
+async function launchRunner(harness = makeAcpHarness(), runTask: Task = task) {
   const runner = new ClaudeAcpRunner({
     adapterBaseUrl: "http://127.0.0.1:4097",
     boardToken: "token",
@@ -91,7 +91,7 @@ async function launchRunner(harness = makeAcpHarness()) {
   });
 
   const runPromise = runner.run({
-    task,
+    task: runTask,
     directory: "/repo",
     prompt: "Do the work",
     runStartedAt: 123,
@@ -142,7 +142,20 @@ describe("ClaudeAcpRunner", () => {
     expect(promptText).toContain("Task type: research");
     expect(promptText).toContain("factual findings, sources inspected, repo areas read, or evidence gathered");
     expect(promptText).toContain("not applicable: research only");
+    expect(promptText).not.toContain("parent handoffs/raw files read");
     expect(promptText).toContain('complete_task with { taskId: "task_1", runStartedAt: 123');
+  });
+
+  it("uses parent handoff guidance for linked tasks", async () => {
+    const { prompt } = await launchRunner(makeAcpHarness(), {
+      ...task,
+      taskKind: "synthesis",
+      parentIds: ["task_parent"],
+    });
+
+    const promptText = ((prompt.params?.prompt as Array<{ text?: string }> | undefined)?.[0]?.text) ?? "";
+    expect(promptText).toContain("evaluation of parent findings");
+    expect(promptText).toContain("parent handoffs/raw files read");
   });
 
   it("marks the in-memory session idle when the prompt completes", async () => {

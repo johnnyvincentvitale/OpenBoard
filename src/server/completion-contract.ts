@@ -9,7 +9,11 @@ type HandoffGuidance = {
   extra?: string;
 };
 
-const GUIDANCE: Record<TaskKind, HandoffGuidance> = {
+type CompletionGuidanceOptions = {
+  hasParents?: boolean;
+};
+
+const LINKED_GUIDANCE: Record<TaskKind, HandoffGuidance> = {
   none: {
     label: "none",
     summary: "what happened",
@@ -56,8 +60,28 @@ const GUIDANCE: Record<TaskKind, HandoffGuidance> = {
   },
 };
 
-export function completionHandoffGuidance(kind: TaskKind | null | undefined): string {
-  const guidance = GUIDANCE[kind ?? "none"] ?? GUIDANCE.none;
+const STANDALONE_GUIDANCE: Record<TaskKind, HandoffGuidance> = {
+  ...LINKED_GUIDANCE,
+  synthesis: {
+    label: "synthesis",
+    summary: "evaluation of the requested material, recommended direction, and proposed next action",
+    changedFiles: "usually empty unless you wrote a synthesis document",
+    verification: "files/sources read, checks against brief/goal, gap checks performed",
+    residualRisk: "unresolved questions, assumptions, competing interpretations, human decisions needed",
+    extra: "Include ideas to avoid, questions for human, and, if useful, a proposed build/audit graph.",
+  },
+  fix: {
+    label: "fix",
+    summary: "what was fixed and which finding or defect it resolves",
+    changedFiles: "actual touched files",
+    verification: "targeted regression check plus broader relevant check when feasible",
+    residualRisk: "unfixed issues, skipped tests, remaining uncertainty",
+  },
+};
+
+export function completionHandoffGuidance(kind: TaskKind | null | undefined, options: CompletionGuidanceOptions = {}): string {
+  const guidanceSet = options.hasParents ? LINKED_GUIDANCE : STANDALONE_GUIDANCE;
+  const guidance = guidanceSet[kind ?? "none"] ?? guidanceSet.none;
   return [
     "OPENBOARD HANDOFF GUIDANCE",
     `Task type: ${guidance.label}`,

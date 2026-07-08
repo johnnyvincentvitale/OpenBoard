@@ -410,10 +410,25 @@ describe("TaskDispatcher", () => {
 
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
       expect(text).toContain("Task type: synthesis");
-      expect(text).toContain("evaluation of parent findings");
-      expect(text).toContain("parent handoffs/raw files read");
+      expect(text).toContain("evaluation of the requested material");
+      expect(text).toContain("files/sources read");
+      expect(text).not.toContain("parent handoffs/raw files read");
       expect(text).toContain("ideas to avoid, questions for human");
       expect(text).toContain("proposed build/audit graph");
+    });
+
+    it("uses linked synthesis handoff guidance when parents are linked", async () => {
+      const parent = createTask({ title: "Research parent", description: "parent" });
+      const child = createTask({ description: "Synthesize research", taskKind: "synthesis" });
+      store.addLink(parent.id, child.id);
+      store.move(parent.id, "done", 0);
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(child.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("evaluation of parent findings");
+      expect(text).toContain("parent handoffs/raw files read");
     });
 
     it("injects task execution context before parent handoffs and the completion contract", async () => {
@@ -437,6 +452,19 @@ describe("TaskDispatcher", () => {
       expect(text.indexOf("Audit the parent")).toBeLessThan(text.indexOf("OPENBOARD TASK CONTEXT"));
       expect(text.indexOf("OPENBOARD TASK CONTEXT")).toBeLessThan(text.indexOf("PARENT CONTEXT"));
       expect(text.indexOf("PARENT CONTEXT")).toBeLessThan(text.indexOf("OPENBOARD COMPLETION CONTRACT"));
+    });
+
+    it("injects standalone task execution context without parent wording when no parents are linked", async () => {
+      const task = createTask({ description: "Audit standalone code", taskKind: "audit" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("OPENBOARD TASK CONTEXT");
+      expect(text).toContain("Review the requested files, diffs, tests, and behavior in cwd.");
+      expect(text).not.toContain("PARENT CONTEXT");
+      expect(text).not.toContain("parent worktrees");
     });
 
     it("omits task execution context for none and research cards", async () => {
@@ -470,8 +498,8 @@ describe("TaskDispatcher", () => {
       expect(prompt).toContain("Fix the audited issue");
       expect(prompt).toContain("OPENBOARD TASK CONTEXT");
       expect(prompt).toContain("Task type: fix");
-      expect(prompt).toContain("Resolve specific findings from parent audit/build/synthesis context.");
-      expect(prompt).toContain("Tie each change back to the finding it addresses.");
+      expect(prompt).toContain("Resolve specific findings described in the card prompt or current cwd.");
+      expect(prompt).toContain("Tie each change back to the finding or defect it addresses.");
       expect(prompt.indexOf("Fix the audited issue")).toBeLessThan(
         prompt.indexOf("OPENBOARD TASK CONTEXT"),
       );

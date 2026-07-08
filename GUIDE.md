@@ -114,7 +114,8 @@ screen — no card exists yet while you're filling this in.
    in — point it at a scratch repo, not something precious, for your first run.
 2. **Task type, harness & model.** **`TASK TYPE`**: optionally classify the
    card as `research`, `synthesis`, `build`, `audit`, or `fix`; leave it on `none`
-   when you do not need workflow semantics yet. **`HARNESS`**: leave it on OpenCode for now.
+   when you do not need workflow semantics yet. The line below the selector gives a
+   short "Use for..." hint for the currently selected type. **`HARNESS`**: leave it on OpenCode for now.
    **`PROVIDER`**: which of your currently-connected OpenCode providers to use,
    or leave it at **`Use Agent Profile Default`** to let the agent profile you
    pick next (step 3) supply its own model — while that's selected, `MODEL` is
@@ -169,7 +170,8 @@ research is evidence-first, synthesis evaluates parent findings for agreement,
 conflict, evidence strength, gaps, and implications, build reports implementation,
 audit reports findings, and fix ties changes back to the finding it resolves.
 Build, synthesis, audit, and fix cards also receive task-mode context before
-any parent handoffs so the worker sees how to use cwd and parent material.
+any parent handoffs. Standalone cards get context that references the card prompt
+and cwd only; linked cards get parent-oriented context plus `PARENT CONTEXT`.
 
 **Done is yours — unless you delegate it.** By default a human moves cards to
 Done (`x` in the TUI). If you run an orchestrator (next section), you can

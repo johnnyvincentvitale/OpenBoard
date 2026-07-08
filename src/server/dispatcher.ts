@@ -1035,6 +1035,10 @@ export class TaskDispatcher implements Dispatcher {
     }
   }
 
+  private taskHasParents(task: Task): boolean {
+    return (task.parentIds ?? this.store.getParentIds(task.id)).length > 0;
+  }
+
   private withCompletionContract(task: Task, prompt: string, runStartedAt?: number): string {
     const taskId = task.id;
     const taskPath = `/api/tasks/${encodeURIComponent(taskId)}`;
@@ -1042,11 +1046,11 @@ export class TaskDispatcher implements Dispatcher {
     const completeUrl = `${this.adapterBaseUrl}${taskPath}/complete${runQuery}`;
     const blockUrl = `${this.adapterBaseUrl}${taskPath}/block${runQuery}`;
     const authHeader = this.boardToken ? ` -H ${shellQuote(`Authorization: Bearer ${this.boardToken}`)}` : "";
-    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind)}\n\nWhen all work and verification are complete, call exactly one of these commands as your final action (replace JSON values with your actual report):\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
+    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind, { hasParents: this.taskHasParents(task) })}\n\nWhen all work and verification are complete, call exactly one of these commands as your final action (replace JSON values with your actual report):\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
   }
 
   private withTaskContext(task: Task, prompt: string): string {
-    const context = taskExecutionContext(task.taskKind);
+    const context = taskExecutionContext(task.taskKind, { hasParents: this.taskHasParents(task) });
     if (!context) return prompt;
     return `${prompt}\n\n---\n${context}`;
   }
