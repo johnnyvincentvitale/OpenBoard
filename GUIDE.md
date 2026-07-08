@@ -77,6 +77,16 @@ npm install
 npm run build:app
 ```
 
+Optional sanity check before testing:
+
+```sh
+npm run verify
+```
+
+That runs typecheck, unit tests, integration tests, and the app build. If the
+integration tests self-skip because `opencode` is not available, mention that
+when reporting results.
+
 `build:app` builds everything into `dist/`, including the `openboard` CLI
 binary (`dist/cli/openboard.mjs`). To get `openboard` on your PATH:
 
@@ -458,11 +468,12 @@ The flows we most want exercised, roughly in order:
    cockpit session, and let it run a small multi-card plan against a scratch
    repo.
 
-**Reporting:** open an issue on this repo. Include what you did, what you
-expected, what happened, and — if a card was involved — the card's handoff
-detail (`enter` on the card) and the instance log
-(`~/.local/share/openboard/<name>/openboard.log`). Rough impressions are as
-welcome as bugs: if something felt confusing, that's a finding.
+**Reporting:** open a Bug report or Tester feedback issue on this repo. Include
+what you did, what you expected, what happened, and — if a card was involved —
+the card's handoff detail (`enter` on the card) and the instance log
+(`~/.local/share/openboard/<name>/openboard.log`). Do not paste API tokens,
+secrets, or private prompt content. Rough impressions are as welcome as bugs:
+if something felt confusing, that's a finding.
 
 ## 13. Troubleshooting
 

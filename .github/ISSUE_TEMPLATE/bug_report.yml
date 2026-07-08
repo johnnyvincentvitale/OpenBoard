@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a crash, broken flow, or confusing tester experience.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing OpenBoard. Please include enough local context for us to reproduce the issue without seeing your private prompts or tokens.
+  - type: textarea
+    id: steps
+    attributes:
+      label: What did you do?
+      description: Include the command or TUI flow, such as `npm run tui`, `openboard start <name>`, creating/running a card, or opening DiffView.
+      placeholder: |
+        1. Ran ...
+        2. Pressed ...
+        3. Expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead?
+      description: Copy visible errors, card state, or terminal output. Do not paste API tokens, secrets, or private prompt content.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: git rev-parse --short HEAD
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node version, OpenCode version, OS, and whether you used `npm run tui` or a named instance.
+      placeholder: |
+        node --version:
+        opencode --version:
+        OS:
+        Launch path:
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or card details
+      description: Include relevant `~/.local/share/openboard/<instance>/openboard.log` lines or card handoff details, with sensitive data removed.
+      render: text
+    validations:
+      required: false

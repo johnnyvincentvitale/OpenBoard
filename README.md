@@ -344,12 +344,17 @@ tasks, or `?archived=all` to see both (any other value is a 400).
 
 ## Develop
 ```sh
+npm run verify              # typecheck + unit tests + integration tests + app build
 npm test                  # unit + DOM (fast, no opencode) — runs on pre-commit + CI
 npm run test:integration  # integration vs a real ephemeral opencode (local)
 npm run typecheck
 npm run build:app         # build server, MCP, TUI, and CLI
 ```
 Branches: `main` (trusted) / `dev` (work). Husky runs the unit suite before every commit.
+
+For tester handoff, run `npm run verify` from a clean checkout before sharing
+the repo or asking someone to retry a bug. Integration tests self-skip only
+when the local `opencode` binary cannot be started; call that out in reports.
 
 **Never commit generated or runtime files:** `dist/`, `*.sqlite*` (DB + WAL/SHM),
 `*.log`, `.env*` (env files), `node_modules/`, or ephemeral worktree artifacts.

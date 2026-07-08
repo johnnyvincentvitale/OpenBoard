@@ -1,0 +1,27 @@
+name: Tester feedback
+description: Share rough edges, confusing flows, or successful test reports.
+title: "[Feedback]: "
+labels: ["feedback"]
+body:
+  - type: textarea
+    id: flow
+    attributes:
+      label: What did you test?
+      description: Pick from the GUIDE checklist or describe your own flow.
+      placeholder: Fresh install, first task, named instances, worktree isolation, Claude Code harness, orchestration, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: What worked, what failed, and what felt confusing?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Useful context
+      description: OS, Node/OpenCode versions, launch path, card IDs, or screenshots/log snippets with sensitive data removed.
+    validations:
+      required: false

@@ -8,6 +8,7 @@
     "openboard": "dist/cli/openboard.mjs"
   },
   "scripts": {
+    "verify": "npm run typecheck && npm test && npm run test:integration && npm run build:app",
     "test": "vitest run --exclude '**/test/integration/**'",
     "test:integration": "vitest run test/integration",
     "test:coverage": "vitest run --exclude '**/test/integration/**' --coverage",
