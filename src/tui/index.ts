@@ -533,6 +533,10 @@ interface ArchiveState {
   laneFilter: string | null;
   refreshing: boolean;
   detailTab: TaskDetailTab;
+  /** Focused detail mode mirrors the board detail view: up/down scrolls the selected record's tab content. */
+  focused: boolean;
+  /** Expanded detail mode hides the metadata block so the tab content gets the full height. */
+  expanded: boolean;
 }
 
 /** Detail tabs shown for a selected card via Enter. */
@@ -1180,6 +1184,8 @@ export async function runOpenBoardTui(
         laneFilter: null,
         refreshing: false,
         detailTab: "prompt",
+        focused: false,
+        expanded: false,
       };
       state.viewState = openArchiveView(state.viewState);
       state.status = `${records.length} archived task${records.length === 1 ? "" : "s"}`;
@@ -1802,14 +1808,21 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
             ? renderArchiveFilesTab(ui, state, record, completion)
             : renderArchiveCommentsTab(ui, state, record);
 
+  const expanded = state.archive?.expanded ?? false;
+  const titleAndMeta: VChild[] = expanded
+    ? []
+    : [
+        ui.Text({ content: record.title, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, wrapMode: "word", height: 3 }),
+        ui.Box(
+          { width: "100%", height: rows.length, flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
+          ...rows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright)),
+        ),
+        ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+      ];
+
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    ui.Text({ content: record.title, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, wrapMode: "word", height: 3 }),
-    ui.Box(
-      { width: "100%", height: rows.length, flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
-      ...rows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright)),
-    ),
-    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...titleAndMeta,
     // Tab headers
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 2 },
@@ -2930,6 +2943,42 @@ function boardDetailScrollMax(state: TuiState, task: Task, tab: TaskDetailTab): 
   return contentRows > 0 ? Math.max(DETAIL_SCROLL_STEP_ROWS, contentRows) : 0;
 }
 
+function archiveDetailScrollId(tab: TaskDetailTab, taskId: string): string | undefined {
+  switch (tab) {
+    case "prompt":
+      return `archive-detail-prompt-${taskId}`;
+    case "handoff":
+      return `archive-detail-handoff-${taskId}`;
+    case "output":
+      return `archive-detail-output-${taskId}`;
+    case "files":
+      return `archive-detail-files-${taskId}`;
+    case "comments":
+      return `archive-detail-comments-${taskId}`;
+  }
+}
+
+function archiveDetailScrollMax(state: TuiState, record: GlobalArchiveRecord, tab: TaskDetailTab): number {
+  const approxWidth = Math.max(20, Math.floor(state.terminalCols / 2) - 4);
+  const wrappedRows = (text: string) =>
+    text
+      .split("\n")
+      .reduce((sum, line) => sum + Math.max(1, Math.ceil(Math.max(1, line.length) / approxWidth)), 0);
+  const completion = parseCompletion(record.completion);
+  const contentRows = tab === "prompt"
+    ? wrappedRows(record.description || "(empty prompt)")
+    : tab === "handoff"
+      ? completion
+        ? wrappedRows(`${completion.summary}\n${completion.changedFiles.join(", ") || "none"}\n${completion.verification.map((item) => `${item.command} → ${item.result}`).join("; ") || "none"}\n${completion.residualRisk ?? "none"}`)
+        : 1
+      : tab === "output"
+        ? wrappedRows(record.final_session_output?.trim() || "No final session output available")
+        : tab === "comments"
+          ? (parseArchiveComments(record.comments).length || 1)
+          : 0;
+  return contentRows > 0 ? Math.max(DETAIL_SCROLL_STEP_ROWS, contentRows) : 0;
+}
+
 function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
   const tab = state.detailTab ?? "prompt";
   const content: VChild =
@@ -3664,7 +3713,9 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
       ui.Text({
         content:
           state.viewState.view === "archive"
-            ? "↑/↓ navigate · ←/→ tabs: Prompt/Handoff · / search · i instance · l lane · u refresh · b back · q quit"
+            ? state.archive?.focused
+              ? "↑/↓ scroll detail · ←/→ tabs · e collapse · ↵ esc back to records · u refresh · b back · q quit"
+              : "↑/↓ records · ↵ focus detail · e expand · ←/→ tabs · / search · i instance · l lane · u refresh · b back · q quit"
             : state.viewState.view === "workspaceGate"
             ? "type absolute path · enter confirm · esc quit"
             : state.viewState.view === "launch"
@@ -3729,8 +3780,10 @@ function renderHelpOverlay(ui: OpenTui) {
     ["q", "quit"],
     ["", ""],
     ["ARCHIVE", ""],
-    ["↑/↓", "navigate records"],
-    ["←/→ / tab", "switch Prompt/Handoff tabs"],
+    ["↑/↓", "navigate records / scroll focused detail"],
+    ["←/→ / tab", "switch detail tabs"],
+    ["enter", "focus / exit detail"],
+    ["e", "toggle expanded detail"],
     ["/", "search (enter to exit)"],
     ["i", "cycle instance filter"],
     ["l", "cycle lane filter"],
@@ -6546,24 +6599,65 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
     return;
   }
   if (key.sequence === "b" || isEscapeKey(key)) {
+    if (archive.focused) {
+      archive.focused = false;
+      actions.render();
+      return;
+    }
     actions.closeArchive();
     return;
   }
-  if (archive.detailTab === "files") {
-    const record = filteredArchiveRecords(archive)[archive.selectedIndex];
-    const files = parseCompletion(record?.completion ?? null)?.changedFiles ?? [];
-    const ownerId = archiveFilesOwnerId(record?.task_id ?? "");
-    const scrollId = record ? `archive-detail-files-${record.task_id}` : "";
-    if (keyName === "down" || keyName === "up") {
-      if (record && files.length > 0) moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, archiveFilesVisibleRows(state));
-      actions.render();
-      return;
-    }
-    if (isEnterKey(key)) {
-      actions.render();
-      return;
-    }
+
+  if (isEnterKey(key)) {
+    archive.focused = !archive.focused;
+    actions.render();
+    return;
   }
+
+  if (key.sequence === "e") {
+    archive.expanded = !archive.expanded;
+    actions.render();
+    return;
+  }
+
+  if (archive.focused) {
+    const record = filteredArchiveRecords(archive)[archive.selectedIndex];
+    if (archive.detailTab === "files") {
+      const files = parseCompletion(record?.completion ?? null)?.changedFiles ?? [];
+      const ownerId = archiveFilesOwnerId(record?.task_id ?? "");
+      const scrollId = record ? `archive-detail-files-${record.task_id}` : "";
+      if (keyName === "down" || keyName === "up") {
+        if (record && files.length > 0) {
+          moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, archiveFilesVisibleRows(state));
+        }
+        actions.render();
+        return;
+      }
+      if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
+        archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
+        actions.render();
+        return;
+      }
+    } else {
+      const scrollId = record ? archiveDetailScrollId(archive.detailTab, record.task_id) : undefined;
+      if (scrollId && (keyName === "down" || keyName === "up")) {
+        const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+        state.detailScrollTop[scrollId] = clampDetailScrollOffset(
+          detailScrollOffset(state, scrollId) + delta,
+          record ? archiveDetailScrollMax(state, record, archive.detailTab) : 0,
+        );
+        actions.render();
+        return;
+      }
+      if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
+        archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
+        actions.render();
+        return;
+      }
+    }
+    return;
+  }
+
   if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
     archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
     actions.render();

@@ -847,13 +847,16 @@ describe("TUI archive detail cleanup", () => {
   it("files tab renders archived changed-file names from completion metadata", async () => {
     const s = state({
       viewState: { view: "archive", previousView: "launch" },
-      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", JSON.stringify({
-        outcome: "complete",
-        summary: "Fixed the bug",
-        changedFiles: ["src/a.ts", "src/b.ts"],
-        verification: [],
-        residualRisk: "none",
-      })), "files"),
+      archive: archiveState([
+        archiveRecord("task-1", "2026-07-03 12:00", JSON.stringify({
+          outcome: "complete",
+          summary: "Fixed the bug",
+          changedFiles: ["src/a.ts", "src/b.ts"],
+          verification: [],
+          residualRisk: "none",
+        })),
+        archiveRecord("task-2", "2026-07-03 12:00", null),
+      ], "files"),
     });
     const app = renderApp(fakeUi(), s);
 
@@ -864,7 +867,8 @@ describe("TUI archive detail cleanup", () => {
     expect(textNodesContaining(app, "-?")[0]?.props.fg).toBe("#ff5c5c");
 
     await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
-    expect(s.filesDetail).toMatchObject({ ownerId: "archive:task-1", selectedIndex: 1, mode: "list" });
+    expect(s.archive.selectedIndex).toBe(1);
+    expect(s.filesDetail).toBeUndefined();
   });
 
   it("archive detail tabs render in stable manual viewports without ScrollBox chrome", () => {
@@ -1179,7 +1183,131 @@ describe("TUI archive tab navigation", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("←/→ tabs: Prompt/Handoff");
+    expect(text).toContain("↑/↓ records · ↵ focus detail · e expand · ←/→ tabs");
+    expect(text).toContain("/ search · i instance · l lane · u refresh · b back · q quit");
+  });
+
+  it("enter toggles focused detail mode and up/down scroll instead of navigating records", async () => {
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null, {
+        description: "a\n".repeat(30),
+      }), "prompt", false, false),
+      terminalRows: 30,
+      terminalCols: 80,
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions());
+    expect(s.archive.focused).toBe(true);
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.detailScrollTop["archive-detail-prompt-task-1"]).toBe(3);
+
+    await handleKeypress({ name: "up", sequence: "\u001b[A" } as any, s, actions());
+    expect(s.archive.selectedIndex).toBe(0);
+    expect(s.detailScrollTop["archive-detail-prompt-task-1"]).toBe(0);
+  });
+
+  it("escape exits focused detail mode without closing archive", async () => {
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt", true),
+    });
+
+    const closeArchive = vi.fn();
+    await handleKeypress({ name: "escape", sequence: "\u001b" } as any, s, actions({ closeArchive }));
+
+    expect(s.archive.focused).toBe(false);
+    expect(closeArchive).not.toHaveBeenCalled();
+  });
+
+  it("left/right still switch tabs while focused", async () => {
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt", true),
+    });
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, actions());
+    expect(s.archive.detailTab).toBe("handoff");
+
+    await handleKeypress({ name: "left", sequence: "\u001b[D" } as any, s, actions());
+    expect(s.archive.detailTab).toBe("prompt");
+  });
+
+  it("expanded mode hides title/metadata but keeps tab strip and content", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt", false, true),
+    }));
+
+    // The right "Detail" panel should not contain the title or metadata labels
+    const detailPanel = nodesByType(app, "Box")
+      .find((node) => node.props?.title === "Detail");
+    const detailText = detailPanel ? textOf(detailPanel) : textOf(app);
+    expect(detailText).not.toContain("Task task-1");
+    expect(detailText).not.toContain("STATE");
+    expect(detailText).not.toContain("AGENT");
+    expect(detailText).toContain("Prompt");
+    expect(detailText).toContain("Handoff");
+    expect(detailText).toContain("Fix the login bug");
+  });
+
+  it("e toggles expanded archive detail mode", async () => {
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null), "prompt", false, false),
+    });
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, actions());
+    expect(s.archive.expanded).toBe(true);
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, actions());
+    expect(s.archive.expanded).toBe(false);
+  });
+
+  it("in Files tab with focus off, Down/Up navigate archive records", async () => {
+    const records = [
+      archiveRecord("task-1", "2026-07-03 12:00", null),
+      archiveRecord("task-2", "2026-07-03 12:00", null),
+    ];
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(records, "files", false, false),
+    });
+
+    expect(s.archive.selectedIndex).toBe(0);
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.archive.selectedIndex).toBe(1);
+    expect(s.filesDetail).toBeUndefined();
+
+    await handleKeypress({ name: "up", sequence: "\u001b[A" } as any, s, actions());
+    expect(s.archive.selectedIndex).toBe(0);
+  });
+
+  it("in Files tab with focus on, Down/Up change file selection instead of records", async () => {
+    const records = [archiveRecord("task-1", "2026-07-03 12:00", JSON.stringify({
+      outcome: "complete",
+      summary: "Fix",
+      changedFiles: ["src/a.ts", "src/b.ts"],
+      verification: [],
+      residualRisk: "none",
+    }))];
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(records, "files", true, false),
+    });
+
+    expect(s.archive.selectedIndex).toBe(0);
+    expect(s.filesDetail?.selectedIndex ?? 0).toBe(0);
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+    expect(s.archive.selectedIndex).toBe(0);
+    expect(s.filesDetail).toMatchObject({ ownerId: "archive:task-1", selectedIndex: 1, mode: "list" });
+
+    await handleKeypress({ name: "up", sequence: "\u001b[A" } as any, s, actions());
+    expect(s.archive.selectedIndex).toBe(0);
+    expect(s.filesDetail).toMatchObject({ ownerId: "archive:task-1", selectedIndex: 0, mode: "list" });
   });
 });
 
@@ -4016,7 +4144,12 @@ function archiveRecord(
   };
 }
 
-function archiveState(records: ReturnType<typeof archiveRecord> | ReturnType<typeof archiveRecord>[], detailTab: TaskDetailTab = "prompt") {
+function archiveState(
+  records: ReturnType<typeof archiveRecord> | ReturnType<typeof archiveRecord>[],
+  detailTab: TaskDetailTab = "prompt",
+  focused = false,
+  expanded = false,
+) {
   const list = Array.isArray(records) ? records : [records];
   return {
     records: list,
@@ -4027,6 +4160,8 @@ function archiveState(records: ReturnType<typeof archiveRecord> | ReturnType<typ
     laneFilter: null,
     refreshing: false,
     detailTab,
+    focused,
+    expanded,
   };
 }
 
