@@ -1799,3 +1799,250 @@ describe("GET /api/tasks/:id/diff", () => {
     expect(["diff", "no-git"]).toContain(body.kind);
   });
 });
+
+// --- Parent/child dependency tests --------------------------------------------
+
+describe("parent/child dependency endpoints", () => {
+  let store: SqliteTaskStore;
+  let dispatcher: ReturnType<typeof makeFakeDispatcher>;
+
+  beforeEach(() => {
+    store = new SqliteTaskStore(":memory:");
+    dispatcher = makeFakeDispatcher(store);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it("creates a task with parentIds and returns them in the response", async () => {
+    const parent = store.create({ title: "Parent", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Child with parent",
+        description: "x",
+        directory: repoDir,
+        parentIds: [parent.id],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.parentIds).toEqual([parent.id]);
+  });
+
+  it("creates a task with multiple parentIds", async () => {
+    const p1 = store.create({ title: "P1", description: "", directory: repoDir });
+    const p2 = store.create({ title: "P2", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Multi-parent child",
+        description: "x",
+        directory: repoDir,
+        parentIds: [p1.id, p2.id],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect((body.parentIds as string[]).sort()).toEqual([p1.id, p2.id].sort());
+  });
+
+  it("rejects creating a task with an unknown parentId", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad parent",
+        description: "x",
+        directory: repoDir,
+        parentIds: ["task_nonexistent"],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Parent task not found");
+  });
+
+  it("patches parentIds atomically on update", async () => {
+    const p1 = store.create({ title: "P1", description: "", directory: repoDir });
+    const p2 = store.create({ title: "P2", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    store.addLink(p1.id, child.id);
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${child.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: [p2.id] }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.parentIds).toEqual([p2.id]);
+    expect(store.getParentIds(child.id)).toEqual([p2.id]);
+  });
+
+  it("clears parentIds when patched with an empty array", async () => {
+    const parent = store.create({ title: "Parent", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    store.addLink(parent.id, child.id);
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${child.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: [] }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.parentIds).toEqual([]);
+    expect(store.getParentIds(child.id)).toEqual([]);
+  });
+
+  it("clears parentIds when patched with null", async () => {
+    const parent = store.create({ title: "Parent", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    store.addLink(parent.id, child.id);
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${child.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: null }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.parentIds).toEqual([]);
+    expect(store.getParentIds(child.id)).toEqual([]);
+  });
+
+  it("observes dependency changes in the task list", async () => {
+    const parent = store.create({ title: "Parent", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+
+    // Before linking
+    let list = await app.request("/api/tasks");
+    let tasks = (await list.json()) as Task[];
+    const childBefore = tasks.find((t) => t.id === child.id);
+    expect(childBefore?.parentIds).toEqual([]);
+
+    // Link via store (dependency changes are reflected in list)
+    store.addLink(parent.id, child.id);
+
+    // After linking, the list reflects the change
+    list = await app.request("/api/tasks");
+    tasks = (await list.json()) as Task[];
+    const childAfter = tasks.find((t) => t.id === child.id);
+    expect(childAfter?.parentIds?.sort()).toEqual([parent.id]);
+
+    // Unlink
+    store.removeLink(parent.id, child.id);
+
+    // After unlinking, the list reflects the change
+    list = await app.request("/api/tasks");
+    tasks = (await list.json()) as Task[];
+    const childAfterUnlink = tasks.find((t) => t.id === child.id);
+    expect(childAfterUnlink?.parentIds).toEqual([]);
+  });
+
+  it("blocks run when one of multiple parents is unsatisfied", async () => {
+    const satisfiedParent = store.create({ title: "Done parent", description: "", directory: repoDir });
+    const unsatisfiedParent = store.create({ title: "Todo parent", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    store.addLink(satisfiedParent.id, child.id);
+    store.addLink(unsatisfiedParent.id, child.id);
+    store.move(satisfiedParent.id, "done", 0);
+
+    const client = new FakeOpencodeClient();
+    const realDispatcher = new TaskDispatcher({ client: client as never, store });
+    const app = buildRealDispatchApp(store, realDispatcher);
+
+    const blocked = await app.request(`/api/tasks/${child.id}/run`, { method: "POST" });
+    expect(blocked.status).toBe(409);
+    const blockedBody = await blocked.json();
+    expect(blockedBody.error.unmetParents).toEqual([
+      { id: unsatisfiedParent.id, title: "Todo parent", why: "parent is in todo" },
+    ]);
+  });
+
+  it("allows run when all of multiple parents are satisfied", async () => {
+    const p1 = store.create({ title: "P1", description: "", directory: repoDir });
+    const p2 = store.create({ title: "P2", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    store.addLink(p1.id, child.id);
+    store.addLink(p2.id, child.id);
+    store.move(p1.id, "done", 0);
+    store.move(p2.id, "done", 0);
+
+    const client = new FakeOpencodeClient();
+    client.nextSessionId = "ses_multi_parent_ok";
+    const realDispatcher = new TaskDispatcher({ client: client as never, store });
+    const app = buildRealDispatchApp(store, realDispatcher);
+
+    const allowed = await app.request(`/api/tasks/${child.id}/run`, { method: "POST" });
+    expect(allowed.status).toBe(202);
+  });
+
+  it("regression: failed create with bad parentId does not leak a task row", async () => {
+    const app = buildApp(store, dispatcher);
+    const before = store.list().length;
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Should roll back",
+        description: "x",
+        directory: repoDir,
+        parentIds: ["task_nonexistent"],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    // No task row or task_created event leaked.
+    expect(store.list()).toHaveLength(before);
+    expect(store.list()).toHaveLength(0);
+  });
+
+  it("regression: PATCH with invalid parentIds does not persist other field changes or alter links", async () => {
+    const parent = store.create({ title: "Original parent", description: "", directory: repoDir });
+    const child = store.create({ title: "Original title", description: "original desc", directory: repoDir });
+    store.addLink(parent.id, child.id);
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${child.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Should not persist",
+        description: "should not persist either",
+        parentIds: ["task_nonexistent"],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Parent task not found");
+
+    // Title, description, and parent links must remain unchanged.
+    const fresh = store.get(child.id)!;
+    expect(fresh.title).toBe("Original title");
+    expect(fresh.description).toBe("original desc");
+    expect(store.getParentIds(child.id)).toEqual([parent.id]);
+  });
+});

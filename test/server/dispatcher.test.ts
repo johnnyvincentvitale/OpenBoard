@@ -1959,4 +1959,158 @@ describe("TaskDispatcher", () => {
       vi.useRealTimers();
     });
   });
+
+  describe("multi-parent and multi-child dependencies", () => {
+    it("injects all multiple parent handoffs into the prompt", async () => {
+      const p1 = createTask({ title: "Parent alpha", description: "" });
+      const p2 = createTask({ title: "Parent beta", description: "" });
+      const child = createTask({ title: "Child", description: "child work" });
+      store.addLink(p1.id, child.id);
+      store.addLink(p2.id, child.id);
+      store.setCompletion(
+        p1.id,
+        {
+          outcome: "complete",
+          summary: "alpha summary",
+          changedFiles: ["src/alpha.ts"],
+          verification: [{ command: "npm test", result: "passed" }],
+          residualRisk: "none",
+          reportedAt: 1,
+        },
+        "reported",
+      );
+      store.setCompletion(
+        p2.id,
+        {
+          outcome: "complete",
+          summary: "beta summary",
+          changedFiles: ["src/beta.ts"],
+          verification: [],
+          residualRisk: "low",
+          reportedAt: 2,
+        },
+        "reported",
+      );
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(child.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("PARENT HANDOFFS");
+      expect(text).toContain(`Parent: Parent alpha (${p1.id})`);
+      expect(text).toContain("Summary: alpha summary");
+      expect(text).toContain(`Parent: Parent beta (${p2.id})`);
+      expect(text).toContain("Summary: beta summary");
+      expect(text).toContain("Residual risk: low");
+      // Completion contract should come after both handoffs
+      expect(text.lastIndexOf("PARENT HANDOFFS")).toBeLessThan(
+        text.indexOf("OPENBOARD COMPLETION CONTRACT"),
+      );
+    });
+
+    it("injects parent handoffs that include a mix of structured reports and manual Done parents", async () => {
+      const p1 = createTask({ title: "Structured parent" });
+      const p2 = createTask({ title: "Manual parent" });
+      const child = createTask({ description: "child work" });
+      store.addLink(p1.id, child.id);
+      store.addLink(p2.id, child.id);
+      store.setCompletion(
+        p1.id,
+        {
+          outcome: "complete",
+          summary: "structured summary",
+          changedFiles: [],
+          verification: [],
+          residualRisk: "none",
+          reportedAt: 1,
+        },
+        "reported",
+      );
+      store.move(p2.id, "done", 0);
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(child.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("Summary: structured summary");
+      expect(text).toContain("No structured handoff exists; parent is manually marked Done.");
+    });
+
+    it("rejects run when any of multiple parents is unsatisfied", async () => {
+      const satisfied = createTask({ title: "Done parent" });
+      const unsatisfied = createTask({ title: "Running parent" });
+      const child = createTask({ title: "Child" });
+      store.addLink(satisfied.id, child.id);
+      store.addLink(unsatisfied.id, child.id);
+      store.move(satisfied.id, "done", 0);
+      store.update(unsatisfied.id, { runState: "running" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await expect(dispatcher.run(child.id)).rejects.toMatchObject({
+        status: 409,
+        unmetParents: [{ id: unsatisfied.id, title: "Running parent", why: "parent is still running" }],
+      });
+      expect(client.createCalls).toHaveLength(0);
+    });
+
+    it("allows run when all of multiple parents are satisfied", async () => {
+      const p1 = createTask({ title: "P1" });
+      const p2 = createTask({ title: "P2" });
+      const p3 = createTask({ title: "P3" });
+      const child = createTask({ title: "Child" });
+      store.addLink(p1.id, child.id);
+      store.addLink(p2.id, child.id);
+      store.addLink(p3.id, child.id);
+      store.move(p1.id, "done", 0);
+      store.move(p2.id, "done", 0);
+      store.move(p3.id, "done", 0);
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.run(child.id);
+      expect(result.column).toBe("in_progress");
+      expect(result.runState).toBe("running");
+      expect(client.createCalls).toHaveLength(1);
+    });
+
+    it("allows run when parent is satisfied via completion report in review column", async () => {
+      const parent = createTask({ title: "Reported parent" });
+      const child = createTask({ title: "Child" });
+      store.addLink(parent.id, child.id);
+      store.setCompletion(
+        parent.id,
+        {
+          outcome: "complete",
+          summary: "done",
+          changedFiles: [],
+          verification: [],
+          residualRisk: "none",
+          reportedAt: 1,
+        },
+        "reported",
+      );
+      store.move(parent.id, "review", 0);
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.run(child.id);
+      expect(result.column).toBe("in_progress");
+      expect(client.createCalls).toHaveLength(1);
+    });
+
+    it("rejects retry when any of multiple parents is unsatisfied", async () => {
+      const satisfied = createTask({ title: "Done parent" });
+      const unsatisfied = createTask({ title: "Running parent" });
+      const child = createTask({ title: "Child" });
+      store.addLink(satisfied.id, child.id);
+      store.addLink(unsatisfied.id, child.id);
+      store.move(satisfied.id, "done", 0);
+      store.update(unsatisfied.id, { runState: "running" });
+      store.update(child.id, { sessionId: "ses_existing" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await expect(dispatcher.retry(child.id)).rejects.toMatchObject({
+        status: 409,
+      });
+      expect(client.promptCalls).toHaveLength(0);
+    });
+  });
 });

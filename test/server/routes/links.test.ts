@@ -125,4 +125,71 @@ describe("task dependency link routes", () => {
 
     expect(res.status).toBe(409);
   });
+
+  it("allows one parent to have multiple children", async () => {
+    const parent = store.create({ title: "Parent", description: "", directory: "/repo" });
+    const child1 = store.create({ title: "Child1", description: "", directory: "/repo" });
+    const child2 = store.create({ title: "Child2", description: "", directory: "/repo" });
+    const child3 = store.create({ title: "Child3", description: "", directory: "/repo" });
+    const app = appFor(store);
+
+    for (const child of [child1, child2, child3]) {
+      const res = await app.request(`/api/tasks/${child.id}/links`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ parentId: parent.id }),
+      });
+      expect(res.status).toBe(200);
+    }
+
+    const childIds = store.getChildIds(parent.id).sort();
+    const expected = [child1.id, child2.id, child3.id].sort();
+    expect(childIds).toEqual(expected);
+  });
+
+  it("allows one child to have multiple parents", async () => {
+    const parent1 = store.create({ title: "Parent1", description: "", directory: "/repo" });
+    const parent2 = store.create({ title: "Parent2", description: "", directory: "/repo" });
+    const child = store.create({ title: "Child", description: "", directory: "/repo" });
+    const app = appFor(store);
+
+    await app.request(`/api/tasks/${child.id}/links`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentId: parent1.id }),
+    });
+    const res2 = await app.request(`/api/tasks/${child.id}/links`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentId: parent2.id }),
+    });
+
+    expect(res2.status).toBe(200);
+    const parentIds = (await res2.json()).parentIds as string[];
+    expect(parentIds.sort()).toEqual([parent1.id, parent2.id].sort());
+    expect(store.getParentIds(child.id).sort()).toEqual([parent1.id, parent2.id].sort());
+  });
+
+  it("allows a valid DAG link when two parents share a child and one parent depends on the other", async () => {
+    // A -> C, B -> C. Then A -> B. No cycle: A -> B -> C, and A -> C is still fine.
+    const a = store.create({ title: "A", description: "", directory: "/repo" });
+    const b = store.create({ title: "B", description: "", directory: "/repo" });
+    const c = store.create({ title: "C", description: "", directory: "/repo" });
+    const app = appFor(store);
+
+    store.addLink(a.id, c.id); // a -> c
+    store.addLink(b.id, c.id); // b -> c
+
+    // Adding A -> B (parent=A, child=B) must be allowed — no cycle.
+    const res = await app.request(`/api/tasks/${b.id}/links`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentId: a.id }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.getParentIds(b.id)).toEqual([a.id]);
+    // B -> C, A -> C still intact
+    expect(store.getParentIds(c.id).sort()).toEqual([a.id, b.id].sort());
+  });
 });

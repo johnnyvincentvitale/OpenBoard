@@ -365,6 +365,8 @@ export interface CreateTaskInput {
   model?: ModelRef;
   isolation?: TaskIsolationMode;
   permissionOverrides?: PermissionOverrides;
+  /** Parent task IDs for dependency links. Applied after the task is created. */
+  parentIds?: string[];
 }
 
 export interface UpdateTaskInput {
@@ -381,6 +383,8 @@ export interface UpdateTaskInput {
   model?: ModelRef | null;
   isolation?: TaskIsolationMode | null;
   permissionOverrides?: PermissionOverrides | null;
+  /** Parent task IDs to set atomically on the child. Replaces all existing links. */
+  parentIds?: string[] | null;
 }
 
 /** Board-level settings (persisted). */

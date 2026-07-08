@@ -28,6 +28,21 @@ import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
 import { computeDiff } from "../diff-engine";
 
+function isReachableViaChildren(store: TaskStore, fromId: string, targetId: string): boolean {
+  const visited = new Set<string>();
+  const stack = [fromId];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current === targetId) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const childId of store.getChildIds(current)) {
+      stack.push(childId);
+    }
+  }
+  return false;
+}
+
 /** Guard error: GET /api/tasks/:id/diff is only valid for Review cards. */
 class NonReviewDiffError extends Error {
   readonly status = 409;
@@ -176,7 +191,7 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides } = body;
+      const { title, description, directory, agent, model, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides, parentIds } = body;
       const taskType = body.type ?? "agent";
       const harness = body.harness ?? "opencode";
       const effectivePermissionMode = permissionMode ?? claudePermissionMode;
@@ -235,6 +250,23 @@ export function registerTaskRoutes(
         throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
       }
 
+      if (parentIds !== undefined) {
+        if (!Array.isArray(parentIds)) {
+          throw AdapterError.validation("parentIds must be an array of task ID strings");
+        }
+        for (const pid of parentIds) {
+          if (typeof pid !== "string" || pid.trim().length === 0) {
+            throw AdapterError.validation("each parentId must be a non-empty string");
+          }
+        }
+        // Validate all parents exist before creating the task, so a bad
+        // parentId never leaves a partial task row behind.
+        const uniqueParentIds = [...new Set(parentIds)];
+        for (const pid of uniqueParentIds) {
+          if (!store.get(pid)) throw AdapterError.validation(`Parent task not found: ${pid}`);
+        }
+      }
+
       const workspace = resolveBoardWorkspace();
       const allowExternal = isExternalDirectoriesAllowed();
       const canonicalDirectory = resolveTaskDirectory(directory, workspace, {
@@ -264,7 +296,16 @@ export function registerTaskRoutes(
       });
       store.addEvent({ taskId: task.id, type: "task_created", body: { type: task.type ?? "agent" } });
 
-      return c.json(task, 201);
+      if (parentIds && parentIds.length > 0) {
+        const uniqueParentIds = [...new Set(parentIds)];
+        for (const pid of uniqueParentIds) {
+          store.addLink(pid, task.id);
+          store.addEvent({ taskId: task.id, type: "task_linked", body: { parentId: pid } });
+        }
+      }
+
+      const fresh = store.get(task.id);
+      return c.json(fresh, 201);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -303,10 +344,54 @@ export function registerTaskRoutes(
       }
 
       const patch = await validateUpdateBody(body, existing);
-      const updated = store.update(id, patch);
+      // Strip parentIds from the patch since they are stored in task_links, not the task row.
+      const { parentIds: _parentIds, ...taskPatch } = patch;
+
+      // Validate parentIds BEFORE mutating the task row or links, so a 400
+      // never leaves partial state.
+      if (body.parentIds !== undefined) {
+        const parentIds = body.parentIds;
+        if (!Array.isArray(parentIds) && parentIds !== null) {
+          throw AdapterError.validation("parentIds must be an array of task ID strings or null");
+        }
+        const ids: string[] = parentIds === null ? [] : [...new Set(parentIds as string[])];
+        for (const pid of ids) {
+          if (typeof pid !== "string" || pid.trim().length === 0) {
+            throw AdapterError.validation("each parentId must be a non-empty string");
+          }
+          if (!store.get(pid)) {
+            throw AdapterError.validation(`Parent task not found: ${pid}`);
+          }
+          if (pid === id) {
+            throw AdapterError.validation("Task cannot depend on itself");
+          }
+        }
+        // Pre-validate every link (cycle/duplicate) before any mutation.
+        for (const pid of ids) {
+          if (isReachableViaChildren(store, id, pid)) {
+            throw AdapterError.validation(`Task link would create a cycle: ${pid} -> ${id}`);
+          }
+        }
+      }
+
+      const updated = store.update(id, taskPatch);
       if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
       store.addEvent({ taskId: id, type: "task_updated", body: { fields: Object.keys(patch) } });
-      return c.json(updated, 200);
+
+      if (body.parentIds !== undefined) {
+        const ids: string[] = body.parentIds === null ? [] : [...new Set(body.parentIds as string[])];
+        // Remove existing links, then set the new ones — all pre-validated above.
+        for (const pid of store.getParentIds(id)) {
+          store.removeLink(pid, id);
+        }
+        for (const pid of ids) {
+          store.addLink(pid, id);
+        }
+      }
+
+      const refreshed = store.get(id);
+      if (!refreshed) throw AdapterError.notFound(`Task not found: ${id}`);
+      return c.json(refreshed, 200);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -434,6 +519,7 @@ export function registerTaskRoutes(
       "claudePermissionMode",
       "acpOptions",
       "permissionOverrides",
+      "parentIds",
     ]);
     for (const key of Object.keys(body)) {
       if (!allowed.has(key)) throw AdapterError.validation(`Unsupported task update field: ${key}`);
@@ -514,6 +600,11 @@ export function registerTaskRoutes(
         `permissionOverrides must be an object mapping ${PERMISSION_OVERRIDE_CATEGORIES.join("/")} to ${PERMISSION_OVERRIDE_ACTIONS.join("/")}`,
       );
     }
+
+    if (body.parentIds !== undefined && body.parentIds !== null && !Array.isArray(body.parentIds)) {
+      throw AdapterError.validation("parentIds must be an array of task ID strings or null");
+    }
+
     // Effective isolation after this patch: the patched value if this PATCH touches it, else whatever is already on the row.
     const effectiveIsolation: TaskIsolationMode | null = patch.isolation !== undefined ? patch.isolation : (existing.isolation ?? null);
 
