@@ -308,6 +308,12 @@ parent/child dependencies, and an archive flag — all exposed on `/api/tasks`.
 **Completion contract.** Every dispatched prompt gets an appended footer telling the
 agent exactly how to end its turn: `POST /api/tasks/:id/complete` (or `/block`) with a
 JSON body `{ summary, changedFiles, verification: [{ command, result }], residualRisk }`.
+The JSON shape stays the same for every card, but the footer includes task-type
+handoff guidance: `research` reports factual evidence and source gaps,
+`synthesis` evaluates parent findings for agreement/conflict/evidence strength/gaps,
+`build` reports implementation output, `audit` reports findings, and `fix`
+reports resolved findings plus regression checks. Build, synthesis, audit, and
+fix cards also receive task-mode context before parent handoffs.
 The server stamps `outcome` (`complete`/`blocked`) and `reportedAt`, stores it as the
 task's `completion`, sets `completionSource: "reported"`, and — if the task was still in
 `todo`/`in_progress` — moves it to `review` (`complete` leaves `runState: "idle"`; `blocked`
@@ -325,10 +331,11 @@ creates a session — it returns 409 with `error.unmetParents: [{ id, title, why
 each unsatisfied parent (e.g. "parent is in todo", "parent is still running", "parent
 reported blocked"). A parent counts as satisfied once it's `done`, *or* it has a `complete`
 completion report with `completionSource: "reported"` — column aside. Once every parent is
-satisfied, the dispatcher injects a `PARENT HANDOFFS` section into the child's prompt (before
-the completion-contract footer) with each parent's title, summary, changed files,
-verification results, and residual risk — or a "manually marked Done" note for parents with
-no structured report.
+satisfied, the dispatcher injects a `PARENT CONTEXT` section into the child's prompt (before
+the completion-contract footer) with read-only parent worktree instructions and numbered
+parent sections (`PARENT-000`, `PARENT-001`, ...): worktree, task id, branch, summary,
+changed files, verification results, and residual risk — or a "manually marked Done" note
+for parents with no structured report.
 
 **Archive + filters.** `POST /api/tasks/:id/archive` / `/unarchive` toggle a task's
 `archived` flag; only `review`/`done` tasks can be archived (409 otherwise). `GET
@@ -360,11 +367,10 @@ test/          unit + integration
 ```
 
 ## Worktree isolation
-Concurrent agents in one repo share a working tree and can clobber each other. Turn on
-**worktree isolation** and each run gets its own `git worktree`:
+Concurrent agents in one repo share a working tree and can clobber each other. Choose
+**worktree isolation** on a task and that run gets its own `git worktree`:
 
-- **Default + override.** A board-level *worktree default* toggle (header checkbox) sets the
-  default; each task can override it (worktree / in-place) in the new-task form.
+- **Per-task choice.** Pick `worktree` or `in-place` in the new-task form.
 - **Isolated run.** A worktree run cuts `board/<taskId>` from the task's directory and dispatches
   the session into that worktree — never the main working tree.
 - **Non-git dir.** Can't be isolated, so the run is blocked and the card offers **Make repo & run**
@@ -417,7 +423,7 @@ editors).
 
 ## Roadmap
 - V1 TUI + named-instance CLI — **ship target**.
-- Worktree-per-agent isolation — **done** (board default + per-task override, sync/integrate).
+- Worktree-per-agent isolation — **done** (per-task isolation, sync/integrate).
 - Multi-CLI ACP host — **in progress**: Claude Code is the exercised path; Codex, Gemini,
   Hermes, Pi Coding Agent, and Cursor harnesses are wired and discovered live
   (experimental, adapter-gated, not yet verified end-to-end).

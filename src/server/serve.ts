@@ -51,6 +51,7 @@ export async function main(): Promise<void> {
       .map((o) => ({
         worktreePath: o.worktreePath ?? "unknown",
         taskId: o.worktreePath ? o.worktreePath.split("/").pop() ?? "unknown" : "unknown",
+        dirtyFileCount: o.dirtyFileCount ?? 0,
       }));
     taskStore.setSweepResult({
       sweptAt: Date.now(),

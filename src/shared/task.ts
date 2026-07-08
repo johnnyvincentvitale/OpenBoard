@@ -68,6 +68,9 @@ export type TaskIsolationMode = (typeof TASK_ISOLATION_MODES)[number];
 export const TASK_TYPES = ["manual", "agent"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
+export const TASK_KINDS = ["none", "research", "synthesis", "build", "audit", "fix"] as const;
+export type TaskKind = (typeof TASK_KINDS)[number];
+
 export const TASK_HARNESSES = ["opencode", "claude-code", "codex", "gemini-acp", "hermes", "pi-coding-agent", "cursor-acp"] as const;
 export type TaskHarness = (typeof TASK_HARNESSES)[number];
 export type AcpTaskHarness = Exclude<TaskHarness, "opencode">;
@@ -226,6 +229,8 @@ export interface Task {
   id: string;
   /** Manual/PM cards are tracked but cannot be dispatched until converted to agent cards. */
   type?: TaskType;
+  /** Operator/orchestrator task intent. Currently metadata only; handoff/context semantics are layered on later. */
+  taskKind?: TaskKind | null;
   title: string;
   /** The prompt handed to the agent when the task is run. */
   description: string;
@@ -265,7 +270,7 @@ export interface Task {
   /** Epoch ms of the most recent transition into `running` (kept after the run ends). */
   runStartedAt?: number;
   error?: string;
-  /** Per-task isolation override. Unset → the board-level default applies. */
+  /** Per-task isolation. Unset is treated as in-place for legacy rows. */
   isolation?: TaskIsolationMode | null;
   /**
    * User-configured OpenCode permission override. Only ever honored for
@@ -292,9 +297,7 @@ export interface Task {
    */
   dirtyAtDispatch: boolean;
   /**
-   * Resolved isolation mode for the most recent dispatch/retry. Unlike
-   * `isolation`, this is not the user's override setting; it is the effective
-   * run intent after applying the board default at dispatch time.
+   * Resolved isolation mode for the most recent dispatch/retry.
    */
   isolationAtDispatch?: TaskIsolationMode | null;
   /**
@@ -354,6 +357,7 @@ export type TaskPending = (typeof TASK_PENDING)[number];
 
 export interface CreateTaskInput {
   type?: TaskType;
+  taskKind?: TaskKind;
   harness?: TaskHarness;
   title: string;
   description: string;
@@ -372,6 +376,7 @@ export interface CreateTaskInput {
 
 export interface UpdateTaskInput {
   type?: TaskType;
+  taskKind?: TaskKind | null;
   harness?: TaskHarness;
   title?: string;
   description?: string;
@@ -390,8 +395,6 @@ export interface UpdateTaskInput {
 
 /** Board-level settings (persisted). */
 export interface BoardSettings {
-  /** Default isolation for runs when a task doesn't override it. */
-  worktreeDefault: boolean;
   /** Whether the bash sandbox wrapper should be wired for managed opencode serve. */
   bashSandbox: boolean;
 }
@@ -540,6 +543,8 @@ export interface Dispatcher {
   discardWorktree(taskId: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
   /** Best-effort startup sweep for board-owned worktrees no live task references. */
   sweepOrphanedWorktrees(): Promise<WorktreeCleanupOutcome[]>;
+  /** Delete a dirty orphan worktree surfaced by the startup sweep. */
+  resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome>;
   /** Begin event-driven auto-transitions (running → review on idle, → error on failure). */
   start(): void;
   shutdown(): void;
@@ -565,6 +570,7 @@ export interface WorktreeCleanupOutcome {
   kept: boolean;
   message: string;
   worktreePath?: string;
+  dirtyFileCount?: number;
 }
 
 /** Stored result of the last startup orphan worktree sweep. */

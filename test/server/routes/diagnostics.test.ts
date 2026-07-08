@@ -41,7 +41,7 @@ function buildApp(
   boardToken = TEST_TOKEN,
 ) {
   const store = new SqliteTaskStore(":memory:");
-  store.updateSettings({ worktreeDefault: false, bashSandbox: false });
+  store.updateSettings({ bashSandbox: false });
   const app = new Hono();
   app.use("*", cors({ origin: "*" }));
   const auth = requireBoardToken(boardToken);
@@ -221,7 +221,7 @@ describe("GET /api/diagnostics (behind board token)", () => {
       sweptAt: 1000,
       removedCleanCount: 3,
       keptDirtyCount: 1,
-      dirtyOrphans: [{ worktreePath: "/repo/.wt/task_abc", taskId: "task_abc" }],
+      dirtyOrphans: [{ worktreePath: "/repo/.wt/task_abc", taskId: "task_abc", dirtyFileCount: 2 }],
     });
 
     const res = await app.request("/api/diagnostics", { headers: authHeaders() });
@@ -231,7 +231,7 @@ describe("GET /api/diagnostics (behind board token)", () => {
       lastSweep: 1000,
       removedCleanCount: 3,
       keptDirtyCount: 1,
-      dirtyOrphans: [{ worktreePath: "/repo/.wt/task_abc", taskId: "task_abc" }],
+      dirtyOrphans: [{ worktreePath: "/repo/.wt/task_abc", taskId: "task_abc", dirtyFileCount: 2 }],
     });
   });
 

@@ -102,7 +102,9 @@ screen — no card exists yet while you're filling this in.
    instruction the agent receives — write it like a work order: what to
    change, where, and how to verify. **`DIR`**: the directory the agent works
    in — point it at a scratch repo, not something precious, for your first run.
-2. **Harness & model.** **`HARNESS`**: leave it on OpenCode for now.
+2. **Task type, harness & model.** **`TASK TYPE`**: optionally classify the
+   card as `research`, `synthesis`, `build`, `audit`, or `fix`; leave it on `none`
+   when you do not need workflow semantics yet. **`HARNESS`**: leave it on OpenCode for now.
    **`PROVIDER`**: which of your currently-connected OpenCode providers to use,
    or leave it at **`Use Agent Profile Default`** to let the agent profile you
    pick next (step 3) supply its own model — while that's selected, `MODEL` is
@@ -152,6 +154,12 @@ changed files, verification commands and results, residual risk. A card that
 reaches Review with a report is solid ground. If the agent just went quiet
 instead, the card still reaches Review but is labeled **unconfirmed** — the
 work may be fine, but nothing vouches for it, so inspect before accepting.
+Task type changes what the handoff asks for without changing the JSON fields:
+research is evidence-first, synthesis evaluates parent findings for agreement,
+conflict, evidence strength, gaps, and implications, build reports implementation,
+audit reports findings, and fix ties changes back to the finding it resolves.
+Build, synthesis, audit, and fix cards also receive task-mode context before
+any parent handoffs so the worker sees how to use cwd and parent material.
 
 **Done is yours — unless you delegate it.** By default a human moves cards to
 Done (`x` in the TUI). If you run an orchestrator (next section), you can
@@ -182,8 +190,9 @@ so a cockpit can't silently accept or merge anything.
 **Dependencies and handoffs.** Cards can declare parent tasks. A child with
 unmet parents refuses to run, and once its parents complete, their summaries,
 changed files, and verification results are injected into the child's prompt
-as `PARENT HANDOFFS`. This is how multi-card runs stay coherent: downstream
-agents start from upstream context instead of rediscovering it.
+as `PARENT CONTEXT` with numbered parent sections and read-only parent worktree
+instructions. This is how multi-card runs stay coherent: downstream agents
+start from upstream context instead of rediscovering it.
 
 **The bundled plugin.** This whole workflow — connect, assess, plan, validate
 profiles, dispatch, verify — is packaged as the OpenBoard plugin's skills for
@@ -376,12 +385,14 @@ treat them as experimental.
 isolation screen shows a `PERMISSIONS` section for OpenCode cards only.
 Worktree-isolated runs already carry a layered safety stack — write-fenced
 edit permissions, the base-checkout escape detector, worktree-cwd prompt
-hygiene, and sandboxed bash — and that stack is **not configurable** from the
-wizard; the screen just shows a note confirming it's active. Loosening it
-per-task would undermine the whole point of isolating a run in the first
-place. Select isolation **`in_place`** instead to get an editable `EDIT`/`BASH`/
-`WEBFETCH` control (each `allow`/`ask`/`deny`), which defaults to `allow`
-everywhere — i.e., today's behavior — until you actively tighten one.
+hygiene, and, when the board's bash sandbox setting is desired/effective, sandboxed bash.
+The worktree screen does not expose per-card permission overrides; it shows the
+automatic worktree protection state. The global settings panel controls desired
+bash sandboxing for managed OpenCode sessions; turning it off does not remove
+the file-tool fence or escape detector. Select isolation **`in_place`** instead
+to get an editable `EDIT`/`BASH`/`WEBFETCH` control (each `allow`/`ask`/`deny`),
+which defaults to `allow` everywhere — i.e., today's behavior — until you actively
+tighten one.
 "Container" isolation is a disabled placeholder in this same segmented
 control; it isn't implemented yet and has no permissions story of its own.
 

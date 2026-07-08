@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS global_archive (
   source_db_path        TEXT NOT NULL,
   task_id               TEXT NOT NULL,
   task_type             TEXT NOT NULL DEFAULT 'agent',
+  task_kind             TEXT NOT NULL DEFAULT 'none',
   title                 TEXT NOT NULL,
   description           TEXT NOT NULL,
   directory             TEXT NOT NULL,
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS global_archive (
 
 const GLOBAL_ARCHIVE_COLUMNS: Array<[name: string, definition: string]> = [
   ["task_type", "TEXT NOT NULL DEFAULT 'agent'"],
+  ["task_kind", "TEXT NOT NULL DEFAULT 'none'"],
   ["assigned_to", "TEXT"],
   ["final_session_output", "TEXT"],
   ["comments", "TEXT"],
@@ -85,6 +87,7 @@ export interface GlobalArchiveRecord {
   source_db_path: string;
   task_id: string;
   task_type: string;
+  task_kind: string;
   title: string;
   description: string;
   directory: string;
@@ -166,7 +169,7 @@ export class GlobalArchiveStore {
       upsert: this.db.prepare(
         `INSERT OR REPLACE INTO global_archive (
            source_instance_name, source_port, source_workspace, source_db_path,
-           task_id, task_type, title, description, directory,
+           task_id, task_type, task_kind, title, description, directory,
            agent, assigned_to, model, isolation,
            column_name, run_state, run_started_at, error,
            session_id, worktree_path, worktree_branch, base_branch,
@@ -174,7 +177,7 @@ export class GlobalArchiveStore {
            archived_at, task_created_at, task_updated_at, mirrored_at
          ) VALUES (
            @sourceInstanceName, @sourcePort, @sourceWorkspace, @sourceDbPath,
-           @taskId, @taskType, @title, @description, @directory,
+           @taskId, @taskType, @taskKind, @title, @description, @directory,
            @agent, @assignedTo, @model, @isolation,
            @columnName, @runState, @runStartedAt, @error,
            @sessionId, @worktreePath, @worktreeBranch, @baseBranch,
@@ -209,6 +212,7 @@ export class GlobalArchiveStore {
       sourceDbPath: source.dbPath,
       taskId: task.id,
       taskType: task.type ?? "agent",
+      taskKind: task.taskKind ?? "none",
       title: task.title,
       description: task.description,
       directory: task.directory,

@@ -43,14 +43,26 @@ Create cards with enough context for an agent to succeed without reading your mi
 
 - Clear title with a run/test prefix when useful.
 - Absolute working directory.
-- Assigned OpenCode agent. The agent's verified roster model is materialized
-  onto `task.model` when OpenBoard creates the card; an explicit model override
-  is allowed only when the approved plan calls for it.
+- Task type: `research`, `synthesis`, `build`, `audit`, `fix`, or `none`.
+- Parent dependencies: link parent cards with `link_tasks` / `parentIds` instead
+  of pasting full parent handoffs into the prompt. A linked child is dispatch-
+  gated until parents are satisfied, and the dispatcher injects `PARENT CONTEXT`
+  with numbered parent sections (`PARENT-000`, `PARENT-001`, ...), read-only
+  parent worktree instructions, summaries, changed files, verification, and
+  residual risk.
+- Harness and assignee. For OpenCode cards, assign an OpenCode agent; its
+  verified roster model is materialized onto `task.model` when OpenBoard creates
+  the card. An explicit model override is allowed only when the approved plan
+  calls for it. For ACP harnesses, store the intended harness/model/options on
+  the task and verify them before Run.
 - `isolation: "worktree"` for concurrent repo work unless the point is shared-tree behavior.
 - Concrete acceptance criteria.
 - File or module boundaries.
 - Required verification commands.
 - Context sources the worker must read before editing.
+- Context sources in the prose body should be repo-relative/worktree-relative.
+  The `directory` field is the absolute path; the prompt body should not point
+  workers at absolute base-checkout source paths.
 
 For concurrent work, make cards file-disjoint by default. Put the boundary directly in the card:
 
@@ -61,10 +73,11 @@ Edit only src/features/calendar/ unless the build is impossible without it.
 Do not create replacement batches just because an earlier run is messy. First determine whether the existing cards are meaningful evidence.
 
 After creating cards, inspect the created task records before Run. Every card
-with an assigned agent must show the expected stored `task.model` from the
-Profile Manifest or the approved explicit override. A card with an assigned
-agent and missing/wrong model is not dispatchable; repair the roster/profile or
-the task before running it.
+must show the expected stored `taskKind`, `harness`, model/options, isolation,
+and parent IDs. Every OpenCode card with an assigned agent must show the
+expected stored `task.model` from the Profile Manifest or the approved explicit
+override. A card with missing/wrong role metadata is not dispatchable; repair
+the roster/profile/task before running it.
 
 ## Dispatch And Monitor
 
@@ -77,13 +90,21 @@ Starting cards is not enough. After Run, verify each card passes the crash windo
 - Worktree metadata appears when isolation is enabled.
 - The OpenCode session is producing real messages or tool activity.
 - No fail-closed sandbox block. On macOS spawn mode, a worktree card whose
-  sandbox wrapper is expected but unavailable lands in `runState: "error"`
-  before any session starts. That is a precondition failure, not a worker
-  failure — surface it as an environment gap, do not retry blindly.
+  bash sandbox is desired but unavailable lands in `runState: "error"` before
+  any session starts. That is a precondition failure, not a worker failure —
+  surface it as an environment gap, restart if required, or ask whether to turn
+  desired sandboxing off. If desired sandboxing is already off, do not describe
+  OpenCode worktree bash as sandboxed; the file-tool fence and escape detector
+  still apply.
 
 If a card reaches Review suspiciously fast, inspect the OpenCode session messages. Intermediate tool-call steps are not final completion.
 
 When the requester asks to run work now, confirm both the card was dispatched and the underlying session actually started. Idle cards sitting in To-Do are not work in progress.
+
+The board SSE stream includes heartbeat frames to keep the UI connected. A
+heartbeat is transport health, not proof that a worker is making progress. Use
+session messages/tool activity, task events, and harness-specific poll output
+for liveness.
 
 ## Review Worktrees
 
@@ -199,9 +220,10 @@ cards:
 
 1. When a role's card reaches Review, verify it passed the crash window and
    read its handoff summary and worktree diff.
-2. Author the next role's card yourself, carrying that evidence forward: what
-   changed, what was run, what passed, and — for an audit card — what to
-   scrutinize. The receiving worker must not have to re-derive the sender's work.
+2. Author the next role's card yourself with the correct `taskKind` and parent
+   links. Do not paste whole parent worktrees or handoffs into the body. Link
+   the parent cards so OpenBoard injects `PARENT CONTEXT`; add only the extra
+   instructions needed for what this child should decide or inspect.
 3. Run the card and monitor it like any other dispatch.
 4. Check the plan's exit condition after every hop (e.g. the audit card
    completes with no findings). When it is met, stop the loop and report.
@@ -215,6 +237,44 @@ dispatching the loop's first card.
 6. **Revert-testing is mandatory for audit-fix cards.** The fixer must prove the
    new regression tests fail when the fix is reverted. The auditor must
    revert-test its own hollow-test suspicions before reporting them.
+
+### Typed Card Flows
+
+Task types are composable roles, not a single required pipeline. Apply
+`research`, `synthesis`, `build`, `audit`, and `fix` cards according to the
+approved workflow shape: solo pipeline, fan-out, waves, role loop, or
+arena/quorum.
+
+Useful mappings include:
+
+- Research fan-out: multiple `research` cards gather evidence in parallel, then
+  a `synthesis` card links those parents when interpretation is useful.
+- Direct research-to-build: research parents can feed build children directly
+  when the user prompt or approved plan already defines the implementation
+  direction.
+- Synthesis-to-dispatch: a `synthesis` card can propose or evaluate the next
+  build/audit graph, after which the orchestrator/user decides what to create.
+- Role loop: `build`, `audit`, and `fix` cards can cycle until the exit
+  condition is met.
+
+The synthesis prompt's requested output shape is authoritative. Do not force it
+to "combine" findings if the user asked for a decision memo, options analysis,
+risk register, build graph, or open questions.
+
+### Build/Audit/Fix Flows
+
+Use task kinds and dependencies to keep implementation, inspection, and repair
+separate:
+
+- `build` creates or modifies the requested implementation/artifact in its cwd.
+  It may start from scratch or modify existing work, but must inspect relevant
+  cwd files before editing.
+- `audit` links the build/synthesis parents, inspects only, and reports
+  findings with severity/confidence and residual risk. Do not ask it to fix
+  unless the card explicitly changes type/scope.
+- `fix` links the audit plus the relevant build/synthesis context, resolves
+  specific findings, ties each change back to a finding, and calls out unfixed
+  findings.
 
 ## Verification Discipline
 
@@ -351,5 +411,9 @@ responsibility, because orphaned worktrees are a real tester-day-one failure:
   Integrate.
 - Reaching for a nonexistent MCP discard/delete tool instead of the REST route.
 - Describing any ACP lane card (`claude-code`, `codex`, `gemini-acp`, `hermes`,
-  `pi-coding-agent`, `cursor-acp`) as isolated. At the default `bypassPermissions`
-  mode they are UNFENCED — label them so.
+  `pi-coding-agent`, `cursor-acp`) as having OpenCode-style file-tool/bash
+  fencing. ACP worktree cards can have a separate cwd and base-checkout escape
+  detection, but their tools are UNFENCED — label them so.
+- Omitting task type or dependency links, causing child cards to miss the
+  dispatcher-injected task context and parent context.
+- Pasting stale parent summaries into child prompts instead of linking parents.

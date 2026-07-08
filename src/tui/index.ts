@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type BoardSettings, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type BoardSettings, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -305,10 +305,10 @@ type WizardStep = "identity" | "harness" | "agentProfile" | "isolation" | "depen
 
 const IDENTITY_FIELDS_AGENT = ["type", "title", "description", "directory"] as const;
 const IDENTITY_FIELDS_MANUAL = ["type", "title", "description", "assignedTo", "directory"] as const;
-const HARNESS_FIELDS_OPENCODE = ["harness", "provider", "model"] as const;
+const HARNESS_FIELDS_OPENCODE = ["taskKind", "harness", "provider", "model"] as const;
 /** MODEL is locked out while PROVIDER is "Use Agent Profile Default" (draft.providerId === "") — nothing to pick. */
-const HARNESS_FIELDS_OPENCODE_LOCKED = ["harness", "provider"] as const;
-const HARNESS_FIELDS_CLAUDE = ["harness", "model"] as const;
+const HARNESS_FIELDS_OPENCODE_LOCKED = ["taskKind", "harness", "provider"] as const;
+const HARNESS_FIELDS_CLAUDE = ["taskKind", "harness", "model"] as const;
 /** Shared label for "no explicit provider/model — the assigned agent profile's own model wins." */
 const AGENT_PROFILE_DEFAULT_LABEL = "Use Agent Profile Default";
 const AGENT_PROFILE_FIELDS_OPENCODE = ["agent"] as const;
@@ -449,6 +449,7 @@ interface GlobalArchiveRecord {
   source_db_path: string;
   task_id: string;
   task_type?: TaskType | string | null;
+  task_kind?: TaskKind | string | null;
   title: string;
   description: string;
   directory: string;
@@ -483,6 +484,7 @@ interface ArchiveReaderOptions {
 
 interface NewTaskDraft {
   type: TaskType;
+  taskKind: TaskKind;
   title: string;
   description: string;
   directory: string;
@@ -541,6 +543,11 @@ interface ArchiveState {
   focused: boolean;
   /** Expanded detail mode hides the metadata block so the tab content gets the full height. */
   expanded: boolean;
+}
+
+interface SettingsDirtyWorktreesState {
+  selectedIndex: number;
+  confirmDeletePath?: string;
 }
 
 /** Detail tabs shown for a selected card via Enter. */
@@ -608,6 +615,7 @@ interface TuiState {
   diagnostics?: BoardDiagnostics;
   settingsLoading?: boolean;
   settingsError?: string;
+  settingsDirtyWorktrees?: SettingsDirtyWorktreesState;
   cwd: string;
   overlay: Overlay;
   newTask?: NewTaskDraft;
@@ -735,7 +743,6 @@ interface TuiActions {
   setupWorkspace: () => Promise<void>;
   openSettings: () => Promise<void>;
   refreshSettings: () => Promise<void>;
-  toggleWorktreeDefault: () => Promise<void>;
   toggleBashSandbox: () => Promise<void>;
   // Open-in-editor (e on a DiffView selection)
   editorSpawner: EditorSpawner;
@@ -991,21 +998,6 @@ export async function runOpenBoardTui(
   const openSettings = async () => {
     state.viewState = transitionView(state.viewState, "settings");
     await refreshSettings();
-  };
-
-  const toggleWorktreeDefault = async () => {
-    const next = !(state.settings?.worktreeDefault ?? false);
-    state.status = `worktree default ${next ? "on" : "off"}...`;
-    render();
-    try {
-      state.settings = await currentClient.updateSettings({ worktreeDefault: next });
-      state.diagnostics = await currentClient.getDiagnostics();
-      state.status = `worktree default ${next ? "enabled" : "disabled"}`;
-    } catch (error) {
-      state.settingsError = errorMessage(error);
-      state.status = "worktree toggle failed";
-    }
-    render();
   };
 
   const toggleBashSandbox = async () => {
@@ -1369,7 +1361,6 @@ export async function runOpenBoardTui(
       setupWorkspace,
       openSettings,
       refreshSettings,
-      toggleWorktreeDefault,
       toggleBashSandbox,
       editorSpawner,
     }).catch((error) => {
@@ -1936,7 +1927,7 @@ function archiveDetailRows(record: GlobalArchiveRecord, model: ModelRef | null):
           { label: "AGENT", value: record.agent ?? "unassigned", color: COLORS.text },
           { label: "MODEL", value: model ? modelLabel(model) : "agent default", color: COLORS.text },
           { label: "DIR", value: shortPath(record.directory), color: COLORS.text },
-          { label: "ISO", value: record.isolation ?? "board default", color: COLORS.text },
+          { label: "ISO", value: record.isolation ?? "in-place", color: COLORS.text },
           ...(record.isolation === "worktree"
             ? [{ label: "WORKTREE", value: archiveWorktreeId(record), color: COLORS.text }]
             : []),
@@ -2319,6 +2310,8 @@ function renderInstanceRow(ui: OpenTui, state: TuiState, item: InstanceListItem,
 }
 
 function renderSettingsView(ui: OpenTui, state: TuiState) {
+  if (state.settingsDirtyWorktrees) return renderSettingsDirtyWorktreesView(ui, state);
+
   const settings = state.settings;
   const diagnostics = state.diagnostics;
   const sandbox = diagnostics?.sandbox;
@@ -2326,15 +2319,15 @@ function renderSettingsView(ui: OpenTui, state: TuiState) {
   const worktree = diagnostics?.worktree;
   const instance = diagnostics?.instance;
   const editor = diagnostics?.editor;
+  const dirtyCount = worktree?.dirtyOrphans?.length || worktree?.keptDirtyCount || 0;
 
   const rows: MetaRow[] = [
-    { label: "WORKTREE", value: settings?.worktreeDefault ? "default on" : "default off", color: settings?.worktreeDefault ? COLORS.accentBright : COLORS.text },
     { label: "SANDBOX", value: `desired ${sandbox?.desired ?? (settings?.bashSandbox ? "on" : "off")} · effective ${sandbox?.effective ?? "unknown"}`, color: sandbox?.restartRequired ? COLORS.bright : COLORS.text },
     { label: "RESTART", value: sandbox?.restartRequired ? "required for sandbox change" : "not required", color: sandbox?.restartRequired ? COLORS.bright : COLORS.muted },
     { label: "OPENCODE", value: opencode ? `${opencode.reachable ? "reachable" : "unreachable"} ${opencode.version ?? ""}`.trim() : "unknown", color: opencode?.reachable ? COLORS.accentBright : COLORS.bright },
     { label: "OC URL", value: opencode?.url ?? "unknown", color: COLORS.text },
     { label: "SWEEP", value: worktree ? `${worktree.removedCleanCount} clean removed · ${worktree.keptDirtyCount} dirty kept` : "unknown", color: COLORS.text },
-    { label: "DIRTY", value: worktree?.dirtyOrphans?.length ? worktree.dirtyOrphans.map((item) => shortPath(item.worktreePath)).join(", ") : "none kept", color: worktree?.dirtyOrphans?.length ? COLORS.bright : COLORS.muted },
+    { label: "DIRTY", value: `${dirtyCount} dirty worktree${dirtyCount === 1 ? "" : "s"}`, color: dirtyCount ? COLORS.bright : COLORS.muted },
     { label: "INSTANCE", value: instance?.instanceName ?? "unnamed", color: COLORS.text },
     { label: "BOARD URL", value: instance?.boardUrl ?? state.boardUrl, color: COLORS.text },
     { label: "PORT", value: instance ? String(instance.port) : "unknown", color: COLORS.text },
@@ -2355,6 +2348,44 @@ function renderSettingsView(ui: OpenTui, state: TuiState) {
       ui.Text({ content: state.settingsError, fg: COLORS.bright, wrapMode: "word", height: 2 }),
     ] : []),
   );
+}
+
+function renderSettingsDirtyWorktreesView(ui: OpenTui, state: TuiState) {
+  const dirty = settingsDirtyOrphans(state);
+  const selectedIndex = clampIndex(state.settingsDirtyWorktrees?.selectedIndex ?? 0, dirty.length);
+  const selectedPath = dirty[selectedIndex]?.worktreePath;
+  const rows = dirty.length === 0
+    ? [ui.Text({ content: "No dirty orphan worktrees", fg: COLORS.muted, height: 1, truncate: true })]
+    : dirty.map((item, index) => {
+        const selected = index === selectedIndex;
+        const armed = state.settingsDirtyWorktrees?.confirmDeletePath === item.worktreePath;
+        return ui.Box(
+          { width: "100%", height: 2, flexDirection: "column", gap: 0, ...boxBg(selected ? COLORS.panelRaised : COLORS.panel) },
+          ui.Text({ content: `${selected ? "▸ " : "  "}${item.taskId}  ${dirtyFileCountLabel(item.dirtyFileCount)}${armed ? "  delete?" : ""}`, fg: selected ? COLORS.bright : COLORS.text, height: 1, truncate: true }),
+          ui.Text({ content: shortPath(item.worktreePath), fg: armed ? COLORS.bright : COLORS.muted, height: 1, truncate: true }),
+        );
+      });
+
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", border: true, borderStyle: "single", borderColor: COLORS.border, paddingX: 2, paddingY: 1, gap: 1, ...boxBg(COLORS.panel) },
+    ui.Box(
+      { width: "100%", flexDirection: "row", height: 1 },
+      ui.Text({ content: "Dirty Worktrees", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, flexGrow: 1, truncate: true }),
+      ui.Text({ content: `${dirty.length}`, fg: dirty.length ? COLORS.bright : COLORS.muted, height: 1, truncate: true }),
+    ),
+    ui.Text({ content: selectedPath ? "Delete force-removes the worktree and keeps the branch for manual salvage." : "No action needed.", fg: COLORS.muted, height: 2, wrapMode: "word" }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...rows,
+  );
+}
+
+function settingsDirtyOrphans(state: TuiState) {
+  return state.diagnostics?.worktree.dirtyOrphans ?? [];
+}
+
+function dirtyFileCountLabel(count: number | undefined): string {
+  if (count === undefined) return "files unknown";
+  return `${count} file${count === 1 ? "" : "s"}`;
 }
 
 // ── Switcher overlay ───────────────────────────────────────────────────────────
@@ -2903,7 +2934,7 @@ function selectedDetailRows(state: TuiState, task: Task): MetaRow[] {
             : []),
           { label: "MODEL", value: modelLabel(task.model ?? undefined), color: COLORS.text },
           { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
-          { label: "ISO", value: task.isolation ?? "board default", color: COLORS.text },
+          { label: "ISO", value: task.isolation ?? "in-place", color: COLORS.text },
           ...(task.isolation === "worktree"
             ? [{ label: "WORKTREE", value: worktreeId(task), color: COLORS.muted }]
             : []),
@@ -3803,7 +3834,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
     ? state.detailTab === "comments"
       ? "↑/↓ comments · ←/→ tabs · ↵ close details · c comment · r reply · esc close · q quit"
       : "↑/↓ scroll detail · ←/→ tabs · ↵ close details · m move · esc close · q quit"
-    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · f filter · u refresh · ? help · q quit · A global archive";
+    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · f filter · p settings · u refresh · ? help · q quit · A global archive";
 
   return ui.Box(
     {
@@ -3843,7 +3874,9 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             : state.viewState.view === "diff"
             ? diffViewKeyHints(state.diffView)
             : state.viewState.view === "settings"
-            ? "w toggle worktree · s toggle sandbox desired · u refresh · b/esc back · q quit"
+            ? state.settingsDirtyWorktrees
+              ? "↑/↓ dirty worktrees · d delete · u refresh · b/esc back · q quit"
+              : "D dirty worktrees · s toggle sandbox desired · u refresh · b/esc back · q quit"
             : boardKeyHints,
         fg: COLORS.text,
         height: 1,
@@ -3895,6 +3928,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["m", "manual move to lane"],
     ["g", "init git and run"],
     ["n", "new task"],
+    ["p", "settings"],
     ["v", "view diff (Review cards)"],
     ["u", "refresh board"],
     ["b", "switch instances"],
@@ -4080,11 +4114,12 @@ function renderIdentityStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   );
 }
 
-// Step B — HARNESS, then (OpenCode) PROVIDER + MODEL synced to the live
+// Step B — TASK TYPE, HARNESS, then (OpenCode) PROVIDER + MODEL synced to the live
 // /api/providers roster, or (Claude Code) the fixed MODEL alias list, unchanged.
 function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    renderSelectField(ui, "TASK TYPE", currentTaskKindLabel(draft), draft.field === "taskKind"),
     renderSelectField(ui, "HARNESS", currentHarnessLabel(draft), draft.field === "harness"),
     ...(draft.harness === "opencode"
       ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
@@ -4296,6 +4331,7 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
   if (draft.type === "manual") return [identity, dependencySummaryRows(draft, state)];
 
   const harnessModel: MetaRow[] = [
+    { label: "TASK TYPE", value: currentTaskKindLabel(draft), color: COLORS.text },
     { label: "HARNESS", value: currentHarnessLabel(draft), color: COLORS.text },
     ...(draft.harness === "opencode"
       ? [{ label: "PROVIDER", value: currentProviderLabel(draft, state.providers), color: COLORS.text }]
@@ -4865,8 +4901,42 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
 }
 
 async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const keyName = key.name || key.sequence;
   if (key.sequence === "q") {
     actions.shutdown();
+    return;
+  }
+  if (state.settingsDirtyWorktrees) {
+    const dirty = settingsDirtyOrphans(state);
+    if (key.sequence === "b" || isEscapeKey(key)) {
+      state.settingsDirtyWorktrees = undefined;
+      actions.render();
+      return;
+    }
+    if (key.sequence === "u") {
+      await actions.refreshSettings();
+      clampSettingsDirtySelection(state);
+      return;
+    }
+    if (keyName === "down" || keyName === "up") {
+      const current = clampIndex(state.settingsDirtyWorktrees.selectedIndex, dirty.length);
+      state.settingsDirtyWorktrees.selectedIndex = clampIndex(current + (keyName === "down" ? 1 : -1), dirty.length);
+      state.settingsDirtyWorktrees.confirmDeletePath = undefined;
+      actions.render();
+      return;
+    }
+    const selected = dirty[clampIndex(state.settingsDirtyWorktrees.selectedIndex, dirty.length)];
+    if (!selected) return;
+    if (key.sequence === "d") {
+      if (state.settingsDirtyWorktrees.confirmDeletePath !== selected.worktreePath) {
+        state.settingsDirtyWorktrees.confirmDeletePath = selected.worktreePath;
+        state.status = `Press d again to delete ${selected.taskId}`;
+        actions.render();
+        return;
+      }
+      await resolveSettingsDirtyWorktree(state, actions, selected.worktreePath);
+      return;
+    }
     return;
   }
   if (key.sequence === "b" || isEscapeKey(key)) {
@@ -4878,13 +4948,47 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
     await actions.refreshSettings();
     return;
   }
-  if (key.sequence === "w") {
-    await actions.toggleWorktreeDefault();
+  if (key.sequence === "D") {
+    const dirty = settingsDirtyOrphans(state);
+    if (dirty.length === 0) {
+      state.status = "no dirty orphan worktrees";
+      actions.render();
+      return;
+    }
+    state.settingsDirtyWorktrees = { selectedIndex: 0 };
+    actions.render();
     return;
   }
   if (key.sequence === "s") {
     await actions.toggleBashSandbox();
     return;
+  }
+}
+
+function clampSettingsDirtySelection(state: TuiState): void {
+  if (!state.settingsDirtyWorktrees) return;
+  state.settingsDirtyWorktrees.selectedIndex = clampIndex(state.settingsDirtyWorktrees.selectedIndex, settingsDirtyOrphans(state).length);
+  state.settingsDirtyWorktrees.confirmDeletePath = undefined;
+}
+
+async function resolveSettingsDirtyWorktree(
+  state: TuiState,
+  actions: TuiActions,
+  worktreePath: string,
+): Promise<void> {
+  state.status = "deleting dirty worktree...";
+  state.settingsDirtyWorktrees && (state.settingsDirtyWorktrees.confirmDeletePath = undefined);
+  actions.render();
+  try {
+    const outcome = await actions.client.resolveOrphanWorktree(worktreePath);
+    await actions.refreshSettings();
+    state.status = outcome.ok ? outcome.message : `delete failed: ${outcome.message}`;
+    clampSettingsDirtySelection(state);
+    actions.render();
+  } catch (error) {
+    state.error = errorMessage(error);
+    state.status = "delete dirty worktree failed";
+    actions.render();
   }
 }
 
@@ -5429,6 +5533,7 @@ function handleEditRequested(state: TuiState, actions: TuiActions): void {
 function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
   return {
     type: task.type ?? "agent",
+    taskKind: task.taskKind ?? "none",
     title: task.title,
     description: task.description,
     directory: task.directory,
@@ -5869,6 +5974,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
     const task = isEditing
       ? await actions.client.updateTask(draft.editingTaskId as string, draft.type === "manual" ? {
           type: "manual",
+          taskKind: draft.taskKind,
           title,
           description: draft.description,
           directory,
@@ -5876,6 +5982,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           parentIds: draft.parentIds,
         } : {
           type: "agent",
+          taskKind: draft.taskKind,
           harness: draft.harness,
           title,
           description: draft.description,
@@ -5891,6 +5998,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
         })
       : await actions.client.createTask(draft.type === "manual" ? {
           type: "manual",
+          taskKind: draft.taskKind,
           title,
           description: draft.description,
           directory,
@@ -5898,6 +6006,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           parentIds: draft.parentIds,
         } : {
           type: "agent",
+          taskKind: draft.taskKind,
           harness: draft.harness,
           title,
           description: draft.description,
@@ -5930,6 +6039,7 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
   const agentId = defaultAgentId(state.agents);
   return {
     type: "agent",
+    taskKind: "none",
     title: "",
     description: "",
     directory: state.cwd,
@@ -5969,6 +6079,9 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
     case "type":
       draft.type = draft.type === "agent" ? "manual" : "agent";
       if (!stepFieldOrder(state, draft).includes(draft.field)) draft.field = stepFieldOrder(state, draft)[0] ?? draft.field;
+      return true;
+    case "taskKind":
+      cycleTaskKind(draft, delta);
       return true;
     case "harness":
       {
@@ -6102,6 +6215,11 @@ function cycleProvider(draft: NewTaskDraft, providers: RosterProvider[], delta: 
   const provider = providers.find((item) => item.id === draft.providerId);
   draft.model = provider ? modelRefFromProvider(provider) : undefined;
   draft.modelQuery = undefined; // a new provider means a new candidate list — any stale filter no longer applies
+}
+
+function cycleTaskKind(draft: NewTaskDraft, delta: number): void {
+  const current = Math.max(0, TASK_KINDS.indexOf(draft.taskKind));
+  draft.taskKind = TASK_KINDS[(current + delta + TASK_KINDS.length) % TASK_KINDS.length];
 }
 
 function modelRefFromProvider(provider: RosterProvider): ModelRef | undefined {
@@ -6980,6 +7098,27 @@ function currentAgentLabel(draft: NewTaskDraft): string {
 
 function currentHarnessLabel(draft: NewTaskDraft): string {
   return harnessDisplayName(draft.harness);
+}
+
+function currentTaskKindLabel(draft: NewTaskDraft): string {
+  return taskKindDisplayName(draft.taskKind);
+}
+
+function taskKindDisplayName(kind: TaskKind): string {
+  switch (kind) {
+    case "none":
+      return "None";
+    case "research":
+      return "Research";
+    case "synthesis":
+      return "Synthesis";
+    case "build":
+      return "Build";
+    case "audit":
+      return "Audit";
+    case "fix":
+      return "Fix";
+  }
 }
 
 function currentPermissionModeLabel(catalog: AcpConfigCatalog, draft: NewTaskDraft): string {

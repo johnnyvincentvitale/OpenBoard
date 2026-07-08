@@ -12,7 +12,7 @@
  * moves the task back to `in_progress`. `abort()` stops the task's session.
  * `shutdown()` stops consuming the event stream.
  */
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
 import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, resolveOpenCodePermissionRules } from "../shared";
@@ -26,7 +26,9 @@ import { createPermissionResponderPool, type PermissionResponderPool } from "./p
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, GeminiAcpRunner, HermesAcpRunner, PiAcpRunner } from "./claude-acp-runner";
 import type { ClaudeCodeRunnerLike } from "./claude-code-runner";
+import { completionHandoffGuidance } from "./completion-contract";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
+import { taskExecutionContext } from "./task-context";
 import {
   isExternalDirectoriesAllowed,
   isUnderWorkspace,
@@ -113,10 +115,9 @@ export interface TaskDispatcherDeps {
   sandbox?: SandboxStatus;
 }
 
-/** Resolve the effective isolation for a task: its override, else the board default. */
-function wantsWorktree(task: Task, store: TaskStore): boolean {
-  if (task.isolation) return task.isolation === "worktree";
-  return store.getSettings().worktreeDefault;
+/** Resolve whether a task explicitly requests worktree isolation. */
+function wantsWorktree(task: Task): boolean {
+  return task.isolation === "worktree";
 }
 
 function unmetReason(parent: Task): string | null {
@@ -381,7 +382,17 @@ function toCleanupOutcome(outcome: WorktreeCleanupOutcome): WorktreeCleanupOutco
     kept: outcome.kept,
     message: outcome.message,
     ...(outcome.worktreePath ? { worktreePath: outcome.worktreePath } : {}),
+    ...(outcome.dirtyFileCount !== undefined ? { dirtyFileCount: outcome.dirtyFileCount } : {}),
   };
+}
+
+function parentWorktreeRelativeChangedFiles(parent: Task): string[] {
+  return (parent.completion?.changedFiles ?? []).map((file) => {
+    if (!parent.worktreePath || !isAbsolute(file)) return file;
+    const rel = relative(parent.worktreePath, file);
+    const outsideParentWorktree = rel === ".." || rel.startsWith("../") || rel.startsWith("..\\") || isAbsolute(rel);
+    return rel && !outsideParentWorktree ? rel : file;
+  });
 }
 
 function shellQuote(value: string): string {
@@ -504,7 +515,7 @@ export class TaskDispatcher implements Dispatcher {
     // Resolve where the session actually runs. In worktree isolation the session
     // runs in a dedicated `git worktree`; a non-repo directory can't be isolated,
     // so we block the run and surface the "make it a git repo?" decision instead.
-    const isolatedRun = wantsWorktree(task, this.store);
+    const isolatedRun = wantsWorktree(task);
     if (isolatedRun) {
       // Fail closed: a worktree-isolated task's write protection depends on
       // the sandbox wrapper being wired into OpenCode's `shell` at server
@@ -569,9 +580,11 @@ export class TaskDispatcher implements Dispatcher {
     const taskPrompt = isolatedRun
       ? this.withWorktreeIsolationPreamble(execDirectory, baseRepoDirectory, task.description)
       : task.description;
+    const contextPrompt = this.withTaskContext(task, taskPrompt);
+    const parentPrompt = this.withParentHandoffs(task, contextPrompt);
     const promptError = await this.prompt(
       sessionId,
-      this.withCompletionContract(task.id, this.withParentHandoffs(task, taskPrompt), runStartedAt),
+      this.withCompletionContract(task, parentPrompt, runStartedAt),
       task.agent ?? undefined,
       task.model ?? undefined,
     );
@@ -620,10 +633,12 @@ export class TaskDispatcher implements Dispatcher {
     const runner = this.acpRunners[harness];
     const label = harnessDisplayName(harness);
     try {
+      const contextPrompt = this.withTaskContext(task, prompt);
+      const parentPrompt = this.withParentHandoffs(task, contextPrompt);
       const launched = await runner[action]({
         task,
         directory: execDirectory,
-        prompt: this.withAcpPreflightContext(this.withParentHandoffs(task, prompt), warning, label),
+        prompt: this.withAcpPreflightContext(parentPrompt, warning, label),
         runStartedAt,
       });
       this.store.update(task.id, {
@@ -953,6 +968,51 @@ export class TaskDispatcher implements Dispatcher {
     return outcomes;
   }
 
+  async resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome> {
+    if (!worktreePath || !worktreePath.startsWith("/")) {
+      throw AdapterError.validation("worktreePath must be an absolute path");
+    }
+
+    const tasks = this.store.list();
+    if (tasks.some((task) => task.worktreePath === worktreePath)) {
+      throw AdapterError.validation("worktree is still referenced by a task");
+    }
+
+    const repoRoot = await this.findManagedWorktreeRepoRoot(worktreePath, tasks);
+    if (!repoRoot) throw AdapterError.notFound(`Orphan worktree not found: ${worktreePath}`);
+
+    const outcome = toCleanupOutcome(await this.worktrees.cleanupWorktree(repoRoot, worktreePath, { force: true }));
+    if (outcome.removed) this.forgetDirtyOrphan(worktreePath);
+    return outcome;
+  }
+
+  private async findManagedWorktreeRepoRoot(worktreePath: string, tasks: Task[]): Promise<string | undefined> {
+    const repoRoots = new Set<string>(this.store.listKnownWorktreeRepoRoots());
+    for (const task of tasks) {
+      try {
+        repoRoots.add(await this.resolveRepoRoot(this.resolveDirectory(task.directory)));
+      } catch {
+        // Ignore stale task directories while resolving an orphan.
+      }
+    }
+    for (const repoRoot of repoRoots) {
+      const worktrees = await this.worktrees.listManagedWorktrees(repoRoot, this.worktreeBaseDir(repoRoot));
+      if (worktrees.includes(worktreePath)) return repoRoot;
+    }
+    return undefined;
+  }
+
+  private forgetDirtyOrphan(worktreePath: string): void {
+    const current = this.store.getSweepResult();
+    if (!current) return;
+    const dirtyOrphans = current.dirtyOrphans.filter((item) => item.worktreePath !== worktreePath);
+    this.store.setSweepResult({
+      ...current,
+      keptDirtyCount: dirtyOrphans.length,
+      dirtyOrphans,
+    });
+  }
+
   private async prompt(
     sessionId: string,
     text: string,
@@ -975,30 +1035,55 @@ export class TaskDispatcher implements Dispatcher {
     }
   }
 
-  private withCompletionContract(taskId: string, prompt: string, runStartedAt?: number): string {
+  private withCompletionContract(task: Task, prompt: string, runStartedAt?: number): string {
+    const taskId = task.id;
     const taskPath = `/api/tasks/${encodeURIComponent(taskId)}`;
     const runQuery = runStartedAt === undefined ? "" : `?runStartedAt=${encodeURIComponent(String(runStartedAt))}`;
     const completeUrl = `${this.adapterBaseUrl}${taskPath}/complete${runQuery}`;
     const blockUrl = `${this.adapterBaseUrl}${taskPath}/block${runQuery}`;
     const authHeader = this.boardToken ? ` -H ${shellQuote(`Authorization: Bearer ${this.boardToken}`)}` : "";
-    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\nWhen all work and verification are complete, call exactly one of these commands as your final action (replace JSON values with your actual report):\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
+    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind)}\n\nWhen all work and verification are complete, call exactly one of these commands as your final action (replace JSON values with your actual report):\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
+  }
+
+  private withTaskContext(task: Task, prompt: string): string {
+    const context = taskExecutionContext(task.taskKind);
+    if (!context) return prompt;
+    return `${prompt}\n\n---\n${context}`;
   }
 
   private withParentHandoffs(task: Task, prompt: string): string {
     const parentIds = task.parentIds ?? this.store.getParentIds(task.id);
     if (parentIds.length === 0) return prompt;
 
-    const lines = [prompt, "", "---", "PARENT HANDOFFS"];
-    for (const parentId of parentIds) {
+    const lines = [
+      prompt,
+      "",
+      "---",
+      "PARENT CONTEXT",
+      "Parent task worktrees are read-only. Use them only to inspect parent changes.",
+      "Do not edit them. Do not run mutating commands there. Do all implementation and verification in your own cwd.",
+      "",
+    ];
+    for (const [index, parentId] of parentIds.entries()) {
       const parent = this.store.get(parentId);
       if (!parent) continue;
-      lines.push(`Parent: ${parent.title} (${parent.id})`);
+      const label = `PARENT-${String(index).padStart(3, "0")}`;
+      const changedFiles = parentWorktreeRelativeChangedFiles(parent);
+      lines.push(`${label}: ${parent.title}`);
+      lines.push(`${label} WORKTREE: ${parent.worktreePath ?? "unavailable"}`);
+      lines.push(`${label} TASK ID: ${parent.id}`);
+      lines.push(`${label} BRANCH: ${parent.worktreeBranch ?? "unavailable"}`);
       if (parent.completion) {
-        lines.push(`Summary: ${parent.completion.summary}`);
-        lines.push(
-          `Changed files: ${parent.completion.changedFiles.length > 0 ? parent.completion.changedFiles.join(", ") : "none"}`,
-        );
-        lines.push("Verification:");
+        lines.push(`${label} SUMMARY: ${parent.completion.summary}`);
+        lines.push(`${label} Changed files:`);
+        if (changedFiles.length > 0) {
+          for (const file of changedFiles) {
+            lines.push(`- ${file}`);
+          }
+        } else {
+          lines.push("- none reported");
+        }
+        lines.push(`${label} Verification:`);
         if (parent.completion.verification.length > 0) {
           for (const check of parent.completion.verification) {
             lines.push(`- ${check.command}: ${check.result}`);
@@ -1006,32 +1091,32 @@ export class TaskDispatcher implements Dispatcher {
         } else {
           lines.push("- none reported");
         }
-        lines.push(`Residual risk: ${parent.completion.residualRisk}`);
+        lines.push(`${label} Residual risk: ${parent.completion.residualRisk}`);
       } else {
         lines.push("No structured handoff exists; parent is manually marked Done.");
       }
       lines.push("");
     }
+    lines.push("If a parent changed file also exists in your cwd, inspect the parent copy only to understand intent, then open/edit/test the cwd copy.");
 
     return lines.join("\n").trimEnd();
   }
 
   /**
    * Boundary preamble for worktree-isolated task prompts — states the agent's actual
-   * cwd, the base repo path it must not write to, and the relative-path recovery hint.
+   * cwd, keeps normal work on cwd-relative paths, and gives a recovery hint for
+   * outside-cwd denials.
    * This is guidance/recovery only: `WRITE_FENCED_PERMISSION` + the permission-responder
    * pool are what actually block an absolute-path escape (worktree-isolation-plan.md
    * Phase 1). Telling the agent its boundaries upfront just makes it less likely to try
    * an absolute path in the first place, and gives it something to recover with if a
    * write is denied — it does not, on its own, un-stick an already-stalled session
    * (that's the dispatcher-side auto-nudge in trackStallAndMaybeNudge()). It also steers
-   * the agent to the read tool for base-repo context instead of shell commands: the
-   * permission-responder pool only auto-approves read-class tools, so a shell command
-   * that trips the shell tool's own external-directory detection gets denied like any
-   * other bash call, where the read tool is approved every time.
+   * the agent to prefer worktree-local context and avoid sibling/base checkout paths
+   * unless the task explicitly requests read-only inspection.
    */
-  private withWorktreeIsolationPreamble(worktreePath: string, baseRepoPath: string, prompt: string): string {
-    return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nBase repo (READ-ONLY — do not write here): ${baseRepoPath}\nEdit only inside your worktree; use relative paths.\nUse the read tool, not shell commands, for base-repo context.\n---\n\n${prompt}`;
+  private withWorktreeIsolationPreamble(worktreePath: string, _baseRepoPath: string, prompt: string): string {
+    return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nDo all edits, tests, and shell commands from cwd using relative paths.\nDo not use absolute paths into the original checkout or any sibling task worktree unless the task explicitly says to inspect them read-only.\nRead context from cwd first: CLAUDE.md, AGENTS.md, README.md, src/..., test/...\nIf an outside-cwd write is denied, switch back to cwd-relative paths or report blocked. Do not try chmod, symlinks, npm install, or temp-dir workarounds unless the task explicitly asks for that bootstrap.\n---\n\n${prompt}`;
   }
 
   private withRebaseConflictContext(task: Task, prompt: string): string {
@@ -1057,7 +1142,7 @@ export class TaskDispatcher implements Dispatcher {
       this.assertParentsSatisfied(task);
       this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
       const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
-      await this.captureDispatchBaseline(task, wantsWorktree(task, this.store), execDirectory);
+      await this.captureDispatchBaseline(task, wantsWorktree(task), execDirectory);
       return this.runAcpTask(task, execDirectory, feedback ?? task.description, "retry");
     }
 
@@ -1071,7 +1156,7 @@ export class TaskDispatcher implements Dispatcher {
     const runStartedAt = Date.now();
     // retry() re-prompts an existing session — the worktree already exists from
     // run(), so its path comes off the task record rather than ensureWorktree().
-    const isolatedRetry = wantsWorktree(task, this.store);
+    const isolatedRetry = wantsWorktree(task);
     await this.captureDispatchBaseline(task, isolatedRetry, this.resolveDirectory(task.worktreePath ?? task.directory));
     const baseRetryPrompt = this.withRebaseConflictContext(task, feedback ?? task.description);
     const retryPrompt = isolatedRetry
@@ -1081,9 +1166,11 @@ export class TaskDispatcher implements Dispatcher {
           baseRetryPrompt,
         )
       : baseRetryPrompt;
+    const contextPrompt = this.withTaskContext(task, retryPrompt);
+    const parentPrompt = this.withParentHandoffs(task, contextPrompt);
     const promptError = await this.prompt(
       task.sessionId,
-      this.withCompletionContract(task.id, this.withParentHandoffs(task, retryPrompt), runStartedAt),
+      this.withCompletionContract(task, parentPrompt, runStartedAt),
       task.agent ?? undefined,
       task.model ?? undefined,
     );

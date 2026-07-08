@@ -10,6 +10,7 @@ import type {
   PermissionOverrides,
   Task,
   TaskHarness,
+  TaskKind,
   ClaudeCodePermissionMode,
   TaskComment,
   TaskCompletionLocation,
@@ -20,13 +21,14 @@ import type {
   TaskStore,
   WorktreeSweepResult,
 } from "../shared";
-import { DEFAULT_COLUMN, TASK_HARNESSES } from "../shared";
+import { DEFAULT_COLUMN, TASK_HARNESSES, TASK_KINDS } from "../shared";
 import { bootstrap } from "./schema";
 
 const TASK_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS task (
   id          TEXT PRIMARY KEY,
   task_type   TEXT NOT NULL DEFAULT 'agent',
+  task_kind   TEXT NOT NULL DEFAULT 'none',
   harness     TEXT NOT NULL DEFAULT 'opencode',
   title       TEXT NOT NULL,
   description TEXT NOT NULL,
@@ -115,6 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_task_events_task_created ON task_events(task_id, 
 /** Columns added after the initial task schema — ALTER-in for pre-existing DBs. */
 const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["task_type", "TEXT NOT NULL DEFAULT 'agent'"],
+  ["task_kind", "TEXT NOT NULL DEFAULT 'none'"],
   ["harness", "TEXT NOT NULL DEFAULT 'opencode'"],
   ["harness_session_id", "TEXT"],
   ["harness_session_name", "TEXT"],
@@ -148,13 +151,14 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["permission_overrides", "TEXT"],
 ];
 
-const DEFAULT_SETTINGS: BoardSettings = { worktreeDefault: false, bashSandbox: false };
+const DEFAULT_SETTINGS: BoardSettings = { bashSandbox: false };
 const WORKTREE_REPO_ROOTS_SETTING = "worktreeRepoRoots";
 const LAST_SWEEP_SETTING = "lastSweep";
 
 interface TaskRowRecord {
   id: string;
   task_type: string;
+  task_kind: string;
   harness: string;
   title: string;
   description: string;
@@ -217,11 +221,18 @@ interface TaskEventRowRecord {
   created_at: number;
 }
 
+function normalizeTaskKind(value: string): TaskKind {
+  if (value === "plan") return "synthesis";
+  return (TASK_KINDS as readonly string[]).includes(value) ? value as TaskKind : "none";
+}
+
 function toTask(record: TaskRowRecord): Task {
   const harness = (TASK_HARNESSES as readonly string[]).includes(record.harness) ? record.harness as TaskHarness : "opencode";
+  const taskKind = normalizeTaskKind(record.task_kind);
   const task: Task = {
     id: record.id,
     type: record.task_type === "manual" ? "manual" : "agent",
+    taskKind,
     harness,
     title: record.title,
     description: record.description,
@@ -351,12 +362,13 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
-         VALUES (@id, @type, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, task_kind, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
+         VALUES (@id, @type, @taskKind, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
            task_type = @type,
+           task_kind = @taskKind,
            harness = @harness,
            title = @title,
            description = @description,
@@ -517,6 +529,7 @@ export class SqliteTaskStore implements TaskStore {
       this.stmts.insertTask.run({
         id,
         type: data.type ?? "agent",
+        taskKind: data.taskKind ?? "none",
         harness: data.harness ?? "opencode",
         title: data.title,
         description: data.description,
@@ -579,6 +592,7 @@ export class SqliteTaskStore implements TaskStore {
       this.stmts.updateTaskFields.run({
         id: taskId,
         type: merged.type,
+        taskKind: merged.taskKind ?? "none",
         harness: merged.harness ?? "opencode",
         title: merged.title,
         description: merged.description,
@@ -702,17 +716,14 @@ export class SqliteTaskStore implements TaskStore {
   }
 
   getSettings(): BoardSettings {
-    const wtRow = this.stmts.getSetting.get("worktreeDefault") as { value: string } | undefined;
     const bsRow = this.stmts.getSetting.get("bashSandbox") as { value: string } | undefined;
     return {
-      worktreeDefault: wtRow ? wtRow.value === "true" : DEFAULT_SETTINGS.worktreeDefault,
       bashSandbox: bsRow ? bsRow.value === "true" : DEFAULT_SETTINGS.bashSandbox,
     };
   }
 
   updateSettings(patch: Partial<BoardSettings>): BoardSettings {
     const next = { ...this.getSettings(), ...patch };
-    this.stmts.putSetting.run({ key: "worktreeDefault", value: next.worktreeDefault ? "true" : "false" });
     this.stmts.putSetting.run({ key: "bashSandbox", value: next.bashSandbox ? "true" : "false" });
     return next;
   }

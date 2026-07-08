@@ -147,6 +147,14 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
     }),
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
+    resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({
+      ok: true,
+      removed: true,
+      dirty: false,
+      kept: false,
+      message: "resolved",
+      worktreePath,
+    })),
     start: vi.fn(),
     shutdown: vi.fn(),
   } as unknown as Parameters<typeof createApp>[0]["dispatcher"];
@@ -958,7 +966,7 @@ describe("auth regression — route categories", () => {
         const res = await app.request("/api/settings", { headers: authHeaders() });
         expect(res.status).toBe(200);
         const body = await res.json();
-        expect(body).toEqual({ worktreeDefault: false, bashSandbox: false });
+        expect(body).toEqual({ bashSandbox: false });
       });
     });
 
@@ -968,7 +976,7 @@ describe("auth regression — route categories", () => {
         const res = await app.request("/api/settings", {
           method: "PUT",
           headers: jsonHeaders(),
-          body: JSON.stringify({ worktreeDefault: true }),
+          body: JSON.stringify({ bashSandbox: true }),
         });
         expect(res.status).toBe(401);
       });
@@ -978,7 +986,7 @@ describe("auth regression — route categories", () => {
         const res = await app.request("/api/settings", {
           method: "PUT",
           headers: jsonHeaders("wrong"),
-          body: JSON.stringify({ worktreeDefault: true }),
+          body: JSON.stringify({ bashSandbox: true }),
         });
         expect(res.status).toBe(401);
       });
@@ -988,10 +996,47 @@ describe("auth regression — route categories", () => {
         const res = await app.request("/api/settings", {
           method: "PUT",
           headers: jsonHeaders("correct"),
-          body: JSON.stringify({ worktreeDefault: true }),
+          body: JSON.stringify({ bashSandbox: true }),
         });
         expect(res.status).toBe(200);
       });
+    });
+  });
+
+  // -- Worktree orphan actions ------------------------------------------------
+
+  describe("POST /api/worktrees/orphans/resolve", () => {
+    const body = JSON.stringify({ worktreePath: "/repo/.opencode-board-worktrees/task_dirty" });
+
+    it("rejects with 401 when no token is provided", async () => {
+      const { app } = makeAuthedApp();
+      const res = await app.request("/api/worktrees/orphans/resolve", {
+        method: "POST",
+        headers: jsonHeaders(),
+        body,
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("rejects with 401 when the token is wrong", async () => {
+      const { app } = makeAuthedApp();
+      const res = await app.request("/api/worktrees/orphans/resolve", {
+        method: "POST",
+        headers: jsonHeaders("wrong"),
+        body,
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("delegates with 200 when the token is correct", async () => {
+      const { app, dispatcher } = makeAuthedApp();
+      const res = await app.request("/api/worktrees/orphans/resolve", {
+        method: "POST",
+        headers: jsonHeaders("correct"),
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(dispatcher.resolveOrphanWorktree).toHaveBeenCalledWith("/repo/.opencode-board-worktrees/task_dirty");
     });
   });
 

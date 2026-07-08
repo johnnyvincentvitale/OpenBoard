@@ -26,9 +26,10 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
   return {
     id,
     title: input.title as string,
-    description: input.description as string,
-    directory: input.directory as string,
-    harness: input.harness as Task["harness"],
+	    description: input.description as string,
+	    directory: input.directory as string,
+	    taskKind: input.taskKind as Task["taskKind"],
+	    harness: input.harness as Task["harness"],
     agent: input.agent as string | undefined,
     claudePermissionMode: input.claudePermissionMode as Task["claudePermissionMode"],
     model: input.model as Task["model"],
@@ -81,8 +82,9 @@ describe("board client", () => {
       {
         title: " Build TUI ",
         description: "Shared client first",
-        directory: "app",
-        agent: " build ",
+	        directory: "app",
+	        taskKind: "build",
+	        agent: " build ",
         model: "opencode/north-mini-code-free",
         isolation: "worktree",
       },
@@ -95,8 +97,9 @@ describe("board client", () => {
       `${DEFAULT_BOARD_URL}/api/tasks`,
     ]);
     expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
-      type: "agent",
-      title: "Build TUI",
+	      type: "agent",
+	      taskKind: "build",
+	      title: "Build TUI",
       description: "Shared client first",
       directory: `${CWD}/app`,
       agent: "build",
@@ -191,7 +194,7 @@ describe("board client", () => {
   it("calls task action endpoints", async () => {
     const task = createdTask("task-1", { title: "A", description: "", directory: CWD });
     const outcome: MergeOutcome = { task, ok: true, conflict: false, message: "merged" };
-    const settings: BoardSettings = { worktreeDefault: true, bashSandbox: false };
+    const settings: BoardSettings = { bashSandbox: false };
     const fetchMock = vi.fn(async (url: string | URL) => {
       const path = new URL(String(url)).pathname;
       if (path.endsWith("/move")) return jsonResponse([task]);
@@ -219,7 +222,8 @@ describe("board client", () => {
     await client.listComments("task-1");
     await client.listTaskEvents("task-1");
     await client.getSettings();
-    await client.updateSettings({ worktreeDefault: true });
+    await client.updateSettings({ bashSandbox: true });
+    await client.resolveOrphanWorktree("/repo/.opencode-board-worktrees/task_dirty");
     await client.deleteTask("task-1");
 
     const calls = fetchMock.mock.calls as unknown as Array<[string | URL, RequestInit | undefined]>;
@@ -241,6 +245,7 @@ describe("board client", () => {
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/events`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/settings`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/settings`, "PUT"],
+      [`${DEFAULT_BOARD_URL}/api/worktrees/orphans/resolve`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1`, "DELETE"],
     ]);
     expect(JSON.parse(String(calls[1][1]?.body))).toEqual({ feedback: "try again" });
@@ -258,9 +263,12 @@ describe("board client", () => {
     await expect(client.createTask({ title: "Bad model", model: "north-mini-code-free" })).rejects.toThrow(
       'model must use "provider/model-id"',
     );
-    await expect(client.createTask({ title: "Bad isolation", isolation: "container" })).rejects.toThrow(
-      "isolation must be 'worktree' or 'in-place'",
-    );
+	    await expect(client.createTask({ title: "Bad isolation", isolation: "container" })).rejects.toThrow(
+	      "isolation must be 'worktree' or 'in-place'",
+	    );
+	    await expect(client.createTask({ title: "Bad kind", taskKind: "investigate" as never })).rejects.toThrow(
+	      "taskKind must be one of",
+	    );
     await expect(client.createTask({ title: "Bad Claude permission", claudePermissionMode: "root" })).rejects.toThrow(
       "claudePermissionMode can only be set for claude-code agent tasks",
     );

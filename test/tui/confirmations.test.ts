@@ -192,10 +192,12 @@ describe("confirmation copy builders", () => {
     expect(copy.body.some((line) => line.startsWith("Permissions:"))).toBe(false);
   });
 
-  it("run confirmation for a card with no explicit isolation defers to the board default rather than guessing", () => {
+  it("run confirmation for a card with no isolation treats it as in-place", () => {
     const copy = buildConfirmationCopy("run", { title: "Widget work", harness: "opencode" });
 
-    expect(copy.body).toContain("Isolation: board default — the board's worktree-default setting decides at dispatch time.");
+    expect(copy.body).toContain(
+      "Isolation: in_place — no worktree is created; the agent works directly in this directory and its edits modify your live working tree.",
+    );
   });
 });
 

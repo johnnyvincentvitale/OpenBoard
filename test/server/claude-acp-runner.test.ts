@@ -7,6 +7,7 @@ import type { Task } from "../../src/shared";
 const task: Task = {
   id: "task_1",
   type: "agent",
+  taskKind: "research",
   harness: "claude-code",
   agent: "build",
   title: "Claude task",
@@ -138,6 +139,9 @@ describe("ClaudeAcpRunner", () => {
     expect(prompt.params?.sessionId).toBe("acp-session-1");
     const promptText = ((prompt.params?.prompt as Array<{ text?: string }> | undefined)?.[0]?.text) ?? "";
     expect(promptText).toContain("OPENBOARD CLAUDE ACP WORKER CONTRACT");
+    expect(promptText).toContain("Task type: research");
+    expect(promptText).toContain("factual findings, sources inspected, repo areas read, or evidence gathered");
+    expect(promptText).toContain("not applicable: research only");
     expect(promptText).toContain('complete_task with { taskId: "task_1", runStartedAt: 123');
   });
 

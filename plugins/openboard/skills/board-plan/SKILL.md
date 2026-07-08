@@ -22,6 +22,12 @@ Auto-promotion of ready children when a parent completes, per-card retry caps,
 and role-loop round-trip caps are not native — the orchestrator session enforces
 them procedurally, and this plan is where they get defined.
 
+OpenBoard also stores a `taskKind` on each card: `none`, `research`,
+`synthesis`, `build`, `audit`, or `fix`. The task kind changes the dispatch
+context and handoff guidance without changing the user's prompt or the JSON
+completion shape. Plan the kind deliberately; do not leave meaningful workflow
+roles as `none`.
+
 Plan, do not implement. The orchestrator session decomposes, dispatches,
 reviews, and integrates; it does not write feature code itself. Work that needs
 doing goes on a card.
@@ -53,36 +59,45 @@ Offer the user named shapes rather than a blank page:
   more than throughput.
 - **Arena / quorum** — N agents attempt the same problem in separate worktrees;
   the orchestrator (or the user) judges and keeps the winner.
+- **Typed evidence graph** — map `research`, `synthesis`, `build`, `audit`, and
+  `fix` cards onto any of the shapes above. The types describe each card's role;
+  they do not prescribe one fixed methodology. Use this when the run needs
+  explicit evidence gathering, interpretation, implementation, review, or repair
+  stages inside a solo pipeline, fan-out, waves, role loop, or arena/quorum.
 
 Serial at the edges, parallel in the middle: setup and integration are always
 serial; only execution parallelizes.
 
 ## What `isolation: "worktree"` Enforces
 
-On the OpenCode lane, a worktree-isolated card is contained at the tool and
-syscall level. Plan around these guarantees:
+On the OpenCode lane, a worktree-isolated card always gets a dedicated git
+worktree plus OpenBoard's file-tool fence and base-checkout escape detector.
+Plan around these guarantees:
 
 - **Write-fence.** File-tool writes outside the worktree are denied at the
   permission layer (reads outside are allowed); the fence is fail-closed.
 - **Escape detector.** The base checkout's git status is snapshotted at
   dispatch and re-checked before Review and before Integrate; a detected escape
   blocks the card with `pending: "base-checkout-escape"` instead of advancing.
-- **macOS sandbox (spawn mode).** Worktree cards additionally run under a
-  Seatbelt wrapper. If sandboxing is expected but unavailable, the card fails
-  closed at dispatch (`runState: "error"`) before any session starts — a
-  worktree card on macOS carries a sandbox precondition.
+- **Bash sandbox (spawn mode, optional).** If the instance's desired bash
+  sandbox setting is on and the macOS Seatbelt wrapper is available, bash tool
+  calls run under that wrapper. If desired is on but unavailable, OpenCode
+  worktree cards fail closed at dispatch (`runState: "error"`) before any
+  session starts. If the user turns desired off, worktree cards still keep the
+  file-tool fence and escape detector, but bash commands are not syscall-fenced.
 
 File-disjoint decomposition remains a core part of the plan: it keeps merges
 clean and Review legible, and it is how concurrent lanes stay independent. The
-containment stack is the structural backstop underneath that boundary, so a
-single agent's mistake cannot reach the base checkout.
+fence/detector stack is the structural backstop underneath that boundary, so a
+single OpenCode file-tool mistake cannot reach the base checkout.
 
 The Claude Code lane — and every other ACP harness (`codex`, `gemini-acp`,
-`hermes`, `pi-coding-agent`, `cursor-acp`) — is UNFENCED at its default
-`bypassPermissions` mode: no write-fence, escape detector, or sandbox. When the
-plan puts feature work on any ACP harness, label those cards UNFENCED and do not
-describe them as isolated. Only `harness: "opencode"` worktree runs carry the
-containment stack above.
+`hermes`, `pi-coding-agent`, `cursor-acp`) — can still run in a task worktree,
+but it does not get OpenCode's file-tool permission fence or bash sandbox.
+OpenBoard still snapshots the base checkout for worktree ACP runs and blocks on
+detected base-checkout escape, but the worker process itself is UNFENCED. Label
+ACP worktree cards as "worktree cwd, unfenced tools" instead of implying the
+same protection as OpenCode worktree cards.
 
 ## Decompose Along The File Tree
 
@@ -273,10 +288,56 @@ has blocked real cards whose tests write temp files through base-repo
 - **Integration test bootstrap**: `tsx ENOENT` in fresh worktrees — add a
   worktree bootstrap hook or a scoped test command.
 
-4. **macOS sandbox precondition (worktree + spawn mode).** A worktree card
-   fails closed if the sandbox wrapper is expected but unavailable. Confirm the
-   selected instance reports sandboxing available before planning a macOS
-   worktree fan-out, or plan for the fail-closed error as a first-run gate.
+4. **Bash sandbox desired/effective state (OpenCode worktree + spawn mode).**
+   Confirm the selected instance's diagnostics before planning a macOS OpenCode
+   worktree fan-out:
+   - desired on + effective on: bash wrapper is active.
+   - desired on + effective unavailable/off: worktree dispatch fails closed or
+     requires a restart.
+   - desired off: file-tool fence and escape detector remain, but bash commands
+     are intentionally not sandboxed.
+
+## Choose Task Types And Dependencies
+
+Every planned card should declare its `taskKind` and dependency links:
+
+- `none` — generic current behavior. Use only when the card does not fit a
+  workflow role.
+- `research` — gather factual findings, source evidence, repo observations, or
+  raw notes. It usually changes no product files.
+- `synthesis` — read parent context first and evaluate parent findings for
+  agreement, conflict, evidence strength, gaps, and implications. Preserve the
+  user's/card prompt as the authority for output shape; do not pre-bias the
+  output toward "combining" findings unless the user asked for that.
+- `build` — create or modify the requested implementation/artifact in cwd. It
+  may be from scratch or a modification of existing work.
+- `audit` — inspect only unless explicitly told otherwise; report findings with
+  severity/confidence and residual risk. Do not fix.
+- `fix` — resolve specific findings from parent audit/build/synthesis context
+  and tie each change back to the finding it addresses.
+
+Use dependency links for information flow, not prose duplication. A child card
+with parent links will not run until parents are satisfied. At dispatch,
+OpenBoard injects one `PARENT CONTEXT` section that marks parent worktrees
+read-only and lists each parent as `PARENT-000`, `PARENT-001`, ... with worktree,
+task id, branch, summary, changed files, verification, and residual risk. The
+changed-file paths are worktree-relative when possible. The child is told to
+inspect parent copies only for intent and then edit/test the cwd copy.
+
+Map task types onto the selected workflow shape explicitly. Useful mappings
+include:
+
+- Research fan-out inside any shape: multiple `research` parents -> one
+  `synthesis` child when interpretation is useful.
+- Direct research-to-build: one or more `research` parents -> one or more
+  `build` children when the prompt already makes the implementation direction
+  clear.
+- Synthesis-to-dispatch: a `synthesis` card proposes or evaluates a build/audit
+  graph, and the orchestrator/user decides what to dispatch next.
+- Build review: one or more `build` parents -> one `audit` child.
+- Audit repair: `audit` parent plus the relevant `build`/`synthesis` parent ->
+  one `fix` child.
+- Fix verification: `fix` parent -> `audit` child when quality gates matter.
 
 ## Write Cards As Contracts
 
@@ -285,6 +346,9 @@ whole contract:
 
 - Title with the run's namespace prefix.
 - Absolute working directory; `isolation: "worktree"` for anything concurrent.
+- Task type: `research`, `synthesis`, `build`, `audit`, `fix`, or `none`.
+- Parent dependencies: use `link_tasks` / `parentIds` so OpenBoard injects
+  parent context and gates dispatch until parents are satisfied.
 - Worker harness: `opencode` for OpenCode profile workers, or `claude-code` for
   Claude Code workers.
 - For OpenCode cards: assigned agent, whose verified roster model is
@@ -300,6 +364,11 @@ whole contract:
 - A required handoff: instruct the worker to end with a summary of what
   changed, what was run, and what passed, so the orchestrator, the next wave,
   or the opposing role inherits evidence instead of re-deriving it.
+
+Do not restate parent worktree absolute paths in the prompt unless the card is
+explicitly about read-only parent inspection. Link the parents instead. The
+dispatcher will inject the parent worktree context in a consistent, numbered
+format.
 
 Create cards through MCP `create_task`/`add_tasks`; check `list_tasks` first to
 avoid duplicates. Use guarded MCP control tools only from the orchestrator flow.
@@ -371,6 +440,10 @@ turn, state that approval before continuing.
 - Creating cards before the selected agent roster has been verified with a
   concrete model for OpenCode harness cards, or failing to confirm the created
   task stores the intended harness/model/permission fields.
+- Omitting `taskKind` on cards that are clearly research, synthesis, build,
+  audit, or fix roles.
+- Copy-pasting parent handoffs into child prompts instead of linking parents and
+  letting OpenBoard inject `PARENT CONTEXT`.
 - Creating OpenCode profiles for work that was supposed to run through the
   Claude Code harness.
 - N same-role profiles with hand-written (driftable) prompts instead of one

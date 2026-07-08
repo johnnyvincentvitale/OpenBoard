@@ -21,6 +21,7 @@ import type {
   RosterProvider,
   Task,
   TaskHarness,
+  TaskKind,
   TaskComment,
   TaskEvent,
   TaskIsolationMode,
@@ -44,6 +45,7 @@ import {
   PI_CODING_AGENT_MODEL_PROVIDER,
   TASK_HARNESSES,
   TASK_ISOLATION_MODES,
+  TASK_KINDS,
 } from "../shared";
 
 export type { BoardHealth } from "../shared/health";
@@ -69,6 +71,7 @@ export interface BoardClientOptions {
 export interface TaskSummary {
   id: string;
   type: TaskType;
+  taskKind?: TaskKind;
   harness?: TaskHarness;
   title: string;
   directory: string;
@@ -97,6 +100,7 @@ export interface TaskSummary {
 
 export interface CreateBoardTaskInput {
   type?: TaskType;
+  taskKind?: TaskKind;
   harness?: TaskHarness;
   title: string;
   description?: string;
@@ -115,8 +119,9 @@ export interface CreateBoardTaskInput {
 
 export type UpdateBoardTaskInput = Omit<
   Partial<CreateBoardTaskInput>,
-  "agent" | "permissionMode" | "claudePermissionMode" | "acpOptions" | "assignedTo" | "model" | "isolation" | "permissionOverrides" | "parentIds"
+  "taskKind" | "agent" | "permissionMode" | "claudePermissionMode" | "acpOptions" | "assignedTo" | "model" | "isolation" | "permissionOverrides" | "parentIds"
 > & {
+  taskKind?: TaskKind | null;
   agent?: string | null;
   permissionMode?: string | null;
   claudePermissionMode?: string | null;
@@ -154,6 +159,7 @@ export interface BoardClient {
   commitTaskFile(id: string, file: string, message?: string): Promise<FileCommitOutcome>;
   integrateTask(id: string, targetBranch?: string, options?: { commitRemaining?: boolean }): Promise<MergeOutcome>;
   discardWorktree(id: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
+  resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome>;
   linkTasks(parentId: string, childId: string): Promise<Task>;
   unlinkTasks(parentId: string, childId: string): Promise<Task>;
   completeTask(id: string, report: CompletionWithOutputInput, runStartedAt?: number): Promise<Task>;
@@ -163,7 +169,7 @@ export interface BoardClient {
   listTaskEvents(id: string): Promise<TaskEvent[]>;
   getTaskDiff(id: string): Promise<DiffResponse>;
   getSettings(): Promise<BoardSettings>;
-  updateSettings(patch: Partial<Pick<BoardSettings, "worktreeDefault" | "bashSandbox">>): Promise<BoardSettings>;
+  updateSettings(patch: Partial<Pick<BoardSettings, "bashSandbox">>): Promise<BoardSettings>;
   getHealth(): Promise<BoardHealth>;
   getDiagnostics(): Promise<BoardDiagnostics>;
 }
@@ -178,6 +184,7 @@ interface ResolvedOptions {
 
 const VALID_ISOLATION = new Set<TaskIsolationMode>(TASK_ISOLATION_MODES);
 const VALID_HARNESS = new Set<TaskHarness>(TASK_HARNESSES);
+const VALID_TASK_KIND = new Set<TaskKind>(TASK_KINDS);
 const VALID_CLAUDE_PERMISSION_MODE = new Set<ClaudeCodePermissionMode>(CLAUDE_CODE_PERMISSION_MODES);
 const VALID_PERMISSION_OVERRIDE_CATEGORY = new Set<PermissionOverrideCategory>(PERMISSION_OVERRIDE_CATEGORIES);
 const VALID_PERMISSION_OVERRIDE_ACTION = new Set<PermissionOverrideAction>(PERMISSION_OVERRIDE_ACTIONS);
@@ -324,6 +331,8 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       ),
     discardWorktree: (id, options) =>
       postJson<WorktreeCleanupOutcome>(resolved, buildTaskPath.discardWorktree(id), options ?? {}),
+    resolveOrphanWorktree: (worktreePath) =>
+      postJson<WorktreeCleanupOutcome>(resolved, "/api/worktrees/orphans/resolve", { worktreePath }),
     linkTasks: (parentId, childId) => postJson<Task>(resolved, buildTaskPath.links(childId), { parentId }),
     unlinkTasks: (parentId, childId) =>
       requestJson<Task>(resolved, buildTaskPath.unlink(childId, parentId), {
@@ -352,6 +361,12 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
 function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): UpdateTaskInput {
   const payload: UpdateTaskInput = {};
   if (task.type !== undefined) payload.type = task.type;
+  if (task.taskKind !== undefined) {
+    if (task.taskKind !== null && !VALID_TASK_KIND.has(task.taskKind as TaskKind)) {
+      throw new Error(`taskKind must be one of: ${TASK_KINDS.join(", ")}`);
+    }
+    payload.taskKind = task.taskKind as TaskKind | null;
+  }
   if (task.harness !== undefined) {
     if (!VALID_HARNESS.has(task.harness)) throw new Error(`harness must be one of: ${harnessList()}`);
     payload.harness = task.harness;
@@ -419,6 +434,7 @@ export function toTaskSummary(task: Task): TaskSummary {
   return {
     id: task.id,
     type: task.type ?? "agent",
+    ...(task.taskKind != null ? { taskKind: task.taskKind } : {}),
     ...(task.harness !== undefined ? { harness: task.harness } : {}),
     title: task.title,
     directory: task.directory,
@@ -465,6 +481,9 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
   if (title.length === 0) {
     throw new Error("title must be a non-empty string");
   }
+  if (task.taskKind !== undefined && !VALID_TASK_KIND.has(task.taskKind as TaskKind)) {
+    throw new Error(`taskKind must be one of: ${TASK_KINDS.join(", ")}`);
+  }
 
   const directory = resolveTaskDirectory(task.directory, cwd);
   const payload: CreateTaskInput = {
@@ -473,6 +492,7 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
     description: task.description ?? "",
     directory,
   };
+  if (task.taskKind !== undefined) payload.taskKind = task.taskKind;
   if (payload.type === "agent" && task.harness !== undefined) {
     if (!VALID_HARNESS.has(task.harness)) {
       throw new Error(`harness must be one of: ${harnessList()}`);

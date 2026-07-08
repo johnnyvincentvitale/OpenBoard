@@ -18,11 +18,12 @@ import {
   TASK_ROUTE_PATTERNS,
   TASK_HARNESSES,
   TASK_ISOLATION_MODES,
+  TASK_KINDS,
   TASK_TYPES,
   USER_COMPLETED_BY,
   isColumn,
 } from "../../shared";
-import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskStore, UpdateTaskInput } from "../../shared";
+import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
@@ -67,6 +68,10 @@ function isIsolationMode(value: unknown): value is TaskIsolationMode {
 
 function isTaskType(value: unknown): value is CreateTaskInput["type"] {
   return typeof value === "string" && (TASK_TYPES as readonly string[]).includes(value);
+}
+
+function isTaskKind(value: unknown): value is TaskKind {
+  return typeof value === "string" && (TASK_KINDS as readonly string[]).includes(value);
 }
 
 function isTaskHarness(value: unknown): value is TaskHarness {
@@ -193,6 +198,7 @@ export function registerTaskRoutes(
 
       const { title, description, directory, agent, model, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides, parentIds } = body;
       const taskType = body.type ?? "agent";
+      const taskKind = body.taskKind ?? "none";
       const harness = body.harness ?? "opencode";
       const effectivePermissionMode = permissionMode ?? claudePermissionMode;
 
@@ -201,6 +207,9 @@ export function registerTaskRoutes(
       }
       if (!isTaskType(taskType)) {
         throw AdapterError.validation("type must be 'manual' or 'agent'");
+      }
+      if (!isTaskKind(taskKind)) {
+        throw AdapterError.validation(`taskKind must be one of: ${TASK_KINDS.join(", ")}`);
       }
       if (!isTaskHarness(harness)) {
         throw AdapterError.validation(`harness must be one of: ${TASK_HARNESSES.join(", ")}`);
@@ -281,6 +290,7 @@ export function registerTaskRoutes(
 
       const task = store.create({
         type: taskType,
+        taskKind,
         ...(taskType === "agent" ? { harness } : {}),
         title,
         description: typeof description === "string" ? description : "",
@@ -512,6 +522,7 @@ export function registerTaskRoutes(
       "agent",
       "model",
       "type",
+      "taskKind",
       "assignedTo",
       "isolation",
       "harness",
@@ -527,8 +538,10 @@ export function registerTaskRoutes(
     if (!existing) throw AdapterError.notFound("Task not found");
 
     const nextType = body.type === undefined ? (existing.type ?? "agent") : body.type;
+    const nextTaskKind = body.taskKind === undefined ? (existing.taskKind ?? "none") : body.taskKind;
     const nextHarness = body.harness === undefined ? (existing.harness ?? "opencode") : body.harness;
     if (!isTaskType(nextType)) throw AdapterError.validation("type must be 'manual' or 'agent'");
+    if (nextTaskKind !== null && !isTaskKind(nextTaskKind)) throw AdapterError.validation(`taskKind must be one of: ${TASK_KINDS.join(", ")}`);
     if (!isTaskHarness(nextHarness)) throw AdapterError.validation(`harness must be one of: ${TASK_HARNESSES.join(", ")}`);
 
     const patch: UpdateTaskInput = {};
@@ -552,6 +565,7 @@ export function registerTaskRoutes(
     }
 
     patch.type = nextType;
+    patch.taskKind = nextTaskKind ?? "none";
     patch.harness = nextType === "agent" ? nextHarness : "opencode";
 
     if (body.assignedTo !== undefined) {
@@ -836,30 +850,19 @@ export function registerTaskRoutes(
 
   app.put(TASK_ROUTE_PATTERNS.settings, async (c) => {
     try {
-      let body: { worktreeDefault?: unknown; bashSandbox?: unknown };
+      let body: { bashSandbox?: unknown };
       try {
         body = await c.req.json();
       } catch {
         throw AdapterError.validation("Request body must be valid JSON");
       }
-      // Both keys are optional — but at least one must be provided.
-      if (body.worktreeDefault === undefined && body.bashSandbox === undefined) {
-        throw AdapterError.validation("Request body must contain at least one of: worktreeDefault, bashSandbox");
-      }
-      if (body.worktreeDefault !== undefined && typeof body.worktreeDefault !== "boolean") {
-        throw AdapterError.validation("worktreeDefault must be a boolean");
+      if (body.bashSandbox === undefined) {
+        throw AdapterError.validation("Request body must contain bashSandbox");
       }
       if (body.bashSandbox !== undefined && typeof body.bashSandbox !== "boolean") {
         throw AdapterError.validation("bashSandbox must be a boolean");
       }
-      const patch: Partial<{ worktreeDefault: boolean; bashSandbox: boolean }> = {};
-      if (body.worktreeDefault !== undefined) {
-        patch.worktreeDefault = body.worktreeDefault;
-      }
-      if (body.bashSandbox !== undefined) {
-        patch.bashSandbox = body.bashSandbox;
-      }
-      const settings = store.updateSettings(patch);
+      const settings = store.updateSettings({ bashSandbox: body.bashSandbox });
       return c.json(settings, 200);
     } catch (err) {
       return respondWithError(c, err);

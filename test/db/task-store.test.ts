@@ -55,6 +55,7 @@ describe("SqliteTaskStore", () => {
 
       expect(task.id).toBe("task_1");
       expect(task.type).toBe("agent");
+      expect(task.taskKind).toBe("none");
       expect(task.title).toBe("First");
       expect(task.description).toBe("Do the thing");
       expect(task.directory).toBe("/tmp/project");
@@ -89,6 +90,17 @@ describe("SqliteTaskStore", () => {
       const listed = store.list().find((t) => t.id === created.id);
       expect(listed?.type).toBe("manual");
       expect(listed?.assignedTo).toBe("Johnny");
+    });
+
+    it("round-trips task kind through create/update/list/get", () => {
+      const created = store.create(input({ taskKind: "synthesis" }));
+
+      expect(created.taskKind).toBe("synthesis");
+      expect(store.get(created.id)?.taskKind).toBe("synthesis");
+
+      const updated = store.update(created.id, { taskKind: "fix" });
+      expect(updated?.taskKind).toBe("fix");
+      expect(store.list().find((task) => task.id === created.id)?.taskKind).toBe("fix");
     });
 
     it("appends subsequent tasks at the end of todo (max position + 1)", () => {

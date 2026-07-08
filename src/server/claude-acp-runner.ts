@@ -10,6 +10,7 @@ import type {
   ClaudeCodeRunnerLike,
   ClaudeCodeStatus,
 } from "./claude-code-runner";
+import { completionHandoffGuidance } from "./completion-contract";
 
 type Spawn = typeof nodeSpawn;
 type SpawnedProcess = ReturnType<Spawn>;
@@ -665,7 +666,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   }
 
   private withWorkerContract(input: ClaudeCodeRunInput): string {
-    return `${input.prompt}\n\n---\n${this.service.contractName}\nTask id: ${input.task.id}\nBoard URL: ${this.adapterBaseUrl}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this ${this.service.sessionLabel} session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk. When all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
+    return `${input.prompt}\n\n---\n${this.service.contractName}\nTask id: ${input.task.id}\nBoard URL: ${this.adapterBaseUrl}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this ${this.service.sessionLabel} session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk.\n\n${completionHandoffGuidance(input.task.taskKind)}\n\nWhen all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
   }
 
   private request(state: AcpSessionState, method: string, params: Record<string, unknown>): Promise<unknown> {

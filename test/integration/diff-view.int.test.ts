@@ -50,6 +50,7 @@ function makeDispatcher(store: SqliteTaskStore): Dispatcher {
     }),
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
+    resolveOrphanWorktree: vi.fn(async (worktreePath) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
     start: vi.fn(),
     shutdown: vi.fn(),
   };

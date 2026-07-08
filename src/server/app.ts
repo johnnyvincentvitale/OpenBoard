@@ -20,6 +20,7 @@ import { registerCompletionRoutes } from "./routes/completion";
 import { registerArchiveRoutes } from "./routes/archive";
 import { registerTaskLinkRoutes } from "./routes/links";
 import { registerTaskCommentRoutes } from "./routes/comments";
+import { registerWorktreeRoutes } from "./routes/worktrees";
 
 export interface AppDeps {
   client: OpencodeHandle["client"];
@@ -87,6 +88,7 @@ export function createApp(deps: AppDeps): Hono {
     dispatcher: deps.dispatcher,
     agentRoster: { fetch: () => fetchRosterStrict(deps.opencodeBaseUrl) },
   });
+  registerWorktreeRoutes(app, { dispatcher: deps.dispatcher });
   registerArchiveRoutes(app, {
     store: deps.taskStore,
     globalArchiveStore: deps.globalArchiveStore,

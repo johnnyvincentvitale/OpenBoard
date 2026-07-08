@@ -289,10 +289,10 @@ function runIsolationLines(task: Pick<Task, "isolation" | "harness" | "permissio
       `Permissions: ${permissionOverridesRunSummary(task.permissionOverrides)}`,
     ];
   }
-  // No per-task isolation override — the board-level default decides at dispatch
-  // time (see wantsWorktree() in dispatcher.ts), which this pure copy-builder has
-  // no access to. Say so rather than guessing a specific mode.
-  return ["Isolation: board default — the board's worktree-default setting decides at dispatch time."];
+  return [
+    "Isolation: in_place — no worktree is created; the agent works directly in this directory and its edits modify your live working tree.",
+    `Permissions: ${permissionOverridesRunSummary(task.permissionOverrides)}`,
+  ];
 }
 
 function permissionOverridesRunSummary(overrides: PermissionOverrides | null | undefined): string {
@@ -342,7 +342,7 @@ export function buildRunConfidenceDetails(task: Task): ConfidenceDetail[] {
   details.push({
     ok: true,
     label: "Isolation",
-    message: task.isolation ?? "board default",
+    message: task.isolation ?? "in-place",
   });
 
   if (task.runState === "running") {

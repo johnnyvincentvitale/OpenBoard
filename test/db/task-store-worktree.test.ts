@@ -42,22 +42,22 @@ describe("SqliteTaskStore — isolation fields + settings", () => {
     store.close();
   });
 
-  it("defaults worktreeDefault to false and persists an update", () => {
+  it("defaults bashSandbox to false and persists an update", () => {
     const store = new SqliteTaskStore(":memory:");
-    expect(store.getSettings()).toEqual({ worktreeDefault: false, bashSandbox: false });
-    expect(store.updateSettings({ worktreeDefault: true })).toEqual({ worktreeDefault: true, bashSandbox: false });
-    expect(store.getSettings()).toEqual({ worktreeDefault: true, bashSandbox: false });
+    expect(store.getSettings()).toEqual({ bashSandbox: false });
+    expect(store.updateSettings({ bashSandbox: true })).toEqual({ bashSandbox: true });
+    expect(store.getSettings()).toEqual({ bashSandbox: true });
     store.close();
   });
 
   it("settings survive reopening the same database file", () => {
     const path = `/tmp/ocb-settings-${Math.floor(Math.random() * 1e9)}.sqlite`;
     const a = new SqliteTaskStore(path);
-    a.updateSettings({ worktreeDefault: true });
+    a.updateSettings({ bashSandbox: true });
     a.close();
 
     const b = new SqliteTaskStore(path);
-    expect(b.getSettings().worktreeDefault).toBe(true);
+    expect(b.getSettings().bashSandbox).toBe(true);
     b.close();
   });
 

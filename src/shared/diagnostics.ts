@@ -36,6 +36,8 @@ export interface OpencodeDiagnostics {
 export interface WorktreeOrphan {
   worktreePath: string;
   taskId: string;
+  /** Number of dirty files reported by git status when the orphan was kept. */
+  dirtyFileCount?: number;
 }
 
 export interface WorktreeHealthDiagnostics {

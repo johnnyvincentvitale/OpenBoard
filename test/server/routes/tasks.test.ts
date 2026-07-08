@@ -43,6 +43,7 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
   removeTask: ReturnType<typeof vi.fn>;
   discardWorktree: ReturnType<typeof vi.fn>;
   sweepOrphanedWorktrees: ReturnType<typeof vi.fn>;
+  resolveOrphanWorktree: ReturnType<typeof vi.fn>;
 } {
   return {
     run: vi.fn(async (taskId: string): Promise<Task> => {
@@ -89,6 +90,7 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
     }),
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
+    resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
     start: vi.fn(),
     shutdown: vi.fn(),
   };
@@ -237,6 +239,7 @@ describe("POST /api/tasks", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         title: "Fix the bug",
+        taskKind: "build",
         description: "There is a bug",
         directory: repoDir,
       }),
@@ -246,6 +249,7 @@ describe("POST /api/tasks", () => {
     const body = await res.json();
     expect(body.title).toBe("Fix the bug");
     expect(body.type).toBe("agent");
+    expect(body.taskKind).toBe("build");
     expect(body.description).toBe("There is a bug");
     expect(body.directory).toBe(repoDir);
     expect(body.column).toBe("todo");
@@ -254,6 +258,7 @@ describe("POST /api/tasks", () => {
 
     // Persisted in the store.
     expect(store.list()).toHaveLength(1);
+    expect(store.list()[0]?.taskKind).toBe("build");
   });
 
   it("creates a manual task with an assignee and no agent metadata", async () => {
@@ -461,7 +466,7 @@ describe("POST /api/tasks", () => {
     expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
   });
 
-  it("rejects permissionOverrides when isolation is unset (board default may resolve to worktree)", async () => {
+  it("rejects permissionOverrides when isolation is unset", async () => {
     const app = buildApp(store, dispatcher);
 
     const res = await app.request("/api/tasks", {
@@ -535,6 +540,24 @@ describe("POST /api/tasks", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error.message).toContain("manual tasks cannot define agent");
+  });
+
+  it("responds 400 validation when taskKind is unsupported", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad kind",
+        taskKind: "investigate",
+        directory: repoDir,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("taskKind must be one of");
   });
 
   it("responds 400 validation when title is missing/empty", async () => {
@@ -1649,18 +1672,18 @@ describe("worktree isolation routes", () => {
 
     const get1 = await app.request("/api/settings");
     expect(get1.status).toBe(200);
-    expect(await get1.json()).toEqual({ worktreeDefault: false, bashSandbox: false });
+    expect(await get1.json()).toEqual({ bashSandbox: false });
 
     const put = await app.request("/api/settings", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ worktreeDefault: true }),
+      body: JSON.stringify({ bashSandbox: true }),
     });
     expect(put.status).toBe(200);
-    expect(await put.json()).toEqual({ worktreeDefault: true, bashSandbox: false });
+    expect(await put.json()).toEqual({ bashSandbox: true });
 
     const get2 = await app.request("/api/settings");
-    expect(await get2.json()).toEqual({ worktreeDefault: true, bashSandbox: false });
+    expect(await get2.json()).toEqual({ bashSandbox: true });
   });
 
   it("PUT /api/settings accepts partial settings patches", async () => {
@@ -1672,15 +1695,15 @@ describe("worktree isolation routes", () => {
       body: JSON.stringify({ bashSandbox: true }),
     });
     expect(bashOnly.status).toBe(200);
-    expect(await bashOnly.json()).toEqual({ worktreeDefault: false, bashSandbox: true });
+    expect(await bashOnly.json()).toEqual({ bashSandbox: true });
 
-    const both = await app.request("/api/settings", {
+    const off = await app.request("/api/settings", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ worktreeDefault: true, bashSandbox: false }),
+      body: JSON.stringify({ bashSandbox: false }),
     });
-    expect(both.status).toBe(200);
-    expect(await both.json()).toEqual({ worktreeDefault: true, bashSandbox: false });
+    expect(off.status).toBe(200);
+    expect(await off.json()).toEqual({ bashSandbox: false });
   });
 
   it("PUT /api/settings rejects an empty patch", async () => {
@@ -1698,7 +1721,7 @@ describe("worktree isolation routes", () => {
     const res = await app.request("/api/settings", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ worktreeDefault: "yes" }),
+      body: JSON.stringify({ bashSandbox: "yes" }),
     });
     expect(res.status).toBe(400);
   });

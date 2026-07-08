@@ -73,6 +73,7 @@ export interface WorktreeCleanupResult {
   kept: boolean;
   message: string;
   worktreePath?: string;
+  dirtyFileCount?: number;
 }
 
 export interface WorktreeManager {
@@ -169,6 +170,17 @@ function conflictPaths(status: string): string[] {
     paths.add(line.slice(3).trim());
   }
   return [...paths].filter(Boolean).sort();
+}
+
+function dirtyStatusFileCount(status: string): number {
+  const paths = new Set<string>();
+  for (const line of status.split("\n").filter(Boolean)) {
+    const rawPath = line.slice(3).trim();
+    if (!rawPath) continue;
+    const renameTarget = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1)?.trim() : rawPath;
+    if (renameTarget) paths.add(renameTarget);
+  }
+  return paths.size;
 }
 
 function uniqueSorted(lines: string): string[] {
@@ -402,12 +414,19 @@ export class GitWorktreeManager implements WorktreeManager {
     return status.stdout.trim().length > 0;
   }
 
+  private async dirtyFileCount(worktreePath: string): Promise<number> {
+    const status = await git(worktreePath, ["status", "--porcelain"]);
+    if (status.code !== 0) fail(status, "status worktree");
+    return dirtyStatusFileCount(status.stdout);
+  }
+
   async cleanupWorktree(
     repoDir: string,
     worktreePath: string,
     options: { force?: boolean } = {},
   ): Promise<WorktreeCleanupResult> {
     const dirty = await this.isWorktreeDirty(worktreePath);
+    const dirtyFileCount = dirty ? await this.dirtyFileCount(worktreePath) : 0;
     if (dirty && !options.force) {
       return {
         ok: false,
@@ -415,6 +434,7 @@ export class GitWorktreeManager implements WorktreeManager {
         dirty: true,
         kept: true,
         worktreePath,
+        dirtyFileCount,
         message: "worktree has uncommitted changes; confirm removal or keep it for manual salvage",
       };
     }
@@ -426,6 +446,7 @@ export class GitWorktreeManager implements WorktreeManager {
       dirty,
       kept: false,
       worktreePath,
+      dirtyFileCount,
       message: dirty ? "dirty worktree removed; branch kept" : "clean worktree removed; branch kept",
     };
   }

@@ -16,7 +16,7 @@
  * via a minimal-stub session path rather than paying real model
  * latency/cost for every leg of this lifecycle): the parent's session is
  * created for real and prompted for real (so its dispatch, in_progress move,
- * and PARENT HANDOFFS injection are all exercised through the real dispatcher
+ * and PARENT CONTEXT injection are all exercised through the real dispatcher
  * and real OpenCode session), but the *completion report* is supplied via the
  * documented external contract (`POST /api/tasks/:id/complete`) rather than
  * waiting on a real model turn to finish and self-report — exactly the path
@@ -236,9 +236,9 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
       expect(childRunning.runState).toBe("running");
       expect(childRunning.sessionId).toBeTruthy();
 
-      // Assert the dispatched prompt actually contains the PARENT HANDOFFS
+      // Assert the dispatched prompt actually contains the PARENT CONTEXT
       // section with the parent's report fields. The dispatcher writes the
-      // full prompt (description + PARENT HANDOFFS + completion contract) as
+      // full prompt (description + PARENT CONTEXT + completion contract) as
       // a single user message part, observable via the real session's
       // message history — so we can assert on the real prompt text, not just
       // that the gate opened.
@@ -258,18 +258,20 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
       )?.find((p) => p.type === "text")?.text;
 
       expect(childPromptText).toBeTruthy();
-      expect(childPromptText).toContain("PARENT HANDOFFS");
-      expect(childPromptText).toContain(`Parent: BoardV3 seam parent (${parent.id})`);
-      expect(childPromptText).toContain(`Summary: ${validCompletion.summary}`);
-      expect(childPromptText).toContain(
-        `Changed files: ${validCompletion.changedFiles.join(", ")}`,
-      );
+      expect(childPromptText).toContain("PARENT CONTEXT");
+      expect(childPromptText).toContain("PARENT-000: BoardV3 seam parent");
+      expect(childPromptText).toContain(`PARENT-000 TASK ID: ${parent.id}`);
+      expect(childPromptText).toContain(`PARENT-000 SUMMARY: ${validCompletion.summary}`);
+      expect(childPromptText).toContain("PARENT-000 Changed files:");
+      for (const file of validCompletion.changedFiles) {
+        expect(childPromptText).toContain(`- ${file}`);
+      }
       expect(childPromptText).toContain(
         `- ${validCompletion.verification[0]!.command}: ${validCompletion.verification[0]!.result}`,
       );
-      expect(childPromptText).toContain(`Residual risk: ${validCompletion.residualRisk}`);
-      // PARENT HANDOFFS must precede the completion contract in the same prompt.
-      expect(childPromptText!.indexOf("PARENT HANDOFFS")).toBeLessThan(
+      expect(childPromptText).toContain(`PARENT-000 Residual risk: ${validCompletion.residualRisk}`);
+      // PARENT CONTEXT must precede the completion contract in the same prompt.
+      expect(childPromptText!.indexOf("PARENT CONTEXT")).toBeLessThan(
         childPromptText!.indexOf("OPENBOARD COMPLETION CONTRACT"),
       );
 

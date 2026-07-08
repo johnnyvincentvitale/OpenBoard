@@ -1312,7 +1312,7 @@ describe("TUI archive tab navigation", () => {
 });
 
 describe("TUI board view command strip", () => {
-  it("board view command strip includes A global archive after q quit", () => {
+  it("board view command strip includes settings and A global archive after q quit", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [task("test-card", "todo")],
@@ -1320,6 +1320,7 @@ describe("TUI board view command strip", () => {
 
     const text = textOf(app);
     expect(text).not.toContain("m move card");
+    expect(text).toContain("p settings");
     expect(text).toContain("q quit · A global archive");
   });
 
@@ -2781,6 +2782,7 @@ describe("TUI manual task creation", () => {
       viewState: { view: "board", previousView: "launch" },
       newTask: {
         type: "manual",
+        taskKind: "none",
         title: "PM review",
         description: "Check the copy",
         directory: "/repo",
@@ -2815,18 +2817,19 @@ describe("TUI manual task creation", () => {
       ...(payload as object),
       id: "claude-card",
     }));
-	    const s = state({
-	      viewState: { view: "board", previousView: "launch" },
-	      acpConfig: {
-	        "claude-code": {
-	          available: true,
-	          modes: [{ value: "bypassPermissions", name: "Bypass Permissions" }],
-	          models: [],
-	          options: [],
-	        },
-	      },
-	      newTask: {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      acpConfig: {
+        "claude-code": {
+          available: true,
+          modes: [{ value: "bypassPermissions", name: "Bypass Permissions" }],
+          models: [],
+          options: [],
+        },
+      },
+      newTask: {
         type: "agent",
+        taskKind: "audit",
         title: "Claude work",
         description: "Run headlessly",
         directory: "/repo",
@@ -2848,6 +2851,8 @@ describe("TUI manual task creation", () => {
 
     // Screen B (HARNESS & MODEL) — no PROVIDER for Claude Code, no PERMS yet (that's screen C).
     const harnessText = textOf(renderApp(fakeUi(), s));
+    expect(harnessText).toContain("TASK TYPE");
+    expect(harnessText).toContain("Audit");
     expect(harnessText).toContain("HARNESS");
     expect(harnessText).toContain("Claude Code");
     expect(harnessText).toContain("MODEL");
@@ -2858,9 +2863,9 @@ describe("TUI manual task creation", () => {
     // Screen C (AGENT) — Claude Code shows PERMS, unchanged from today's behavior.
     s.newTask.step = "agentProfile";
     s.newTask.field = "permissionMode";
-	    const profileText = textOf(renderApp(fakeUi(), s));
-	    expect(profileText).toContain("PERMS");
-	    expect(profileText).toContain("Bypass Permissions");
+    const profileText = textOf(renderApp(fakeUi(), s));
+    expect(profileText).toContain("PERMS");
+    expect(profileText).toContain("Bypass Permissions");
     expect(profileText).not.toContain("AGENT PROFILE");
 
     // Screen E (confirm) — enter creates the card, never runs it.
@@ -2871,6 +2876,7 @@ describe("TUI manual task creation", () => {
 
     expect(createTask).toHaveBeenCalledWith({
       type: "agent",
+      taskKind: "audit",
       harness: "claude-code",
       title: "Claude work",
       description: "Run headlessly",
@@ -3105,6 +3111,7 @@ describe("TUI new-task wizard navigation", () => {
   function agentDraft(overrides: Record<string, unknown> = {}) {
     return {
       type: "agent",
+      taskKind: "none",
       title: "",
       description: "",
       directory: "/repo",
@@ -3134,7 +3141,7 @@ describe("TUI new-task wizard navigation", () => {
 
     expect(createTask).not.toHaveBeenCalled();
     expect(s.newTask.step).toBe("harness");
-    expect(s.newTask.field).toBe("harness");
+    expect(s.newTask.field).toBe("taskKind");
     expect(s.newTask).toBeDefined();
   });
 
@@ -3209,9 +3216,9 @@ describe("TUI new-task wizard navigation", () => {
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
 
-    // Only harness/provider exist on this step while locked — Tab from
-    // "provider" wraps back to "harness", never reaching "model".
-    expect(s.newTask.field).toBe("harness");
+    // Only task type/harness/provider exist on this step while locked — Tab from
+    // "provider" wraps back to "TASK TYPE", never reaching "model".
+    expect(s.newTask.field).toBe("taskKind");
   });
 
   it("selecting a real PROVIDER unlocks MODEL in the Tab order", async () => {
@@ -4107,7 +4114,7 @@ describe("TUI settings diagnostics view", () => {
   it("renders instance-scoped settings and diagnostics", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "settings", previousView: "board" },
-      settings: { worktreeDefault: true, bashSandbox: true },
+      settings: { bashSandbox: true },
       diagnostics: {
         sandbox: { desired: "on", effective: "off", restartRequired: true },
         opencode: { url: "http://127.0.0.1:60793", version: "1.17.15", reachable: true },
@@ -4119,22 +4126,91 @@ describe("TUI settings diagnostics view", () => {
 
     const text = textOf(app);
     expect(text).toContain("Settings");
-    expect(text).toContain("default on");
+    expect(text).not.toContain("default on");
+    expect(text).not.toContain("default off");
     expect(text).toContain("desired on · effective off");
     expect(text).toContain("required for sandbox change");
     expect(text).toContain("reachable 1.17.15");
     expect(text).toContain("2 clean removed · 1 dirty kept");
+    expect(text).toContain("1 dirty worktree");
+    expect(text).not.toContain("/repo/.opencode-board-worktrees/task_dirty");
     expect(text).toContain("alpha");
     expect(text).toContain("present");
+  });
+
+  it("D opens dirty worktree actions from settings", async () => {
+    const s = state({
+      viewState: { view: "settings", previousView: "board" },
+      diagnostics: {
+        sandbox: { desired: "on", effective: "on", restartRequired: false },
+        opencode: { reachable: true },
+        worktree: {
+          removedCleanCount: 0,
+          keptDirtyCount: 2,
+          dirtyOrphans: [
+            { worktreePath: "/repo/.opencode-board-worktrees/task_a", taskId: "task_a", dirtyFileCount: 2 },
+            { worktreePath: "/repo/.opencode-board-worktrees/task_b", taskId: "task_b", dirtyFileCount: 1 },
+          ],
+        },
+        instance: { boardUrl: "http://127.0.0.1:4098", port: 4098, workspace: "/repo/openboard", dbPath: "/data/alpha/board.sqlite", apiTokenPresent: true },
+        editor: { missing: true },
+      },
+    });
+
+    await handleKeypress({ sequence: "D", name: "D" } as any, s, actions());
+    expect(s.settingsDirtyWorktrees).toEqual({ selectedIndex: 0 });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("Dirty Worktrees");
+    expect(text).toContain("task_a");
+    expect(text).toContain("2 files");
+    expect(text).toContain("task_b");
+    expect(text).toContain("Delete force-removes");
+  });
+
+  it("deletes dirty orphan worktrees from settings after confirmation", async () => {
+    const resolveOrphanWorktree = vi.fn(async (worktreePath: string) => ({
+      ok: true,
+      removed: true,
+      dirty: false,
+      kept: false,
+      message: "delete ok",
+      worktreePath,
+    }));
+    const refreshSettings = vi.fn(async () => undefined);
+    const s = state({
+      viewState: { view: "settings", previousView: "board" },
+      settingsDirtyWorktrees: { selectedIndex: 0 },
+      diagnostics: {
+        sandbox: { desired: "on", effective: "on", restartRequired: false },
+        opencode: { reachable: true },
+        worktree: {
+          removedCleanCount: 0,
+          keptDirtyCount: 2,
+          dirtyOrphans: [
+            { worktreePath: "/repo/.opencode-board-worktrees/task_a", taskId: "task_a", dirtyFileCount: 2 },
+            { worktreePath: "/repo/.opencode-board-worktrees/task_b", taskId: "task_b", dirtyFileCount: 1 },
+          ],
+        },
+        instance: { boardUrl: "http://127.0.0.1:4098", port: 4098, workspace: "/repo/openboard", dbPath: "/data/alpha/board.sqlite", apiTokenPresent: true },
+        editor: { missing: true },
+      },
+    });
+    const a = actions({ refreshSettings, client: { resolveOrphanWorktree } });
+
+    await handleKeypress({ sequence: "d", name: "d" } as any, s, a);
+    expect(s.settingsDirtyWorktrees?.confirmDeletePath).toBe("/repo/.opencode-board-worktrees/task_a");
+    await handleKeypress({ sequence: "d", name: "d" } as any, s, a);
+    expect(resolveOrphanWorktree).toHaveBeenCalledWith("/repo/.opencode-board-worktrees/task_a");
+    expect(refreshSettings).toHaveBeenCalledTimes(1);
   });
 
   it("opens and controls settings from board keys", async () => {
     const openSettings = vi.fn(async () => undefined);
     const refreshSettings = vi.fn(async () => undefined);
-    const toggleWorktreeDefault = vi.fn(async () => undefined);
     const toggleBashSandbox = vi.fn(async () => undefined);
     const s = state({ viewState: { view: "board", previousView: "launch" } });
-    const a = actions({ openSettings, refreshSettings, toggleWorktreeDefault, toggleBashSandbox });
+    const a = actions({ openSettings, refreshSettings, toggleBashSandbox });
 
     await handleKeypress({ sequence: "p", name: "p" } as any, s, a);
     expect(openSettings).toHaveBeenCalledTimes(1);
@@ -4144,7 +4220,6 @@ describe("TUI settings diagnostics view", () => {
     await handleKeypress({ sequence: "s", name: "s" } as any, s, a);
     await handleKeypress({ sequence: "u", name: "u" } as any, s, a);
 
-    expect(toggleWorktreeDefault).toHaveBeenCalledTimes(1);
     expect(toggleBashSandbox).toHaveBeenCalledTimes(1);
     expect(refreshSettings).toHaveBeenCalledTimes(1);
   });
@@ -4224,6 +4299,7 @@ function actions(overrides: Record<string, unknown> = {}) {
       getTaskDiff: vi.fn(async () => ({ kind: "diff", capped: false, files: [] })),
       getTaskCommitStatus: vi.fn(async () => ({ committedFiles: [], uncommittedFiles: [] })),
       commitTaskFile: vi.fn(async (_id: string, file: string) => ({ task: task("review-card", "review"), ok: true, file, message: "committed" })),
+      resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
       listComments: vi.fn(async () => []),
       addComment: vi.fn(async () => ({ id: "comment-1", taskId: "todo-card", author: "User", body: "", createdAt: 1 })),
     },
@@ -4243,7 +4319,6 @@ function actions(overrides: Record<string, unknown> = {}) {
     setupWorkspace: vi.fn(async () => undefined),
     openSettings: vi.fn(async () => undefined),
     refreshSettings: vi.fn(async () => undefined),
-    toggleWorktreeDefault: vi.fn(async () => undefined),
     toggleBashSandbox: vi.fn(async () => undefined),
     editorSpawner: {
       runTerminalEditor: vi.fn(async () => ({ code: 0 })),

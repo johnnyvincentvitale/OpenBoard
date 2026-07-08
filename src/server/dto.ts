@@ -11,6 +11,7 @@ export function mapTaskToDto(task: Task): TaskDto {
   return {
     ...task,
     type: task.type ?? "agent",
+    taskKind: task.taskKind ?? "none",
     archived: task.archived ?? false,
     parentIds: [...(task.parentIds ?? [])],
     completion: task.completion

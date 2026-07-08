@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { Task } from "../../src/shared";
+import type { Task, TaskKind } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { TaskDispatcher } from "../../src/server/dispatcher";
 import type { ClaudeCodeRunnerLike } from "../../src/server/claude-code-runner";
@@ -220,12 +220,14 @@ describe("TaskDispatcher", () => {
       title: string;
       description: string;
       directory: string;
+      taskKind: TaskKind;
       isolation: "worktree" | "in-place";
       permissionOverrides: Record<string, "allow" | "ask" | "deny">;
     }> = {},
   ) {
     return store.create({
       title: overrides.title ?? "Fix the bug",
+      ...(overrides.taskKind !== undefined ? { taskKind: overrides.taskKind } : {}),
       description: overrides.description ?? "Please fix the bug in foo.ts",
       directory: overrides.directory ?? projectDir,
       ...(overrides.isolation !== undefined ? { isolation: overrides.isolation } : {}),
@@ -361,7 +363,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("appends the completion-contract footer with task id and adapter URL", async () => {
-      const task = createTask({ description: "Do scoped work" });
+      const task = createTask({ description: "Do scoped work", taskKind: "build" });
       client.nextSessionId = "ses_contract";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -375,6 +377,10 @@ describe("TaskDispatcher", () => {
       expect(text).toContain("Do scoped work");
       expect(text).toContain("OPENBOARD COMPLETION CONTRACT");
       expect(text).toContain(`Task id: ${task.id}`);
+      expect(text).toContain("OPENBOARD HANDOFF GUIDANCE");
+      expect(text).toContain("Task type: build");
+      expect(text).toContain("- summary: implementation completed and behavior changed.");
+      expect(text).toContain("- changedFiles: actual touched files.");
       expect(text).toContain(`http://127.0.0.1:5123/api/tasks/${task.id}/complete`);
       expect(text).toContain(`http://127.0.0.1:5123/api/tasks/${task.id}/block`);
       expect(text).toContain("Call /complete or /block exactly once");
@@ -396,16 +402,96 @@ describe("TaskDispatcher", () => {
       expect(text.match(/Authorization: Bearer/g)).toHaveLength(2);
     });
 
+    it("includes synthesis-specific handoff guidance in completion contracts", async () => {
+      const task = createTask({ description: "Synthesize research", taskKind: "synthesis" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("Task type: synthesis");
+      expect(text).toContain("evaluation of parent findings");
+      expect(text).toContain("parent handoffs/raw files read");
+      expect(text).toContain("ideas to avoid, questions for human");
+      expect(text).toContain("proposed build/audit graph");
+    });
+
+    it("injects task execution context before parent handoffs and the completion contract", async () => {
+      const parent = createTask({ title: "Audit source", description: "parent" });
+      const child = createTask({ title: "Child task", description: "Audit the parent", taskKind: "audit" });
+      store.addLink(parent.id, child.id);
+      store.move(parent.id, "done", 0);
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(child.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("Audit the parent");
+      expect(text).toContain("OPENBOARD TASK CONTEXT");
+      expect(text).toContain("Task type: audit");
+      expect(text).toContain("Inspect only unless explicitly told otherwise.");
+      expect(text).toContain("Do not fix issues.");
+      expect(text).toContain("Review diffs, parent worktrees, tests, and behavior.");
+      expect(text).toContain("Produce findings with severity/confidence and residual risk.");
+      expect(text).toContain("Keep output finding-oriented.");
+      expect(text.indexOf("Audit the parent")).toBeLessThan(text.indexOf("OPENBOARD TASK CONTEXT"));
+      expect(text.indexOf("OPENBOARD TASK CONTEXT")).toBeLessThan(text.indexOf("PARENT CONTEXT"));
+      expect(text.indexOf("PARENT CONTEXT")).toBeLessThan(text.indexOf("OPENBOARD COMPLETION CONTRACT"));
+    });
+
+    it("omits task execution context for none and research cards", async () => {
+      const task = createTask({ description: "Research only", taskKind: "research" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).not.toContain("OPENBOARD TASK CONTEXT");
+      expect(text).toContain("OPENBOARD HANDOFF GUIDANCE");
+      expect(text).toContain("Task type: research");
+    });
+
+    it("injects task execution context into ACP prompts", async () => {
+      const task = store.create({
+        title: "Fix lane",
+        description: "Fix the audited issue",
+        directory: myProjectDir,
+        harness: "claude-code",
+        taskKind: "fix",
+      });
+      const claudeRunner = makeClaudeRunner();
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+
+      await dispatcher.run(task.id);
+
+      const call = claudeRunner.run.mock.calls[0]?.[0];
+      expect(call).toBeDefined();
+      const prompt = call?.prompt ?? "";
+      expect(prompt).toContain("Fix the audited issue");
+      expect(prompt).toContain("OPENBOARD TASK CONTEXT");
+      expect(prompt).toContain("Task type: fix");
+      expect(prompt).toContain("Resolve specific findings from parent audit/build/synthesis context.");
+      expect(prompt).toContain("Tie each change back to the finding it addresses.");
+      expect(prompt.indexOf("Fix the audited issue")).toBeLessThan(
+        prompt.indexOf("OPENBOARD TASK CONTEXT"),
+      );
+    });
+
     it("injects satisfied parent handoffs before the completion-contract footer", async () => {
       const parent = createTask({ title: "Parent task", description: "parent" });
       const child = createTask({ title: "Child task", description: "child work" });
+      const parentWorktreePath = `/tmp/openboard-test/worktrees/${parent.id}`;
       store.addLink(parent.id, child.id);
+      store.update(parent.id, {
+        worktreePath: parentWorktreePath,
+        worktreeBranch: `board/${parent.id}`,
+      });
       store.setCompletion(
         parent.id,
         {
           outcome: "complete",
           summary: "parent summary",
-          changedFiles: ["src/parent.ts"],
+          changedFiles: ["src/parent.ts", `${parentWorktreePath}/test/parent.test.ts`],
           verification: [{ command: "npm test", result: "passed" }],
           residualRisk: "none",
           reportedAt: 123,
@@ -417,13 +503,21 @@ describe("TaskDispatcher", () => {
       await dispatcher.run(child.id);
 
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
-      expect(text).toContain("PARENT HANDOFFS");
-      expect(text).toContain(`Parent: Parent task (${parent.id})`);
-      expect(text).toContain("Summary: parent summary");
-      expect(text).toContain("Changed files: src/parent.ts");
+      expect(text).toContain("PARENT CONTEXT");
+      expect(text).toContain("PARENT-000: Parent task");
+      expect(text).toContain("Parent task worktrees are read-only. Use them only to inspect parent changes.");
+      expect(text).toContain(`PARENT-000 WORKTREE: ${parentWorktreePath}`);
+      expect(text).toContain(`PARENT-000 TASK ID: ${parent.id}`);
+      expect(text).toContain(`PARENT-000 BRANCH: board/${parent.id}`);
+      expect(text).toContain("PARENT-000 SUMMARY: parent summary");
+      expect(text).toContain("PARENT-000 Changed files:");
+      expect(text).toContain("- src/parent.ts");
+      expect(text).toContain("- test/parent.test.ts");
+      expect(text).not.toContain(`${parentWorktreePath}/test/parent.test.ts`);
       expect(text).toContain("- npm test: passed");
-      expect(text).toContain("Residual risk: none");
-      expect(text.indexOf("PARENT HANDOFFS")).toBeLessThan(
+      expect(text).toContain("PARENT-000 Residual risk: none");
+      expect(text).toContain("If a parent changed file also exists in your cwd, inspect the parent copy only to understand intent, then open/edit/test the cwd copy.");
+      expect(text.indexOf("PARENT CONTEXT")).toBeLessThan(
         text.indexOf("OPENBOARD COMPLETION CONTRACT"),
       );
       expect(text.trim().endsWith("Do not continue working after reporting.")).toBe(true);
@@ -439,7 +533,7 @@ describe("TaskDispatcher", () => {
       await dispatcher.run(child.id);
 
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
-      expect(text).toContain("Parent: Manual parent");
+      expect(text).toContain("PARENT-000: Manual parent");
       expect(text).toContain("No structured handoff exists; parent is manually marked Done.");
     });
 
@@ -543,8 +637,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("worktree-isolated tasks get WRITE_FENCED_PERMISSION and start a permission responder", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_fenced";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -588,8 +681,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("SAFETY: a worktree-isolated task with a permissionOverrides on its row still gets WRITE_FENCED_PERMISSION unchanged", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       // Simulate an override somehow ending up on a worktree-isolated row (stale
       // isolation flip, direct DB edit, bug elsewhere) — the dispatcher must never
       // honor it once the run is worktree-isolated, regardless of how it got there.
@@ -610,8 +702,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("worktree-isolated tasks get the isolation preamble, before parent handoffs and the completion contract", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir, description: "Fix the widget" });
       client.nextSessionId = "ses_preamble";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -626,10 +717,12 @@ describe("TaskDispatcher", () => {
       expect(worktreePath).toBeTruthy();
       expect(text).toContain("OPENBOARD WORKTREE ISOLATION");
       expect(text).toContain(worktreePath!);
-      expect(text).toContain(gitProjectDir);
-      expect(text).toContain("READ-ONLY");
-      expect(text).toContain("Edit only inside your worktree; use relative paths.");
-      expect(text).toContain("Use the read tool, not shell commands, for base-repo context.");
+      expect(text).not.toContain(gitProjectDir);
+      expect(text).toContain("Do all edits, tests, and shell commands from cwd using relative paths.");
+      expect(text).toContain("Do not use absolute paths into the original checkout or any sibling task worktree unless the task explicitly says to inspect them read-only.");
+      expect(text).toContain("Read context from cwd first: CLAUDE.md, AGENTS.md, README.md, src/..., test/...");
+      expect(text).toContain("If an outside-cwd write is denied, switch back to cwd-relative paths or report blocked.");
+      expect(text).toContain("Do not try chmod, symlinks, npm install, or temp-dir workarounds");
       expect(text.indexOf("OPENBOARD WORKTREE ISOLATION")).toBeLessThan(text.indexOf("Fix the widget"));
       expect(text.indexOf("Fix the widget")).toBeLessThan(text.indexOf("OPENBOARD COMPLETION CONTRACT"));
     });
@@ -646,9 +739,8 @@ describe("TaskDispatcher", () => {
       expect(text).not.toContain("READ-ONLY");
     });
 
-    it("retry() re-injects the worktree-isolation preamble with the worktree + base repo paths", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+    it("retry() re-injects the worktree-isolation preamble with the live worktree path", async () => {
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir, description: "Fix the widget" });
       client.nextSessionId = "ses_preamble_retry";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -665,9 +757,12 @@ describe("TaskDispatcher", () => {
       const text = (client.promptCalls[1]?.parts as Array<{ text: string }>)[0]?.text;
       expect(text).toContain("OPENBOARD WORKTREE ISOLATION");
       expect(text).toContain(worktreePath!);
-      expect(text).toContain(gitProjectDir);
-      expect(text).toContain("READ-ONLY");
-      expect(text).toContain("Use the read tool, not shell commands, for base-repo context.");
+      expect(text).not.toContain(gitProjectDir);
+      expect(text).toContain("Do all edits, tests, and shell commands from cwd using relative paths.");
+      expect(text).toContain("Do not use absolute paths into the original checkout or any sibling task worktree unless the task explicitly says to inspect them read-only.");
+      expect(text).toContain("Read context from cwd first: CLAUDE.md, AGENTS.md, README.md, src/..., test/...");
+      expect(text).toContain("If an outside-cwd write is denied, switch back to cwd-relative paths or report blocked.");
+      expect(text).toContain("Do not try chmod, symlinks, npm install, or temp-dir workarounds");
       expect(text.indexOf("OPENBOARD WORKTREE ISOLATION")).toBeLessThan(text.indexOf("keep going"));
     });
 
@@ -679,8 +774,7 @@ describe("TaskDispatcher", () => {
       // are set, so that specific mutation is behaviorally a no-op and this sentinel
       // can't distinguish it (verified live). The next test closes that gap directly
       // by spying on ensureWorktree() itself.
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir, description: "Fix the widget" });
       client.nextSessionId = "ses_preamble_retry_record";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -698,15 +792,14 @@ describe("TaskDispatcher", () => {
 
       const text = (client.promptCalls[1]?.parts as Array<{ text: string }>)[0]?.text;
       expect(text).toContain(sentinelWorktreePath);
-      expect(text).toContain(gitProjectDir);
+      expect(text).not.toContain(gitProjectDir);
     });
 
     it("retry() does not call ensureWorktree() again to source the preamble's worktree path", async () => {
       // ensureWorktree() re-cuts a worktree (or, once one exists, only reconfirms
       // it) — retry()'s worktree path must come off the already-persisted
       // task.worktreePath field instead, matching the code's own stated intent.
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir, description: "Fix the widget" });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir, description: "Fix the widget" });
       client.nextSessionId = "ses_preamble_retry_no_ensure";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -739,8 +832,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("retry() restarts the permission responder for a worktree-isolated task", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_fenced_retry";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -759,8 +851,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("a persistently failing permission-responder list() call surfaces a task_warning event", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_fenced_failing";
       client.permissionListShouldErrorCount = 3;
       dispatcher = new TaskDispatcher({
@@ -785,11 +876,10 @@ describe("TaskDispatcher", () => {
       // registered targets from one shared loop; this proves the dispatcher
       // actually registers both sessions with its one pool instance rather
       // than needing (or creating) a second one.
-      store.updateSettings({ worktreeDefault: true });
       const gitProjectDir2 = join(workspace, "git-project-2");
       makeGitRepo(gitProjectDir2);
-      const taskA = createTask({ directory: gitProjectDir, title: "Task A" });
-      const taskB = createTask({ directory: gitProjectDir2, title: "Task B" });
+      const taskA = createTask({ isolation: "worktree", directory: gitProjectDir, title: "Task A" });
+      const taskB = createTask({ isolation: "worktree", directory: gitProjectDir2, title: "Task B" });
       dispatcher = new TaskDispatcher({
         client: client as never,
         store,
@@ -814,8 +904,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("abort() stops the permission responder for a worktree-isolated task", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_fenced_abort";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -833,8 +922,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("a normal idle-fallback completion stops the permission responder", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_fenced_idle";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -866,8 +954,7 @@ describe("TaskDispatcher", () => {
       // the dispatcher or its permissionResponders map at all. The dispatcher's
       // own watchCompletion loop must be the one to notice and stop the
       // responder — this simulates that path without wiring up the full route.
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_fenced_reported";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -910,8 +997,7 @@ describe("TaskDispatcher", () => {
     }
 
     it("blocks a worktree task at completion when the base checkout was mutated during the run", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_escape";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -936,10 +1022,9 @@ describe("TaskDispatcher", () => {
       expect(blocked?.runState).toBe("idle");
     });
 
-    it("uses isolationAtDispatch instead of the current board default when blocking an escaped OpenCode run", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
-      client.nextSessionId = "ses_escape_default_drift";
+    it("uses isolationAtDispatch when blocking an escaped OpenCode run", async () => {
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
+      client.nextSessionId = "ses_escape_isolation_snapshot";
       dispatcher = new TaskDispatcher({
         client: client as never,
         store,
@@ -949,7 +1034,6 @@ describe("TaskDispatcher", () => {
       await dispatcher.run(task.id);
       expect(store.get(task.id)?.isolationAtDispatch).toBe("worktree");
 
-      store.updateSettings({ worktreeDefault: false });
       writeFileSync(join(gitProjectDir, "escaped-after-default-flip.txt"), "escaped write\n");
 
       queueFinishedTurn();
@@ -962,8 +1046,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("blocks a Claude Code worktree task at idle fallback when the base checkout was mutated", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = store.create({
+      const task = store.create({ isolation: "worktree",
         title: "Claude isolated escape",
         description: "mutate base",
         directory: gitProjectDir,
@@ -1026,8 +1109,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("a normal worktree task (base checkout untouched) still reaches review", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_clean";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -1047,8 +1129,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("integrate() refuses when the base checkout escaped and succeeds when clean", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_integrate_escape";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -1090,8 +1171,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("a sibling worktree task created after this task's dispatch does not falsely block it (concurrent nested worktrees)", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const taskA = createTask({ directory: gitProjectDir, title: "Task A" });
+      const taskA = createTask({ isolation: "worktree", directory: gitProjectDir, title: "Task A" });
       // Nest worktrees inside the repo (the isUnderWorkspace fallback layout,
       // not the sibling-outside-the-repo default) — the real bug only fires
       // in this layout.
@@ -1104,7 +1184,7 @@ describe("TaskDispatcher", () => {
       client.nextSessionId = "ses_task_a";
       await dispatcher.run(taskA.id); // taskA's baseCheckoutSnapshot is captured now.
 
-      const taskB = createTask({ directory: gitProjectDir, title: "Task B" });
+      const taskB = createTask({ isolation: "worktree", directory: gitProjectDir, title: "Task B" });
       client.nextSessionId = "ses_task_b";
       await dispatcher.run(taskB.id); // taskB's worktree appears after A's snapshot.
 
@@ -1128,7 +1208,6 @@ describe("TaskDispatcher", () => {
       // root leaks into the "registered worktree" exclusion list and every
       // changed path reads as "inside" it: escaped:false unconditionally,
       // no matter what actually changed at the true root.
-      store.updateSettings({ worktreeDefault: true });
       const subdir = join(gitProjectDir, "subdir");
       mkdirSync(subdir, { recursive: true });
       writeFileSync(join(subdir, "nested.txt"), "nested\n");
@@ -1138,7 +1217,7 @@ describe("TaskDispatcher", () => {
         env: cleanGitEnv(),
       });
 
-      const task = createTask({ directory: subdir });
+      const task = createTask({ isolation: "worktree", directory: subdir });
       client.nextSessionId = "ses_subdir_escape";
       dispatcher = new TaskDispatcher({
         client: client as never,
@@ -1206,8 +1285,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("nudges with denial-aware guidance when the permission-responder recorded a recent deny", async () => {
-      store.updateSettings({ worktreeDefault: true }); // permission-responder only registers for worktree-isolated tasks
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_stall_denial";
       // A tool part the permission-responder can resolve (call_1 -> apply_patch)
       // and deny (not read-class), matched by the same messages() the
@@ -1290,8 +1368,7 @@ describe("TaskDispatcher", () => {
     });
 
     it("gives up citing the denial when the session never recovers after a denial-aware nudge", async () => {
-      store.updateSettings({ worktreeDefault: true });
-      const task = createTask({ directory: gitProjectDir });
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
       client.nextSessionId = "ses_stall_giveup_denial";
       client.stableMessagesResponse = [
         {
@@ -1967,6 +2044,14 @@ describe("TaskDispatcher", () => {
       const child = createTask({ title: "Child", description: "child work" });
       store.addLink(p1.id, child.id);
       store.addLink(p2.id, child.id);
+      store.update(p1.id, {
+        worktreePath: `/tmp/openboard-test/worktrees/${p1.id}`,
+        worktreeBranch: `board/${p1.id}`,
+      });
+      store.update(p2.id, {
+        worktreePath: `/tmp/openboard-test/worktrees/${p2.id}`,
+        worktreeBranch: `board/${p2.id}`,
+      });
       store.setCompletion(
         p1.id,
         {
@@ -1996,14 +2081,25 @@ describe("TaskDispatcher", () => {
       await dispatcher.run(child.id);
 
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
-      expect(text).toContain("PARENT HANDOFFS");
-      expect(text).toContain(`Parent: Parent alpha (${p1.id})`);
-      expect(text).toContain("Summary: alpha summary");
-      expect(text).toContain(`Parent: Parent beta (${p2.id})`);
-      expect(text).toContain("Summary: beta summary");
-      expect(text).toContain("Residual risk: low");
-      // Completion contract should come after both handoffs
-      expect(text.lastIndexOf("PARENT HANDOFFS")).toBeLessThan(
+      expect(text).toContain("PARENT CONTEXT");
+      const alphaLabel = text.includes("PARENT-000: Parent alpha") ? "PARENT-000" : "PARENT-001";
+      const betaLabel = alphaLabel === "PARENT-000" ? "PARENT-001" : "PARENT-000";
+      expect(text).toContain(`${alphaLabel}: Parent alpha`);
+      expect(text).toContain(`${alphaLabel} SUMMARY: alpha summary`);
+      expect(text).toContain(`${betaLabel}: Parent beta`);
+      expect(text).toContain(`${betaLabel} SUMMARY: beta summary`);
+      expect(text).toContain(`${betaLabel} Residual risk: low`);
+      expect(text).toContain(`${alphaLabel} WORKTREE: /tmp/openboard-test/worktrees/${p1.id}`);
+      expect(text).toContain(`${alphaLabel} TASK ID: ${p1.id}`);
+      expect(text).toContain(`${alphaLabel} BRANCH: board/${p1.id}`);
+      expect(text).toContain("- src/alpha.ts");
+      expect(text).toContain(`${betaLabel} WORKTREE: /tmp/openboard-test/worktrees/${p2.id}`);
+      expect(text).toContain(`${betaLabel} TASK ID: ${p2.id}`);
+      expect(text).toContain(`${betaLabel} BRANCH: board/${p2.id}`);
+      expect(text).toContain("- src/beta.ts");
+      expect(text.match(/If a parent changed file also exists in your cwd/g)).toHaveLength(1);
+      // Completion contract should come after all parent context.
+      expect(text.lastIndexOf("PARENT CONTEXT")).toBeLessThan(
         text.indexOf("OPENBOARD COMPLETION CONTRACT"),
       );
     });
@@ -2032,7 +2128,8 @@ describe("TaskDispatcher", () => {
       await dispatcher.run(child.id);
 
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
-      expect(text).toContain("Summary: structured summary");
+      const structuredLabel = text.includes("PARENT-000: Structured parent") ? "PARENT-000" : "PARENT-001";
+      expect(text).toContain(`${structuredLabel} SUMMARY: structured summary`);
       expect(text).toContain("No structured handoff exists; parent is manually marked Done.");
     });
 

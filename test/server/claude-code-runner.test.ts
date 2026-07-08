@@ -6,6 +6,7 @@ import type { Task } from "../../src/shared";
 const task: Task = {
   id: "task_1",
   type: "agent",
+  taskKind: "audit",
   harness: "claude-code",
   agent: "build",
   title: "Claude task",
@@ -83,6 +84,9 @@ describe("ClaudeCodeRunner", () => {
       }),
     );
     expect(execFile.mock.calls[0][1].at(-1)).toContain("OPENBOARD CLAUDE CODE WORKER CONTRACT");
+    expect(execFile.mock.calls[0][1].at(-1)).toContain("Task type: audit");
+    expect(execFile.mock.calls[0][1].at(-1)).toContain("verdict plus findings");
+    expect(execFile.mock.calls[0][1].at(-1)).toContain("Be finding-oriented, not implementation-oriented.");
     expect(execFile.mock.calls[0][1].at(-1)).toContain('complete_task with { taskId: "task_1", runStartedAt: 123');
   });
 
