@@ -2098,4 +2098,92 @@ describe("parent/child dependency endpoints", () => {
     expect(fresh.description).toBe("original desc");
     expect(store.getParentIds(child.id)).toEqual([parent.id]);
   });
+
+  it("rejects a self-link via PATCH parentIds", async () => {
+    const task = store.create({ title: "Self-linker", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: [task.id] }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Task cannot depend on itself");
+    expect(store.getParentIds(task.id)).toEqual([]);
+  });
+
+  it("rejects a direct cycle via PATCH parentIds", async () => {
+    const parent = store.create({ title: "Parent", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    store.addLink(parent.id, child.id);
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${parent.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: [child.id] }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Task link would create a cycle");
+    // Existing parent -> child relationship must remain intact.
+    expect(store.getParentIds(parent.id)).toEqual([]);
+    expect(store.getParentIds(child.id)).toEqual([parent.id]);
+  });
+
+  it("rejects a transitive cycle via PATCH parentIds", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    const b = store.create({ title: "B", description: "", directory: repoDir });
+    const c = store.create({ title: "C", description: "", directory: repoDir });
+    store.addLink(a.id, b.id);
+    store.addLink(b.id, c.id);
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${a.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: [c.id] }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Task link would create a cycle");
+    expect(store.getParentIds(a.id)).toEqual([]);
+    expect(store.getParentIds(b.id)).toEqual([a.id]);
+    expect(store.getParentIds(c.id)).toEqual([b.id]);
+  });
+
+  it("clears parentIds with both null and empty array without leaving stale child references", async () => {
+    const p1 = store.create({ title: "P1", description: "", directory: repoDir });
+    const p2 = store.create({ title: "P2", description: "", directory: repoDir });
+    const child = store.create({ title: "Child", description: "", directory: repoDir });
+    store.addLink(p1.id, child.id);
+    store.addLink(p2.id, child.id);
+    const app = buildApp(store, dispatcher);
+
+    const nullClear = await app.request(`/api/tasks/${child.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: null }),
+    });
+    expect(nullClear.status).toBe(200);
+    expect(store.getParentIds(child.id)).toEqual([]);
+    expect(store.getChildIds(p1.id)).toEqual([]);
+    expect(store.getChildIds(p2.id)).toEqual([]);
+
+    store.addLink(p1.id, child.id);
+    const emptyClear = await app.request(`/api/tasks/${child.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentIds: [] }),
+    });
+    expect(emptyClear.status).toBe(200);
+    expect(store.getParentIds(child.id)).toEqual([]);
+    expect(store.getChildIds(p1.id)).toEqual([]);
+    expect(store.getChildIds(p2.id)).toEqual([]);
+  });
 });
