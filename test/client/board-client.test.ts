@@ -25,6 +25,7 @@ function directoryStat(isDirectory = true): { isDirectory(): boolean } {
 function createdTask(id: string, input: Record<string, unknown>): Task {
   return {
     id,
+    type: (input.type as Task["type"]) ?? "agent",
     title: input.title as string,
 	    description: input.description as string,
 	    directory: input.directory as string,
@@ -34,6 +35,7 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
     claudePermissionMode: input.claudePermissionMode as Task["claudePermissionMode"],
     model: input.model as Task["model"],
     isolation: input.isolation as Task["isolation"],
+    parentIds: input.parentIds as Task["parentIds"],
     column: "todo",
     position: 0,
     runState: "unstarted",
@@ -317,6 +319,83 @@ describe("board client", () => {
       "permissionOverrides.edit must be one of: allow, ask, deny",
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards valid taskKind through updateTask PATCH body", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-1", input));
+    });
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.updateTask("task-1", { taskKind: "build" });
+
+    expect(result.taskKind).toBe("build");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${DEFAULT_BOARD_URL}/api/tasks/task-1`,
+      expect.objectContaining({ method: "PATCH" }),
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      taskKind: "build",
+    });
+  });
+
+  it("clears taskKind through updateTask PATCH body when set to null", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-1", input));
+    });
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.updateTask("task-1", { taskKind: null });
+
+    expect(result.taskKind).toBeNull();
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      taskKind: null,
+    });
+  });
+
+  it("rejects a bad taskKind on updateTask", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(createdTask("task-1", {})));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    await expect(client.updateTask("task-1", { taskKind: "investigate" as never })).rejects.toThrow(
+      "taskKind must be one of",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards and normalizes parentIds through updateTask PATCH body", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-1", input));
+    });
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.updateTask("task-1", {
+      parentIds: [" task-0 ", "task-0", "  task-1 "],
+    });
+
+    expect(result.parentIds).toEqual(["task-0", "task-1"]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      parentIds: ["task-0", "task-1"],
+    });
+  });
+
+  it("clears parentIds through updateTask PATCH body when set to null", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-1", input));
+    });
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.updateTask("task-1", { parentIds: null });
+
+    expect(result.parentIds).toBeNull();
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      parentIds: null,
+    });
   });
 
   it("reports board startup failures and resolves OPENCODE_BOARD_URL", async () => {

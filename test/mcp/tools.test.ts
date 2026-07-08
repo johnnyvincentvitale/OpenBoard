@@ -52,6 +52,7 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
   return {
     id,
     type: input.type as Task["type"],
+    taskKind: input.taskKind as Task["taskKind"],
     title: input.title as string,
     description: input.description as string,
     directory: input.directory as string,
@@ -63,6 +64,7 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
     assignedTo: input.assignedTo as string | undefined,
     model: input.model as Task["model"],
     isolation: input.isolation as Task["isolation"],
+    parentIds: input.parentIds as Task["parentIds"],
     column: "todo",
     position: 0,
     runState: "unstarted",
@@ -370,6 +372,85 @@ describe("MCP add_tasks", () => {
     await expect(addTasks({ tasks: [{ title: "Needs board" }] }, options)).rejects.toThrow(
       BOARD_UNAVAILABLE_MESSAGE,
     );
+  });
+it("forwards taskKind through addTasks POST body", async () => {
+    const options = makeOptions([CWD]);
+
+    const result = await addTasks(
+      {
+        tasks: [
+          {
+            title: "Build coverage",
+            description: "Add tests",
+            directory: CWD,
+            taskKind: "build",
+            isolation: "worktree",
+          },
+        ],
+      },
+      options,
+    );
+
+    expect(result.created[0]).toMatchObject({
+      id: "task-1",
+      type: "agent",
+      title: "Build coverage",
+      taskKind: "build",
+      column: "todo",
+      runState: "unstarted",
+    });
+    expect(options.fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      type: "agent",
+      title: "Build coverage",
+      description: "Add tests",
+      directory: CWD,
+      taskKind: "build",
+      isolation: "worktree",
+    });
+  });
+
+  it("forwards taskKind through createTask POST body for manual tasks", async () => {
+    const options = makeOptions([CWD]);
+
+    const result = await createTask(
+      {
+        type: "manual",
+        title: "Research task",
+        description: "Research something",
+        directory: CWD,
+        taskKind: "research",
+        assignedTo: "Alice",
+      },
+      options,
+    );
+
+    expect(result.task).toMatchObject({
+      id: "task-1",
+      type: "manual",
+      title: "Research task",
+      taskKind: "research",
+      column: "todo",
+      runState: "unstarted",
+    });
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
+      type: "manual",
+      title: "Research task",
+      description: "Research something",
+      directory: CWD,
+      taskKind: "research",
+      assignedTo: "Alice",
+    });
+  });
+
+  it("rejects bad taskKind before POSTing", async () => {
+    const options = makeOptions([CWD]);
+
+    await expect(
+      addTasks({ tasks: [{ title: "Bad kind", taskKind: "investigate" as never }] }, options),
+    ).rejects.toThrow();
+
+    expect(options.fetchMock).not.toHaveBeenCalled();
   });
 });
 
