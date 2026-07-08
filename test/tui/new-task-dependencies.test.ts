@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleKeypress } from "../../src/tui/index";
+import { handleKeypress, renderApp } from "../../src/tui/index";
 import { createMockInstanceProvider } from "../../src/tui/model";
-import type { Task } from "../../src/shared";
+import { TASK_KINDS, type Task } from "../../src/shared";
 
 function task(id: string, title = id): Task {
   return {
@@ -46,6 +46,51 @@ function state(overrides: Record<string, unknown> = {}) {
     workspaceGateSubmitting: false,
     ...overrides,
   } as any;
+}
+
+function fakeUi() {
+  return {
+    TextAttributes: { BOLD: "bold" },
+    Box: (props: Record<string, unknown>, ...children: unknown[]) => ({ type: "Box", props, children }),
+    ScrollBox: (props: Record<string, unknown>, ...children: unknown[]) => ({ type: "ScrollBox", props, children }),
+    Text: (props: Record<string, unknown>) => ({ type: "Text", props, children: [] }),
+    fg: () => (value: unknown) => String(value),
+    t: (strings: TemplateStringsArray, ...values: unknown[]) =>
+      strings.reduce((out, part, index) => `${out}${part}${index < values.length ? String(values[index]) : ""}`, ""),
+  } as any;
+}
+
+function textOf(node: any): string {
+  if (!node || typeof node !== "object") return "";
+  const own = typeof node.props?.content === "string" ? node.props.content : "";
+  return [own, ...(node.children ?? []).map(textOf)].filter(Boolean).join("\n");
+}
+
+function newTaskDraft(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "agent" as const,
+    taskKind: "none" as const,
+    title: "",
+    description: "",
+    directory: "/repo",
+    harness: "opencode" as const,
+    providerId: "",
+    agentId: "",
+    permissionMode: "bypassPermissions",
+    acpOptions: {},
+    assignedTo: "",
+    model: undefined,
+    isolation: "worktree" as const,
+    permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+    parentIds: [] as string[],
+    dependencyIndex: 0,
+    step: "identity" as const,
+    field: "type" as const,
+    textCursors: {},
+    textScrolls: {},
+    submitting: false,
+    ...overrides,
+  };
 }
 
 function actions(overrides: Record<string, unknown> = {}) {
@@ -125,5 +170,110 @@ describe("TUI new-task dependency picker", () => {
     await handleKeypress({ sequence: " ", name: "space" } as any, s, a);
 
     expect(s.newTask.parentIds).toEqual(["parent"]);
+  });
+
+  describe("task-kind cycling", () => {
+    it("advances through all six task kinds and wraps to none", async () => {
+      const s = state({ tasks: [] });
+      s.newTask = newTaskDraft({ title: "Test", step: "harness", field: "taskKind" });
+      const a = actions();
+
+      const labels: string[] = [];
+      // initial + six right presses covers the full cycle, ending back at none
+      for (let i = 0; i <= TASK_KINDS.length; i += 1) {
+        labels.push(textOf(renderApp(fakeUi(), s, a)));
+        await handleKeypress({ sequence: "\u001b[C", name: "right" } as any, s, a);
+      }
+
+      const expectedOrder = ["None", "Research", "Synthesis", "Build", "Audit", "Fix", "None"];
+      for (let i = 0; i < expectedOrder.length; i += 1) {
+        expect(labels[i]).toContain("TASK TYPE");
+        expect(labels[i]).toContain(expectedOrder[i]);
+      }
+    });
+  });
+
+  describe("dependency picker edge cases", () => {
+    it("renders an empty-state when no candidates exist", () => {
+      const s = state({ tasks: [] });
+      s.newTask = newTaskDraft({ step: "dependencies", field: "dependency" });
+      const a = actions();
+
+      const rendered = renderApp(fakeUi(), s, a);
+      expect(textOf(rendered)).toContain("No existing tasks available");
+    });
+
+    it("windows candidate list and moves the selection without exceeding bounds", async () => {
+      const candidates = Array.from({ length: 12 }, (_, i) => task(`p-${i}`, `Parent ${i}`));
+      const s = state({ tasks: candidates });
+      s.newTask = newTaskDraft({ step: "dependencies", field: "dependency", dependencyIndex: 0 });
+      const a = actions();
+
+      // initial render should show first 8 candidates
+      const first = textOf(renderApp(fakeUi(), s, a));
+      expect(first).toContain("Parent 0");
+      expect(first).toContain("Parent 7");
+      expect(first).not.toContain("Parent 8");
+
+      // move down to wrap past bottom boundary
+      for (let i = 0; i < candidates.length; i += 1) {
+        await handleKeypress({ sequence: "\u001b[B", name: "down" } as any, s, a);
+      }
+      expect(s.newTask.dependencyIndex).toBe(0);
+
+      // moving up across top boundary wraps to the last candidate
+      await handleKeypress({ sequence: "\u001b[A", name: "up" } as any, s, a);
+      expect(s.newTask.dependencyIndex).toBe(candidates.length - 1);
+    });
+
+    it("_preserves selected dependencies across windowing", async () => {
+      const candidates = Array.from({ length: 10 }, (_, i) => task(`p-${i}`, `Parent ${i}`));
+      const s = state({ tasks: candidates });
+      s.newTask = newTaskDraft({ step: "dependencies", field: "dependency", dependencyIndex: 0, parentIds: ["p-0"] });
+      const a = actions();
+
+      const first = textOf(renderApp(fakeUi(), s, a));
+      expect(first).toContain("☑ Parent 0");
+
+      // scroll well past the selected item
+      for (let i = 0; i < 8; i += 1) {
+        await handleKeypress({ sequence: "\u001b[B", name: "down" } as any, s, a);
+      }
+      await handleKeypress({ sequence: " ", name: "space" } as any, s, a);
+      expect(s.newTask.parentIds).toContain("p-0");
+      expect(s.newTask.parentIds).toContain(`p-${(0 + 8) % candidates.length}`);
+    });
+  });
+
+  describe("confirm step PARENTS summary", () => {
+    it("renders selected parent titles on the confirm screen", () => {
+      const parents = [
+        task("parent-1", "Backend refactor"),
+        task("parent-2", "API contract"),
+      ];
+      const s = state({ tasks: parents });
+      s.newTask = newTaskDraft({
+        step: "confirm",
+        field: "confirm",
+        title: "Implement endpoints",
+        parentIds: ["parent-1", "parent-2"],
+      });
+      const a = actions();
+
+      const rendered = textOf(renderApp(fakeUi(), s, a));
+      expect(rendered).toContain("PARENTS");
+      expect(rendered).toContain("Backend refactor");
+      expect(rendered).toContain("API contract");
+    });
+
+    it("renders None under PARENTS when no parents are selected", () => {
+      const s = state({ tasks: [] });
+      s.newTask = newTaskDraft({ step: "confirm", field: "confirm", title: "Solo task", parentIds: [] });
+      const a = actions();
+
+      const rendered = textOf(renderApp(fakeUi(), s, a));
+      expect(rendered).toContain("PARENTS");
+      expect(rendered).toContain("None");
+    });
   });
 });

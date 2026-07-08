@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp, type TaskDetailTab } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
-import type { Column, Task } from "../../src/shared";
+import type { BoardDiagnostics, Column, Task } from "../../src/shared";
 
 function fakeUi() {
   return {
@@ -117,6 +117,42 @@ function state(overrides: Record<string, unknown> = {}) {
     workspaceGateSubmitting: false,
     ...overrides,
   } as any;
+}
+
+function diagnostics(overrides: Partial<BoardDiagnostics> = {}): BoardDiagnostics {
+  return {
+    sandbox: {
+      desired: "on",
+      effective: "sandboxed",
+      restartRequired: false,
+    },
+    opencode: {
+      reachable: true,
+      url: "http://127.0.0.1:8080",
+      version: "1.0.0",
+      home: "/home/user/.opencode",
+      configDir: "/home/user/.config/opencode",
+    },
+    worktree: {
+      removedCleanCount: 0,
+      keptDirtyCount: 0,
+      dirtyOrphans: [],
+    },
+    instance: {
+      instanceName: "default",
+      port: 4097,
+      boardUrl: "http://127.0.0.1:4097",
+      workspace: "/repo",
+      dbPath: "/data/default.sqlite",
+      apiTokenPresent: true,
+    },
+    editor: {
+      source: "PATH",
+      resolved: "/usr/bin/code",
+      missing: false,
+    },
+    ...overrides,
+  };
 }
 
 describe("TUI instance rendering", () => {
@@ -4222,6 +4258,96 @@ describe("TUI settings diagnostics view", () => {
 
     expect(toggleBashSandbox).toHaveBeenCalledTimes(1);
     expect(refreshSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders sandbox effective external state", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "settings", previousView: "board" },
+      diagnostics: diagnostics({
+        sandbox: { desired: "on", effective: "external", restartRequired: true },
+      }),
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("desired on · effective external");
+    expect(text).toContain("required for sandbox change");
+  });
+
+  it("reports no dirty orphan worktrees when D is pressed on an empty list", async () => {
+    const s = state({
+      viewState: { view: "settings", previousView: "board" },
+      diagnostics: diagnostics({ worktree: { removedCleanCount: 0, keptDirtyCount: 0, dirtyOrphans: [] } }),
+    });
+    const a = actions();
+
+    await handleKeypress({ sequence: "D", name: "D" } as any, s, a);
+
+    expect(s.settingsDirtyWorktrees).toBeUndefined();
+    expect(s.status).toContain("no dirty orphan worktrees");
+  });
+
+  it("navigates dirty worktree selection with clamping at list bounds", async () => {
+    const s = state({
+      viewState: { view: "settings", previousView: "board" },
+      settingsDirtyWorktrees: { selectedIndex: 0 },
+      diagnostics: diagnostics({
+        worktree: {
+          removedCleanCount: 0,
+          keptDirtyCount: 2,
+          dirtyOrphans: [
+            { worktreePath: "/repo/.opencode-board-worktrees/task_a", taskId: "task_a", dirtyFileCount: 2 },
+            { worktreePath: "/repo/.opencode-board-worktrees/task_b", taskId: "task_b", dirtyFileCount: 1 },
+          ],
+        },
+      }),
+    });
+    const a = actions();
+
+    expect(textOf(renderApp(fakeUi(), s))).toContain("▸ task_a");
+
+    await handleKeypress({ sequence: "\u001b[B", name: "down" } as any, s, a);
+    expect(s.settingsDirtyWorktrees?.selectedIndex).toBe(1);
+    expect(textOf(renderApp(fakeUi(), s))).toContain("▸ task_b");
+
+    // selection clamps at last item instead of wrapping
+    await handleKeypress({ sequence: "\u001b[B", name: "down" } as any, s, a);
+    expect(s.settingsDirtyWorktrees?.selectedIndex).toBe(1);
+
+    // selection clamps at first item instead of wrapping
+    s.settingsDirtyWorktrees.selectedIndex = 0;
+    await handleKeypress({ sequence: "\u001b[A", name: "up" } as any, s, a);
+    expect(s.settingsDirtyWorktrees?.selectedIndex).toBe(0);
+  });
+
+  it("shows a failure status when deleting a dirty worktree fails", async () => {
+    const resolveOrphanWorktree = vi.fn(async (_worktreePath: string) => ({
+      ok: false,
+      removed: false,
+      dirty: true,
+      kept: true,
+      message: "permission denied",
+      worktreePath: _worktreePath,
+    }));
+    const refreshSettings = vi.fn(async () => undefined);
+    const s = state({
+      viewState: { view: "settings", previousView: "board" },
+      settingsDirtyWorktrees: { selectedIndex: 0 },
+      diagnostics: diagnostics({
+        worktree: {
+          removedCleanCount: 0,
+          keptDirtyCount: 1,
+          dirtyOrphans: [{ worktreePath: "/repo/.opencode-board-worktrees/task_a", taskId: "task_a", dirtyFileCount: 2 }],
+        },
+      }),
+    });
+    const a = actions({ refreshSettings, client: { resolveOrphanWorktree } });
+
+    await handleKeypress({ sequence: "d", name: "d" } as any, s, a);
+    expect(s.settingsDirtyWorktrees?.confirmDeletePath).toBe("/repo/.opencode-board-worktrees/task_a");
+
+    await handleKeypress({ sequence: "d", name: "d" } as any, s, a);
+    expect(resolveOrphanWorktree).toHaveBeenCalledWith("/repo/.opencode-board-worktrees/task_a");
+    expect(s.status).toContain("delete failed: permission denied");
   });
 });
 
