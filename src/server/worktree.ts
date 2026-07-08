@@ -352,7 +352,14 @@ export class GitWorktreeManager implements WorktreeManager {
       }
     }
 
-    const rebase = await git(worktreePath, ["rebase", targetBranch]);
+    const rebase = await git(worktreePath, [
+      "-c",
+      "user.name=openboard",
+      "-c",
+      "user.email=openboard@localhost",
+      "rebase",
+      targetBranch,
+    ]);
     if (rebase.code !== 0) {
       const conflict = await git(worktreePath, ["status", "--porcelain"]);
       const paths = conflict.code === 0 ? conflictPaths(conflict.stdout) : [];

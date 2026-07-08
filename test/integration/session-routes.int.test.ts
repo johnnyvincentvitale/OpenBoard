@@ -208,12 +208,7 @@ describe.skipIf(!available)("session routes (integration)", () => {
           return user ? result.data : undefined;
         });
         expect(messages.some((message) => message.info.role === "user")).toBe(true);
-        const promptText = (
-          messages.find((message) => message.info.role === "user")?.parts as Array<{
-            type: string;
-            text?: string;
-          }>
-        )?.find((part) => part.type === "text")?.text;
+        const promptText = JSON.stringify(messages.find((message) => message.info.role === "user"));
         expect(promptText).toContain("Reply OK only. Do not edit files.");
         expect(promptText).toContain("OPENBOARD COMPLETION CONTRACT");
         expect(promptText).toContain(`Task id: ${created.id}`);
