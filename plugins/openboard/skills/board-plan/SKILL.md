@@ -319,9 +319,6 @@ is the only absolute path that should appear. Every worktree card should rely on
 the injected preamble for cwd guidance rather than restating absolute paths in
 the body.
 
-
-avoid duplicates. Use guarded MCP control tools only from the orchestrator flow.
-
 ## Set The Failure Policy
 
 Decide before dispatch, not mid-thrash:
