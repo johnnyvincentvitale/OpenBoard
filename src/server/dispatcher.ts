@@ -1036,8 +1036,9 @@ export class TaskDispatcher implements Dispatcher {
       "",
       "---",
       "PARENT CONTEXT",
-      "Parent task worktrees are read-only. Use them only to inspect parent changes.",
-      "Do not edit them. Do not run mutating commands there. Do all implementation and verification in your own cwd.",
+      "Parent task worktrees are read-only. Use them only to inspect parent changes with read/grep/glob/list tools.",
+      "Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.",
+      "Do all implementation and verification shell commands from your own cwd.",
       "",
     ];
     for (const [index, parentId] of parentIds.entries()) {
@@ -1092,7 +1093,7 @@ export class TaskDispatcher implements Dispatcher {
    * unless the task explicitly requests read-only inspection.
    */
   private withWorktreeIsolationPreamble(worktreePath: string, _baseRepoPath: string, prompt: string): string {
-    return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nDo all edits, tests, and shell commands from cwd using relative paths.\nDo not use absolute paths into the original checkout or any sibling task worktree unless the task explicitly says to inspect them read-only.\nRead context from cwd first: CLAUDE.md, AGENTS.md, README.md, src/..., test/...\nIf an outside-cwd write is denied, switch back to cwd-relative paths or report blocked. Do not try chmod, symlinks, npm install, or temp-dir workarounds unless the task explicitly asks for that bootstrap.\n---\n\n${prompt}`;
+    return `OPENBOARD WORKTREE ISOLATION\nYour working directory (cwd): ${worktreePath}\nRun edits, tests, builds, and shell commands from cwd using relative paths.\nDo not use bash, git -C, wc, shell grep, tests, or mutating commands against the original checkout or sibling task worktrees.\nIf the task explicitly asks for read-only outside-cwd inspection, use read/grep/glob/list tools instead of bash.\nRead context from cwd first: CLAUDE.md, AGENTS.md, README.md, src/..., test/...\nIf an outside-cwd write is denied, switch back to cwd-relative paths or report blocked. If a cwd-local test/build command is denied, report the exact command and denied path instead of retrying with parent/sibling paths. Do not try chmod, symlinks, npm install, or temp-dir workarounds unless the task explicitly asks for that bootstrap.\n---\n\n${prompt}`;
   }
 
   private withRebaseConflictContext(task: Task, prompt: string): string {

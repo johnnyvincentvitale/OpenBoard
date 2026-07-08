@@ -108,6 +108,21 @@ describe("createPermissionResponderPool", () => {
     expect(client.replyCalls[0]).toMatchObject({ requestID: "req_2", reply: "reject" });
   });
 
+  it("denies ('reject') a pending request raised by bash", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "bash")];
+    client.listResponses = [
+      [{ id: "req_bash", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => client.replyCalls.length === 1);
+    pool.stop();
+
+    expect(client.replyCalls[0]).toMatchObject({ requestID: "req_bash", reply: "reject" });
+  });
+
   it("fails closed (reject) when the tool name can't be determined", async () => {
     client.messagesResponse = []; // no matching message/part
     client.listResponses = [

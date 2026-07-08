@@ -533,7 +533,8 @@ describe("TaskDispatcher", () => {
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
       expect(text).toContain("PARENT CONTEXT");
       expect(text).toContain("PARENT-000: Parent task");
-      expect(text).toContain("Parent task worktrees are read-only. Use them only to inspect parent changes.");
+      expect(text).toContain("Parent task worktrees are read-only. Use them only to inspect parent changes with read/grep/glob/list tools.");
+      expect(text).toContain("Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.");
       expect(text).toContain(`PARENT-000 WORKTREE: ${parentWorktreePath}`);
       expect(text).toContain(`PARENT-000 TASK ID: ${parent.id}`);
       expect(text).toContain(`PARENT-000 BRANCH: board/${parent.id}`);
@@ -746,8 +747,9 @@ describe("TaskDispatcher", () => {
       expect(text).toContain("OPENBOARD WORKTREE ISOLATION");
       expect(text).toContain(worktreePath!);
       expect(text).not.toContain(gitProjectDir);
-      expect(text).toContain("Do all edits, tests, and shell commands from cwd using relative paths.");
-      expect(text).toContain("Do not use absolute paths into the original checkout or any sibling task worktree unless the task explicitly says to inspect them read-only.");
+      expect(text).toContain("Run edits, tests, builds, and shell commands from cwd using relative paths.");
+      expect(text).toContain("Do not use bash, git -C, wc, shell grep, tests, or mutating commands against the original checkout or sibling task worktrees.");
+      expect(text).toContain("If the task explicitly asks for read-only outside-cwd inspection, use read/grep/glob/list tools instead of bash.");
       expect(text).toContain("Read context from cwd first: CLAUDE.md, AGENTS.md, README.md, src/..., test/...");
       expect(text).toContain("If an outside-cwd write is denied, switch back to cwd-relative paths or report blocked.");
       expect(text).toContain("Do not try chmod, symlinks, npm install, or temp-dir workarounds");
@@ -786,8 +788,9 @@ describe("TaskDispatcher", () => {
       expect(text).toContain("OPENBOARD WORKTREE ISOLATION");
       expect(text).toContain(worktreePath!);
       expect(text).not.toContain(gitProjectDir);
-      expect(text).toContain("Do all edits, tests, and shell commands from cwd using relative paths.");
-      expect(text).toContain("Do not use absolute paths into the original checkout or any sibling task worktree unless the task explicitly says to inspect them read-only.");
+      expect(text).toContain("Run edits, tests, builds, and shell commands from cwd using relative paths.");
+      expect(text).toContain("Do not use bash, git -C, wc, shell grep, tests, or mutating commands against the original checkout or sibling task worktrees.");
+      expect(text).toContain("If the task explicitly asks for read-only outside-cwd inspection, use read/grep/glob/list tools instead of bash.");
       expect(text).toContain("Read context from cwd first: CLAUDE.md, AGENTS.md, README.md, src/..., test/...");
       expect(text).toContain("If an outside-cwd write is denied, switch back to cwd-relative paths or report blocked.");
       expect(text).toContain("Do not try chmod, symlinks, npm install, or temp-dir workarounds");
