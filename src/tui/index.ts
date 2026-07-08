@@ -295,13 +295,13 @@ function textBg(color: TuiColor): { bg: TuiColor } | Record<string, never> {
 }
 
 /**
- * The 'n'/'e' new-task form is a 5-screen wizard (identity -> harness ->
- * agentProfile -> isolation -> confirm). Manual cards skip straight from
- * identity to confirm. Each screen owns its own field-order table below;
+ * The 'n'/'e' new-task form is a wizard (identity -> harness ->
+ * agentProfile -> isolation -> dependencies -> confirm). Manual cards skip the
+ * agent-only screens. Each screen owns its own field-order table below;
  * `stepFieldOrder()` picks the right one for the current step/harness/
  * isolation combination, and Tab/arrow cycling only ever moves within it.
  */
-type WizardStep = "identity" | "harness" | "agentProfile" | "isolation" | "confirm";
+type WizardStep = "identity" | "harness" | "agentProfile" | "isolation" | "dependencies" | "confirm";
 
 const IDENTITY_FIELDS_AGENT = ["type", "title", "description", "directory"] as const;
 const IDENTITY_FIELDS_MANUAL = ["type", "title", "description", "assignedTo", "directory"] as const;
@@ -317,6 +317,7 @@ const ACP_OPTION_FIELDS = ["acpOption0", "acpOption1", "acpOption2", "acpOption3
 /** No permission editor: worktree isolation (locked, automatic) or Claude Code harness (N/A). */
 const ISOLATION_FIELDS_LOCKED = ["isolation"] as const;
 const ISOLATION_FIELDS_EDITABLE = ["isolation", "permEdit", "permBash", "permWebfetch"] as const;
+const DEPENDENCY_FIELDS = ["dependency"] as const;
 const CONFIRM_FIELDS: readonly never[] = [];
 const TEXT_INPUT_COLUMNS = 56;
 type Overlay = "none" | "help" | "newTask" | "addInstance" | "renameInstance";
@@ -326,7 +327,8 @@ type NewTaskField =
   | (typeof AGENT_PROFILE_FIELDS_OPENCODE)[number]
   | (typeof AGENT_PROFILE_FIELDS_ACP_BASE)[number]
   | (typeof ACP_OPTION_FIELDS)[number]
-  | (typeof ISOLATION_FIELDS_EDITABLE)[number];
+  | (typeof ISOLATION_FIELDS_EDITABLE)[number]
+  | (typeof DEPENDENCY_FIELDS)[number];
 type TextInputField = Extract<NewTaskField, "title" | "description" | "directory" | "assignedTo">;
 type AddInstanceField = "name" | "workspace";
 
@@ -497,6 +499,8 @@ interface NewTaskDraft {
   isolation: TaskIsolationMode;
   /** OpenCode permission-category overrides. Only ever submitted for in-place (non-worktree) OpenCode tasks. */
   permissionOverrides: Record<PermissionOverrideCategory, PermissionOverrideAction>;
+  parentIds: string[];
+  dependencyIndex: number;
   step: WizardStep;
   field: NewTaskField;
   textCursors?: Partial<Record<TextInputField, number>>;
@@ -3853,6 +3857,7 @@ const WIZARD_STEP_LABELS: Record<WizardStep, string> = {
   harness: "HARNESS & MODEL",
   agentProfile: "AGENT",
   isolation: "ISOLATION",
+  dependencies: "DEPENDENCIES",
   confirm: "CONFIRM",
 };
 
@@ -3909,6 +3914,8 @@ function renderWizardBody(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
       return renderAgentProfileStep(ui, state, draft);
     case "isolation":
       return renderIsolationStep(ui, draft);
+    case "dependencies":
+      return renderDependenciesStep(ui, state, draft);
     case "confirm":
       return renderConfirmStep(ui, state, draft);
   }
@@ -4050,6 +4057,48 @@ function renderIsolationStep(ui: OpenTui, draft: NewTaskDraft) {
   );
 }
 
+function renderDependenciesStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  const candidates = dependencyCandidates(state, draft);
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    ui.Text({ content: "Choose zero or more parent tasks that must complete first.", fg: COLORS.muted, wrapMode: "word", height: 2 }),
+    renderDependencyField(ui, state, draft),
+    ui.Text({ content: candidates.length === 0 ? "No existing tasks available." : "↑/↓ select · space toggle · enter continue", fg: COLORS.dim, height: 1, truncate: true }),
+    renderDraftErrorRow(ui, draft),
+  );
+}
+
+function renderDependencyField(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  const candidates = dependencyCandidates(state, draft);
+  const selected = new Set(draft.parentIds);
+  const selectedIndex = normalizedDependencyIndex(draft, candidates.length);
+  const visibleCandidates = dependencyWindow(candidates, selectedIndex, 8);
+  const rows = candidates.length === 0
+    ? [ui.Text({ content: "No dependencies", fg: COLORS.muted, height: 1, truncate: true })]
+    : visibleCandidates.map(({ task, index }) => {
+        const active = index === selectedIndex;
+        const checked = selected.has(task.id) ? "☑" : "☐";
+        return ui.Text({
+          content: `${active ? "▸" : " "} ${checked} ${task.title}`,
+          fg: active ? COLORS.bright : checked === "☑" ? COLORS.text : COLORS.muted,
+          height: 1,
+          truncate: true,
+        });
+      });
+  return renderFieldShell(
+    ui,
+    "PARENTS",
+    draft.field === "dependency",
+    Math.max(3, rows.length + 2),
+    ui.Box({ flexDirection: "column", gap: 0 }, ...rows),
+  );
+}
+
+function dependencyWindow(candidates: Task[], selectedIndex: number, limit: number): Array<{ task: Task; index: number }> {
+  const start = Math.max(0, Math.min(selectedIndex - Math.floor(limit / 2), candidates.length - limit));
+  return candidates.slice(start, start + limit).map((task, offset) => ({ task, index: start + offset }));
+}
+
 function isolationDescription(mode: TaskIsolationMode): string {
   return mode === "worktree"
     ? "Runs in a dedicated git worktree cut from DIR on a board/<taskId> branch — concurrent agents never share a working tree. Sync (s) and integrate (i) afterward."
@@ -4126,7 +4175,7 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
     { label: "DIR", value: shortPath(draft.directory), color: COLORS.text },
   ];
 
-  if (draft.type === "manual") return [identity];
+  if (draft.type === "manual") return [identity, dependencySummaryRows(draft, state)];
 
   const harnessModel: MetaRow[] = [
     { label: "HARNESS", value: currentHarnessLabel(draft), color: COLORS.text },
@@ -4158,7 +4207,18 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
       : []),
   ];
 
-  return [identity, harnessModel, agentProfile, isolation];
+  return [identity, harnessModel, agentProfile, isolation, dependencySummaryRows(draft, state)];
+}
+
+function dependencySummaryRows(draft: NewTaskDraft, state: TuiState): MetaRow[] {
+  return [{ label: "PARENTS", value: dependencySummary(draft, state), color: COLORS.text }];
+}
+
+function dependencySummary(draft: NewTaskDraft, state: TuiState): string {
+  if (draft.parentIds.length === 0) return "None";
+  return draft.parentIds
+    .map((id) => state.tasks.find((task) => task.id === id)?.title ?? id)
+    .join(", ");
 }
 
 function permissionOverridesSummary(draft: NewTaskDraft): string {
@@ -5235,6 +5295,8 @@ function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
       bash: task.permissionOverrides?.bash ?? "allow",
       webfetch: task.permissionOverrides?.webfetch ?? "allow",
     },
+    parentIds: task.parentIds ?? [],
+    dependencyIndex: 0,
     step: "identity",
     field: "title",
     textCursors: {},
@@ -5522,6 +5584,12 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
     return;
   }
 
+  if (handleDependencyKey(draft, state, key)) {
+    draft.error = undefined;
+    actions.render();
+    return;
+  }
+
   if ((key.name === "left" || key.name === "up") && cycleFocusedField(draft, state, -1)) {
     actions.render();
     return;
@@ -5651,6 +5719,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           description: draft.description,
           directory,
           assignedTo: draft.assignedTo.trim() || null,
+          parentIds: draft.parentIds,
         } : {
           type: "agent",
           harness: draft.harness,
@@ -5664,6 +5733,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           model: model ?? null,
           isolation: draft.isolation,
           permissionOverrides: draftPermissionOverridesPayload(draft) ?? null,
+          parentIds: draft.parentIds,
         })
       : await actions.client.createTask(draft.type === "manual" ? {
           type: "manual",
@@ -5671,6 +5741,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           description: draft.description,
           directory,
           assignedTo: draft.assignedTo.trim() || undefined,
+          parentIds: draft.parentIds,
         } : {
           type: "agent",
           harness: draft.harness,
@@ -5684,6 +5755,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           model,
           isolation: draft.isolation,
           permissionOverrides: draftPermissionOverridesPayload(draft),
+          parentIds: draft.parentIds,
         });
     state.overlay = "none";
     state.newTask = undefined;
@@ -5719,6 +5791,8 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
     model: undefined,
     isolation: "worktree",
     permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
+    parentIds: [],
+    dependencyIndex: 0,
     step: "identity",
     field: "type",
     textCursors: {},
@@ -5790,9 +5864,57 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
     case "permWebfetch":
       cyclePermissionOverride(draft, "webfetch", delta);
       return true;
+    case "dependency":
+      moveDependencySelection(draft, state, delta);
+      return true;
     default:
       return false;
   }
+}
+
+function handleDependencyKey(draft: NewTaskDraft, state: TuiState, key: KeyEvent): boolean {
+  if (draft.step !== "dependencies" || draft.field !== "dependency") return false;
+  const keyName = key.name || key.sequence;
+  if (keyName === "down") {
+    moveDependencySelection(draft, state, 1);
+    return true;
+  }
+  if (keyName === "up") {
+    moveDependencySelection(draft, state, -1);
+    return true;
+  }
+  if (key.sequence === " ") {
+    toggleSelectedDependency(draft, state);
+    return true;
+  }
+  return false;
+}
+
+function dependencyCandidates(state: TuiState, draft: NewTaskDraft): Task[] {
+  return state.tasks.filter((task) => task.id !== draft.editingTaskId);
+}
+
+function normalizedDependencyIndex(draft: NewTaskDraft, count: number): number {
+  if (count <= 0) return 0;
+  return Math.max(0, Math.min(draft.dependencyIndex, count - 1));
+}
+
+function moveDependencySelection(draft: NewTaskDraft, state: TuiState, delta: number): void {
+  const count = dependencyCandidates(state, draft).length;
+  if (count === 0) {
+    draft.dependencyIndex = 0;
+    return;
+  }
+  draft.dependencyIndex = (normalizedDependencyIndex(draft, count) + delta + count) % count;
+}
+
+function toggleSelectedDependency(draft: NewTaskDraft, state: TuiState): void {
+  const candidates = dependencyCandidates(state, draft);
+  const task = candidates[normalizedDependencyIndex(draft, candidates.length)];
+  if (!task) return;
+  draft.parentIds = draft.parentIds.includes(task.id)
+    ? draft.parentIds.filter((id) => id !== task.id)
+    : [...draft.parentIds, task.id];
 }
 
 /**
@@ -6124,10 +6246,10 @@ function lineRangeAtCursor(value: string, cursor: number): { start: number; end:
   return { start, end, nextCursor };
 }
 
-/** The wizard screens for the current draft's card type — manual cards skip straight from identity to confirm. */
+/** The wizard screens for the current draft's card type — manual cards skip agent-only screens. */
 function wizardSteps(draft: NewTaskDraft): readonly WizardStep[] {
-  if (draft.type === "manual") return ["identity", "confirm"] as const;
-  return ["identity", "harness", "agentProfile", "isolation", "confirm"] as const;
+  if (draft.type === "manual") return ["identity", "dependencies", "confirm"] as const;
+  return ["identity", "harness", "agentProfile", "isolation", "dependencies", "confirm"] as const;
 }
 
 /** The focusable field order for the draft's *current* step, branched by harness/isolation where relevant. */
@@ -6148,6 +6270,8 @@ function stepFieldOrder(state: TuiState, draft: NewTaskDraft): readonly NewTaskF
       return draft.harness === "opencode" ? AGENT_PROFILE_FIELDS_OPENCODE : CONFIRM_FIELDS;
     case "isolation":
       return draft.harness === "opencode" && draft.isolation === "in-place" ? ISOLATION_FIELDS_EDITABLE : ISOLATION_FIELDS_LOCKED;
+    case "dependencies":
+      return DEPENDENCY_FIELDS;
     case "confirm":
       return CONFIRM_FIELDS;
   }

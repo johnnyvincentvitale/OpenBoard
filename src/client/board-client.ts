@@ -110,11 +110,12 @@ export interface CreateBoardTaskInput {
   isolation?: string;
   /** Only valid for in-place (non-worktree) OpenCode agent tasks — see resolveOpenCodePermissionRules. */
   permissionOverrides?: PermissionOverrides;
+  parentIds?: string[];
 }
 
 export type UpdateBoardTaskInput = Omit<
   Partial<CreateBoardTaskInput>,
-  "agent" | "permissionMode" | "claudePermissionMode" | "acpOptions" | "assignedTo" | "model" | "isolation" | "permissionOverrides"
+  "agent" | "permissionMode" | "claudePermissionMode" | "acpOptions" | "assignedTo" | "model" | "isolation" | "permissionOverrides" | "parentIds"
 > & {
   agent?: string | null;
   permissionMode?: string | null;
@@ -124,6 +125,7 @@ export type UpdateBoardTaskInput = Omit<
   model?: string | ModelRef | null;
   isolation?: string | null;
   permissionOverrides?: PermissionOverrides | null;
+  parentIds?: string[] | null;
 };
 
 export type CompletionInput = Omit<CompletionReport, "outcome" | "reportedAt">;
@@ -386,6 +388,7 @@ function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): Upda
   if (task.permissionOverrides !== undefined) {
     payload.permissionOverrides = task.permissionOverrides === null ? null : normalizePermissionOverrides(task.permissionOverrides);
   }
+  if (task.parentIds !== undefined) payload.parentIds = task.parentIds === null ? null : normalizeParentIds(task.parentIds);
   return payload;
 }
 
@@ -539,7 +542,21 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
     payload.permissionOverrides = normalizePermissionOverrides(task.permissionOverrides);
   }
 
+  if (task.parentIds !== undefined) payload.parentIds = normalizeParentIds(task.parentIds);
+
   return payload;
+}
+
+function normalizeParentIds(parentIds: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const id of parentIds) {
+    const trimmed = id.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
 }
 
 function resolveTaskDirectory(directory: string | undefined, cwd: string): string {
