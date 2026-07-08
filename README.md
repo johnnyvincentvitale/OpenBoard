@@ -184,7 +184,10 @@ openboard add my-repo --workspace /path/to/repo-1      # auto-assigns a port
 openboard add side-project --workspace /path/to/repo-2 --port 4197
 openboard start my-repo
 openboard start side-project
-openboard list                                          # status of every instance
+openboard list                                          # status + identity of every instance
+openboard status my-repo                                # read-only registry/live diagnostics
+openboard default set my-repo                           # default for attach with no name
+openboard default show / clear
 openboard attach my-repo                                # open the TUI for one
 openboard stop my-repo
 openboard remove side-project
@@ -208,15 +211,23 @@ Rules of the registry:
   CLI picks the next free one starting from `4097`.
 - `openboard add` only registers the instance; `openboard start` spawns the
   daemon process.
-- `openboard list` reports `running`, `stopped`, `stale-pid`, or `unhealthy`.
-  A stale pidfile is cleaned up the next time it is inspected.
+- `openboard list` reports `running`, `stopped`, `stale-pid`, or `unhealthy`,
+  plus board URL, workspace, and DB path so similar instances can be
+  distinguished. A stale pidfile is cleaned up the next time it is inspected.
+- `openboard status <name>` is read-only diagnostics: registry identity,
+  runtime state, board and OpenCode endpoints when available, workspace, task DB
+  path, board-token presence (never the token), adapter build/version/commit,
+  and OpenCode health/version when the daemon is reachable.
 - `openboard <name>` (the bare shorthand) starts the instance if needed and then
   opens the TUI with that instance's board URL.
 - `openboard attach <name>` opens the TUI for an already-running instance; it does
   not start a stopped one — run `openboard start <name>` first, or use the bare
   `openboard <name>` shorthand above.
 - When no name is given to `attach`, the default instance is used: the instance
-  explicitly marked as default, or the only registered instance.
+  explicitly marked with `openboard default set <name>`, or the only registered
+  instance. Use `openboard default show` to see whether the default is explicit,
+  inferred, or unset, and `openboard default clear` to remove the explicit
+  default.
 
 ### `npm run tui` — single self-owned instance
 

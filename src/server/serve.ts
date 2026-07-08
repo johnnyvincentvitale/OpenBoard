@@ -75,6 +75,7 @@ export async function main(): Promise<void> {
     port: instance.port,
     workspace: instance.workspace,
     dbPath: storePaths.taskDbPath,
+    opencodeBaseUrl: handle.baseUrl,
   };
 
   const app = createApp({

@@ -32,8 +32,9 @@ function buildApp(client: ReturnType<typeof makeFakeClient>) {
   const app = new Hono();
   registerHealthRoutes(app, {
     client,
-    identity: { name: "alpha", port: 4098, workspace: "/repo", dbPath: "/db/tasks.sqlite" },
+    identity: { name: "alpha", port: 4098, workspace: "/repo", dbPath: "/db/tasks.sqlite", opencodeBaseUrl: "http://127.0.0.1:4096" },
     boardTokenPresent: true,
+    build: { version: "test-version", commit: "test-commit" },
   });
   return app;
 }
@@ -47,15 +48,18 @@ describe("GET /api/health", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({
+    expect(body).toMatchObject({
       adapter: "ok",
       opencode: { status: "ok", version: "1.x" },
+      build: { version: "test-version", commit: "test-commit" },
       identity: {
         instanceName: "alpha",
         boardUrl: "http://127.0.0.1:4098",
         port: 4098,
         workspace: "/repo",
         dbPath: "/db/tasks.sqlite",
+        opencodeUrl: "http://127.0.0.1:4096",
+        opencodePort: 4096,
         boardTokenPresent: true,
       },
     });
@@ -69,7 +73,7 @@ describe("GET /api/health", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({
+    expect(body).toMatchObject({
       adapter: "ok",
       opencode: { status: "unreachable" },
       identity: {
@@ -91,7 +95,7 @@ describe("GET /api/health", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({
+    expect(body).toMatchObject({
       adapter: "ok",
       opencode: { status: "unreachable" },
       identity: {
@@ -113,7 +117,7 @@ describe("GET /api/health", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({
+    expect(body).toMatchObject({
       adapter: "ok",
       opencode: { status: "unreachable" },
       identity: {

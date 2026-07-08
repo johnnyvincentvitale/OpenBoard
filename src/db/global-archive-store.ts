@@ -73,6 +73,8 @@ export interface SourceInstanceInfo {
   workspace: string;
   /** Path to this instance's task-store SQLite file (unique per-instance). */
   dbPath: string;
+  /** Live OpenCode backend URL, when known for a running adapter. */
+  opencodeBaseUrl?: string;
 }
 
 /** Full mirrored record as returned from the database. */

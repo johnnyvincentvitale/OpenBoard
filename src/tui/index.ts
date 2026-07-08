@@ -1598,10 +1598,13 @@ function renderHeader(ui: OpenTui, state: TuiState) {
 
 function boardHealthLabel(state: TuiState): string {
   if (state.health?.adapter === "ok") {
+    const board = state.health.build?.version
+      ? `Board ${state.health.build.version}`
+      : "Board ok";
     const opencode = state.health.opencode.status === "ok"
       ? `OpenCode ${state.health.opencode.version}`
       : "OpenCode unreachable";
-    return `Board ok · ${opencode}`;
+    return `${board} · ${opencode}`;
   }
   return state.healthError ? "Board health unknown" : "";
 }

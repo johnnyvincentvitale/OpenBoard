@@ -11,3 +11,4 @@ export * from "./task";
 export * from "./providers";
 export * from "./terminal";
 export * from "./instances";
+export * from "./health";

@@ -8,6 +8,7 @@ import {
   InstanceUnknownError,
   resolveDefaultInstance,
 } from "../instances";
+import type { BoardHealth } from "../shared/health";
 import type {
   InstanceDefinition,
   InstanceRuntimeState,
@@ -68,6 +69,31 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
       return resolveDefaultInstance(file);
     },
 
+    async getDefaultInfo() {
+      const file = registry.getFile();
+      if (file.defaultInstance) {
+        return { kind: "explicit", definition: getDefinition(file.defaultInstance), instanceCount: file.instances.length };
+      }
+      if (file.instances.length === 1) {
+        return { kind: "inferred", definition: file.instances[0], instanceCount: 1 };
+      }
+      return { kind: "unset", instanceCount: file.instances.length };
+    },
+
+    async setDefault(name) {
+      registry.setDefault(name);
+      return getDefinition(name);
+    },
+
+    async clearDefault() {
+      registry.clearDefault();
+      const file = registry.getFile();
+      if (file.instances.length === 1) {
+        return { kind: "inferred", definition: file.instances[0], instanceCount: 1 };
+      }
+      return { kind: "unset", instanceCount: file.instances.length };
+    },
+
     async add(input) {
       const dirs = instanceDataDir(homeDir, input.name);
       const definition: InstanceDefinition = {
@@ -109,6 +135,19 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
     async getRuntime(name) {
       const definition = getDefinition(name);
       return daemon.status(definition);
+    },
+
+    async getHealth(name) {
+      const definition = getDefinition(name);
+      const runtime = await daemon.status(definition);
+      if (runtime.status !== "running") return undefined;
+      try {
+        const res = await fetch(`${runtime.boardUrl}/api/health`);
+        if (!res.ok) return undefined;
+        return await res.json() as BoardHealth;
+      } catch {
+        return undefined;
+      }
     },
 
     async rename(oldName, newName) {

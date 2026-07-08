@@ -327,6 +327,24 @@ describe("defaultInstance", () => {
     const fresh = createInstanceRegistry(homeDir);
     expect(fresh.getFile().defaultInstance).toBe("b");
   });
+
+  it("sets and clears an explicit default through registry helpers", () => {
+    registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
+    registry.add(makeDef("b", 4197, "/b", "b.sqlite"));
+
+    registry.setDefault("b");
+    expect(registry.getFile().defaultInstance).toBe("b");
+
+    registry.clearDefault();
+    expect(registry.getFile().defaultInstance).toBeUndefined();
+  });
+
+  it("rejects setting a default to an unknown instance", () => {
+    registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
+
+    expect(() => registry.setDefault("ghost")).toThrow(InstanceUnknownError);
+    expect(registry.getFile().defaultInstance).toBeUndefined();
+  });
 });
 
 // ── Atomicity ────────────────────────────────────────────────────────────────

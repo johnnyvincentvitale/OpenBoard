@@ -259,7 +259,9 @@ background daemon with its own port, workspace, and database:
 openboard add my-repo --workspace /path/to/repo   # register only (does not start)
 openboard start my-repo                           # start the daemon
 openboard attach my-repo                          # open the TUI
-openboard list                                    # status of all instances
+openboard list                                    # status + identity of all instances
+openboard status my-repo                          # read-only diagnostics
+openboard default show / set my-repo / clear      # inspect or control attach default
 openboard stop my-repo / start my-repo / remove my-repo / rename old new
 ```
 
@@ -267,6 +269,10 @@ Shortcuts: `openboard my-repo` starts-if-needed and attaches; bare `openboard`
 opens an interactive selector. Instance state lives under
 `~/.config/openboard/` (registry + tokens) and `~/.local/share/openboard/<name>/`
 (database, daemon pid, log).
+When `attach` is run without a name, OpenBoard uses the explicit default set by
+`openboard default set <name>`, or infers the only registered instance. If there
+are multiple instances and no explicit default, use `openboard default show` for
+the current state or pass a name explicitly.
 
 The instance's **workspace** matters: task directories must live inside it, so
 register the instance against the repo — or parent directory — you actually

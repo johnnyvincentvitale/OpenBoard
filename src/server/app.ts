@@ -9,6 +9,7 @@ import { fetchRosterStrict } from "./agents";
 import { requireBoardToken } from "./auth";
 import { EventBridge } from "./event-bridge";
 import { registerHealthRoutes } from "./routes/health";
+import { resolveAdapterBuildInfo } from "./build-info";
 import { registerBoardRoutes } from "./routes/board";
 import { registerCardActionRoutes } from "./routes/card-actions";
 import { registerBoardEventsRoutes } from "./routes/board-events";
@@ -54,7 +55,12 @@ export function createApp(deps: AppDeps): Hono {
   // Health route is deliberately unauthenticated so boot-time probes work
   // without a token. It reports adapter, upstream OpenCode reachability, and
   // non-secret board identity for MCP/TUI/CLI disambiguation.
-  registerHealthRoutes(app, { client: deps.client, identity: deps.sourceInstance, boardTokenPresent: Boolean(deps.boardToken) });
+  registerHealthRoutes(app, {
+    client: deps.client,
+    identity: deps.sourceInstance,
+    boardTokenPresent: Boolean(deps.boardToken),
+    build: resolveAdapterBuildInfo(),
+  });
 
   // All remaining API routes require the board token.
   const auth = requireBoardToken(deps.boardToken);

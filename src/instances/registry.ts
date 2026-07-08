@@ -155,6 +155,12 @@ export interface InstanceRegistry {
   /** List all registered instances. */
   list(): InstanceDefinition[];
 
+  /** Set the explicit default instance. */
+  setDefault(name: string): InstancesFile;
+
+  /** Clear the explicit default instance. */
+  clearDefault(): InstancesFile;
+
   /** Return the raw backing file. */
   getFile(): InstancesFile;
 }
@@ -363,9 +369,36 @@ export function createInstanceRegistry(homeDir: string): InstanceRegistry {
     return load().instances;
   };
 
+  const setDefault = (name: string): InstancesFile => {
+    const lock = acquireRegistryLock(filePath);
+    try {
+      const file = loadFresh();
+      if (!file.instances.some((i) => i.name === name)) {
+        throw new InstanceUnknownError(name);
+      }
+      const updated: InstancesFile = { ...file, defaultInstance: name };
+      persist(updated);
+      return updated;
+    } finally {
+      releaseRegistryLock(lock);
+    }
+  };
+
+  const clearDefault = (): InstancesFile => {
+    const lock = acquireRegistryLock(filePath);
+    try {
+      const file = loadFresh();
+      const updated: InstancesFile = { ...file, defaultInstance: undefined };
+      persist(updated);
+      return updated;
+    } finally {
+      releaseRegistryLock(lock);
+    }
+  };
+
   const getFile = (): InstancesFile => {
     return load();
   };
 
-  return { load, save: persist, add, remove, rename, get, list, getFile };
+  return { load, save: persist, add, remove, rename, get, list, setDefault, clearDefault, getFile };
 }

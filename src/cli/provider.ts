@@ -2,6 +2,12 @@ import type {
   InstanceDefinition,
   InstanceRuntimeState,
 } from "../shared/instances";
+import type { BoardHealth } from "../shared/health";
+
+export type DefaultInstanceInfo =
+  | { kind: "explicit"; definition: InstanceDefinition; instanceCount: number }
+  | { kind: "inferred"; definition: InstanceDefinition; instanceCount: number }
+  | { kind: "unset"; instanceCount: number };
 
 /**
  * Thin lifecycle seam for the `openboard` CLI.
@@ -22,6 +28,15 @@ export interface InstanceLifecycleProvider {
 
   /** Resolve the default instance: explicit default, or the only instance. */
   resolveDefault(): Promise<InstanceDefinition | undefined>;
+
+  /** Explain default resolution: explicit, inferred from one instance, or unset. */
+  getDefaultInfo(): Promise<DefaultInstanceInfo>;
+
+  /** Persist an explicit default instance after validating it exists. */
+  setDefault(name: string): Promise<InstanceDefinition>;
+
+  /** Clear any explicit default instance. */
+  clearDefault(): Promise<DefaultInstanceInfo>;
 
   /**
    * Register a new instance.
@@ -49,6 +64,9 @@ export interface InstanceLifecycleProvider {
 
   /** Current runtime state of a single instance. */
   getRuntime(name: string): Promise<InstanceRuntimeState>;
+
+  /** Live health for a running instance, or undefined if unavailable. */
+  getHealth(name: string): Promise<BoardHealth | undefined>;
 
   /**
    * Rename an instance.

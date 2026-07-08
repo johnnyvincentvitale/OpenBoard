@@ -17,6 +17,7 @@ import type {
   InstanceDefinition,
   InstanceRuntimeState,
 } from "../shared/instances";
+import type { BoardHealth } from "../shared/health";
 import { createDefaultProvider } from "./default-provider";
 import type { InstanceLifecycleProvider } from "./provider";
 
@@ -57,7 +58,6 @@ type ParsedCommand =
       workspace: string;
       port?: number;
       opencodePort?: number;
-      noStart?: boolean;
     }
   | { command: "remove"; name: string; force: boolean }
   | { command: "start"; name: string }
@@ -65,6 +65,8 @@ type ParsedCommand =
   | { command: "attach"; name?: string }
   | { command: "mcp"; name?: string }
   | { command: "rename"; oldName: string; newName: string }
+  | { command: "default"; action: "show" | "set" | "clear"; name?: string }
+  | { command: "status"; name: string }
   | { command: "bare"; name?: string };
 
 const DEFAULT_FIRST_PORT = BOARD_SERVER_DEFAULTS.port;
@@ -135,7 +137,6 @@ export function parseArgs(argv: string[]): ParsedCommand {
       let workspace: string | undefined;
       let port: number | undefined;
       let opencodePort: number | undefined;
-      let noStart = false;
       for (let i = 0; i < rest.length; ) {
         const item = rest[i];
         if (item.startsWith("-")) {
@@ -157,11 +158,6 @@ export function parseArgs(argv: string[]): ParsedCommand {
             i = opencodePortFlag.nextIndex;
             continue;
           }
-          if (item === "--no-start") {
-            noStart = true;
-            i += 1;
-            continue;
-          }
           throw new Error(`Unknown argument: ${item}`);
         }
         if (name === undefined) {
@@ -177,7 +173,7 @@ export function parseArgs(argv: string[]): ParsedCommand {
       if (workspace === undefined) {
         throw new Error("add requires --workspace <dir>");
       }
-      return { command: "add", name, workspace, port, opencodePort, noStart };
+      return { command: "add", name, workspace, port, opencodePort };
     }
     case "remove": {
       if (rest.some(isHelpFlag)) return { command: "help" };
@@ -245,6 +241,39 @@ export function parseArgs(argv: string[]): ParsedCommand {
       }
       return { command: "rename", oldName: rest[0], newName: rest[1] };
     }
+    case "default": {
+      if (rest.some(isHelpFlag)) return { command: "help" };
+      const action = rest[0];
+      if (action === undefined) {
+        throw new Error("default requires a subcommand: show, set, or clear");
+      }
+      if (action === "show" || action === "clear") {
+        if (rest.length > 1) {
+          throw new Error(`default ${action} does not take arguments`);
+        }
+        return { command: "default", action };
+      }
+      if (action === "set") {
+        if (rest.length < 2) {
+          throw new Error("default set requires an instance name");
+        }
+        if (rest.length > 2) {
+          throw new Error("default set does not take extra arguments");
+        }
+        return { command: "default", action, name: rest[1] };
+      }
+      throw new Error(`Unknown default subcommand: ${action}`);
+    }
+    case "status": {
+      if (rest.some(isHelpFlag)) return { command: "help" };
+      if (rest.length === 0) {
+        throw new Error("status requires an instance name");
+      }
+      if (rest.length > 1) {
+        throw new Error("status does not take extra arguments");
+      }
+      return { command: "status", name: rest[0] };
+    }
     default: {
       // Exhaustive check; `first` is a CliCommand.
       throw new Error(`Unhandled command: ${first}`);
@@ -287,12 +316,13 @@ function printTable(
     stdout.write("No instances registered.\n");
     return;
   }
-  const headers = ["NAME", "STATUS", "PORT", "WORKSPACE"];
+  const headers = ["NAME", "STATUS", "BOARD URL", "WORKSPACE", "DB PATH"];
   const rows = entries.map(({ definition, runtime }) => [
     definition.name,
     runtime.status,
-    String(definition.port),
+    runtime.boardUrl,
     definition.workspace,
+    definition.dbPath,
   ]);
   const widths = headers.map((h, i) =>
     Math.max(h.length, ...rows.map((r) => r[i].length)),
@@ -302,6 +332,92 @@ function printTable(
   stdout.write(`${line(headers)}\n`);
   for (const row of rows) {
     stdout.write(`${line(row)}\n`);
+  }
+}
+
+function printDefaultInfo(
+  info: Awaited<ReturnType<InstanceLifecycleProvider["getDefaultInfo"]>>,
+  stdout: OutStream,
+): void {
+  if (info.kind === "explicit") {
+    stdout.write(`Default instance: ${info.definition.name} (explicit)\n`);
+    stdout.write(`openboard attach will use "${info.definition.name}" when no name is provided.\n`);
+    return;
+  }
+  if (info.kind === "inferred") {
+    stdout.write(`Default instance: ${info.definition.name} (inferred: only registered instance)\n`);
+    stdout.write("No explicit default is set; openboard attach will infer the only instance.\n");
+    return;
+  }
+  if (info.instanceCount === 0) {
+    stdout.write("No default instance is set and no instances are registered.\n");
+    stdout.write("Add one with: openboard add <name> --workspace <dir>\n");
+    return;
+  }
+  stdout.write("No default instance is set.\n");
+  stdout.write("Set one with: openboard default set <name>\n");
+  stdout.write("Or attach explicitly with: openboard attach <name>\n");
+}
+
+function printDefaultClearInfo(
+  info: Awaited<ReturnType<InstanceLifecycleProvider["clearDefault"]>>,
+  stdout: OutStream,
+): void {
+  stdout.write("Cleared explicit default instance.\n");
+  if (info.kind === "inferred") {
+    stdout.write(`openboard attach will infer "${info.definition.name}" because it is the only registered instance.\n`);
+    return;
+  }
+  stdout.write("openboard attach will require a name until you set a default with: openboard default set <name>\n");
+}
+
+function formatBuild(build: BoardHealth["build"] | undefined): string {
+  if (!build || (!build.version && !build.commit && !build.build)) return "unavailable";
+  return [
+    build.version ? `version ${build.version}` : undefined,
+    build.commit ? `commit ${build.commit}` : undefined,
+    build.build ? `build ${build.build}` : undefined,
+  ].filter(Boolean).join(", ");
+}
+
+function formatOpencodeBackend(definition: InstanceDefinition, health: BoardHealth | undefined): string {
+  if (health?.identity?.opencodeUrl) return health.identity.opencodeUrl;
+  if (definition.opencodePort !== undefined) return `http://127.0.0.1:${definition.opencodePort} (registry)`;
+  return "auto-assigned when running (live status required)";
+}
+
+function printStatus(
+  definition: InstanceDefinition,
+  runtime: InstanceRuntimeState,
+  health: BoardHealth | undefined,
+  stdout: OutStream,
+): void {
+  stdout.write(`Instance: ${definition.name}\n`);
+  stdout.write(`Runtime: ${runtime.status}\n`);
+  stdout.write(`Board URL: ${runtime.boardUrl}\n`);
+  stdout.write(`Board port: ${definition.port}\n`);
+  stdout.write(`Workspace: ${definition.workspace}\n`);
+  stdout.write(`Task DB path: ${definition.dbPath}\n`);
+  stdout.write(`OpenCode backend: ${formatOpencodeBackend(definition, health)}\n`);
+  stdout.write(`Board token: ${definition.boardToken?.trim() ? "present" : "absent"}\n`);
+
+  if (!health) {
+    stdout.write("Live identity: unavailable (start the instance to query /api/health)\n");
+    stdout.write("Adapter build: unavailable\n");
+    stdout.write("OpenCode health: unavailable\n");
+    return;
+  }
+
+  stdout.write(`Live instance name: ${health.identity?.instanceName ?? "unavailable"}\n`);
+  stdout.write(`Live board URL: ${health.identity?.boardUrl ?? "unavailable"}\n`);
+  stdout.write(`Live workspace: ${health.identity?.workspace ?? "unavailable"}\n`);
+  stdout.write(`Live task DB path: ${health.identity?.dbPath ?? "unavailable"}\n`);
+  stdout.write(`Live board token: ${health.identity?.boardTokenPresent ? "present" : "absent"}\n`);
+  stdout.write(`Adapter build: ${formatBuild(health.build)}\n`);
+  if (health.opencode.status === "ok") {
+    stdout.write(`OpenCode health: ok (${health.opencode.version})\n`);
+  } else {
+    stdout.write("OpenCode health: unreachable\n");
   }
 }
 
@@ -455,14 +571,18 @@ function printUsage(out: OutStream): void {
 Running openboard with no arguments opens the instance selector.
 
 Commands:
-  list                                    Show registered instances
-  add <name> --workspace <dir> [--port N] [--no-start]
+  list                                    Show registered instances and identity
+  add <name> --workspace <dir> [--port N]
                                             Register a new instance
   remove <name> [--force]                 Unregister an instance
   start <name>                            Start an instance daemon
   stop <name>                             Stop an instance daemon
   rename <old> <new>                      Rename an instance (stops/restarts if
                                            running)
+  default show                            Show explicit/inferred/default state
+  default set <name>                      Set the default instance
+  default clear                           Clear the explicit default instance
+  status <name>                           Show read-only instance diagnostics
   attach [name]                           Attach the TUI to an instance
   mcp [--instance <name>]                  Start MCP unbound, or bound to a running instance
   <name>                                  Start-if-stopped, then attach the TUI
@@ -608,6 +728,32 @@ export async function runOpenboard(
         );
         return 0;
       }
+      case "default": {
+        if (parsed.action === "show") {
+          printDefaultInfo(await provider.getDefaultInfo(), stdout);
+          return 0;
+        }
+        if (parsed.action === "set") {
+          const name = parsed.name;
+          if (name === undefined) {
+            stderr.write("Error: default set requires an instance name\n");
+            return 1;
+          }
+          const definition = await provider.setDefault(name);
+          stdout.write(`Default instance set to "${definition.name}".\n`);
+          stdout.write("openboard attach will use this instance when no name is provided.\n");
+          return 0;
+        }
+        printDefaultClearInfo(await provider.clearDefault(), stdout);
+        return 0;
+      }
+      case "status": {
+        const definition = await provider.get(parsed.name);
+        const runtime = await provider.getRuntime(parsed.name);
+        const health = await provider.getHealth(parsed.name);
+        printStatus(definition, runtime, health, stdout);
+        return 0;
+      }
       case "mcp": {
         const repoRoot = cliRepoRoot();
         if (parsed.name === undefined) {
@@ -635,7 +781,7 @@ export async function runOpenboard(
           const resolved = await provider.resolveDefault();
           if (resolved === undefined) {
             stderr.write(
-              "Error: No default instance configured. Provide a name or set a default.\n",
+              "Error: No default instance configured. Provide a name with: openboard attach <name>; or set one with: openboard default set <name>. Inspect with: openboard default show\n",
             );
             return 1;
           }

@@ -41,6 +41,9 @@ function mockProvider(
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(DEFAULT_DEFINITION),
     resolveDefault: vi.fn().mockResolvedValue(DEFAULT_DEFINITION),
+    getDefaultInfo: vi.fn().mockResolvedValue({ kind: "explicit", definition: DEFAULT_DEFINITION, instanceCount: 1 }),
+    setDefault: vi.fn().mockResolvedValue(DEFAULT_DEFINITION),
+    clearDefault: vi.fn().mockResolvedValue({ kind: "unset", instanceCount: 0 }),
     add: vi.fn().mockImplementation(async (input) => ({
       name: input.name,
       port: input.port,
@@ -52,6 +55,7 @@ function mockProvider(
     start: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
     stop: vi.fn().mockResolvedValue(STOPPED_RUNTIME),
     getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME),
+    getHealth: vi.fn().mockResolvedValue(undefined),
     rename: vi.fn().mockImplementation(async (oldName, newName) => ({
       name: newName,
       port: DEFAULT_DEFINITION.port,
@@ -127,6 +131,15 @@ describe("openboard --help", () => {
     expect(selector).toHaveBeenCalledTimes(1);
     expect(out).not.toContain("Usage:");
   });
+
+  it("does not advertise the removed add --no-start flag", async () => {
+    const provider = mockProvider();
+    const { code, out } = await run(["--help"], provider);
+    expect(code).toBe(0);
+    expect(out).not.toContain("--no-start");
+    expect(out).toContain("default show");
+    expect(out).toContain("status <name>");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -134,7 +147,7 @@ describe("openboard --help", () => {
 // ---------------------------------------------------------------------------
 
 describe("openboard list", () => {
-  it("prints a table of instances with status, port, and workspace", async () => {
+  it("prints a table of instances with status, board URL, workspace, and DB path", async () => {
     const provider = mockProvider({
       list: vi.fn().mockResolvedValue([
         {
@@ -161,14 +174,16 @@ describe("openboard list", () => {
     expect(code).toBe(0);
     expect(out).toContain("NAME");
     expect(out).toContain("STATUS");
-    expect(out).toContain("PORT");
+    expect(out).toContain("BOARD URL");
     expect(out).toContain("WORKSPACE");
+    expect(out).toContain("DB PATH");
     expect(out).toContain("alpha");
     expect(out).toContain("running");
-    expect(out).toContain("4097");
+    expect(out).toContain("http://127.0.0.1:4097");
     expect(out).toContain("/ws/alpha");
+    expect(out).toContain("alpha.sqlite");
     expect(out).toContain("stopped");
-    expect(out).toContain("4197");
+    expect(out).toContain("http://127.0.0.1:4197");
   });
 
   it("prints a friendly message when no instances exist", async () => {
@@ -247,15 +262,16 @@ describe("openboard add", () => {
     expect(out).toContain('Added instance "fresh"');
   });
 
-  it("accepts --no-start as a backward-compatible no-op", async () => {
+  it("rejects --no-start as an unknown dead flag", async () => {
     const provider = mockProvider();
-    const { code, out } = await run(
+    const { code, err } = await run(
       ["add", "fresh", "--workspace", "/ws/fresh", "--no-start"],
       provider,
     );
-    expect(code).toBe(0);
+    expect(code).toBe(1);
+    expect(err).toContain("Unknown argument: --no-start");
     expect(provider.start).not.toHaveBeenCalled();
-    expect(out).toContain('Added instance "fresh"');
+    expect(provider.add).not.toHaveBeenCalled();
   });
 
   it("rejects invalid instance names", async () => {
@@ -384,6 +400,133 @@ describe("openboard stop", () => {
 });
 
 // ---------------------------------------------------------------------------
+// default
+// ---------------------------------------------------------------------------
+
+describe("openboard default", () => {
+  it("shows an explicit default", async () => {
+    const provider = mockProvider({
+      getDefaultInfo: vi.fn().mockResolvedValue({ kind: "explicit", definition: DEFAULT_DEFINITION, instanceCount: 2 }),
+    });
+
+    const { code, out } = await run(["default", "show"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("my-project");
+    expect(out).toContain("explicit");
+  });
+
+  it("shows an inferred only-instance default", async () => {
+    const provider = mockProvider({
+      getDefaultInfo: vi.fn().mockResolvedValue({ kind: "inferred", definition: DEFAULT_DEFINITION, instanceCount: 1 }),
+    });
+
+    const { code, out } = await run(["default", "show"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("inferred");
+    expect(out).toContain("only registered instance");
+  });
+
+  it("shows unset default with actionable commands", async () => {
+    const provider = mockProvider({
+      getDefaultInfo: vi.fn().mockResolvedValue({ kind: "unset", instanceCount: 2 }),
+    });
+
+    const { code, out } = await run(["default", "show"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("openboard default set <name>");
+    expect(out).toContain("openboard attach <name>");
+  });
+
+  it("sets a default after provider validation", async () => {
+    const provider = mockProvider();
+
+    const { code, out } = await run(["default", "set", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(provider.setDefault).toHaveBeenCalledWith("my-project");
+    expect(out).toContain('Default instance set to "my-project"');
+  });
+
+  it("surfaces unknown instance when setting default", async () => {
+    const provider = mockProvider({
+      setDefault: vi.fn().mockRejectedValue(new InstanceUnknownError("ghost")),
+    });
+
+    const { code, err } = await run(["default", "set", "ghost"], provider);
+
+    expect(code).toBe(1);
+    expect(err).toContain("Unknown instance");
+  });
+
+  it("clears a default and explains attach behavior", async () => {
+    const provider = mockProvider({
+      clearDefault: vi.fn().mockResolvedValue({ kind: "inferred", definition: DEFAULT_DEFINITION, instanceCount: 1 }),
+    });
+
+    const { code, out } = await run(["default", "clear"], provider);
+
+    expect(code).toBe(0);
+    expect(provider.clearDefault).toHaveBeenCalled();
+    expect(out).toContain("Cleared explicit default");
+    expect(out).toContain("will infer");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+describe("openboard status", () => {
+  it("prints stopped registry identity with live fields unavailable", async () => {
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME),
+      getHealth: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { code, out } = await run(["status", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(provider.start).not.toHaveBeenCalled();
+    expect(out).toContain("Instance: my-project");
+    expect(out).toContain("Runtime: stopped");
+    expect(out).toContain("Task DB path: my-project.sqlite");
+    expect(out).toContain("Board token: present");
+    expect(out).toContain("Live identity: unavailable");
+  });
+
+  it("prints live health identity and build for running instances", async () => {
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      getHealth: vi.fn().mockResolvedValue({
+        adapter: "ok",
+        opencode: { status: "ok", version: "1.2.3" },
+        identity: {
+          instanceName: "my-project",
+          boardUrl: "http://127.0.0.1:4097",
+          port: 4097,
+          workspace: "/home/alice/repos/my-project",
+          dbPath: "my-project.sqlite",
+          opencodeUrl: "http://127.0.0.1:4096",
+          opencodePort: 4096,
+          boardTokenPresent: true,
+        },
+        build: { version: "0.0.1", commit: "abc123" },
+      }),
+    });
+
+    const { code, out } = await run(["status", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("OpenCode backend: http://127.0.0.1:4096");
+    expect(out).toContain("Adapter build: version 0.0.1, commit abc123");
+    expect(out).toContain("OpenCode health: ok (1.2.3)");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // attach
 // ---------------------------------------------------------------------------
 
@@ -420,6 +563,8 @@ describe("openboard attach", () => {
     const { code, err } = await run(["attach"], provider);
     expect(code).toBe(1);
     expect(err).toContain("No default instance");
+    expect(err).toContain("openboard default set <name>");
+    expect(err).toContain("openboard default show");
   });
 });
 

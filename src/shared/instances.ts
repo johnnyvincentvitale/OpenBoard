@@ -178,8 +178,10 @@ export class InstanceSpawnError extends InstanceError {
  * - `attach`: Open the TUI for an instance (or the default instance).
  * - `mcp`:    Start the MCP server bound to an explicit named instance.
  * - `rename`: Rename an instance (stops/restarts if running).
+ * - `default`: Show/set/clear the default instance used by attach.
+ * - `status`: Read-only diagnostics for one instance.
  */
-export const CLI_COMMANDS = ["list", "add", "remove", "start", "stop", "attach", "mcp", "rename"] as const;
+export const CLI_COMMANDS = ["list", "add", "remove", "start", "stop", "attach", "mcp", "rename", "default", "status"] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 /** Arguments for the `list` subcommand. */
@@ -237,6 +239,19 @@ export interface CliRenameArgs {
   newName: string;
 }
 
+/** Arguments for the `default` subcommand group. */
+export interface CliDefaultArgs {
+  command: "default";
+  action: "show" | "set" | "clear";
+  name?: string;
+}
+
+/** Arguments for the `status` subcommand. */
+export interface CliStatusArgs {
+  command: "status";
+  name: string;
+}
+
 /** Discriminated union of all CLI argument shapes. */
 export type CliArgs =
   | CliListArgs
@@ -246,7 +261,9 @@ export type CliArgs =
   | CliStopArgs
   | CliAttachArgs
   | CliMcpArgs
-  | CliRenameArgs;
+  | CliRenameArgs
+  | CliDefaultArgs
+  | CliStatusArgs;
 
 // ── Pure validation helpers ──────────────────────────────────────────────────
 

@@ -84,7 +84,7 @@ describe("INSTANCE_STATUSES", () => {
 // ---------------------------------------------------------------------------
 
 describe("CLI_COMMANDS", () => {
-  it("contains the eight subcommands", () => {
+  it("contains the ten subcommands", () => {
     expect(CLI_COMMANDS).toEqual([
       "list",
       "add",
@@ -94,6 +94,8 @@ describe("CLI_COMMANDS", () => {
       "attach",
       "mcp",
       "rename",
+      "default",
+      "status",
     ]);
   });
 });

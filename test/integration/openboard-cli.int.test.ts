@@ -241,8 +241,7 @@ describe.skipIf(!available)("openboard CLI named-instance flow (integration)", (
         ]);
         expect(portA).not.toBe(portB);
 
-        // Register two instances (--no-start: this test exercises the explicit
-        // start path; add's default auto-start is covered at the unit level).
+        // Register two instances; add is register-only and start is explicit.
         const addA = await runCli(ctx, [
           "add",
           "alpha",
@@ -250,7 +249,6 @@ describe.skipIf(!available)("openboard CLI named-instance flow (integration)", (
           workspaceA,
           "--port",
           String(portA),
-          "--no-start",
         ]);
         expect(addA.code).toBe(0);
 
@@ -261,7 +259,6 @@ describe.skipIf(!available)("openboard CLI named-instance flow (integration)", (
           workspaceB,
           "--port",
           String(portB),
-          "--no-start",
         ]);
         expect(addB.code).toBe(0);
         ctx.instances = ["alpha", "beta"];
@@ -352,7 +349,6 @@ describe.skipIf(!available)("openboard CLI named-instance flow (integration)", (
           workspace,
           "--port",
           String(port),
-          "--no-start",
         ]);
         expect(add.code).toBe(0);
         ctx.instances = ["gamma"];

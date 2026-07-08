@@ -28,6 +28,7 @@ import type {
   UpdateTaskInput,
   WorktreeCommitStatus,
   WorktreeCleanupOutcome,
+  BoardHealth,
 } from "../shared";
 import {
   buildTaskPath,
@@ -43,6 +44,8 @@ import {
   TASK_HARNESSES,
   TASK_ISOLATION_MODES,
 } from "../shared";
+
+export type { BoardHealth } from "../shared/health";
 
 export const DEFAULT_BOARD_URL = "http://127.0.0.1:4097";
 export const BOARD_UNAVAILABLE_MESSAGE = "Open OpenBoard first or set OPENCODE_BOARD_URL.";
@@ -120,22 +123,6 @@ export type UpdateBoardTaskInput = Omit<
   isolation?: string | null;
   permissionOverrides?: PermissionOverrides | null;
 };
-
-/** GET /api/health response — adapter + OpenCode reachability and version. */
-export interface BoardIdentity {
-  instanceName?: string;
-  boardUrl: string;
-  port: number;
-  workspace: string;
-  dbPath: string;
-  boardTokenPresent: boolean;
-}
-
-export interface BoardHealth {
-  adapter: "ok";
-  opencode: { status: "ok"; version: string } | { status: "unreachable" };
-  identity?: BoardIdentity;
-}
 
 export type CompletionInput = Omit<CompletionReport, "outcome" | "reportedAt">;
 export type CompletionWithOutputInput = CompletionInput & { finalSessionOutput?: string | null };
