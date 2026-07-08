@@ -155,6 +155,61 @@ describe("startOrConnect — spawn mode", () => {
       }),
     );
     const call = vi.mocked(createOpencodeServer).mock.calls[0]?.[0];
-    expect(call).not.toHaveProperty("config");
+    expect(call?.config).toBeUndefined();
+  });
+
+  it("injects a bound OpenBoard MCP server config in spawn mode", async () => {
+    const config = await spawnConfig();
+
+    await expect(
+      startOrConnect(config, {
+        openboardMcp: {
+          adapterBaseUrl: "http://127.0.0.1:4097",
+          boardToken: "tok_test",
+          instanceName: "alpha",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "opencode_unreachable" });
+
+    const call = vi.mocked(createOpencodeServer).mock.calls[0]?.[0];
+    expect(call?.config).toEqual({
+      mcp: {
+        openboard: {
+          type: "local",
+          command: ["openboard", "mcp", "--instance", "alpha"],
+          environment: {
+            OPENCODE_BOARD_URL: "http://127.0.0.1:4097",
+            OPENBOARD_API_TOKEN: "tok_test",
+          },
+        },
+      },
+    });
+  });
+
+  it("injects an env-bound OpenBoard MCP config when no instance name is available", async () => {
+    const config = await spawnConfig();
+
+    await expect(
+      startOrConnect(config, {
+        openboardMcp: {
+          adapterBaseUrl: "http://127.0.0.1:4098",
+          boardToken: "tok_dev",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "opencode_unreachable" });
+
+    const call = vi.mocked(createOpencodeServer).mock.calls[0]?.[0];
+    expect(call?.config).toEqual({
+      mcp: {
+        openboard: {
+          type: "local",
+          command: ["openboard", "mcp"],
+          environment: {
+            OPENCODE_BOARD_URL: "http://127.0.0.1:4098",
+            OPENBOARD_API_TOKEN: "tok_dev",
+          },
+        },
+      },
+    });
   });
 });

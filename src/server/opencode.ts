@@ -5,7 +5,7 @@
  * shutdown handle.
  */
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2/client";
-import { createOpencodeServer } from "@opencode-ai/sdk/v2/server";
+import { createOpencodeServer, type ServerOptions } from "@opencode-ai/sdk/v2/server";
 import { AdapterError } from "../shared/errors";
 import { assertPortFree, ConfigError } from "./config";
 import type { AdapterConfig } from "./config";
@@ -14,6 +14,12 @@ export interface OpencodeHandle {
   client: OpencodeClient;
   baseUrl: string;
   shutdown(): Promise<void>;
+}
+
+export interface OpenboardMcpConfig {
+  adapterBaseUrl: string;
+  boardToken?: string;
+  instanceName?: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -60,6 +66,7 @@ async function waitForHealthy(
  */
 export async function startOrConnect(
   config: AdapterConfig,
+  options: { openboardMcp?: OpenboardMcpConfig } = {},
 ): Promise<OpencodeHandle> {
   if (config.mode === "connect") {
     const baseUrl = config.baseUrl;
@@ -96,6 +103,7 @@ export async function startOrConnect(
     server = await createOpencodeServer({
       hostname: config.hostname,
       port: config.port,
+      ...(options.openboardMcp ? { config: openboardMcpConfig(options.openboardMcp) } : {}),
     });
   } catch (err) {
     throw AdapterError.unreachable("Failed to spawn OpenCode server", err);
@@ -117,6 +125,23 @@ export async function startOrConnect(
       if (config.manageProcess) {
         server.close();
       }
+    },
+  };
+}
+
+function openboardMcpConfig(options: OpenboardMcpConfig): NonNullable<ServerOptions["config"]> {
+  return {
+    mcp: {
+      openboard: {
+        type: "local",
+        command: options.instanceName
+          ? ["openboard", "mcp", "--instance", options.instanceName]
+          : ["openboard", "mcp"],
+        environment: {
+          OPENCODE_BOARD_URL: options.adapterBaseUrl,
+          ...(options.boardToken ? { OPENBOARD_API_TOKEN: options.boardToken } : {}),
+        },
+      },
     },
   };
 }

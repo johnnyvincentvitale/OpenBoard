@@ -381,9 +381,11 @@ describe("TaskDispatcher", () => {
       expect(text).toContain("Task type: build");
       expect(text).toContain("- summary: implementation completed and behavior changed.");
       expect(text).toContain("- changedFiles: actual touched files.");
+      expect(text).toContain(`complete_task with { taskId: "${task.id}"`);
+      expect(text).toContain(`block_task with { taskId: "${task.id}"`);
       expect(text).toContain(`http://127.0.0.1:5123/api/tasks/${task.id}/complete`);
       expect(text).toContain(`http://127.0.0.1:5123/api/tasks/${task.id}/block`);
-      expect(text).toContain("Call /complete or /block exactly once");
+      expect(text).toContain("Call complete_task/block_task or /complete or /block exactly once");
     });
 
     it("includes a shell-escaped board token in completion-contract curl commands", async () => {

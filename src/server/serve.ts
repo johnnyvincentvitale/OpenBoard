@@ -26,16 +26,25 @@ export async function main(): Promise<void> {
   // so users don't paste it manually.
   const boardToken = resolveBoardToken(process.env);
 
+  const adapterBaseUrl = `http://${config.hostname}:${config.boardPort}`;
+  const instanceName = process.env.OPENBOARD_INSTANCE_NAME?.trim() || undefined;
+
   const storePaths = deriveStorePaths(instance);
   const taskStore = new SqliteTaskStore(storePaths.taskDbPath);
 
-  const handle = await startOrConnect(config);
+  const handle = await startOrConnect(config, {
+    openboardMcp: {
+      adapterBaseUrl,
+      boardToken,
+      instanceName,
+    },
+  });
   const dispatcher = new TaskDispatcher({
     client: handle.client,
     store: taskStore,
-    adapterBaseUrl: `http://${config.hostname}:${config.boardPort}`,
+    adapterBaseUrl,
     boardToken,
-    instanceName: process.env.OPENBOARD_INSTANCE_NAME?.trim() || undefined,
+    instanceName,
   });
   try {
     const outcomes = await dispatcher.sweepOrphanedWorktrees();
