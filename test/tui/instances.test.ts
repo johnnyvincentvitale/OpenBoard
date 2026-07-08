@@ -123,15 +123,13 @@ function diagnostics(overrides: Partial<BoardDiagnostics> = {}): BoardDiagnostic
   return {
     sandbox: {
       desired: "on",
-      effective: "sandboxed",
+      effective: "on",
       restartRequired: false,
     },
     opencode: {
       reachable: true,
       url: "http://127.0.0.1:8080",
       version: "1.0.0",
-      home: "/home/user/.opencode",
-      configDir: "/home/user/.config/opencode",
     },
     worktree: {
       removedCleanCount: 0,
@@ -147,7 +145,7 @@ function diagnostics(overrides: Partial<BoardDiagnostics> = {}): BoardDiagnostic
       apiTokenPresent: true,
     },
     editor: {
-      source: "PATH",
+      source: "editor",
       resolved: "/usr/bin/code",
       missing: false,
     },

@@ -181,7 +181,7 @@ describe("TUI new-task dependency picker", () => {
       const labels: string[] = [];
       // initial + six right presses covers the full cycle, ending back at none
       for (let i = 0; i <= TASK_KINDS.length; i += 1) {
-        labels.push(textOf(renderApp(fakeUi(), s, a)));
+        labels.push(textOf(renderApp(fakeUi(), s)));
         await handleKeypress({ sequence: "\u001b[C", name: "right" } as any, s, a);
       }
 
@@ -199,7 +199,7 @@ describe("TUI new-task dependency picker", () => {
       s.newTask = newTaskDraft({ step: "dependencies", field: "dependency" });
       const a = actions();
 
-      const rendered = renderApp(fakeUi(), s, a);
+      const rendered = renderApp(fakeUi(), s);
       expect(textOf(rendered)).toContain("No existing tasks available");
     });
 
@@ -210,7 +210,7 @@ describe("TUI new-task dependency picker", () => {
       const a = actions();
 
       // initial render should show first 8 candidates
-      const first = textOf(renderApp(fakeUi(), s, a));
+      const first = textOf(renderApp(fakeUi(), s));
       expect(first).toContain("Parent 0");
       expect(first).toContain("Parent 7");
       expect(first).not.toContain("Parent 8");
@@ -232,7 +232,7 @@ describe("TUI new-task dependency picker", () => {
       s.newTask = newTaskDraft({ step: "dependencies", field: "dependency", dependencyIndex: 0, parentIds: ["p-0"] });
       const a = actions();
 
-      const first = textOf(renderApp(fakeUi(), s, a));
+      const first = textOf(renderApp(fakeUi(), s));
       expect(first).toContain("☑ Parent 0");
 
       // scroll well past the selected item
@@ -260,7 +260,7 @@ describe("TUI new-task dependency picker", () => {
       });
       const a = actions();
 
-      const rendered = textOf(renderApp(fakeUi(), s, a));
+      const rendered = textOf(renderApp(fakeUi(), s));
       expect(rendered).toContain("PARENTS");
       expect(rendered).toContain("Backend refactor");
       expect(rendered).toContain("API contract");
@@ -271,7 +271,7 @@ describe("TUI new-task dependency picker", () => {
       s.newTask = newTaskDraft({ step: "confirm", field: "confirm", title: "Solo task", parentIds: [] });
       const a = actions();
 
-      const rendered = textOf(renderApp(fakeUi(), s, a));
+      const rendered = textOf(renderApp(fakeUi(), s));
       expect(rendered).toContain("PARENTS");
       expect(rendered).toContain("None");
     });
