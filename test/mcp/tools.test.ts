@@ -19,11 +19,12 @@ import {
   retryTask,
   runTask,
   syncTask,
+  taskDiff,
   taskEvents,
   unlinkTasks,
 } from "../../src/mcp/tools";
 import type { McpToolOptions } from "../../src/mcp/tools";
-import type { RosterAgent, Task } from "../../src/shared";
+import type { DiffResponse, RosterAgent, Task } from "../../src/shared";
 
 const CWD = "/tmp/openboard-project";
 const NO_AUTH_ENV = { OPENBOARD_API_TOKEN: "" };
@@ -472,13 +473,20 @@ describe("MCP orchestrator tools", () => {
     updatedAt: 2,
   };
 
-  it("wraps run/retry/abort/link/unlink/complete/block/sync/integrate/comment/event endpoints", async () => {
+  it("wraps run/retry/abort/link/unlink/complete/block/sync/integrate/comment/event/diff endpoints", async () => {
     const outcome = { task, ok: true, conflict: false, message: "merged" };
+    const diff: DiffResponse = {
+      kind: "diff",
+      files: [{ file: "src/a.ts", additions: 1, deletions: 0, status: "added", patch: "@@" }],
+      capped: false,
+      root: CWD,
+    };
     const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
       const path = new URL(String(url)).pathname;
       if (path.endsWith("/sync") || path.endsWith("/integrate")) return jsonResponse(outcome);
       if (path.endsWith("/comments")) return jsonResponse({ id: "comment_1", taskId: "task-1", author: "me", body: "note", createdAt: 3 }, 201);
       if (path.endsWith("/events")) return jsonResponse([{ id: "event_1", taskId: "task-1", type: "task_run", body: {}, createdAt: 4 }]);
+      if (path.endsWith("/diff")) return jsonResponse(diff);
       return jsonResponse(task);
     });
     const options = makeOptions([CWD], fetchMock);
@@ -495,8 +503,10 @@ describe("MCP orchestrator tools", () => {
     await integrateTask({ taskId: "task-1", confirmReviewed: true, targetBranch: "main" }, options);
     await commentTask({ taskId: "task-1", author: "me", body: "note" }, options);
     const events = await taskEvents({ taskId: "task-1" }, options);
+    const diffResult = await taskDiff({ taskId: "task-1" }, options);
 
     expect(events.count).toBe(1);
+    expect(diffResult).toEqual({ boardUrl: DEFAULT_BOARD_URL, taskId: "task-1", diff });
     expect(fetchMock.mock.calls.map((call: unknown[]) => new URL(String(call[0])).pathname)).toEqual([
       "/api/tasks/task-1/run",
       "/api/tasks/task-1/retry",
@@ -509,6 +519,7 @@ describe("MCP orchestrator tools", () => {
       "/api/tasks/task-1/integrate",
       "/api/tasks/task-1/comments",
       "/api/tasks/task-1/events",
+      "/api/tasks/task-1/diff",
     ]);
     expect(new URL(String(fetchMock.mock.calls[5][0])).search).toBe("?runStartedAt=10");
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ feedback: "again" });
@@ -668,6 +679,21 @@ describe("MCP list tools", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(`${DEFAULT_BOARD_URL}/api/agents`, { method: "GET" });
     expect(result).toEqual({ boardUrl: DEFAULT_BOARD_URL, count: 2, agents });
+  });
+
+  it("fetches task diff through GET /api/tasks/:id/diff", async () => {
+    const diff: DiffResponse = {
+      kind: "diff",
+      files: [{ file: "src/card.ts", additions: 4, deletions: 1, status: "modified", patch: "@@ -1 +1 @@" }],
+      capped: false,
+      root: "/repo/.opencode-board-worktrees/task-1",
+    };
+    const fetchMock = vi.fn(async () => jsonResponse(diff));
+
+    const result = await taskDiff({ taskId: "task-1" }, { fetch: fetchMock, cwd: CWD, env: NO_AUTH_ENV });
+
+    expect(fetchMock).toHaveBeenCalledWith(`${DEFAULT_BOARD_URL}/api/tasks/task-1/diff`, { method: "GET" });
+    expect(result).toEqual({ boardUrl: DEFAULT_BOARD_URL, taskId: "task-1", diff });
   });
 
   it("uses OPENCODE_BOARD_URL when provided", () => {

@@ -78,9 +78,8 @@ Clients send the token in one of two ways:
   that cannot set custom headers)
 
 Local clients launched by OpenBoard itself — the TUI and the `openboard` CLI —
-receive the token automatically through the environment. The web UI receives it
-via an injected `<script>` tag in the HTML. No manual copying is needed for
-these same-origin clients.
+receive the token automatically through the environment. No manual copying is
+needed for these clients.
 
 Dispatched OpenCode sessions also receive the token inside the appended
 completion-contract prompt so they can report `/complete` or `/block` back to

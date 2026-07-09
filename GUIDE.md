@@ -284,6 +284,10 @@ openboard list                                    # status + identity of all ins
 openboard status my-repo                          # read-only diagnostics
 openboard default show / set my-repo / clear      # inspect or control attach default
 openboard stop my-repo / start my-repo / remove my-repo / rename old new
+openboard restart my-repo                         # stop + start + wait for health
+openboard doctor my-repo                          # deeper operator diagnostics
+openboard logs my-repo                            # tail the instance log (secrets scrubbed)
+openboard tasks / agents / providers / harnesses / worktrees my-repo   # read-only introspection
 ```
 
 Shortcuts: `openboard my-repo` starts-if-needed and attaches; bare `openboard`
@@ -482,11 +486,12 @@ if something felt confusing, that's a finding.
 model on the card doesn't exist in your OpenCode auth, or OpenCode itself is
 unhappy.
 
-**Board looks dead on start.** Check the instance log first; a malformed
-OpenCode agent profile is the usual suspect (see Known issues).
+**Board looks dead on start.** Run `openboard doctor <name>` and `openboard logs
+<name>` first; a malformed OpenCode agent profile is the usual suspect (see Known
+issues).
 
 **A new agent doesn't appear in the roster.** Restart the instance:
-`openboard stop <name> && openboard start <name>`.
+`openboard restart <name>`.
 
 **`openboard list` says `stale-pid` or `unhealthy`.** Stale pidfiles clean
 themselves up on inspection. `unhealthy` means the process answers but fails

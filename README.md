@@ -141,7 +141,7 @@ create and run tasks if they have the token.
 ## Run it
 ```sh
 npm install            # first time only
-npm run build:app      # builds server, TUI, CLI, MCP, and web bundles
+npm run build:app      # builds server, MCP, TUI, and CLI
 npm run tui            # starts a single self-owned TUI board
 ```
 
@@ -294,10 +294,11 @@ The MCP server's tools are an orchestrator control surface for the existing task
 `add_tasks`, `list_tasks`, `list_agents`,
 `link_tasks`, `unlink_tasks`, `run_task`, `retry_task`, `abort_task`, `move_task`,
 `complete_task`, `block_task`, `sync_task`, `integrate_task`, `comment_task`, `add_note`, and
-`task_events`. `move_task` requires `completedBy` when moving to Done, and `integrate_task`
+`task_events` / `task_diff`. `move_task` requires `completedBy` when moving to Done, and `integrate_task`
 requires `confirmReviewed: true`.
 
-Review cards expose `GET /api/tasks/:id/diff`, which the TUI uses for the `v`
+Review cards expose `GET /api/tasks/:id/diff`, also available to MCP clients as
+`task_diff`, which the TUI uses for the `v`
 full-screen diff view. Non-Review cards return 409, unknown tasks return 404,
 and missing git evidence returns a readable no-git response instead of crashing.
 
@@ -370,6 +371,9 @@ src/server/    Hono adapter — opencode client, dispatcher, task store wiring, 
 src/db/        better-sqlite3 task store + global archive
 src/tui/       V1 OpenTUI board, selected-card details, instance switcher, launcher
 src/cli/       named-instance CLI (`openboard`)
+src/mcp/       MCP orchestrator server (`openboard mcp`)
+src/client/    board REST client (shared by CLI, TUI, MCP)
+src/instances/ named-instance registry + daemon
 test/          unit + integration
 ```
 
@@ -386,6 +390,10 @@ Concurrent agents in one repo share a working tree and can clobber each other. C
   branch *into* the worktree (resolve drift there); **Integrate** merges the worktree branch *into*
   the base branch, removes the worktree, and **keeps the branch**. Conflicts are reported, not
   forced.
+- **Discard.** End a Review worktree *without* merging — removes the worktree, keeps the branch and
+  card. For runs you don't want to integrate.
+- **Per-file review commits.** From the DiffView (`c`) you can commit individual changed files in
+  the worktree before Integrate, so a partial result lands cleanly.
 
 ## Open in editor
 

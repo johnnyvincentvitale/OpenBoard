@@ -43,6 +43,7 @@ import {
   runTask,
   selectInstance,
   syncTask,
+  taskDiff,
   taskEvents,
   unlinkTasks,
   type McpToolOptions,
@@ -246,6 +247,16 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
       inputSchema: TaskIdInputSchema,
     },
     async (args) => toToolResult(await taskEvents(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "task_diff",
+    {
+      title: "Get OpenBoard task diff",
+      description: "Fetch the structured Review-card diff through GET /api/tasks/:id/diff.",
+      inputSchema: TaskIdInputSchema,
+    },
+    async (args) => toToolResult(await taskDiff(args, toolOptions)),
   );
 
   server.registerTool(

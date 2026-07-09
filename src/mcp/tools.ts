@@ -11,7 +11,7 @@ import {
   type CompletionInput,
   type TaskSummary,
 } from "../client/board-client";
-import type { Column, MergeOutcome, RosterAgent, TaskComment, TaskEvent } from "../shared";
+import type { Column, DiffResponse, MergeOutcome, RosterAgent, TaskComment, TaskEvent } from "../shared";
 import { CLAUDE_CODE_PERMISSION_MODES, TASK_HARNESSES, TASK_KINDS } from "../shared";
 import {
   currentSelectionFromOptions,
@@ -156,6 +156,12 @@ export interface TaskEventsResult {
   taskId: string;
   count: number;
   events: TaskEvent[];
+}
+
+export interface TaskDiffResult {
+  boardUrl: string;
+  taskId: string;
+  diff: DiffResponse;
 }
 
 export interface ListTasksResult {
@@ -310,6 +316,13 @@ export async function taskEvents(input: unknown, options: McpToolOptions = {}): 
   const client = await createMcpBoardClient(options);
   const events = await client.listTaskEvents(parsed.taskId);
   return { boardUrl: client.boardUrl, taskId: parsed.taskId, count: events.length, events };
+}
+
+export async function taskDiff(input: unknown, options: McpToolOptions = {}): Promise<TaskDiffResult> {
+  const parsed = TaskIdInputSchema.parse(input);
+  const client = await createMcpBoardClient(options);
+  const diff = await client.getTaskDiff(parsed.taskId);
+  return { boardUrl: client.boardUrl, taskId: parsed.taskId, diff };
 }
 
 export async function listInstances(): Promise<ListInstancesResult> {
