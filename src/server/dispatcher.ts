@@ -1036,9 +1036,11 @@ export class TaskDispatcher implements Dispatcher {
       "",
       "---",
       "PARENT CONTEXT",
-      "Parent task worktrees are read-only. Use them only to inspect parent changes with read/grep/glob/list tools.",
-      "Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.",
+      "To inspect a parent's code changes, first call the openboard MCP tool task_diff with that parent's task id (listed below).",
+      "If task_diff is unavailable or errors (for example the parent has left Review), fall back to the parent worktree with read/grep/glob/list tools only.",
+      "Parent task worktrees are read-only. Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.",
       "Do all implementation and verification shell commands from your own cwd.",
+      "Board tools are limited to task_diff for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).",
       "",
     ];
     for (const [index, parentId] of parentIds.entries()) {
@@ -1074,6 +1076,8 @@ export class TaskDispatcher implements Dispatcher {
       }
       lines.push("");
     }
+    lines.push("Your cwd starts from the base branch: parent changes are NOT present in your cwd unless they were already integrated.");
+    lines.push("If your task depends on un-integrated parent changes, reapply the needed changes into cwd first (guided by task_diff), then do your own work.");
     lines.push("If a parent changed file also exists in your cwd, inspect the parent copy only to understand intent, then open/edit/test the cwd copy.");
 
     return lines.join("\n").trimEnd();

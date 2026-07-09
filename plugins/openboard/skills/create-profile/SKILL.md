@@ -76,8 +76,10 @@ Optional frontmatter:
   config is part of the crash risk.
 
 Prompt body requirements: state the role in one sentence; list sources to read
-before work; state hard boundaries (no board operations, no commits/pushes, no
-secret exposure, stay inside the card's file boundary); state verification
+before work; state hard boundaries (board tools limited to `task_diff`
+inspection and completion reports — never run/move/create/integrate; no
+commits/pushes; no secret exposure; stay inside the card's file boundary);
+state verification
 expectations; state the final handoff format (changed files, commands run,
 results, residual risks, human-gated decisions). For audit profiles, say
 review-only and deny edits in both prompt and permission config.

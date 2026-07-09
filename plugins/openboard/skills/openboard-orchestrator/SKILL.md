@@ -39,9 +39,13 @@ Create cards an agent can succeed on without reading your mind:
 - Task kind: `research`, `synthesis`, `build`, `audit`, `fix`, or `none`.
 - Parent links via `link_tasks` / `parentIds` — never paste parent handoffs
   into the prompt. A linked child is dispatch-gated until parents are
-  satisfied, and the dispatcher injects `PARENT CONTEXT` with numbered parent
-  sections (`PARENT-000`, `PARENT-001`, ...), read-only parent worktree
-  instructions, summaries, changed files, verification, and residual risk.
+  satisfied, and the dispatcher injects `PARENT CONTEXT`: `task_diff`-first
+  parent inspection guidance (read-only worktree reads as fallback), the rule
+  that the child cwd starts from base, and numbered parent sections
+  (`PARENT-000`, `PARENT-001`, ...) with worktree, task id, branch, summary,
+  changed files, verification, and residual risk. For a fix card, link the
+  code-bearing build parent directly (not just the audit) so its diff is
+  reachable.
 - Harness and assignee. OpenCode cards: assign an OpenCode agent; its verified
   roster model is materialized onto `task.model` at creation (explicit model
   override only when the approved plan calls for it). ACP cards: store the

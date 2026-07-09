@@ -57,8 +57,17 @@ describe("task execution context", () => {
   });
 
   it("preserves linked audit and fix modes with parent-oriented guidance", () => {
-    expect(taskExecutionContext("audit", { hasParents: true })).toContain("Review diffs, parent worktrees, tests, and behavior.");
+    expect(taskExecutionContext("audit", { hasParents: true })).toContain(
+      "Inspect parent code changes with the openboard task_diff MCP tool first; use read-only parent worktree inspection as the fallback.",
+    );
+    expect(taskExecutionContext("audit", { hasParents: true })).toContain("Review diffs, tests, and behavior.");
     expect(taskExecutionContext("fix", { hasParents: true })).toContain("Resolve specific findings from parent audit/build/synthesis context.");
+    expect(taskExecutionContext("fix", { hasParents: true })).toContain(
+      "Use audit parents for findings. Use the openboard task_diff MCP tool on the code-bearing (build) parent for the code changes; do not read sibling worktree files directly when the diff is available.",
+    );
+    expect(taskExecutionContext("fix", { hasParents: true })).toContain(
+      "Your cwd starts from the base branch: reapply the parent changes your fix depends on into cwd first, then apply the fix.",
+    );
     expect(taskExecutionContext("fix", { hasParents: true })).toContain("Tie each change back to the finding it addresses.");
   });
 });

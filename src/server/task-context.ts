@@ -24,12 +24,16 @@ const LINKED_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
   audit: [
     "Inspect only unless explicitly told otherwise.",
     "Do not fix issues.",
-    "Review diffs, parent worktrees, tests, and behavior.",
+    "Inspect parent code changes with the openboard task_diff MCP tool first; use read-only parent worktree inspection as the fallback.",
+    "Review diffs, tests, and behavior.",
+    "State which tree each verification command ran in (own cwd vs parent changes); static diff review is not runtime proof of the parent's tree.",
     "Produce findings with severity/confidence and residual risk.",
     "Keep output finding-oriented.",
   ],
   fix: [
     "Resolve specific findings from parent audit/build/synthesis context.",
+    "Use audit parents for findings. Use the openboard task_diff MCP tool on the code-bearing (build) parent for the code changes; do not read sibling worktree files directly when the diff is available.",
+    "Your cwd starts from the base branch: reapply the parent changes your fix depends on into cwd first, then apply the fix.",
     "Tie each change back to the finding it addresses.",
     "Prefer targeted edits and targeted regression checks first, then broader checks when feasible.",
     "Call out unfixed findings.",

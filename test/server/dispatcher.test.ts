@@ -448,7 +448,8 @@ describe("TaskDispatcher", () => {
       expect(text).toContain("Task type: audit");
       expect(text).toContain("Inspect only unless explicitly told otherwise.");
       expect(text).toContain("Do not fix issues.");
-      expect(text).toContain("Review diffs, parent worktrees, tests, and behavior.");
+      expect(text).toContain("Inspect parent code changes with the openboard task_diff MCP tool first; use read-only parent worktree inspection as the fallback.");
+      expect(text).toContain("Review diffs, tests, and behavior.");
       expect(text).toContain("Produce findings with severity/confidence and residual risk.");
       expect(text).toContain("Keep output finding-oriented.");
       expect(text.indexOf("Audit the parent")).toBeLessThan(text.indexOf("OPENBOARD TASK CONTEXT"));
@@ -535,8 +536,11 @@ describe("TaskDispatcher", () => {
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
       expect(text).toContain("PARENT CONTEXT");
       expect(text).toContain("PARENT-000: Parent task");
-      expect(text).toContain("Parent task worktrees are read-only. Use them only to inspect parent changes with read/grep/glob/list tools.");
-      expect(text).toContain("Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.");
+      expect(text).toContain("To inspect a parent's code changes, first call the openboard MCP tool task_diff with that parent's task id (listed below).");
+      expect(text).toContain("If task_diff is unavailable or errors (for example the parent has left Review), fall back to the parent worktree with read/grep/glob/list tools only.");
+      expect(text).toContain("Parent task worktrees are read-only. Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.");
+      expect(text).toContain("Board tools are limited to task_diff for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).");
+      expect(text).toContain("Your cwd starts from the base branch: parent changes are NOT present in your cwd unless they were already integrated.");
       expect(text).toContain(`PARENT-000 WORKTREE: ${parentWorktreePath}`);
       expect(text).toContain(`PARENT-000 TASK ID: ${parent.id}`);
       expect(text).toContain(`PARENT-000 BRANCH: board/${parent.id}`);

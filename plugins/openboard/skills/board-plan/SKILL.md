@@ -122,9 +122,12 @@ reviews adversarially and never fixes). A custom prompt may REPLACE OpenCode's
 default agent prompt rather than extend it, so each role prompt must carry its
 own agentic-coding instructions; verify a role profile against one real
 dispatch before building a run on it. The loop is orchestrator-mediated —
-workers never create cards and need no board access. Define the loop's exit
-condition (e.g. the audit card completes with no findings) and a round-trip
-cap in the plan; the runtime procedure lives in `openboard-orchestrator`.
+you author every hop; workers must not create or move cards. Spawned OpenCode
+workers do receive the injected `openboard` MCP server, but dispatch guidance
+limits its use to `task_diff` inspection and `complete_task`/`block_task`
+reports. Define the loop's exit condition (e.g. the audit card completes with
+no findings) and a round-trip cap in the plan; the runtime procedure lives in
+`openboard-orchestrator`.
 
 Cross-provider defaults and mid-run recovery:
 
@@ -220,9 +223,9 @@ Every worktree branches from a verified-green commit:
      card, or use absolute venv tools from the base repo.
    - Runner binaries (e.g. `tsx` ENOENT in fresh worktrees): add a bootstrap
      hook or a scoped test command.
-3. For audit/synthesis cards that need parent or sibling evidence, include
-   explicit read-only inspection instructions and prefer read/grep/list tools
-   over shell commands.
+3. For audit/synthesis cards that need parent evidence, rely on the injected
+   `task_diff`-first parent inspection guidance; prefer read/grep/list tools
+   over shell commands for anything beyond parent diffs.
 
 ## Choose Task Kinds And Dependencies
 
@@ -245,11 +248,13 @@ shape. Do not leave meaningful workflow roles as `none`:
 
 Use dependency links for information flow, not prose duplication. A linked
 child will not run until parents are satisfied; at dispatch OpenBoard injects
-one `PARENT CONTEXT` section that marks parent worktrees read-only and lists
-each parent as `PARENT-000`, `PARENT-001`, ... with worktree, task id, branch,
+one `PARENT CONTEXT` section that directs workers to inspect parent code with
+the `task_diff` MCP tool first (read-only parent worktree reads are the
+fallback), marks parent worktrees read-only, states that the child cwd starts
+from base (un-integrated parent changes must be reapplied), and lists each
+parent as `PARENT-000`, `PARENT-001`, ... with worktree, task id, branch,
 summary, changed files (worktree-relative when possible), verification, and
-residual risk. The child inspects parent copies for intent, then edits/tests
-its own cwd copy.
+residual risk.
 
 Useful kind mappings onto any shape: research fan-out → one `synthesis` child;
 research → `build` directly when the direction is already clear; a `synthesis`

@@ -47,7 +47,7 @@ const LINKED_GUIDANCE: Record<TaskKind, HandoffGuidance> = {
     label: "audit",
     summary: "verdict plus findings",
     changedFiles: "usually empty unless you wrote an audit artifact",
-    verification: "diffs reviewed, tests run, files inspected, behavior checked",
+    verification: "diffs reviewed, files inspected, commands run — name the tree each command ran in (own cwd vs parent changes); static diff review is not runtime proof",
     residualRisk: "areas not inspected, confidence limits, unresolved concerns",
     extra: "Be finding-oriented, not implementation-oriented.",
   },
