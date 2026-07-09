@@ -196,7 +196,7 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides, parentIds } = body;
+      const { title, description, directory, agent, model, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides, autoRun, parentIds } = body;
       const taskType = body.type ?? "agent";
       const taskKind = body.taskKind ?? "none";
       const harness = body.harness ?? "opencode";
@@ -258,6 +258,12 @@ export function registerTaskRoutes(
       if (permissionOverrides !== undefined && (taskType !== "agent" || harness !== "opencode" || isolation !== "in-place")) {
         throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
       }
+      if (autoRun !== undefined && typeof autoRun !== "boolean") {
+        throw AdapterError.validation("autoRun must be a boolean");
+      }
+      if (autoRun === true && (taskType !== "agent" || isolation !== "worktree")) {
+        throw AdapterError.validation("autoRun can only be set on worktree-isolated tasks");
+      }
 
       if (parentIds !== undefined) {
         if (!Array.isArray(parentIds)) {
@@ -302,6 +308,7 @@ export function registerTaskRoutes(
         ...(taskType === "manual" && typeof assignedTo === "string" && assignedTo.trim() ? { assignedTo: assignedTo.trim() } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
+        ...(taskType === "agent" && isolation === "worktree" && autoRun === true ? { autoRun: true } : {}),
         ...(taskType === "agent" && harness === "opencode" && isolation === "in-place" && isPermissionOverrides(permissionOverrides) ? { permissionOverrides } : {}),
       });
       store.addEvent({ taskId: task.id, type: "task_created", body: { type: task.type ?? "agent" } });
@@ -530,6 +537,7 @@ export function registerTaskRoutes(
       "claudePermissionMode",
       "acpOptions",
       "permissionOverrides",
+      "autoRun",
       "parentIds",
     ]);
     for (const key of Object.keys(body)) {
@@ -621,6 +629,23 @@ export function registerTaskRoutes(
 
     // Effective isolation after this patch: the patched value if this PATCH touches it, else whatever is already on the row.
     const effectiveIsolation: TaskIsolationMode | null = patch.isolation !== undefined ? patch.isolation : (existing.isolation ?? null);
+
+    if (body.autoRun !== undefined && typeof body.autoRun !== "boolean") {
+      throw AdapterError.validation("autoRun must be a boolean");
+    }
+    // autoRun only ever applies to worktree-isolated agent tasks. Any patch that
+    // leaves the task off that shape (isolation moves away from worktree, or type
+    // moves to manual) auto-clears a stale flag instead of silently keeping it —
+    // same rule as permissionOverrides above.
+    const worktreeCapable = nextType === "agent" && effectiveIsolation === "worktree";
+    if (!worktreeCapable) {
+      if (body.autoRun === true) {
+        throw AdapterError.validation("autoRun can only be set on worktree-isolated tasks");
+      }
+      patch.autoRun = false;
+    } else if (body.autoRun !== undefined) {
+      patch.autoRun = body.autoRun as boolean;
+    }
 
     if (nextType === "manual") {
       if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation("manual tasks cannot define agent");

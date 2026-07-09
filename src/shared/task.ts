@@ -273,6 +273,14 @@ export interface Task {
   /** Per-task isolation. Unset is treated as in-place for legacy rows. */
   isolation?: TaskIsolationMode | null;
   /**
+   * Opt-in auto-dispatch: when true, a future chain advancer may run this
+   * task automatically once its parents are satisfied. Only valid on
+   * worktree-isolated tasks (`isolation === "worktree"`) — unattended
+   * dispatch must stay inside the write fence. Unset means false for
+   * legacy rows.
+   */
+  autoRun?: boolean;
+  /**
    * User-configured OpenCode permission override. Only ever honored for
    * in-place (non-worktree) OpenCode tasks — see
    * {@link resolveOpenCodePermissionRules}. Ignored (never read) for
@@ -369,6 +377,7 @@ export interface CreateTaskInput {
   assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
+  autoRun?: boolean;
   permissionOverrides?: PermissionOverrides;
   /** Parent task IDs for dependency links. Applied after the task is created. */
   parentIds?: string[];
@@ -388,6 +397,7 @@ export interface UpdateTaskInput {
   assignedTo?: string | null;
   model?: ModelRef | null;
   isolation?: TaskIsolationMode | null;
+  autoRun?: boolean;
   permissionOverrides?: PermissionOverrides | null;
   /** Parent task IDs to set atomically on the child. Replaces all existing links. */
   parentIds?: string[] | null;

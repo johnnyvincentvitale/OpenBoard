@@ -111,6 +111,8 @@ export interface CreateBoardTaskInput {
   assignedTo?: string;
   model?: string | ModelRef;
   isolation?: string;
+  /** Only valid on worktree-isolated agent tasks. */
+  autoRun?: boolean;
   /** Only valid for in-place (non-worktree) OpenCode agent tasks — see resolveOpenCodePermissionRules. */
   permissionOverrides?: PermissionOverrides;
   parentIds?: string[];
@@ -390,6 +392,10 @@ function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): Upda
     if (task.isolation !== null && !VALID_ISOLATION.has(task.isolation as TaskIsolationMode)) throw new Error("isolation must be 'worktree' or 'in-place'");
     payload.isolation = task.isolation as TaskIsolationMode | null;
   }
+  if (task.autoRun !== undefined) {
+    if (typeof task.autoRun !== "boolean") throw new Error("autoRun must be a boolean");
+    payload.autoRun = task.autoRun;
+  }
   if (task.permissionOverrides !== undefined) {
     payload.permissionOverrides = task.permissionOverrides === null ? null : normalizePermissionOverrides(task.permissionOverrides);
   }
@@ -543,6 +549,14 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
       throw new Error("isolation must be 'worktree' or 'in-place'");
     }
     payload.isolation = task.isolation as TaskIsolationMode;
+  }
+
+  if (task.autoRun !== undefined) {
+    if (typeof task.autoRun !== "boolean") throw new Error("autoRun must be a boolean");
+    if (task.autoRun === true && (payload.type !== "agent" || payload.isolation !== "worktree")) {
+      throw new Error("autoRun can only be set on worktree-isolated tasks");
+    }
+    payload.autoRun = task.autoRun;
   }
 
   if (task.permissionOverrides !== undefined) {

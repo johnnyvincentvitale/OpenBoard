@@ -372,6 +372,23 @@ describe("SqliteTaskStore", () => {
       expect(store.get(task.id)!.permissionOverrides).toBeNull();
     });
 
+    it("round-trips autoRun through create/update/list/get", () => {
+      const task = store.create(input({ autoRun: true }));
+      expect(task.autoRun).toBe(true);
+      expect(store.get(task.id)!.autoRun).toBe(true);
+      expect(store.list().find((t) => t.id === task.id)?.autoRun).toBe(true);
+
+      const cleared = store.update(task.id, { autoRun: false });
+      expect(cleared!.autoRun).toBe(false);
+      expect(store.get(task.id)!.autoRun).toBe(false);
+    });
+
+    it("hydrates autoRun as false when not provided at create", () => {
+      const task = store.create(input());
+      expect(task.autoRun).toBe(false);
+      expect(store.get(task.id)!.autoRun).toBe(false);
+    });
+
     it("can set and clear completedBy", () => {
       const task = store.create(input());
       clock = 11_000;
@@ -711,16 +728,44 @@ describe("SqliteTaskStore", () => {
       );
       expect(taskColumns.has("base_commit")).toBe(true);
       expect(taskColumns.has("dirty_at_dispatch")).toBe(true);
+      expect(taskColumns.has("auto_run")).toBe(true);
 
       // Existing row got the defaults
       const existing = migratedStore.get("task_pre");
       expect(existing?.baseCommit).toBeNull();
       expect(existing?.dirtyAtDispatch).toBe(false);
+      expect(existing?.autoRun).toBe(false);
 
       // New rows created after migration also work
       const created = migratedStore.create(input({ title: "Post" }));
       expect(created.baseCommit).toBeNull();
       expect(created.dirtyAtDispatch).toBe(false);
+      expect(created.autoRun).toBe(false);
+
+      migratedStore.close();
+      db.close();
+    });
+
+    it("hydrates a legacy row missing the auto_run column as false", () => {
+      const db = new Database(":memory:");
+      db.exec(`
+        CREATE TABLE task (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL, directory TEXT NOT NULL,
+          column TEXT NOT NULL, position INTEGER NOT NULL, session_id TEXT, run_state TEXT NOT NULL,
+          error TEXT, agent TEXT, model TEXT, isolation TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          UNIQUE(column, position)
+        );
+      `);
+
+      db.prepare(
+        "INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, isolation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("task_legacy", "Legacy", "desc", "/repo", "todo", 0, null, "unstarted", "worktree", 1000, 1000);
+
+      const migratedStore = new SqliteTaskStore(db);
+
+      const legacy = migratedStore.get("task_legacy");
+      expect(legacy?.autoRun).toBe(false);
+      expect(legacy?.isolation).toBe("worktree");
 
       migratedStore.close();
       db.close();

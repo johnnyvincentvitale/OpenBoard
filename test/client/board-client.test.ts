@@ -280,6 +280,15 @@ describe("board client", () => {
     await expect(
       client.createTask({ title: "Bad override shape", isolation: "in-place", permissionOverrides: { edit: "sometimes" as never } }),
     ).rejects.toThrow("permissionOverrides.edit must be one of: allow, ask, deny");
+    await expect(client.createTask({ title: "Bad auto-run", autoRun: true })).rejects.toThrow(
+      "autoRun can only be set on worktree-isolated tasks",
+    );
+    await expect(client.createTask({ title: "Bad auto-run", isolation: "in-place", autoRun: true })).rejects.toThrow(
+      "autoRun can only be set on worktree-isolated tasks",
+    );
+    await expect(client.createTask({ title: "Bad auto-run shape", isolation: "worktree", autoRun: "yes" as never })).rejects.toThrow(
+      "autoRun must be a boolean",
+    );
     await expect(client.createTask({ title: "Missing dir", directory: "missing" })).rejects.toThrow(
       `directory does not exist: ${CWD}/missing`,
     );
@@ -313,6 +322,48 @@ describe("board client", () => {
       "permissionOverrides.edit must be one of: allow, ask, deny",
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts autoRun for a worktree-isolated task and POSTs it verbatim", async () => {
+    const options = makeOptions([CWD], vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-auto-run", input), 201);
+    }));
+    const client = createBoardClient(options);
+
+    await client.createTask({
+      title: "Auto-run worker",
+      isolation: "worktree",
+      autoRun: true,
+    });
+
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      isolation: "worktree",
+      autoRun: true,
+    });
+  });
+
+  it("rejects a non-boolean autoRun update on normalizeUpdateTaskInput", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(createdTask("task-1", {})));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    await expect(client.updateTask("task-1", { autoRun: "yes" as never })).rejects.toThrow(
+      "autoRun must be a boolean",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards autoRun through updateTask PATCH body", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-1", input));
+    });
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    await client.updateTask("task-1", { autoRun: false });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ autoRun: false });
   });
 
   it("forwards valid taskKind through updateTask PATCH body", async () => {

@@ -523,6 +523,63 @@ describe("POST /api/tasks", () => {
     expect(body.error.message).toContain("permissionOverrides must be an object mapping");
   });
 
+  it("creates a worktree-isolated task with autoRun set", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Auto-run worker",
+        directory: repoDir,
+        isolation: "worktree",
+        autoRun: true,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Task;
+    expect(body.autoRun).toBe(true);
+    expect(store.get(body.id)?.autoRun).toBe(true);
+  });
+
+  it("rejects autoRun on an in-place task", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad auto-run",
+        directory: repoDir,
+        isolation: "in-place",
+        autoRun: true,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+  });
+
+  it("rejects autoRun when isolation is unset", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Bad auto-run",
+        directory: repoDir,
+        autoRun: true,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+  });
+
   it("rejects manual tasks with agent metadata", async () => {
     const app = buildApp(store, dispatcher);
 
@@ -868,6 +925,77 @@ describe("PATCH /api/tasks/:id", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+  });
+
+  it("sets autoRun on a worktree-isolated agent task", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ title: "T", description: "", directory: repoDir, isolation: "worktree" });
+
+    const res = await patch(app, task.id, { autoRun: true });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.autoRun).toBe(true);
+    expect(store.get(task.id)?.autoRun).toBe(true);
+  });
+
+  it("rejects autoRun on an in-place card", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ title: "T", description: "", directory: repoDir, isolation: "in-place" });
+
+    const res = await patch(app, task.id, { autoRun: true });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+  });
+
+  it("rejects autoRun on manual tasks", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ type: "manual", title: "T", description: "", directory: repoDir });
+
+    const res = await patch(app, task.id, { autoRun: true });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+  });
+
+  it("auto-clears autoRun when the same PATCH moves isolation from worktree to in-place", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "worktree",
+      autoRun: true,
+    });
+    expect(store.get(task.id)?.autoRun).toBe(true);
+
+    const res = await patch(app, task.id, { isolation: "in-place" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.autoRun).toBe(false);
+    expect(store.get(task.id)?.autoRun).toBe(false);
+  });
+
+  it("leaves a worktree task's untouched autoRun intact when unrelated fields change", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "worktree",
+      autoRun: true,
+    });
+
+    const res = await patch(app, task.id, { title: "Renamed" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.title).toBe("Renamed");
+    expect(body.autoRun).toBe(true);
   });
 
   it("auto-clears an existing override when the same PATCH moves isolation away from in-place", async () => {
