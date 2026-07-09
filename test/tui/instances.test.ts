@@ -3232,9 +3232,9 @@ describe("TUI new-task wizard navigation", () => {
       await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
     }
 
-    // "isolation" is the only field on this step while worktree is selected —
-    // Tab cycling can never land on permEdit/permBash/permWebfetch.
-    expect(s.newTask.field).toBe("isolation");
+    // ISOLATION and AUTO-RUN are the only fields on this step while worktree
+    // is selected — Tab cycling can never land on permEdit/permBash/permWebfetch.
+    expect(["isolation", "autoRun"]).toContain(s.newTask.field);
   });
 
   it("PROVIDER unset (Use Agent Profile Default) locks MODEL out of the Tab order", async () => {

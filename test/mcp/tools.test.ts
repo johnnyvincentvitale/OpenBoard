@@ -65,6 +65,7 @@ function createdTask(id: string, input: Record<string, unknown>): Task {
     assignedTo: input.assignedTo as string | undefined,
     model: input.model as Task["model"],
     isolation: input.isolation as Task["isolation"],
+    autoRun: input.autoRun as Task["autoRun"],
     parentIds: input.parentIds as Task["parentIds"],
     column: "todo",
     position: 0,
@@ -453,6 +454,50 @@ it("forwards taskKind through addTasks POST body", async () => {
 
     expect(options.fetchMock).not.toHaveBeenCalled();
   });
+
+  it("forwards autoRun through addTasks POST body for a worktree-isolated task", async () => {
+    const options = makeOptions([`${CWD}/app`]);
+
+    const result = await addTasks(
+      {
+        tasks: [
+          {
+            title: "Chain child",
+            directory: `${CWD}/app`,
+            isolation: "worktree",
+            autoRun: true,
+          },
+        ],
+      },
+      options,
+    );
+
+    expect(result.created[0]).toMatchObject({ id: "task-1", isolation: "worktree", autoRun: true });
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      isolation: "worktree",
+      autoRun: true,
+    });
+  });
+
+  it("forwards autoRun through createTask POST body", async () => {
+    const options = makeOptions([`${CWD}/app`]);
+
+    await createTask(
+      { title: "Chain root", directory: `${CWD}/app`, isolation: "worktree", autoRun: false },
+      options,
+    );
+
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toMatchObject({ autoRun: false });
+  });
+
+  it("rejects a non-boolean autoRun before POSTing", async () => {
+    const options = makeOptions([CWD]);
+
+    await expect(
+      addTasks({ tasks: [{ title: "Bad autoRun", isolation: "worktree", autoRun: "yes" as never }] }, options),
+    ).rejects.toThrow();
+    expect(options.fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("MCP orchestrator tools", () => {
@@ -666,6 +711,32 @@ describe("MCP list tools", () => {
         },
       ],
     });
+  });
+
+  it("includes autoRun in the task summary projection so orchestrators can see chain configuration", async () => {
+    const tasks: Task[] = [
+      {
+        id: "t2",
+        title: "Chain child",
+        description: "",
+        directory: CWD,
+        column: "todo",
+        position: 0,
+        runState: "unstarted",
+        isolation: "worktree",
+        autoRun: true,
+        parentIds: ["t1"],
+        baseCommit: null,
+        dirtyAtDispatch: false,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    const fetchMock = vi.fn(async () => jsonResponse(tasks));
+
+    const result = await listTasks({ fetch: fetchMock, cwd: CWD, env: NO_AUTH_ENV });
+
+    expect(result.tasks[0]).toMatchObject({ id: "t2", isolation: "worktree", autoRun: true });
   });
 
   it("lists agents through GET /api/agents", async () => {

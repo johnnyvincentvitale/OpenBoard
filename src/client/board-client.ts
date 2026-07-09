@@ -83,6 +83,8 @@ export interface TaskSummary {
   assignedTo?: string;
   model?: ModelRef;
   isolation?: TaskIsolationMode;
+  /** Unlike permissionOverrides (deliberately not projected), this is chain-planning metadata an orchestrator needs. */
+  autoRun?: boolean;
   sessionId?: string;
   harnessSessionId?: string;
   harnessSessionName?: string;
@@ -443,6 +445,7 @@ export function toTaskSummary(task: Task): TaskSummary {
     ...(task.assignedTo != null ? { assignedTo: task.assignedTo } : {}),
     ...(task.model != null ? { model: task.model } : {}),
     ...(task.isolation != null ? { isolation: task.isolation } : {}),
+    ...(task.autoRun !== undefined ? { autoRun: task.autoRun } : {}),
     ...(task.sessionId !== undefined ? { sessionId: task.sessionId } : {}),
     ...(task.harnessSessionId !== undefined ? { harnessSessionId: task.harnessSessionId } : {}),
     ...(task.harnessSessionName !== undefined ? { harnessSessionName: task.harnessSessionName } : {}),

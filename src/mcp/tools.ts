@@ -60,6 +60,10 @@ const AgentTaskInputSchema = z
     acpOptions: AcpOptionsSchema.optional(),
     model: z.string().optional(),
     isolation: z.enum(["worktree", "in-place"]).optional(),
+    autoRun: z
+      .boolean()
+      .optional()
+      .describe('Opt-in auto-dispatch. Requires isolation "worktree" — the card self-dispatches once its parents are satisfied.'),
   })
   .strict();
 
@@ -80,6 +84,10 @@ export const AddTaskInputSchema = z
     assignedTo: z.string().optional(),
     model: z.string().optional(),
     isolation: z.enum(["worktree", "in-place"]).optional(),
+    autoRun: z
+      .boolean()
+      .optional()
+      .describe('Opt-in auto-dispatch. Requires isolation "worktree" — the card self-dispatches once its parents are satisfied.'),
   })
   .strict();
 

@@ -95,6 +95,19 @@ in progress; when the user asks to run work now, confirm the session actually
 started. SSE heartbeat frames are transport health, not worker progress — use
 session messages, task events, and harness-specific output for liveness.
 
+### AutoRun Chains
+
+A card marked `autoRun: true` dispatches itself the instant its parents are
+satisfied — do not Run it by hand, and do not treat its self-dispatch as
+unverified just because no one pressed the button. Your role on an autoRun
+chain is monitoring and handling blocks or warnings, not advancing cards:
+watch for `task_auto_dispatched` events confirming the chain moved, and treat
+a `task_warning` event on a child (a failed auto-dispatch) as a stop —
+auto-dispatch never retries itself, so a warned child sits in To-Do until you
+or the user re-run it. A blocked or errored parent halts its whole downstream
+chain silently (its children simply never become eligible); when an expected
+chain never advances, check parent state before assuming the chain is broken.
+
 ### Stall Detection
 
 The dispatcher auto-nudges a session with no new messages for ~45s, sends up

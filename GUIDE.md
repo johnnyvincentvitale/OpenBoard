@@ -206,6 +206,19 @@ as `PARENT CONTEXT` with numbered parent sections and read-only parent worktree
 instructions. This is how multi-card runs stay coherent: downstream agents
 start from upstream context instead of rediscovering it.
 
+**Auto-run chains.** Link a build → audit → fix chain, turn on `AUTO-RUN` for
+the audit and fix cards on the new-task wizard's Isolation screen (worktree
+isolation only — the toggle doesn't appear under `in_place`), and pressing
+**`r`** once on the build card runs the whole chain: audit dispatches itself
+the moment build reports complete, and fix dispatches itself the moment audit
+does, with no further Run presses. Turning the toggle on shows a warning in
+the wizard for a reason — auto-run dispatches a card the instant its parents
+report complete, before any human reviews a diff, and because a downstream
+worktree branches from base before its parent is integrated, later diffs can
+duplicate parent changes, blurring which card made which edit. Read each
+Review card in the chain yourself before integrating; a `task_auto_dispatched`
+chain that ran fast is not the same as one that's verified.
+
 **The bundled plugin.** This whole workflow — connect, assess, plan, validate
 profiles, dispatch, verify — is packaged as the OpenBoard plugin's skills for
 Claude Code, Codex, and OpenCode. The next section breaks down what each skill

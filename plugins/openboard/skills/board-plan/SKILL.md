@@ -262,6 +262,25 @@ card proposing the next build/audit graph for the orchestrator/user to decide
 on; `build` parents → one `audit` child; `audit` + the relevant build/synthesis
 parent → `fix`; `fix` → `audit` when quality gates matter.
 
+## Auto-Run Chains
+
+A planned chain can mark its non-first cards `autoRun: true` instead of
+budgeting orchestrator time for manual card advancement — each `autoRun`
+child dispatches itself the moment every parent it links to is satisfied
+(`done`, or a `complete` report with `completionSource: "reported"`), with no
+human or orchestrator pressing Run. `autoRun` only ever applies to
+worktree-isolated agent cards; the create/update APIs reject it on in-place
+or manual tasks.
+
+Decide this per child, not per run: a chain of file-disjoint cards meant to
+run start-to-finish on one Review checkpoint is a good `autoRun` candidate; a
+role loop, or any card whose Review should gate the next dispatch, is not. A
+failed auto-dispatch surfaces as a `task_warning` event on the child with no
+retry — re-running it is still the orchestrator's (or user's) call. Because a
+downstream worktree branches from base before its parent is integrated, note
+in the plan that later diffs can duplicate parent changes until integration
+order catches up — `openboard-orchestrator` watches for this on Review.
+
 ## Write Cards As Contracts
 
 The card body is the only channel OpenBoard gives a worker — it carries the

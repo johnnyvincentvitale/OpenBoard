@@ -340,6 +340,18 @@ parent sections (`PARENT-000`, `PARENT-001`, ...): worktree, task id, branch, su
 changed files, verification results, and residual risk — or a "manually marked Done" note
 for parents with no structured report.
 
+**Auto-dispatch.** A child can opt into unattended chain advancement by
+setting `autoRun: true` (`POST`/`PATCH /api/tasks`), which is accepted only on
+worktree-isolated agent tasks (400 otherwise) — a chain always runs inside the
+worktree safety stack. Once every parent a card links to is satisfied (the
+same test dependency gating uses: `done`, or a `complete` report with
+`completionSource: "reported"` — an `idle-fallback` or `blocked` parent never
+satisfies it), the board dispatches the child itself with no Run call and
+records a `task_auto_dispatched` event naming the parent that completed the
+chain. A failed auto-dispatch records a `task_warning` event on the child
+instead of retrying; the card stays in `todo` until a human or orchestrator
+re-runs it.
+
 **Archive + filters.** `POST /api/tasks/:id/archive` / `/unarchive` toggle a task's
 `archived` flag; only `review`/`done` tasks can be archived (409 otherwise). `GET
 /api/tasks` excludes archived tasks by default; pass `?archived=true` to see only archived

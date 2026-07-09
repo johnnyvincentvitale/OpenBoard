@@ -317,6 +317,8 @@ const ACP_OPTION_FIELDS = ["acpOption0", "acpOption1", "acpOption2", "acpOption3
 /** No permission editor: worktree isolation (locked, automatic) or Claude Code harness (N/A). */
 const ISOLATION_FIELDS_LOCKED = ["isolation"] as const;
 const ISOLATION_FIELDS_EDITABLE = ["isolation", "permEdit", "permBash", "permWebfetch"] as const;
+/** Worktree isolation swaps the permission note for the AUTO-RUN toggle, regardless of harness. */
+const ISOLATION_FIELDS_WORKTREE = ["isolation", "autoRun"] as const;
 const DEPENDENCY_FIELDS = ["dependency"] as const;
 const CONFIRM_FIELDS: readonly never[] = [];
 const TEXT_INPUT_COLUMNS = 56;
@@ -328,6 +330,7 @@ type NewTaskField =
   | (typeof AGENT_PROFILE_FIELDS_ACP_BASE)[number]
   | (typeof ACP_OPTION_FIELDS)[number]
   | (typeof ISOLATION_FIELDS_EDITABLE)[number]
+  | (typeof ISOLATION_FIELDS_WORKTREE)[number]
   | (typeof DEPENDENCY_FIELDS)[number];
 type TextInputField = Extract<NewTaskField, "title" | "description" | "directory" | "assignedTo">;
 type AddInstanceField = "name" | "workspace";
@@ -499,6 +502,8 @@ interface NewTaskDraft {
   /** Type-to-filter query for the MODEL field, active only while it's focused — reset whenever focus leaves it. */
   modelQuery?: string;
   isolation: TaskIsolationMode;
+  /** Opt-in auto-dispatch toggle. Only ever submitted for worktree-isolated tasks; resets to false whenever isolation leaves "worktree". */
+  autoRun: boolean;
   /** OpenCode permission-category overrides. Only ever submitted for in-place (non-worktree) OpenCode tasks. */
   permissionOverrides: Record<PermissionOverrideCategory, PermissionOverrideAction>;
   parentIds: string[];
@@ -2752,6 +2757,7 @@ function renderTask(ui: OpenTui, state: TuiState, task: Task) {
           minWidth: 0,
           truncate: true,
         }),
+        ...(task.column === "todo" && task.autoRun ? [renderAutoRunBadge(ui)] : []),
         ui.Text({ content: "⋯", fg: COLORS.dim, height: 1, width: 1 }),
       ),
       ui.Text({
@@ -2766,6 +2772,11 @@ function renderTask(ui: OpenTui, state: TuiState, task: Task) {
       renderTaskMeta(ui, metaB, done),
     ),
   );
+}
+
+/** Compact marker for a To Do card that will self-dispatch once its parents are satisfied. */
+function renderAutoRunBadge(ui: OpenTui) {
+  return ui.Text({ content: "⛓ auto", fg: COLORS.accentBright, height: 1, width: 7, truncate: true });
 }
 
 // The two meta lines a card carries under its hairline. Reads by lane: an error card
@@ -2912,6 +2923,7 @@ function selectedDetailRows(state: TuiState, task: Task): MetaRow[] {
           ...(task.isolation === "worktree"
             ? [{ label: "WORKTREE", value: worktreeId(task), color: COLORS.muted }]
             : []),
+          ...(task.autoRun ? [{ label: "AUTO-RUN", value: "chain enabled", color: COLORS.bright }] : []),
         ]),
   ];
   if (task.sessionId) rows.push({ label: "SESSION", value: task.sessionId, color: COLORS.muted });
@@ -4180,7 +4192,62 @@ function renderIsolationStep(ui: OpenTui, draft: NewTaskDraft) {
     renderIsolationField(ui, draft),
     ui.Text({ content: isolationDescription(draft.isolation), fg: COLORS.muted, wrapMode: "word", height: 2 }),
     ...(draft.harness === "opencode" ? [editable ? renderPermissionOverrideControl(ui, draft) : renderLockedPermissionsNote(ui)] : []),
+    ...(draft.isolation === "worktree"
+      ? [renderAutoRunField(ui, draft), ...(draft.autoRun ? [renderAutoRunWarning(ui)] : [])]
+      : []),
     renderDraftErrorRow(ui, draft),
+  );
+}
+
+/**
+ * Auto-run dispatches a child the instant its parents report complete, ahead
+ * of any human diff review — this warning text is locked product copy (do
+ * not rephrase) and must never be clipped, so its height is derived from
+ * wrappedTextHeight rather than a fixed row count (see that helper's doc
+ * comment for the clipping bug it replaced).
+ */
+const AUTO_RUN_WARNING_TEXT =
+  "Auto-run dispatches this card as soon as its parents report complete — the whole chain finishes before any human reviews a diff. Downstream worktrees branch from base before parents are integrated, so later diffs can duplicate parent changes, blurring which card made which edit.";
+
+function renderAutoRunWarning(ui: OpenTui) {
+  return ui.Text({
+    content: AUTO_RUN_WARNING_TEXT,
+    fg: COLORS.bright,
+    wrapMode: "word",
+    height: wrappedTextHeight(AUTO_RUN_WARNING_TEXT, 6),
+  });
+}
+
+function renderAutoRunField(ui: OpenTui, draft: NewTaskDraft) {
+  const segments: Array<{ label: string; value: boolean }> = [
+    { label: "off", value: false },
+    { label: "on", value: true },
+  ];
+  return ui.Box(
+    { width: "100%", flexDirection: "column", gap: 0 },
+    ui.Text({ content: "AUTO-RUN", fg: COLORS.dim, height: 1 }),
+    ui.Box(
+      {
+        width: "100%",
+        height: 3,
+        border: true,
+        borderStyle: "single",
+        borderColor: draft.field === "autoRun" ? COLORS.borderHot : COLORS.border,
+        flexDirection: "row",
+        ...boxBg(COLORS.bg),
+      },
+      ...segments.map((segment) => {
+        const active = segment.value === draft.autoRun;
+        return ui.Text({
+          content: segment.label,
+          fg: active ? COLORS.bright : COLORS.muted,
+          ...textBg(active ? COLORS.accent : COLORS.bg),
+          height: 1,
+          flexGrow: 1,
+          truncate: true,
+        });
+      }),
+    ),
   );
 }
 
@@ -4333,6 +4400,7 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
           },
         ]
       : []),
+    ...(draft.isolation === "worktree" ? [{ label: "AUTO-RUN", value: draft.autoRun ? "On" : "Off", color: COLORS.text }] : []),
   ];
 
   return [identity, harnessModel, agentProfile, isolation, dependencySummaryRows(draft, state)];
@@ -5537,6 +5605,7 @@ function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
     assignedTo: task.assignedTo ?? "",
     model: task.model ?? undefined,
     isolation: task.isolation ?? "worktree",
+    autoRun: task.autoRun ?? false,
     permissionOverrides: {
       edit: task.permissionOverrides?.edit ?? "allow",
       bash: task.permissionOverrides?.bash ?? "allow",
@@ -5981,6 +6050,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           acpOptions: acpOptions ?? null,
           model: model ?? null,
           isolation: draft.isolation,
+          autoRun: draft.autoRun,
           permissionOverrides: draftPermissionOverridesPayload(draft) ?? null,
           parentIds: draft.parentIds,
         })
@@ -6005,6 +6075,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           ...(acpOptions ? { acpOptions } : {}),
           model,
           isolation: draft.isolation,
+          autoRun: draft.autoRun,
           permissionOverrides: draftPermissionOverridesPayload(draft),
           parentIds: draft.parentIds,
         });
@@ -6042,6 +6113,7 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
     assignedTo: "",
     model: undefined,
     isolation: "worktree",
+    autoRun: false,
     permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
     parentIds: [],
     dependencyIndex: 0,
@@ -6108,7 +6180,14 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       return true;
     case "isolation":
       draft.isolation = draft.isolation === "worktree" ? "in-place" : "worktree";
+      // The server auto-clears autoRun when a PATCH moves isolation away from
+      // worktree (see routes/tasks.ts); the wizard must not display a stale
+      // on-state for a value it's about to discard.
+      if (draft.isolation !== "worktree") draft.autoRun = false;
       if (!stepFieldOrder(state, draft).includes(draft.field)) draft.field = stepFieldOrder(state, draft)[0] ?? draft.field;
+      return true;
+    case "autoRun":
+      draft.autoRun = !draft.autoRun;
       return true;
     case "permEdit":
       cyclePermissionOverride(draft, "edit", delta);
@@ -6530,6 +6609,7 @@ function stepFieldOrder(state: TuiState, draft: NewTaskDraft): readonly NewTaskF
       }
       return draft.harness === "opencode" ? AGENT_PROFILE_FIELDS_OPENCODE : CONFIRM_FIELDS;
     case "isolation":
+      if (draft.isolation === "worktree") return ISOLATION_FIELDS_WORKTREE;
       return draft.harness === "opencode" && draft.isolation === "in-place" ? ISOLATION_FIELDS_EDITABLE : ISOLATION_FIELDS_LOCKED;
     case "dependencies":
       return DEPENDENCY_FIELDS;
