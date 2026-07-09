@@ -10,6 +10,8 @@ import type { Dispatcher, RosterAgent, Task } from "../../../src/shared";
 import { USER_COMPLETED_BY } from "../../../src/shared";
 import { AdapterError } from "../../../src/shared/errors";
 import type { WorktreeManager } from "../../../src/server/worktree";
+import type { ChainAdvancer } from "../../../src/server/chain-advancer";
+import { createChainAdvancer } from "../../../src/server/chain-advancer";
 import { cleanupTestWorkspace, setupTestWorkspace } from "../test-workspace";
 
 let workspaceDir: string;
@@ -100,6 +102,7 @@ function buildApp(
   store: SqliteTaskStore,
   dispatcher: Dispatcher,
   rosterOrFetch: RosterAgent[] | (() => Promise<RosterAgent[]>) = [],
+  advancer?: ChainAdvancer,
 ): Hono {
   const app = new Hono();
   const fetch = Array.isArray(rosterOrFetch) ? async () => rosterOrFetch : rosterOrFetch;
@@ -107,6 +110,7 @@ function buildApp(
     store,
     dispatcher,
     agentRoster: { fetch },
+    advancer,
   });
   return app;
 }
@@ -1443,6 +1447,60 @@ describe("POST /api/tasks/:id/move", () => {
     expect(moved.column).toBe("done");
     expect(moved.completedBy).toBe(USER_COMPLETED_BY);
     expect(store.get(a.id)?.completedBy).toBe(USER_COMPLETED_BY);
+  });
+
+  it("fires the advancer when a manual move lands the task in Done", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    const child = store.create({
+      title: "Child",
+      description: "",
+      directory: repoDir,
+      isolation: "worktree",
+      autoRun: true,
+    });
+    store.addLink(a.id, child.id);
+    const runTask = vi.fn(async (taskId: string) => {
+      store.update(taskId, { runState: "running", column: "in_progress" });
+      return store.get(taskId)!;
+    });
+    const advancer = createChainAdvancer({ store, runTask });
+    const app = buildApp(store, dispatcher, [], advancer);
+
+    const res = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "done", position: 0 }),
+    });
+
+    expect(res.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runTask).toHaveBeenCalledWith(child.id);
+    expect(store.listEvents(child.id).some((e) => e.type === "task_auto_dispatched")).toBe(true);
+  });
+
+  it("does not fire the advancer when moving to a non-Done column", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    const child = store.create({
+      title: "Child",
+      description: "",
+      directory: repoDir,
+      isolation: "worktree",
+      autoRun: true,
+    });
+    store.addLink(a.id, child.id);
+    const runTask = vi.fn(async (taskId: string) => store.get(taskId)!);
+    const advancer = createChainAdvancer({ store, runTask });
+    const app = buildApp(store, dispatcher, [], advancer);
+
+    const res = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "in_progress", position: 0 }),
+    });
+
+    expect(res.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runTask).not.toHaveBeenCalled();
   });
 
   it("preserves sessionId, worktree metadata, completion report, and error when moving", async () => {

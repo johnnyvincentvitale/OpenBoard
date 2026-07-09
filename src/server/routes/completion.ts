@@ -11,20 +11,28 @@ import type {
 import { AdapterError } from "../../shared/errors";
 import { detectTaskBaseCheckoutEscape, markTaskBaseCheckoutEscape } from "../base-checkout-escape";
 import { inspectCompletionResult } from "../git-inspect";
+import { fireChainAdvance, type ChainAdvancer } from "../chain-advancer";
 
 const END_OF_COLUMN = Number.POSITIVE_INFINITY;
 type CompletionBody = CompleteTaskBody | BlockTaskBody;
 
-export function registerCompletionRoutes(app: Hono, deps: { store: TaskStore }): void {
-  app.post("/api/tasks/:id/complete", async (c) => handleCompletion(c, deps.store, "complete"));
-  app.post("/api/tasks/:id/block", async (c) => handleCompletion(c, deps.store, "blocked"));
+export interface CompletionRouteDeps {
+  store: TaskStore;
+  /** Optional so existing callers/tests that don't care about auto-dispatch keep working unchanged. */
+  advancer?: ChainAdvancer;
+}
+
+export function registerCompletionRoutes(app: Hono, deps: CompletionRouteDeps): void {
+  app.post("/api/tasks/:id/complete", async (c) => handleCompletion(c, deps, "complete"));
+  app.post("/api/tasks/:id/block", async (c) => handleCompletion(c, deps, "blocked"));
 }
 
 async function handleCompletion(
   c: Context,
-  store: TaskStore,
+  deps: CompletionRouteDeps,
   outcome: TaskRunOutcome,
 ): Promise<Response> {
+  const store = deps.store;
   const id = c.req.param("id");
   if (!id) return respondWithError(c, AdapterError.notFound("Task not found"));
   try {
@@ -108,6 +116,13 @@ async function handleCompletion(
     store.addEvent({ taskId: id, type: outcome === "complete" ? "task_completed" : "task_blocked", body: { ...report } });
     if (!isLateIdleFallbackUpgrade && (updated.column === "todo" || updated.column === "in_progress")) {
       store.move(id, "review", END_OF_COLUMN);
+    }
+    // Fire-and-forget: never delay this response on spawned child sessions.
+    // Only a reported "complete" satisfies a parent gate (unmetReason) — a
+    // "blocked" outcome never triggers the chain, and the base-checkout-escape
+    // branch above returns before reaching here regardless of outcome.
+    if (outcome === "complete") {
+      void fireChainAdvance(deps.advancer, store, id);
     }
     return c.json(store.get(id) ?? updated, 200);
   } catch (err) {

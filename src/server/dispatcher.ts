@@ -105,6 +105,17 @@ export interface TaskDispatcherDeps {
   instanceName?: string;
   /** Override the stall-detection threshold (tests only; default DEFAULT_STALL_THRESHOLD_MS). */
   stallThresholdMs?: number;
+  /**
+   * Called after a task moves to "done" via integrate(), so the chain
+   * advancer (src/server/chain-advancer.ts) can auto-dispatch any autoRun
+   * children whose parents are now satisfied. Deliberately a plain function,
+   * not a chain-advancer type import — the advancer imports `unmetReason`
+   * from this module, so this module must never import back from it. Also
+   * settable post-construction via setOnParentSatisfied() for callers (see
+   * serve.ts) that must build the dispatcher and the advancer in either
+   * order.
+   */
+  onParentSatisfied?: (parentId: string) => Promise<void>;
 }
 
 /** Resolve whether a task explicitly requests worktree isolation. */
@@ -112,7 +123,15 @@ function wantsWorktree(task: Task): boolean {
   return task.isolation === "worktree";
 }
 
-function unmetReason(parent: Task): string | null {
+/**
+ * Whether `parent` currently satisfies a child's dependency gate. Returns
+ * null when satisfied, or a human-readable reason when not. This is the
+ * single source of truth for parent-satisfaction semantics — reused as-is
+ * by the chain advancer (src/server/chain-advancer.ts) rather than
+ * duplicated, so "does this parent satisfy its children" only has one
+ * definition in the codebase.
+ */
+export function unmetReason(parent: Task): string | null {
   if (parent.column === "done") return null;
   if (parent.completion?.outcome === "complete" && parent.completionSource === "reported") return null;
   if (parent.completion?.outcome === "blocked") return "parent reported blocked";
@@ -403,6 +422,8 @@ export class TaskDispatcher implements Dispatcher {
   private readonly allowExternalDirectories: boolean;
   private readonly resolveDirectory: (raw: string) => string;
   private readonly stallThresholdMs: number;
+  /** Not readonly — see setOnParentSatisfied() for why this is settable post-construction. */
+  private onParentSatisfied?: (parentId: string) => Promise<void>;
 
   private running = false;
   /** Bumped on every stop()/restart so a stale consume loop knows to exit. */
@@ -483,6 +504,18 @@ export class TaskDispatcher implements Dispatcher {
           allowExternal: this.allowExternalDirectories,
         }));
     this.stallThresholdMs = deps.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+    this.onParentSatisfied = deps.onParentSatisfied;
+  }
+
+  /**
+   * Late-bind the chain-advancer hook. The advancer needs `dispatcher.run`
+   * to dispatch children, and the dispatcher needs the advancer to notify on
+   * integrate-to-done — constructing both up front would be circular, so the
+   * integrator (serve.ts) builds the dispatcher first, then the advancer,
+   * then wires this setter.
+   */
+  setOnParentSatisfied(fn: (parentId: string) => Promise<void>): void {
+    this.onParentSatisfied = fn;
   }
 
   async run(taskId: string): Promise<Task> {
@@ -843,6 +876,7 @@ export class TaskDispatcher implements Dispatcher {
         pending: undefined,
         rebaseConflictPaths: undefined,
       });
+      this.fireOnParentSatisfied(taskId);
     }
     return { task: this.store.get(taskId) ?? task, ...result };
   }
@@ -1202,6 +1236,24 @@ export class TaskDispatcher implements Dispatcher {
     if (unmetParents.length > 0) {
       throw new DependencyGateError(unmetParents);
     }
+  }
+
+  /**
+   * Fire-and-forget notify that `taskId` just became satisfied (moved to
+   * done), so the chain advancer can check for autoRun children. Never
+   * awaited by the caller — integrate() must not delay its response on
+   * spawned child sessions. Any advancer failure is recorded as a
+   * task_warning on the parent rather than becoming an unhandled rejection.
+   */
+  private fireOnParentSatisfied(taskId: string): void {
+    if (!this.onParentSatisfied) return;
+    void this.onParentSatisfied(taskId).catch((err) => {
+      this.store.addEvent({
+        taskId,
+        type: "task_warning",
+        body: { warning: `Auto-dispatch chain check failed: ${errorMessage(err, "unknown error")}` },
+      });
+    });
   }
 
   async abort(taskId: string): Promise<void> {

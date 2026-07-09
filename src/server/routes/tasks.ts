@@ -28,6 +28,7 @@ import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
 import { computeDiff } from "../diff-engine";
+import { fireChainAdvance, type ChainAdvancer } from "../chain-advancer";
 
 function isReachableViaChildren(store: TaskStore, fromId: string, targetId: string): boolean {
   const visited = new Set<string>();
@@ -142,7 +143,7 @@ interface RetryTaskBody {
  */
 export function registerTaskRoutes(
   app: Hono,
-  deps: { store: TaskListStore; dispatcher: Dispatcher; agentRoster?: AgentRosterDep },
+  deps: { store: TaskListStore; dispatcher: Dispatcher; agentRoster?: AgentRosterDep; advancer?: ChainAdvancer },
 ): void {
   const { store, dispatcher } = deps;
   const agentRoster = deps.agentRoster ?? { fetch: async () => [] as RosterAgent[] };
@@ -496,6 +497,13 @@ export function registerTaskRoutes(
 
       store.update(id, { completedBy: nextCompletedBy });
       store.addEvent({ taskId: id, type: "task_moved", body: { column, position, completedBy: nextCompletedBy } });
+
+      // Fire-and-forget: a manual move to Done satisfies this task as a
+      // parent gate — check for autoRun children without delaying this
+      // response on spawned child sessions.
+      if (column === "done") {
+        void fireChainAdvance(deps.advancer, store, id);
+      }
 
       const tasks = store.list();
       return c.json(tasks, 200);

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,7 +58,11 @@ describe("TaskDispatcher — worktree isolation", () => {
   let tmp: string;
   let store: SqliteTaskStore;
 
-  function buildDispatcher(client: ReturnType<typeof makeFakeClient>, worktrees: WorktreeManager = new GitWorktreeManager()) {
+  function buildDispatcher(
+    client: ReturnType<typeof makeFakeClient>,
+    worktrees: WorktreeManager = new GitWorktreeManager(),
+    onParentSatisfied?: (parentId: string) => Promise<void>,
+  ) {
     return new TaskDispatcher({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       client: client as any,
@@ -66,6 +70,7 @@ describe("TaskDispatcher — worktree isolation", () => {
       worktrees,
       // Keep worktrees inside the temp dir for the test.
       worktreeBaseDir: () => join(tmp, "worktrees"),
+      onParentSatisfied,
     });
   }
 
@@ -210,6 +215,51 @@ describe("TaskDispatcher — worktree isolation", () => {
     expect(completed?.column).toBe("done");
     expect(completed?.completedBy).toBe(INTEGRATED_COMPLETED_BY);
     expect(completed?.worktreePath).toBeUndefined();
+  });
+
+  it("fires onParentSatisfied without blocking the response when integrate lands the task in Done", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const onParentSatisfied = vi.fn(async () => undefined);
+    const dispatcher = buildDispatcher(makeFakeClient(), new GitWorktreeManager(), onParentSatisfied);
+    const task = store.create({ isolation: "worktree", title: "t", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+
+    const wtPath = ran.worktreePath!;
+    writeFileSync(join(wtPath, "feature.txt"), "work\n");
+    g(wtPath, ["add", "-A"]);
+    g(wtPath, ["commit", "--no-gpg-sign", "-m", "feature"]);
+    store.update(task.id, { runState: "idle" });
+
+    const outcome = await dispatcher.integrate(task.id);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.task.column).toBe("done");
+    expect(onParentSatisfied).toHaveBeenCalledWith(task.id);
+  });
+
+  it("records a task_warning instead of throwing when onParentSatisfied fails", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const onParentSatisfied = vi.fn(async () => {
+      throw new Error("chain check boom");
+    });
+    const dispatcher = buildDispatcher(makeFakeClient(), new GitWorktreeManager(), onParentSatisfied);
+    const task = store.create({ isolation: "worktree", title: "t", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+
+    const wtPath = ran.worktreePath!;
+    writeFileSync(join(wtPath, "feature.txt"), "work\n");
+    g(wtPath, ["add", "-A"]);
+    g(wtPath, ["commit", "--no-gpg-sign", "-m", "feature"]);
+    store.update(task.id, { runState: "idle" });
+
+    const outcome = await dispatcher.integrate(task.id);
+    expect(outcome.ok).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const events = store.listEvents(task.id);
+    expect(events.some((e) => e.type === "task_warning" && String(e.body.warning).includes("chain check boom"))).toBe(true);
   });
 
   it("maps integrate rebase conflicts to pending rebase-conflict without clearing the worktree", async () => {

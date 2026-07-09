@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { registerCompletionRoutes } from "../../../src/server/routes/completion";
+import { createChainAdvancer } from "../../../src/server/chain-advancer";
+import type { Task } from "../../../src/shared";
 
 const validBody = {
   summary: "implemented the change",
@@ -14,10 +16,14 @@ const validBody = {
   residualRisk: "none",
 };
 
-function appFor(store: SqliteTaskStore): Hono {
+function appFor(store: SqliteTaskStore, advancer?: ReturnType<typeof createChainAdvancer>): Hono {
   const app = new Hono();
-  registerCompletionRoutes(app, { store });
+  registerCompletionRoutes(app, { store, advancer });
   return app;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe("completion routes", () => {
@@ -448,5 +454,133 @@ describe("completion routes", () => {
     });
 
     expect(res.status).toBe(404);
+  });
+
+  describe("chain advance on /complete", () => {
+    function readyChild(parentId: string) {
+      const child = store.create({
+        title: "Child",
+        description: "",
+        directory: "/repo",
+        isolation: "worktree",
+        autoRun: true,
+      });
+      store.addLink(parentId, child.id);
+      return child;
+    }
+
+    it("fires the ready child without delaying the /complete response", async () => {
+      const parent = store.create({ title: "Parent", description: "do it", directory: "/repo" });
+      store.update(parent.id, { runState: "running" });
+      store.move(parent.id, "in_progress", 0);
+      const child = readyChild(parent.id);
+
+      let resolveRunTask: (() => void) | undefined;
+      const runTask = vi.fn(
+        (taskId: string) =>
+          new Promise<Task>((resolve) => {
+            resolveRunTask = () => {
+              store.update(taskId, { runState: "running", column: "in_progress" });
+              resolve(store.get(taskId)!);
+            };
+          }),
+      );
+      const advancer = createChainAdvancer({ store, runTask });
+      const app = appFor(store, advancer);
+
+      const res = await app.request(`/api/tasks/${parent.id}/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      // The response already came back even though runTask's promise is
+      // still pending — proves the advance never blocked this request.
+      expect(res.status).toBe(200);
+      expect(runTask).toHaveBeenCalledWith(child.id);
+      expect(store.get(child.id)?.column).toBe("todo");
+
+      resolveRunTask?.();
+      await sleep(20);
+
+      const dispatched = store.listEvents(child.id);
+      expect(dispatched.some((e) => e.type === "task_auto_dispatched" && e.body.parentId === parent.id)).toBe(true);
+    });
+
+    it("does not fire the advancer on /block", async () => {
+      const parent = store.create({ title: "Parent", description: "do it", directory: "/repo" });
+      store.update(parent.id, { runState: "running" });
+      store.move(parent.id, "in_progress", 0);
+      readyChild(parent.id);
+      const runTask = vi.fn(async (taskId: string) => store.get(taskId)!);
+      const advancer = createChainAdvancer({ store, runTask });
+      const app = appFor(store, advancer);
+
+      const res = await app.request(`/api/tasks/${parent.id}/block`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...validBody, residualRisk: "needs human decision" }),
+      });
+
+      expect(res.status).toBe(200);
+      await sleep(20);
+      expect(runTask).not.toHaveBeenCalled();
+    });
+
+    it("does not fire the advancer on a base-checkout-escape report", async () => {
+      const { repo } = gitRepoWithClaudeWorktree();
+      const parent = store.create({ title: "Escaped parent", description: "do it", directory: repo });
+      store.update(parent.id, {
+        runState: "running",
+        isolationAtDispatch: "worktree",
+        baseCheckoutSnapshot: "",
+      });
+      store.move(parent.id, "in_progress", 0);
+      writeFileSync(join(repo, "escaped.txt"), "escaped write\n");
+      readyChild(parent.id);
+      const runTask = vi.fn(async (taskId: string) => store.get(taskId)!);
+      const advancer = createChainAdvancer({ store, runTask });
+      const app = appFor(store, advancer);
+
+      const res = await app.request(`/api/tasks/${parent.id}/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).pending).toBe("base-checkout-escape");
+      await sleep(20);
+      expect(runTask).not.toHaveBeenCalled();
+    });
+
+    it("fires the advancer on a late idle-fallback-upgrade /complete report", async () => {
+      const parent = store.create({ title: "Parent", description: "do it", directory: "/repo" });
+      store.update(parent.id, {
+        sessionId: "ses_1",
+        runState: "idle",
+        runStartedAt: 100,
+        completion: null,
+        completionSource: "idle-fallback",
+      });
+      store.move(parent.id, "review", 0);
+      const child = readyChild(parent.id);
+      const runTask = vi.fn(async (taskId: string) => {
+        store.update(taskId, { runState: "running", column: "in_progress" });
+        return store.get(taskId)!;
+      });
+      const advancer = createChainAdvancer({ store, runTask });
+      const app = appFor(store, advancer);
+
+      const res = await app.request(`/api/tasks/${parent.id}/complete?runStartedAt=100`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      expect(res.status).toBe(200);
+      await sleep(20);
+      expect(runTask).toHaveBeenCalledWith(child.id);
+    });
   });
 });

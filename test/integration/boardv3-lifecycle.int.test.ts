@@ -22,7 +22,8 @@
  * waiting on a real model turn to finish and self-report — exactly the path
  * a real agent takes when it calls that contract as its final action.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -31,6 +32,7 @@ import { startOrConnect, type OpencodeHandle } from "../../src/server/opencode";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { GlobalArchiveStore } from "../../src/db/global-archive-store";
 import { TaskDispatcher } from "../../src/server/dispatcher";
+import { createChainAdvancer } from "../../src/server/chain-advancer";
 import { createApp } from "../../src/server/app";
 import type { Task } from "../../src/shared";
 import {
@@ -91,6 +93,11 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
 
     taskStore = new SqliteTaskStore(":memory:");
     dispatcher = new TaskDispatcher({ client: handle.client, store: taskStore, boardToken: BOARD_TOKEN });
+    // Same wiring order as serve.ts: dispatcher first, then the advancer
+    // (which needs dispatcher.run), then late-bind it back onto the
+    // dispatcher — see dispatcher.ts's TaskDispatcherDeps doc comment.
+    const chainAdvancer = createChainAdvancer({ store: taskStore, runTask: (taskId) => dispatcher.run(taskId) });
+    dispatcher.setOnParentSatisfied((parentId) => chainAdvancer.advanceReadyChildren(parentId));
     dispatcher.start();
 
     app = createApp({
@@ -102,6 +109,7 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
       sourceInstance: { port: 0, workspace: "/test", dbPath: ":memory:" },
       boardToken: BOARD_TOKEN,
       opencodeMode: "connect",
+      chainAdvancer,
     });
 
     taskDir = mkdtempSync(join(boardWorkspace, "task-"));
@@ -325,6 +333,116 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
       expect(restoredListRes.status).toBe(200);
       const restoredList = (await restoredListRes.json()) as Task[];
       expect(restoredList.map((t) => t.id)).toContain(child.id);
+    },
+    90_000,
+  );
+
+  it(
+    "autoRun chain: parent /complete auto-dispatches a worktree-isolated child with no manual run call",
+    async () => {
+      // --- 1. A real git repo — worktree isolation blocks (pending git-init)
+      // otherwise, which would prove nothing about the auto-dispatch chain. ---
+      const repoDir = mkdtempSync(join(boardWorkspace, "autorun-repo-"));
+      const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+      const git = (args: string[]) => execFileSync("git", args, { cwd: repoDir, env: gitEnv, encoding: "utf8" });
+      git(["init", "-b", "main"]);
+      git(["config", "user.email", "openboard@example.test"]);
+      git(["config", "user.name", "OpenBoard Test"]);
+      writeFileSync(join(repoDir, "README.md"), "base\n");
+      git(["add", "README.md"]);
+      git(["commit", "-m", "initial"]);
+
+      // --- 2. Create parent (in-place) + autoRun worktree child, link them ---
+      const parentRes = await app.request("/api/tasks", {
+        method: "POST",
+        headers: { ...AUTH_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Auto-dispatch parent",
+          description: "Parent task for the auto-dispatch chain.",
+          directory: repoDir,
+        }),
+      });
+      expect(parentRes.status).toBe(201);
+      const parent = (await parentRes.json()) as Task;
+
+      const childRes = await app.request("/api/tasks", {
+        method: "POST",
+        headers: { ...AUTH_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Auto-dispatch child",
+          description: "Child task that should self-dispatch once the parent is satisfied.",
+          directory: repoDir,
+          isolation: "worktree",
+          autoRun: true,
+        }),
+      });
+      expect(childRes.status).toBe(201);
+      const child = (await childRes.json()) as Task;
+      expect(child.autoRun).toBe(true);
+
+      const linkRes = await app.request(`/api/tasks/${child.id}/links`, {
+        method: "POST",
+        headers: { ...AUTH_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ parentId: parent.id }),
+      });
+      expect(linkRes.status).toBe(200);
+
+      // --- 3. Run the parent for real, then report completion via /complete --
+      const parentRunRes = await app.request(`/api/tasks/${parent.id}/run`, { method: "POST", headers: AUTH_HEADERS });
+      expect(parentRunRes.status).toBe(202);
+      const parentRunning = (await parentRunRes.json()) as Task;
+      expect(parentRunning.sessionId).toBeTruthy();
+
+      await waitFor(async () => {
+        const result = await handle.client.session.messages({ sessionID: parentRunning.sessionId! });
+        if (result.error) return undefined;
+        return result.data?.find((m) => m.info.role === "user") ? result.data : undefined;
+      });
+
+      const completeRes = await app.request(`/api/tasks/${parent.id}/complete`, {
+        method: "POST",
+        headers: { ...AUTH_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify(validCompletion),
+      });
+      expect(completeRes.status).toBe(200);
+      await handle.client.session.abort({ sessionID: parentRunning.sessionId! }).catch(() => {});
+
+      // --- 4. The child dispatches on its own — no manual /run call here. ----
+      const dispatchedChild = await waitFor(async () => {
+        const listRes = await app.request("/api/tasks", { headers: AUTH_HEADERS });
+        if (!listRes.ok) return undefined;
+        const tasks = (await listRes.json()) as Task[];
+        const current = tasks.find((t) => t.id === child.id);
+        return current?.sessionId ? current : undefined;
+      });
+      expect(dispatchedChild.column).toBe("in_progress");
+      expect(dispatchedChild.runState).toBe("running");
+
+      const dispatchEventsRes = await app.request(`/api/tasks/${child.id}/events`, { headers: AUTH_HEADERS });
+      const dispatchEvents = await dispatchEventsRes.json();
+      expect(
+        (dispatchEvents as Array<{ type: string; body: Record<string, unknown> }>).some(
+          (e) => e.type === "task_auto_dispatched" && e.body.parentId === parent.id,
+        ),
+      ).toBe(true);
+
+      // --- 5. Its prompt carries the PARENT CONTEXT handoff, same as a manual run.
+      // Poll until the user message's text part exists, not just the message —
+      // OpenCode materializes message parts asynchronously, so a user-role
+      // message can briefly report an empty parts array right after dispatch.
+      const childPromptText = await waitFor(async () => {
+        const result = await handle.client.session.messages({ sessionID: dispatchedChild.sessionId! });
+        if (result.error) return undefined;
+        const parts = result.data?.find((m) => m.info.role === "user")?.parts as
+          | Array<{ type: string; text?: string }>
+          | undefined;
+        return parts?.find((p) => p.type === "text")?.text;
+      });
+      expect(childPromptText).toContain("PARENT CONTEXT");
+      expect(childPromptText).toContain(`PARENT-000 TASK ID: ${parent.id}`);
+      expect(childPromptText).toContain(`PARENT-000 SUMMARY: ${validCompletion.summary}`);
+
+      await handle.client.session.abort({ sessionID: dispatchedChild.sessionId! }).catch(() => {});
     },
     90_000,
   );

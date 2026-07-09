@@ -20,6 +20,7 @@ import { registerArchiveRoutes } from "./routes/archive";
 import { registerTaskLinkRoutes } from "./routes/links";
 import { registerTaskCommentRoutes } from "./routes/comments";
 import { registerWorktreeRoutes } from "./routes/worktrees";
+import type { ChainAdvancer } from "./chain-advancer";
 
 export interface AppDeps {
   client: OpencodeHandle["client"];
@@ -33,6 +34,12 @@ export interface AppDeps {
   boardToken: string;
   /** The adapter connection mode ("spawn" | "connect"). */
   opencodeMode: "spawn" | "connect";
+  /**
+   * Auto-dispatches autoRun children once their parents are satisfied.
+   * Optional so existing callers/tests that don't wire one keep working —
+   * chains simply never fire without it.
+   */
+  chainAdvancer?: ChainAdvancer;
 }
 
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
@@ -76,13 +83,14 @@ export function createApp(deps: AppDeps): Hono {
   registerAgentRoutes(app, { baseUrl: deps.opencodeBaseUrl });
   registerProviderRoutes(app, { client: deps.client });
   registerAcpConfigRoutes(app, { cwd: deps.sourceInstance.workspace });
-  registerCompletionRoutes(app, { store: deps.taskStore });
+  registerCompletionRoutes(app, { store: deps.taskStore, advancer: deps.chainAdvancer });
   registerTaskLinkRoutes(app, { store: deps.taskStore });
   registerTaskCommentRoutes(app, { store: deps.taskStore });
   registerTaskRoutes(app, {
     store: deps.taskStore,
     dispatcher: deps.dispatcher,
     agentRoster: { fetch: () => fetchRosterStrict(deps.opencodeBaseUrl) },
+    advancer: deps.chainAdvancer,
   });
   registerWorktreeRoutes(app, { dispatcher: deps.dispatcher });
   registerArchiveRoutes(app, {

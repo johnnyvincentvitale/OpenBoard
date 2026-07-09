@@ -6,6 +6,7 @@ import { SqliteTaskStore } from "../db/task-store";
 import { assertPortFree, deriveStorePaths, resolveAdapterConfig, resolveInstanceConfig } from "./config";
 import { startOrConnect } from "./opencode";
 import { TaskDispatcher } from "./dispatcher";
+import { createChainAdvancer } from "./chain-advancer";
 import { createApp } from "./app";
 import { resolveBoardToken } from "./auth";
 import { registerTerminalRoutes } from "./routes/terminals";
@@ -46,6 +47,11 @@ export async function main(): Promise<void> {
     boardToken,
     instanceName,
   });
+  // Chain advancer needs dispatcher.run; the dispatcher needs the advancer to
+  // notify on integrate-to-done — built in this order to avoid a circular
+  // construction, then wired together with the late-bound setter.
+  const chainAdvancer = createChainAdvancer({ store: taskStore, runTask: (taskId) => dispatcher.run(taskId) });
+  dispatcher.setOnParentSatisfied((parentId) => chainAdvancer.advanceReadyChildren(parentId));
   try {
     const outcomes = await dispatcher.sweepOrphanedWorktrees();
     const removedCleanCount = outcomes.filter((o) => o.ok && o.removed && !o.dirty).length;
@@ -88,6 +94,7 @@ export async function main(): Promise<void> {
     sourceInstance,
     boardToken,
     opencodeMode: config.mode,
+    chainAdvancer,
   });
   registerTerminalRoutes(app, { manager: terminalManager });
 
