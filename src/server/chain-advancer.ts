@@ -12,6 +12,7 @@
  * comment for how the two are wired together at integration time.
  */
 import type { Task, TaskStore } from "../shared";
+import { canAutoRun } from "../shared";
 import { ArchivedTaskActionError, DependencyGateError, unmetReason } from "./dispatcher";
 
 export interface ChainAdvancerDeps {
@@ -53,8 +54,7 @@ function isAutoRunEligible(task: Task | undefined): task is Task {
     task.column === "todo" &&
     !task.archived &&
     task.runState !== "running" &&
-    (task.type ?? "agent") === "agent" &&
-    task.isolation === "worktree"
+    canAutoRun(task)
   );
 }
 

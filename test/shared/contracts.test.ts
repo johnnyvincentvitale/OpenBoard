@@ -15,6 +15,7 @@ import {
   AdapterError,
   buildTaskPath,
   resolveOpenCodePermissionRules,
+  canAutoRun,
   UNATTENDED_PERMISSION,
   WRITE_FENCED_PERMISSION,
   TASK_HARNESSES,
@@ -167,5 +168,30 @@ describe("resolveOpenCodePermissionRules", () => {
       { permission: "edit", pattern: "**", action: "ask" },
       { permission: "bash", pattern: "**", action: "deny" },
     ]);
+  });
+});
+
+describe("canAutoRun", () => {
+  it("accepts worktree-isolated agent tasks regardless of harness or overrides", () => {
+    expect(canAutoRun({ isolation: "worktree" })).toBe(true);
+    expect(canAutoRun({ type: "agent", isolation: "worktree" })).toBe(true);
+    expect(canAutoRun({ harness: "claude-code", isolation: "worktree" })).toBe(true);
+    expect(canAutoRun({ isolation: "worktree", permissionOverrides: { edit: "allow", bash: "allow" } })).toBe(true);
+  });
+
+  it("accepts fenced in-place OpenCode tasks (edit+bash deny)", () => {
+    expect(canAutoRun({ isolation: "in-place", permissionOverrides: { edit: "deny", bash: "deny" } })).toBe(true);
+    expect(canAutoRun({ harness: "opencode", isolation: "in-place", permissionOverrides: { edit: "deny", bash: "deny", webfetch: "allow" } })).toBe(true);
+  });
+
+  it("rejects everything else", () => {
+    expect(canAutoRun({ type: "manual", isolation: "worktree" })).toBe(false);
+    expect(canAutoRun({ isolation: "in-place" })).toBe(false);
+    expect(canAutoRun({ isolation: null })).toBe(false);
+    expect(canAutoRun({})).toBe(false);
+    expect(canAutoRun({ isolation: "in-place", permissionOverrides: { edit: "deny", bash: "ask" } })).toBe(false);
+    expect(canAutoRun({ isolation: "in-place", permissionOverrides: { edit: "ask", bash: "deny" } })).toBe(false);
+    expect(canAutoRun({ isolation: "in-place", permissionOverrides: { edit: "deny" } })).toBe(false);
+    expect(canAutoRun({ harness: "claude-code", isolation: "in-place", permissionOverrides: { edit: "deny", bash: "deny" } })).toBe(false);
   });
 });

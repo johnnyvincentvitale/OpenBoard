@@ -273,9 +273,12 @@ A planned chain can mark its non-first cards `autoRun: true` instead of
 budgeting orchestrator time for manual card advancement — each `autoRun`
 child dispatches itself the moment every parent it links to is satisfied
 (`done`, or a `complete` report with `completionSource: "reported"`), with no
-human or orchestrator pressing Run. `autoRun` only ever applies to
-worktree-isolated agent cards; the create/update APIs reject it on in-place
-or manual tasks.
+human or orchestrator pressing Run. `autoRun` applies to agent cards
+whose shape makes unattended writes to the live checkout impossible: worktree
+isolation, or in-place OpenCode with `permissionOverrides` `edit` and `bash`
+both `"deny"` — the read-only shape for research/synthesis/audit lanes. The
+create/update APIs reject it on any other shape, and weakening a fenced
+card's overrides clears the flag.
 
 Decide this per child, not per run: a chain of file-disjoint cards meant to
 run start-to-finish on one Review checkpoint is a good `autoRun` candidate; a

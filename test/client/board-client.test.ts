@@ -281,14 +281,17 @@ describe("board client", () => {
       client.createTask({ title: "Bad override shape", isolation: "in-place", permissionOverrides: { edit: "sometimes" as never } }),
     ).rejects.toThrow("permissionOverrides.edit must be one of: allow, ask, deny");
     await expect(client.createTask({ title: "Bad auto-run", autoRun: true })).rejects.toThrow(
-      "autoRun can only be set on worktree-isolated tasks",
+      'autoRun requires worktree isolation, or an in-place OpenCode task with edit and bash permission overrides set to "deny"',
     );
     await expect(client.createTask({ title: "Bad auto-run", isolation: "in-place", autoRun: true })).rejects.toThrow(
-      "autoRun can only be set on worktree-isolated tasks",
+      'autoRun requires worktree isolation, or an in-place OpenCode task with edit and bash permission overrides set to "deny"',
     );
     await expect(client.createTask({ title: "Bad auto-run shape", isolation: "worktree", autoRun: "yes" as never })).rejects.toThrow(
       "autoRun must be a boolean",
     );
+    await expect(
+      client.createTask({ title: "Half fenced", isolation: "in-place", permissionOverrides: { edit: "deny", bash: "ask" }, autoRun: true }),
+    ).rejects.toThrow("autoRun requires worktree isolation");
     await expect(client.createTask({ title: "Missing dir", directory: "missing" })).rejects.toThrow(
       `directory does not exist: ${CWD}/missing`,
     );
@@ -339,6 +342,27 @@ describe("board client", () => {
 
     expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toMatchObject({
       isolation: "worktree",
+      autoRun: true,
+    });
+  });
+
+  it("accepts autoRun for a fenced in-place OpenCode task and POSTs it verbatim", async () => {
+    const options = makeOptions([CWD], vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse(createdTask("task-fenced-auto-run", input), 201);
+    }));
+    const client = createBoardClient(options);
+
+    await client.createTask({
+      title: "Read-only auto-run worker",
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "deny" },
+      autoRun: true,
+    });
+
+    expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "deny" },
       autoRun: true,
     });
   });

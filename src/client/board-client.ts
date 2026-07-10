@@ -32,7 +32,9 @@ import type {
   BoardHealth,
 } from "../shared";
 import {
+  AUTO_RUN_REQUIREMENT,
   buildTaskPath,
+  canAutoRun,
   CLAUDE_CODE_MODEL_PROVIDER,
   CLAUDE_CODE_PERMISSION_MODES,
   CODEX_MODEL_PROVIDER,
@@ -554,19 +556,21 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
     payload.isolation = task.isolation as TaskIsolationMode;
   }
 
-  if (task.autoRun !== undefined) {
-    if (typeof task.autoRun !== "boolean") throw new Error("autoRun must be a boolean");
-    if (task.autoRun === true && (payload.type !== "agent" || payload.isolation !== "worktree")) {
-      throw new Error("autoRun can only be set on worktree-isolated tasks");
-    }
-    payload.autoRun = task.autoRun;
-  }
-
   if (task.permissionOverrides !== undefined) {
     if (payload.type !== "agent" || (payload.harness !== undefined && payload.harness !== "opencode") || payload.isolation !== "in-place") {
       throw new Error("permissionOverrides can only be set for in-place OpenCode agent tasks");
     }
     payload.permissionOverrides = normalizePermissionOverrides(task.permissionOverrides);
+  }
+
+  // Evaluated after permissionOverrides lands on the payload — the fenced
+  // in-place shape (edit+bash denied) is part of what canAutoRun checks.
+  if (task.autoRun !== undefined) {
+    if (typeof task.autoRun !== "boolean") throw new Error("autoRun must be a boolean");
+    if (task.autoRun === true && !canAutoRun(payload)) {
+      throw new Error(AUTO_RUN_REQUIREMENT);
+    }
+    payload.autoRun = task.autoRun;
   }
 
   if (task.parentIds !== undefined) payload.parentIds = normalizeParentIds(task.parentIds);

@@ -226,6 +226,11 @@ Every worktree branches from a verified-green commit:
 3. For audit/synthesis cards that need parent evidence, rely on the injected
    `task_diff`-first parent inspection guidance; prefer read/grep/list tools
    over shell commands for anything beyond parent diffs.
+4. A read-only audit can inspect a parent diff but cannot prove the parent tree
+   builds from its own base-only worktree. Do not plan ad hoc diff application
+   as an audit mechanism. Assign executable parent-build verification to the
+   orchestrator in the code-bearing worktree or to a downstream integration
+   candidate, and name that command and owner in the run plan.
 
 ## Choose Task Kinds And Dependencies
 
@@ -268,9 +273,12 @@ A planned chain can mark its non-first cards `autoRun: true` instead of
 budgeting orchestrator time for manual card advancement — each `autoRun`
 child dispatches itself the moment every parent it links to is satisfied
 (`done`, or a `complete` report with `completionSource: "reported"`), with no
-human or orchestrator pressing Run. `autoRun` only ever applies to
-worktree-isolated agent cards; the create/update APIs reject it on in-place
-or manual tasks.
+human or orchestrator pressing Run. `autoRun` applies to agent cards
+whose shape makes unattended writes to the live checkout impossible: worktree
+isolation, or in-place OpenCode with `permissionOverrides` `edit` and `bash`
+both `"deny"` — the read-only shape for research/synthesis/audit lanes. The
+create/update APIs reject it on any other shape, and weakening a fenced
+card's overrides clears the flag.
 
 Decide this per child, not per run: a chain of file-disjoint cards meant to
 run start-to-finish on one Review checkpoint is a good `autoRun` candidate; a

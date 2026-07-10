@@ -96,7 +96,7 @@ Tools (a guarded control surface over the task API):
 - `complete_task` / `block_task` — structured worker completion reports.
 - `sync_task` / `integrate_task` — worktree merges; integrate requires `confirmReviewed: true`.
 - `comment_task` / `add_note`, `task_events` — scoped comments and durable task events.
-- `task_diff` — structured Review-card diff without shelling into worktrees.
+- `task_diff` — structured Review- or Done-card diff without shelling into worktrees.
 
 Verify the MCP client points at the board the user is viewing: `list_tasks`
 must match the visible cards and the selected instance's `GET /api/tasks`. If

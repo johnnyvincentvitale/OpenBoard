@@ -131,12 +131,48 @@ function actions(overrides: Record<string, unknown> = {}) {
 }
 
 describe("TUI new-task AUTO-RUN toggle", () => {
-  it("is hidden on the isolation screen when isolation is in_place", () => {
+  it("shows only the availability hint (no toggle) for an unfenced in_place draft", () => {
     const s = state();
     s.newTask = newTaskDraft({ isolation: "in-place" });
 
     const text = textOf(renderApp(fakeUi(), s));
-    expect(text).not.toContain("AUTO-RUN");
+    expect(text).toContain('AUTO-RUN: available for in_place cards when EDIT and BASH are "deny"');
+    // No toggle: the warning can never render and Tab cycling never reaches autoRun.
+    expect(text).not.toContain("Auto-run dispatches this card");
+    const seen = new Set<string>();
+    for (let i = 0; i < 8; i += 1) {
+      seen.add(s.newTask.field);
+      void handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    }
+    expect(seen.has("autoRun")).toBe(false);
+  });
+
+  it("shows the toggle (no hint) for a fenced in_place draft (edit+bash deny)", () => {
+    const s = state();
+    s.newTask = newTaskDraft({
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "deny", webfetch: "allow" },
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("AUTO-RUN");
+    expect(text).not.toContain("AUTO-RUN: available for in_place cards");
+  });
+
+  it("resets autoRun when a fenced in_place draft weakens bash off deny", async () => {
+    const s = state();
+    s.newTask = newTaskDraft({
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "deny", webfetch: "allow" },
+      autoRun: true,
+      field: "permBash",
+    });
+    const a = actions();
+
+    await handleKeypress({ sequence: "[C", name: "right" } as any, s, a);
+
+    expect(s.newTask.permissionOverrides.bash).not.toBe("deny");
+    expect(s.newTask.autoRun).toBe(false);
   });
 
   it("is visible on the isolation screen when isolation is worktree", () => {

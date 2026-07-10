@@ -6,6 +6,7 @@
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
+  AUTO_RUN_REQUIREMENT,
   CLAUDE_CODE_MODEL_PROVIDER,
   CLAUDE_CODE_PERMISSION_MODES,
   CODEX_MODEL_PROVIDER,
@@ -21,6 +22,7 @@ import {
   TASK_KINDS,
   TASK_TYPES,
   USER_COMPLETED_BY,
+  canAutoRun,
   isColumn,
 } from "../../shared";
 import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
@@ -262,8 +264,16 @@ export function registerTaskRoutes(
       if (autoRun !== undefined && typeof autoRun !== "boolean") {
         throw AdapterError.validation("autoRun must be a boolean");
       }
-      if (autoRun === true && (taskType !== "agent" || isolation !== "worktree")) {
-        throw AdapterError.validation("autoRun can only be set on worktree-isolated tasks");
+      const autoRunAccepted =
+        autoRun === true &&
+        canAutoRun({
+          type: taskType,
+          harness,
+          isolation: isIsolationMode(isolation) ? isolation : null,
+          permissionOverrides: isPermissionOverrides(permissionOverrides) ? permissionOverrides : null,
+        });
+      if (autoRun === true && !autoRunAccepted) {
+        throw AdapterError.validation(AUTO_RUN_REQUIREMENT);
       }
 
       if (parentIds !== undefined) {
@@ -309,7 +319,7 @@ export function registerTaskRoutes(
         ...(taskType === "manual" && typeof assignedTo === "string" && assignedTo.trim() ? { assignedTo: assignedTo.trim() } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
-        ...(taskType === "agent" && isolation === "worktree" && autoRun === true ? { autoRun: true } : {}),
+        ...(autoRunAccepted ? { autoRun: true } : {}),
         ...(taskType === "agent" && harness === "opencode" && isolation === "in-place" && isPermissionOverrides(permissionOverrides) ? { permissionOverrides } : {}),
       });
       store.addEvent({ taskId: task.id, type: "task_created", body: { type: task.type ?? "agent" } });
@@ -641,14 +651,25 @@ export function registerTaskRoutes(
     if (body.autoRun !== undefined && typeof body.autoRun !== "boolean") {
       throw AdapterError.validation("autoRun must be a boolean");
     }
-    // autoRun only ever applies to worktree-isolated agent tasks. Any patch that
-    // leaves the task off that shape (isolation moves away from worktree, or type
-    // moves to manual) auto-clears a stale flag instead of silently keeping it —
-    // same rule as permissionOverrides above.
-    const worktreeCapable = nextType === "agent" && effectiveIsolation === "worktree";
-    if (!worktreeCapable) {
+    // autoRun only ever applies to shapes where unattended writes to the live
+    // checkout are impossible — worktree isolation, or in-place OpenCode with
+    // edit+bash overrides denied (see canAutoRun). Any patch that leaves the
+    // task off those shapes (isolation, harness, type, or a weakened override)
+    // auto-clears a stale flag instead of silently keeping it — same rule as
+    // permissionOverrides below. Overrides are evaluated post-patch: the
+    // patched value if this PATCH touches them, else the stored row's.
+    const autoRunCapable = canAutoRun({
+      type: nextType,
+      harness: nextHarness,
+      isolation: effectiveIsolation,
+      permissionOverrides:
+        body.permissionOverrides !== undefined
+          ? (body.permissionOverrides as PermissionOverrides | null)
+          : existing.permissionOverrides ?? null,
+    });
+    if (!autoRunCapable) {
       if (body.autoRun === true) {
-        throw AdapterError.validation("autoRun can only be set on worktree-isolated tasks");
+        throw AdapterError.validation(AUTO_RUN_REQUIREMENT);
       }
       patch.autoRun = false;
     } else if (body.autoRun !== undefined) {

@@ -53,6 +53,39 @@ describe("chain advancer", () => {
     expect(events.some((e) => e.type === "task_auto_dispatched" && e.body.parentId === parent.id)).toBe(true);
   });
 
+  it("dispatches a ready fenced in-place child (edit+bash deny)", async () => {
+    const parent = store.create(parentInput());
+    store.move(parent.id, "done", 0);
+    const child = readyChild([parent.id], {
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "deny" },
+    });
+    const runTask = fakeRunTask();
+    const advancer = createChainAdvancer({ store, runTask });
+
+    await advancer.advanceReadyChildren(parent.id);
+
+    expect(runTask).toHaveBeenCalledWith(child.id);
+    const events = store.listEvents(child.id);
+    expect(events.some((e) => e.type === "task_auto_dispatched" && e.body.parentId === parent.id)).toBe(true);
+  });
+
+  it("skips an unfenced in-place child (bash not denied) despite a stored autoRun flag", async () => {
+    const parent = store.create(parentInput());
+    store.move(parent.id, "done", 0);
+    const child = readyChild([parent.id], {
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "ask" },
+    });
+    const runTask = fakeRunTask();
+    const advancer = createChainAdvancer({ store, runTask });
+
+    await advancer.advanceReadyChildren(parent.id);
+
+    expect(runTask).not.toHaveBeenCalled();
+    expect(store.get(child.id)?.column).toBe("todo");
+  });
+
   it("skips a child with a second unmet parent", async () => {
     const parent1 = store.create(parentInput({ title: "P1" }));
     store.move(parent1.id, "done", 0);

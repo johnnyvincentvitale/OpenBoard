@@ -207,8 +207,10 @@ instructions. This is how multi-card runs stay coherent: downstream agents
 start from upstream context instead of rediscovering it.
 
 **Auto-run chains.** Link a build → audit → fix chain, turn on `AUTO-RUN` for
-the audit and fix cards on the new-task wizard's Isolation screen (worktree
-isolation only — the toggle doesn't appear under `in_place`), and pressing
+the audit and fix cards on the new-task wizard's Isolation screen (the toggle
+appears for worktree cards, and for `in_place` OpenCode cards once EDIT and
+BASH are both set to `deny` — the write-fenced read-only shape for
+research/synthesis chains), and pressing
 **`r`** once on the build card runs the whole chain: audit dispatches itself
 the moment build reports complete, and fix dispatches itself the moment audit
 does, with no further Run presses. Turning the toggle on shows a warning in

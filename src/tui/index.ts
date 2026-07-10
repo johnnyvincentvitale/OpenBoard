@@ -317,6 +317,8 @@ const ACP_OPTION_FIELDS = ["acpOption0", "acpOption1", "acpOption2", "acpOption3
 /** No permission editor: worktree isolation (locked, automatic) or Claude Code harness (N/A). */
 const ISOLATION_FIELDS_LOCKED = ["isolation"] as const;
 const ISOLATION_FIELDS_EDITABLE = ["isolation", "permEdit", "permBash", "permWebfetch"] as const;
+/** In-place OpenCode with edit+bash denied is write-fenced in place, so AUTO-RUN becomes available. */
+const ISOLATION_FIELDS_EDITABLE_FENCED = ["isolation", "permEdit", "permBash", "permWebfetch", "autoRun"] as const;
 /** Worktree isolation swaps the permission note for the AUTO-RUN toggle, regardless of harness. */
 const ISOLATION_FIELDS_WORKTREE = ["isolation", "autoRun"] as const;
 const DEPENDENCY_FIELDS = ["dependency"] as const;
@@ -4187,16 +4189,33 @@ function renderAgentProfileStep(ui: OpenTui, state: TuiState, draft: NewTaskDraf
 // under in-place isolation, the only mode a permission override ever applies to.
 function renderIsolationStep(ui: OpenTui, draft: NewTaskDraft) {
   const editable = draft.harness === "opencode" && draft.isolation === "in-place";
+  const autoRunAvailable = draft.isolation === "worktree" || (editable && draftInPlaceFenced(draft));
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
     renderIsolationField(ui, draft),
     ui.Text({ content: isolationDescription(draft.isolation), fg: COLORS.muted, wrapMode: "word", height: 2 }),
     ...(draft.harness === "opencode" ? [editable ? renderPermissionOverrideControl(ui, draft) : renderLockedPermissionsNote(ui)] : []),
-    ...(draft.isolation === "worktree"
+    ...(autoRunAvailable
       ? [renderAutoRunField(ui, draft), ...(draft.autoRun ? [renderAutoRunWarning(ui)] : [])]
-      : []),
+      : editable
+        ? [renderAutoRunHint(ui)]
+        : []),
     renderDraftErrorRow(ui, draft),
   );
+}
+
+/**
+ * The in-place shape that qualifies for AUTO-RUN: edit and bash overrides
+ * both denied, so unattended writes cannot land in the live checkout. Must
+ * agree with the shared canAutoRun predicate (src/shared/task.ts).
+ */
+function draftInPlaceFenced(draft: NewTaskDraft): boolean {
+  return draft.permissionOverrides.edit === "deny" && draft.permissionOverrides.bash === "deny";
+}
+
+function renderAutoRunHint(ui: OpenTui) {
+  const hint = 'AUTO-RUN: available for in_place cards when EDIT and BASH are "deny" (write-fenced, read-only work).';
+  return ui.Text({ content: hint, fg: COLORS.dim, wrapMode: "word", height: wrappedTextHeight(hint, 3) });
 }
 
 /**
@@ -4400,7 +4419,9 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
           },
         ]
       : []),
-    ...(draft.isolation === "worktree" ? [{ label: "AUTO-RUN", value: draft.autoRun ? "On" : "Off", color: COLORS.text }] : []),
+    ...(draft.isolation === "worktree" || (draft.harness === "opencode" && draft.isolation === "in-place" && draftInPlaceFenced(draft))
+      ? [{ label: "AUTO-RUN", value: draft.autoRun ? "On" : "Off", color: COLORS.text }]
+      : []),
   ];
 
   return [identity, harnessModel, agentProfile, isolation, dependencySummaryRows(draft, state)];
@@ -6191,9 +6212,14 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       return true;
     case "permEdit":
       cyclePermissionOverride(draft, "edit", delta);
+      // Weakening edit/bash off "deny" exits the fenced in-place shape; the
+      // server auto-clears autoRun the same way (see canAutoRun), so the
+      // wizard must not display a stale on-state.
+      if (draft.isolation === "in-place" && !draftInPlaceFenced(draft)) draft.autoRun = false;
       return true;
     case "permBash":
       cyclePermissionOverride(draft, "bash", delta);
+      if (draft.isolation === "in-place" && !draftInPlaceFenced(draft)) draft.autoRun = false;
       return true;
     case "permWebfetch":
       cyclePermissionOverride(draft, "webfetch", delta);
@@ -6610,7 +6636,10 @@ function stepFieldOrder(state: TuiState, draft: NewTaskDraft): readonly NewTaskF
       return draft.harness === "opencode" ? AGENT_PROFILE_FIELDS_OPENCODE : CONFIRM_FIELDS;
     case "isolation":
       if (draft.isolation === "worktree") return ISOLATION_FIELDS_WORKTREE;
-      return draft.harness === "opencode" && draft.isolation === "in-place" ? ISOLATION_FIELDS_EDITABLE : ISOLATION_FIELDS_LOCKED;
+      if (draft.harness === "opencode" && draft.isolation === "in-place") {
+        return draftInPlaceFenced(draft) ? ISOLATION_FIELDS_EDITABLE_FENCED : ISOLATION_FIELDS_EDITABLE;
+      }
+      return ISOLATION_FIELDS_LOCKED;
     case "dependencies":
       return DEPENDENCY_FIELDS;
     case "confirm":

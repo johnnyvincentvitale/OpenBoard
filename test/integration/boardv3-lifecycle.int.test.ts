@@ -181,20 +181,19 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
 
       // Confirm the real OpenCode session actually received the prompt (the
       // completion-contract footer travels on every dispatched prompt).
-      const parentMessages = await waitFor(async () => {
+      // Poll until the user message's text part exists, not just the message —
+      // OpenCode materializes message parts asynchronously, so a user-role
+      // message can briefly report an empty parts array right after dispatch.
+      const parentPromptText = await waitFor(async () => {
         const result = await handle.client.session.messages({
           sessionID: parentRunning.sessionId!,
         });
         if (result.error) return undefined;
-        const userMsg = result.data?.find((m) => m.info.role === "user");
-        return userMsg ? result.data : undefined;
+        const parts = result.data?.find((m) => m.info.role === "user")?.parts as
+          | Array<{ type: string; text?: string }>
+          | undefined;
+        return parts?.find((p) => p.type === "text")?.text;
       });
-      const parentPromptText = (
-        parentMessages.find((m) => m.info.role === "user")?.parts as Array<{
-          type: string;
-          text?: string;
-        }>
-      )?.find((p) => p.type === "text")?.text;
       expect(parentPromptText).toContain("OPENBOARD COMPLETION CONTRACT");
       expect(parentPromptText).toContain(`Task id: ${parent.id}`);
       expect(parentPromptText).toContain(`Authorization: Bearer ${BOARD_TOKEN}`);

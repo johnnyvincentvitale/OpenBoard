@@ -563,7 +563,7 @@ describe("POST /api/tasks", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+    expect(body.error.message).toContain('autoRun requires worktree isolation, or an in-place OpenCode task with edit and bash permission overrides set to "deny"');
   });
 
   it("rejects autoRun when isolation is unset", async () => {
@@ -581,7 +581,49 @@ describe("POST /api/tasks", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+    expect(body.error.message).toContain('autoRun requires worktree isolation, or an in-place OpenCode task with edit and bash permission overrides set to "deny"');
+  });
+
+  it("creates a fenced in-place OpenCode task (edit+bash deny) with autoRun set", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Read-only auto-run",
+        directory: repoDir,
+        isolation: "in-place",
+        permissionOverrides: { edit: "deny", bash: "deny" },
+        autoRun: true,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Task;
+    expect(body.autoRun).toBe(true);
+    expect(store.get(body.id)?.autoRun).toBe(true);
+    expect(store.get(body.id)?.permissionOverrides).toEqual({ edit: "deny", bash: "deny" });
+  });
+
+  it("rejects autoRun on an in-place task whose overrides deny edit but not bash", async () => {
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Half-fenced auto-run",
+        directory: repoDir,
+        isolation: "in-place",
+        permissionOverrides: { edit: "deny", bash: "ask" },
+        autoRun: true,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("autoRun requires worktree isolation");
   });
 
   it("rejects manual tasks with agent metadata", async () => {
@@ -951,7 +993,7 @@ describe("PATCH /api/tasks/:id", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+    expect(body.error.message).toContain('autoRun requires worktree isolation, or an in-place OpenCode task with edit and bash permission overrides set to "deny"');
   });
 
   it("rejects autoRun on manual tasks", async () => {
@@ -962,7 +1004,7 @@ describe("PATCH /api/tasks/:id", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("autoRun can only be set on worktree-isolated tasks");
+    expect(body.error.message).toContain('autoRun requires worktree isolation, or an in-place OpenCode task with edit and bash permission overrides set to "deny"');
   });
 
   it("auto-clears autoRun when the same PATCH moves isolation from worktree to in-place", async () => {
@@ -1000,6 +1042,62 @@ describe("PATCH /api/tasks/:id", () => {
     const body = (await res.json()) as Task;
     expect(body.title).toBe("Renamed");
     expect(body.autoRun).toBe(true);
+  });
+
+  it("sets autoRun via PATCH on a fenced in-place card (edit+bash deny)", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "deny" },
+    });
+
+    const res = await patch(app, task.id, { autoRun: true });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.autoRun).toBe(true);
+    expect(store.get(task.id)?.autoRun).toBe(true);
+  });
+
+  it("auto-clears autoRun when a PATCH weakens a fenced in-place card's bash override", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "deny" },
+      autoRun: true,
+    });
+    expect(store.get(task.id)?.autoRun).toBe(true);
+
+    const res = await patch(app, task.id, { permissionOverrides: { edit: "deny", bash: "allow" } });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Task;
+    expect(body.autoRun).toBe(false);
+    expect(store.get(task.id)?.autoRun).toBe(false);
+  });
+
+  it("rejects a PATCH that sets autoRun on an unfenced in-place card", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      isolation: "in-place",
+      permissionOverrides: { edit: "deny", bash: "ask" },
+    });
+
+    const res = await patch(app, task.id, { autoRun: true });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("autoRun requires worktree isolation");
+    expect(store.get(task.id)?.autoRun).toBe(false);
   });
 
   it("auto-clears an existing override when the same PATCH moves isolation away from in-place", async () => {

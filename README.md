@@ -343,9 +343,15 @@ changed files, verification results, and residual risk — or a "manually marked
 for parents with no structured report.
 
 **Auto-dispatch.** A child can opt into unattended chain advancement by
-setting `autoRun: true` (`POST`/`PATCH /api/tasks`), which is accepted only on
-worktree-isolated agent tasks (400 otherwise) — a chain always runs inside the
-worktree safety stack. Once every parent a card links to is satisfied (the
+setting `autoRun: true` (`POST`/`PATCH /api/tasks`), accepted only on agent
+tasks where unattended writes to the live checkout are impossible (400
+otherwise): worktree isolation (the write fence + escape detector), or an
+in-place OpenCode task whose `permissionOverrides` set both `edit` and `bash`
+to `"deny"` — the write-fenced read-only shape for research/synthesis/audit
+chains. A PATCH that weakens either override off `"deny"`, or moves the task
+off a qualifying shape, auto-clears the flag. Fenced read-only workers still
+report completion through the injected OpenBoard MCP `complete_task` tool,
+which needs neither edit nor bash. Once every parent a card links to is satisfied (the
 same test dependency gating uses: `done`, or a `complete` report with
 `completionSource: "reported"` — an `idle-fallback` or `blocked` parent never
 satisfies it), the board dispatches the child itself with no Run call and

@@ -479,6 +479,42 @@ export function resolveOpenCodePermissionRules(
   return rules;
 }
 
+/**
+ * The single source of truth for whether a task's shape permits unattended
+ * auto-dispatch (`autoRun`). Two shapes qualify:
+ *
+ * - Worktree isolation — the write fence, escape detector, and worktree-cwd
+ *   prompt hygiene contain the run.
+ * - An in-place OpenCode task whose permission overrides deny BOTH `edit`
+ *   and `bash` — writes cannot land in the live checkout, while OpenCode's
+ *   native read/grep/glob tools keep read-only work (research, synthesis,
+ *   audit) viable. Completion still reports through the injected OpenBoard
+ *   MCP `complete_task` tool, which needs neither edit nor bash.
+ *
+ * Shared by route/client validation and the chain advancer so eligibility
+ * only has one definition, mirroring {@link resolveOpenCodePermissionRules}.
+ */
+export function canAutoRun(task: {
+  type?: TaskType | null;
+  harness?: TaskHarness;
+  isolation?: TaskIsolationMode | null;
+  permissionOverrides?: PermissionOverrides | null;
+}): boolean {
+  if ((task.type ?? "agent") !== "agent") return false;
+  if (task.isolation === "worktree") return true;
+  const opencode = task.harness === undefined || task.harness === "opencode";
+  return (
+    opencode &&
+    task.isolation === "in-place" &&
+    task.permissionOverrides?.edit === "deny" &&
+    task.permissionOverrides?.bash === "deny"
+  );
+}
+
+/** Shared validation message for a rejected autoRun value — keep route and client errors identical. */
+export const AUTO_RUN_REQUIREMENT =
+  'autoRun requires worktree isolation, or an in-place OpenCode task with edit and bash permission overrides set to "deny"';
+
 /** SSE frames the task board pushes to the browser. */
 export type TaskFrame =
   | { kind: "snapshot"; seq: number; tasks: Task[] }

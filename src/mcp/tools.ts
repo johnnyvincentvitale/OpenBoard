@@ -63,7 +63,9 @@ const AgentTaskInputSchema = z
     autoRun: z
       .boolean()
       .optional()
-      .describe('Opt-in auto-dispatch. Requires isolation "worktree" — the card self-dispatches once its parents are satisfied.'),
+      .describe(
+        'Opt-in auto-dispatch: the card self-dispatches once its parents are satisfied. Requires isolation "worktree", or in-place OpenCode with permissionOverrides edit and bash set to "deny" (write-fenced read-only work).',
+      ),
   })
   .strict();
 
@@ -87,7 +89,9 @@ export const AddTaskInputSchema = z
     autoRun: z
       .boolean()
       .optional()
-      .describe('Opt-in auto-dispatch. Requires isolation "worktree" — the card self-dispatches once its parents are satisfied.'),
+      .describe(
+        'Opt-in auto-dispatch: the card self-dispatches once its parents are satisfied. Requires isolation "worktree", or in-place OpenCode with permissionOverrides edit and bash set to "deny" (write-fenced read-only work).',
+      ),
   })
   .strict();
 
