@@ -376,6 +376,34 @@ describe("createPermissionResponderPool", () => {
     expect(errors[0]).toEqual({ sessionID: "ses_1", context: "reply" });
   });
 
+  it("calls onError only once per reply-failure streak even while list() keeps recovering every tick (P3 regression)", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "read")];
+    client.listResponses = [
+      [{ id: "req_persist_reply_fail", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+    // Fails far more times than the ticks we wait for below, so the reply
+    // never recovers during the assertion window.
+    client.replyShouldThrowCount = 20;
+    const errors: Array<{ sessionID: string; context: string }> = [];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      onError: (sessionID, context) => errors.push({ sessionID, context }),
+    });
+    pool.register("ses_1", "/wt");
+
+    // Every tick: list() succeeds (recovering the *list* failure streak) while
+    // the reply keeps failing and gets released for retry (state.replied
+    // deleted on failure), so the same doomed request is retried on the next
+    // tick. Before the fix, a shared `failing` flag meant each successful
+    // list() reset the reply streak too, re-firing onError on every tick.
+    await waitFor(() => client.replyCalls.length >= 6);
+    pool.stop();
+
+    expect(errors).toEqual([{ sessionID: "ses_1", context: "reply" }]);
+  });
+
   it("retries and succeeds after a read-class provider reply fails once", async () => {
     client.messagesResponse = [toolMessage("msg_1", "call_1", "read")];
     client.listResponses = [

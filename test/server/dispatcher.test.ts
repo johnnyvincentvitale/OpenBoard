@@ -1227,6 +1227,65 @@ describe("TaskDispatcher", () => {
       });
     });
 
+    it("suppresses the paired onRetryDecision from the same terminate() call during live permission grace (P1 regression)", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_paired";
+      client.stableMessagesResponse = [{ info: { id: "msg1" }, parts: [{ type: "tool", callID: "call1", tool: "bash" }] }];
+      client.pendingPermissionRequests = [
+        { id: "native_req_paired", sessionID: "ses_paired", permission: "bash", tool: { messageID: "msg1", callID: "call1" } },
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000, watchdogConfig: { enabled: true, timeoutMs: 60_000, sweepIntervalMs: 0, maxAutomaticRetries: 2 } });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 1);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+      const ask = (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string; deadline: number }> }).listPendingPermissions(task.id)[0]!;
+
+      const dispatcherInternal = dispatcher as unknown as {
+        handleWatchdogTermination(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; terminatedAt: number }): void;
+        handleWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): void;
+      };
+
+      // Faithfully replay RunWatchdog.terminate()'s synchronous callback
+      // contract: onTerminate fires first, then onRetryDecision fires in the
+      // same synchronous call — both with the same run identity.
+      dispatcherInternal.handleWatchdogTermination({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_paired", attempt: 0 },
+        reason: "liveness-timeout",
+        terminatedAt: ask.deadline - 1,
+      });
+      dispatcherInternal.handleWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_paired", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: ask.deadline - 1,
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      // Give the fire-and-forget applyWatchdogRetryDecision promise a chance to
+      // settle so we can prove it no-op'd instead of aborting/starting a writer.
+      await new Promise((r) => setTimeout(r, 50));
+
+      const events = store.listEvents(task.id).map((event) => event.type);
+
+      // No abort of the live root session.
+      expect(client.abortCalls).toEqual([]);
+      // No fresh session/writer created — still the original single create call.
+      expect(client.createCalls).toHaveLength(1);
+      // The task is still running, not errored or retried.
+      expect(store.get(task.id)?.runState).toBe("running");
+      // The suppression event was emitted.
+      expect(events).toContain("task_watchdog_permission_wait");
+      // No retry, fallback, or tripped event leaked through from the paired decision.
+      expect(events).not.toContain("task_watchdog_retry");
+      expect(events).not.toContain("task_watchdog_fallback");
+      expect(events).not.toContain("task_watchdog_tripped");
+      // The watchdog was rearmed (a new run record with a fresh watchdog exists).
+      const runRecord = (dispatcher as never as { openCodeRunsByTask: Map<string, { watchdog: { snapshot: () => { stage: string } } }> }).openCodeRunsByTask.get(task.id);
+      expect(runRecord).toBeDefined();
+      expect(runRecord!.watchdog.snapshot().stage).toBe("healthy");
+    });
+
     it("blocks watchdog retry when old root abort fails", async () => {
       const task = createTask({ directory: myProjectDir });
       client.nextSessionId = "ses_abort_failed_old";
@@ -1286,6 +1345,95 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)).toMatchObject({ column: "review", runState: "error", completionSource: "watchdog" });
       expect(store.get(task.id)?.completion).toMatchObject({ outcome: "blocked", needsInput: expect.stringContaining("Review the partial") });
       expect(store.listEvents(task.id).map((event) => event.type)).toEqual(expect.arrayContaining(["task_watchdog_retry", "task_watchdog_fallback", "task_watchdog_exhausted"]));
+    });
+
+    it("emits task_watchdog_retry (not fallback) when no fallback model is set (P3 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      // No model, no fallbackModel — both resolve to null.
+      client.nextSessionId = "ses_no_fallback";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      const current = store.get(task.id)!;
+      client.nextSessionId = "ses_no_fallback_retry";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: current.runStartedAt!, sessionId: "ses_no_fallback", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      const events = store.listEvents(task.id).map((event) => event.type);
+      expect(events).toContain("task_watchdog_retry");
+      expect(events).not.toContain("task_watchdog_fallback");
+    });
+
+    it("emits task_watchdog_retry (not fallback) on first retry even with a configured fallback model (P3 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      store.update(task.id, { model: { providerID: "primary", id: "p1" }, fallbackModel: { providerID: "fallback", id: "f1" } });
+      client.nextSessionId = "ses_first_retry";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      const current = store.get(task.id)!;
+      client.nextSessionId = "ses_first_retry_new";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: current.runStartedAt!, sessionId: "ses_first_retry", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      const events = store.listEvents(task.id).map((event) => event.type);
+      expect(events).toContain("task_watchdog_retry");
+      expect(events).not.toContain("task_watchdog_fallback");
+    });
+
+    it("emits task_watchdog_fallback only on the actual second retry selecting a different-provider fallback (P3 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      store.update(task.id, { model: { providerID: "primary", id: "p1" }, fallbackModel: { providerID: "fallback", id: "f1" } });
+      client.nextSessionId = "ses_fallback_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      // First retry (nextAttempt=1) — should emit task_watchdog_retry, not fallback.
+      const first = store.get(task.id)!;
+      client.nextSessionId = "ses_fallback_1";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: first.runStartedAt!, sessionId: "ses_fallback_0", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      // Second retry (nextAttempt=2) with different provider — should emit task_watchdog_fallback.
+      const second = store.get(task.id)!;
+      client.nextSessionId = "ses_fallback_2";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: second.runStartedAt!, sessionId: "ses_fallback_1", attempt: 1 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 2,
+      });
+
+      const events = store.listEvents(task.id).map((event) => event.type);
+      expect(events).toContain("task_watchdog_retry");
+      expect(events).toContain("task_watchdog_fallback");
+      // Exactly one of each.
+      expect(events.filter((e) => e === "task_watchdog_retry")).toHaveLength(1);
+      expect(events.filter((e) => e === "task_watchdog_fallback")).toHaveLength(1);
     });
   });
 

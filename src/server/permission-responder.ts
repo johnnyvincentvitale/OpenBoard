@@ -189,8 +189,10 @@ interface TargetState {
   directory: string;
   /** requestIDs already handled (approved or submitted to the broker), scoped to this target so it's freed on unregister(). */
   replied: Set<string>;
-  /** Whether the most recent list/reply attempt for this target failed — gates onError de-dup. */
-  failing: boolean;
+  /** Whether the most recent list attempt for this target failed — gates onError de-dup for list failures. */
+  failingList: boolean;
+  /** Whether the most recent reply attempt for this target failed — gates onError de-dup for reply failures independently of list failures. */
+  failingReply: boolean;
   /** Most recent denial for this target, so a caller can give the agent recovery guidance. */
   lastDenial: DenialInfo | null;
   /** Source classification applied to every broker ask raised for this session. */
@@ -234,7 +236,7 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
     if (!state) return; // unregistered/cleared mid-flight; nothing left to update.
     if (event.type === "permission_answered") {
       state.pendingAskNativeIds.delete(event.askId);
-      reportRecovery(state);
+      reportRecovery(state, "reply");
       if (event.decision === "deny") {
         state.lastDenial = { tool: event.tool ?? "unknown", deniedAt: event.occurredAt };
       }
@@ -276,7 +278,7 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
       reportFailure(sessionID, "list", state, err);
       return;
     }
-    reportRecovery(state);
+    reportRecovery(state, "list");
 
     for (const request of pending) {
       if (stopped || !targets.has(sessionID)) return;
@@ -299,7 +301,7 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
             reply: "once",
           });
           if ((result as { error?: unknown }).error) throw (result as { error?: unknown }).error;
-          reportRecovery(state);
+          reportRecovery(state, "reply");
         } catch (err) {
           // Never actually replied: release the suppression so a later poll
           // sees this request again instead of permanently ignoring it.
@@ -335,8 +337,10 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
   }
 
   function reportFailure(sessionID: string, context: PermissionResponderErrorContext, state: TargetState, err: unknown): void {
-    if (state.failing) return;
-    state.failing = true;
+    const alreadyFailing = context === "list" ? state.failingList : state.failingReply;
+    if (alreadyFailing) return;
+    if (context === "list") state.failingList = true;
+    else state.failingReply = true;
     if (!onError) return;
     try {
       onError(sessionID, context, err);
@@ -345,8 +349,9 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
     }
   }
 
-  function reportRecovery(state: TargetState): void {
-    state.failing = false;
+  function reportRecovery(state: TargetState, context: PermissionResponderErrorContext): void {
+    if (context === "list") state.failingList = false;
+    else state.failingReply = false;
   }
 
   async function resolveToolName(sessionID: string, directory: string, request: PendingRequest): Promise<string | undefined> {
@@ -367,7 +372,8 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
       targets.set(sessionID, {
         directory,
         replied: new Set(),
-        failing: false,
+        failingList: false,
+        failingReply: false,
         lastDenial: null,
         source: registerOptions?.source ?? "worktree-fence",
         pendingAskNativeIds: new Map(),

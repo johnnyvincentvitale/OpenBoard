@@ -559,6 +559,17 @@ interface OpenCodeRunRecord {
   transportLive: boolean;
   lastLiveState: "running" | "idle" | "error" | null;
   attempt: number;
+  /**
+   * Set when the most recent watchdog termination was suppressed for a pending
+   * in-grace permission ask. The paired onRetryDecision fires synchronously
+   * after onTerminate inside RunWatchdog.terminate(), so without this marker
+   * the retry decision would proceed to abort the live root and start a fresh
+   * writer, defeating the suppression. Checked-and-cleared in
+   * applyWatchdogRetryDecision so only the immediately paired decision is
+   * ignored; a later (genuinely stale) termination's retry decision still
+   * runs.
+   */
+  watchdogRetrySuppressed?: boolean;
 }
 
 export class TaskDispatcher implements Dispatcher {
@@ -1847,6 +1858,7 @@ export class TaskDispatcher implements Dispatcher {
       .filter((ask) => ask.deadline > event.terminatedAt)
       .sort((a, b) => a.raisedAt - b.raisedAt)[0];
     if (!pending) return false;
+    run.watchdogRetrySuppressed = true;
     run.watchdog.dispose();
     run.watchdog = this.createRunWatchdog();
     run.watchdog.startRun(event.run, pending.deadline);
@@ -1871,6 +1883,10 @@ export class TaskDispatcher implements Dispatcher {
   private async applyWatchdogRetryDecision(event: WatchdogRetryDecision): Promise<void> {
     const current = this.openCodeRunsByTask.get(event.run.taskId);
     if (!current || current.runStartedAt !== event.run.runStartedAt || current.rootSessionId !== event.run.sessionId) return;
+    if (current.watchdogRetrySuppressed) {
+      current.watchdogRetrySuppressed = false;
+      return;
+    }
     const task = this.store.get(event.run.taskId);
     if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt || task.sessionId !== event.run.sessionId) return;
     const abortConfirmed = await (current.abortPromise ?? this.confirmWatchdogAbort(event.run));
@@ -1903,7 +1919,8 @@ export class TaskDispatcher implements Dispatcher {
     const fallback = task.fallbackModel;
     const primary = task.model ?? null;
     const activeModel = nextAttempt === 2 && fallback && !sameProvider(primary, fallback) ? fallback : primary;
-    this.store.addEvent({ taskId: task.id, type: activeModel === fallback ? "task_watchdog_fallback" : "task_watchdog_retry", body: { attempt: nextAttempt, model: activeModel } });
+    const usedFallback = activeModel === fallback && fallback !== null;
+    this.store.addEvent({ taskId: task.id, type: usedFallback ? "task_watchdog_fallback" : "task_watchdog_retry", body: { attempt: nextAttempt, model: activeModel } });
     await this.startFreshOpenCodeAttempt(task, nextAttempt, activeModel);
   }
 
