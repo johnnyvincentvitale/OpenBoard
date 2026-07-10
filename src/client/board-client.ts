@@ -7,6 +7,7 @@ import type {
   CompletionReport,
   CompletionSource,
   DiffResponse,
+  DominantTaskState,
   FileCommitOutcome,
   MergeOutcome,
   ModelRef,
@@ -57,6 +58,7 @@ import {
   TASK_ISOLATION_MODES,
   TASK_KINDS,
   blockedQuestion,
+  dominantTaskState,
 } from "../shared";
 
 export type { BoardHealth } from "../shared/health";
@@ -139,6 +141,14 @@ export interface TaskSummary {
   hasParentIds?: boolean;
   /** True when this task has a completion report (handoff evidence available). */
   hasCompletion?: boolean;
+  /**
+   * Single computed precedence winner from the shared `dominantTaskState`
+   * projection (`src/shared/lifecycle.ts`) — the same precedence order the
+   * TUI uses to pick a card's displayed state. Raw component fields above
+   * (runState, column, completion, pendingPermissions) are preserved
+   * unchanged; this is an additive projection, not a replacement.
+   */
+  dominantState: DominantTaskState;
 }
 
 export interface CreateBoardTaskInput {
@@ -570,6 +580,7 @@ export function toTaskSummary(task: Task): TaskSummary {
     pendingPermissions: task.pendingPermissions ?? [],
     ...(hasParentIds ? { hasParentIds: true } : {}),
     ...(hasCompletion ? { hasCompletion: true } : {}),
+    dominantState: dominantTaskState(task),
   };
 }
 

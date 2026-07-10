@@ -21,14 +21,16 @@ import {
   retryTask,
   runTask,
   syncTask,
+  tailSession,
   taskCompare,
+  taskContext,
   taskDiff,
   taskEvents,
   unlinkTasks,
 } from "../../src/mcp/tools";
 import type { CompactBlockedProjection, TaskSummary } from "../../src/client/board-client";
 import type { McpToolOptions } from "../../src/mcp/tools";
-import type { DiffResponse, PendingPermissionAsk, RosterAgent, Task } from "../../src/shared";
+import type { DiffResponse, PendingPermissionAsk, RosterAgent, SessionActivityEvent, SessionActivityRun, Task } from "../../src/shared";
 import { toTaskSummary } from "../../src/client/board-client";
 
 const CWD = "/tmp/openboard-project";
@@ -47,6 +49,32 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
+  });
+}
+
+/** One step of a fake SSE stream: a frame, optionally after a delay. */
+interface SseStep {
+  frame: unknown;
+  delayMs?: number;
+}
+
+/** Build a fake `text/event-stream` Response emitting the given frames in order, closing after the last one. */
+function sseResponse(steps: SseStep[]): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (const step of steps) {
+        if (step.delayMs) {
+          await new Promise((resolve) => setTimeout(resolve, step.delayMs));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(step.frame)}\n\n`));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
   });
 }
 
@@ -181,6 +209,7 @@ describe("MCP add_tasks", () => {
           model: { providerID: "opencode", id: "north-mini-code-free" },
           isolation: "worktree",
           pendingPermissions: [],
+          dominantState: "queued",
         },
       ],
     });
@@ -715,6 +744,7 @@ describe("MCP list tools", () => {
           isolation: "worktree",
           sessionId: "session-1",
           pendingPermissions: [],
+          dominantState: "review",
         },
       ],
     });
@@ -1155,5 +1185,136 @@ describe("MCP integrate_task with blockedAcceptance", () => {
         acceptIncomplete: true,
       },
     });
+  });
+});
+
+describe("MCP tail_session", () => {
+  const run: SessionActivityRun = {
+    taskId: "task-1",
+    runStartedAt: 1000,
+    sessionId: "session-1",
+    rootSessionId: "session-1",
+    harness: "opencode",
+  };
+
+  function makeEvent(seq: number): SessionActivityEvent {
+    return {
+      seq,
+      taskId: "task-1",
+      runStartedAt: 1000,
+      sessionId: "session-1",
+      rootSessionId: "session-1",
+      harness: "opencode",
+      occurredAt: 1000 + seq,
+      kind: "text",
+      role: "assistant",
+      text: `event ${seq}`,
+    };
+  }
+
+  it("captures the terminal frame that arrives after the snapshot (P2-2)", async () => {
+    const snapshotFrame = { kind: "snapshot" as const, run, transport: "live" as const, events: [makeEvent(1)], lastEventAt: 1001 };
+    const terminalFrame = { kind: "terminal" as const, status: "complete" as const };
+    const fetchMock = vi.fn(async () => sseResponse([
+      { frame: snapshotFrame },
+      { frame: terminalFrame, delayMs: 30 },
+    ]));
+    const options = makeOptions([CWD], fetchMock);
+
+    const result = await tailSession({ taskId: "task-1", timeoutMs: 3000 }, options);
+
+    expect(result.terminal).toEqual({ status: "complete" });
+    expect(result.run).toEqual(run);
+    expect(result.events).toHaveLength(1);
+  });
+
+  it("resolves without a terminal signal if none arrives within the bounded window (P2-2)", async () => {
+    const snapshotFrame = { kind: "snapshot" as const, run, transport: "live" as const, events: [makeEvent(1)], lastEventAt: 1001 };
+    // Only a snapshot — no terminal frame ever arrives on the wire.
+    const fetchMock = vi.fn(async () => sseResponse([{ frame: snapshotFrame }]));
+    const options = makeOptions([CWD], fetchMock);
+
+    const result = await tailSession({ taskId: "task-1", timeoutMs: 3000 }, options);
+
+    expect(result.terminal).toBeUndefined();
+    expect(result.run).toEqual(run);
+  }, 2000);
+
+  it("does not flag exactly `limit` events as bounded (off-by-one, P3-15)", async () => {
+    const events = [makeEvent(1), makeEvent(2)];
+    const snapshotFrame = { kind: "snapshot" as const, run, transport: "live" as const, events, lastEventAt: 1002 };
+    const terminalFrame = { kind: "terminal" as const, status: "complete" as const };
+    const fetchMock = vi.fn(async () => sseResponse([{ frame: snapshotFrame }, { frame: terminalFrame }]));
+    const options = makeOptions([CWD], fetchMock);
+
+    const result = await tailSession({ taskId: "task-1", limit: 2 }, options);
+
+    expect(result.events).toHaveLength(2);
+    expect(result.bounded).toBe(false);
+  });
+
+  it("flags more-than-limit events as bounded (P3-15)", async () => {
+    const events = [makeEvent(1), makeEvent(2), makeEvent(3)];
+    const snapshotFrame = { kind: "snapshot" as const, run, transport: "live" as const, events, lastEventAt: 1003 };
+    const terminalFrame = { kind: "terminal" as const, status: "complete" as const };
+    const fetchMock = vi.fn(async () => sseResponse([{ frame: snapshotFrame }, { frame: terminalFrame }]));
+    const options = makeOptions([CWD], fetchMock);
+
+    const result = await tailSession({ taskId: "task-1", limit: 2 }, options);
+
+    expect(result.events).toHaveLength(2);
+    expect(result.bounded).toBe(true);
+  });
+});
+
+describe("MCP task_context", () => {
+  const nestedContextBody = {
+    task: {
+      taskId: "task-1",
+      title: "Target",
+      description: "desc",
+      taskKind: "fix",
+      completion: null,
+      changedFiles: [],
+      verification: [],
+      residualRisk: "",
+      hasStructuredHandoff: false,
+      completionSource: null,
+      completionLocation: null,
+    },
+    directParents: [],
+    inheritedParents: [],
+    codeAncestors: [],
+  };
+
+  it("resolves a nested `task` handoff (P2-3)", async () => {
+    const options = makeOptions([CWD]);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(nestedContextBody)));
+    try {
+      const result = await taskContext({ taskId: "task-1" }, options);
+      expect(result.context.task.taskId).toBe("task-1");
+      expect(result.context.directParents).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a legacy flat response body missing the nested `task` key (P2-3)", async () => {
+    const options = makeOptions([CWD]);
+    const flatLegacyBody = {
+      taskId: "task-1",
+      title: "Target",
+      directParents: [],
+      inheritedParents: [],
+      codeAncestors: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(flatLegacyBody)));
+    try {
+      await expect(taskContext({ taskId: "task-1" }, options)).rejects.toThrow(
+        "unexpected response shape",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

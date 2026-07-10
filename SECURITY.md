@@ -154,10 +154,9 @@ terminal directories must fall under:
 BOARD_WORKSPACE=/path/to/your/repo npm run dev:server
 ```
 
-If `BOARD_WORKSPACE` is unset, the server falls back to your home directory. An
-explicitly set but missing, empty, or non-directory value is rejected at
-startup with a validation error — the server will not start with a broken
-workspace configuration.
+`BOARD_WORKSPACE` is required — there is no home-directory fallback. The
+server refuses to start if it is unset, empty, missing, or not an existing
+directory, with a validation error naming the problem.
 
 ### Explicit unsafe override
 

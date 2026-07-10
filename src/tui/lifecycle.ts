@@ -1,4 +1,5 @@
 import type { Task } from "../shared";
+import { dominantTaskState } from "../shared/lifecycle";
 import { formatElapsed, taskStatus } from "./model";
 import { permissionAskDetailRows, permissionAskSummary } from "./permission-surface";
 
@@ -71,92 +72,84 @@ function normalizeDetail(value: string | undefined): string {
  *
  * This is a pure projection: it returns plain data and never creates terminal
  * nodes or reads clocks (callers pass `now`).
+ *
+ * The precedence order is delegated to the shared `dominantTaskState`
+ * projection in `src/shared/lifecycle.ts` so the MCP and TUI cannot diverge.
+ * This function maps the shared dominant state to the TUI's more detailed
+ * phase set and display strings.
  */
 export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()): TaskLifecycleStatus {
   const status = taskStatus(task);
   const base = { glyph: status.glyph, label: status.label };
+  const dominant = dominantTaskState(task);
 
-  const permissionSummary = permissionAskSummary(task, now);
-  if (permissionSummary) {
-    return {
-      phase: "needs-user-input",
-      glyph: "◆",
-      label: "NEEDS USER INPUT",
-      detail: `${permissionSummary.count} ${permissionSummary.count === 1 ? "ask" : "asks"} · ${formatElapsed(permissionSummary.countdownMs ?? 0)} left`,
-    };
-  }
-
-  if (task.column === "review" && task.completion?.outcome === "blocked") {
-    return { phase: "review-blocked", glyph: "▲", label: "REVIEW", detail: "BLOCKED" };
-  }
-
-  if (task.column === "done" && task.completion?.outcome === "blocked") {
-    const by = task.completedBy ?? "";
-    return { phase: "done-accepted-blocked", glyph: "○", label: "DONE", detail: by ? `accepted blocked · ${by}` : "accepted blocked" };
-  }
-
-  if (task.runState === "running") {
-    const elapsed = task.runStartedAt ? formatElapsed(now - task.runStartedAt) : "";
-    return {
-      phase: elapsed ? "running" : "running-no-elapsed",
-      ...base,
-      detail: elapsed,
-    };
-  }
-
-  if (task.runState === "error") {
-    return {
-      phase: task.column === "review" ? "review-error" : "error",
-      ...base,
-      detail: normalizeDetail(task.error),
-    };
-  }
-
-  if (task.pending === "git-init") {
-    return { phase: "blocked", ...base, detail: "git init required" };
-  }
-
-  if (task.pending === "base-checkout-escape") {
-    return { phase: "blocked", ...base, detail: "base checkout changed outside worktree" };
-  }
-
-  if (task.pending === "rebase-conflict") {
-    return { phase: "blocked", ...base, detail: "rebase conflict in worktree" };
-  }
-
-  if (task.column === "review") {
-    if (task.type === "manual") {
-      return { phase: "review-manual", ...base, detail: "MANUAL" };
+  switch (dominant) {
+    case "needs-user-input": {
+      const permissionSummary = permissionAskSummary(task, now);
+      return {
+        phase: "needs-user-input",
+        glyph: "◆",
+        label: "NEEDS USER INPUT",
+        detail: `${permissionSummary!.count} ${permissionSummary!.count === 1 ? "ask" : "asks"} · ${formatElapsed(permissionSummary!.countdownMs ?? 0)} left`,
+      };
     }
-    if (task.completion) {
-      const outcome = task.completion.outcome;
-      const source = task.completionSource ?? "reported";
-      if (outcome === "blocked") {
-        return { phase: "review-blocked", ...base, detail: normalizeOutcome(outcome) };
-      }
-      if (source === "idle-fallback") {
-        return { phase: "review-idle-fallback", ...base, detail: "UNCONFIRMED" };
-      }
-      return { phase: "review-reported-complete", ...base, detail: normalizeOutcome(outcome) };
+    case "blocked": {
+      return { phase: "review-blocked", glyph: "▲", label: "REVIEW", detail: "BLOCKED" };
     }
-    if (task.sessionId) {
+    case "accepted-blocked": {
+      const by = task.completedBy ?? "";
+      return { phase: "done-accepted-blocked", glyph: "○", label: "DONE", detail: by ? `accepted blocked · ${by}` : "accepted blocked" };
+    }
+    case "running": {
+      const elapsed = task.runStartedAt ? formatElapsed(now - task.runStartedAt) : "";
+      return {
+        phase: elapsed ? "running" : "running-no-elapsed",
+        ...base,
+        detail: elapsed,
+      };
+    }
+    case "error": {
+      return {
+        phase: task.column === "review" ? "review-error" : "error",
+        ...base,
+        detail: normalizeDetail(task.error),
+      };
+    }
+    case "pending": {
+      if (task.pending === "git-init") return { phase: "blocked", ...base, detail: "git init required" };
+      if (task.pending === "base-checkout-escape") return { phase: "blocked", ...base, detail: "base checkout changed outside worktree" };
+      if (task.pending === "rebase-conflict") return { phase: "blocked", ...base, detail: "rebase conflict in worktree" };
+      return { phase: "blocked", ...base, detail: "" };
+    }
+    case "review": {
+      if (task.type === "manual") {
+        return { phase: "review-manual", ...base, detail: "MANUAL" };
+      }
+      if (task.completion) {
+        const outcome = task.completion.outcome;
+        const source = task.completionSource ?? "reported";
+        if (outcome === "blocked") {
+          return { phase: "review-blocked", ...base, detail: normalizeOutcome(outcome) };
+        }
+        if (source === "idle-fallback") {
+          return { phase: "review-idle-fallback", ...base, detail: "UNCONFIRMED" };
+        }
+        return { phase: "review-reported-complete", ...base, detail: normalizeOutcome(outcome) };
+      }
       return { phase: "review-no-agent-report", ...base, detail: "NO AGENT REPORT" };
     }
-    return { phase: "review-no-agent-report", ...base, detail: "NO AGENT REPORT" };
+    case "done": {
+      const by = task.completedBy ?? "";
+      return by
+        ? { phase: "done-user", ...base, detail: by }
+        : { phase: "done", ...base, detail: "" };
+    }
+    case "idle":
+      return { phase: "idle", ...base, detail: "" };
+    case "queued":
+    default:
+      return { phase: "queued", ...base, detail: "" };
   }
-
-  if (task.column === "done") {
-    const by = task.completedBy ?? "";
-    return by
-      ? { phase: "done-user", ...base, detail: by }
-      : { phase: "done", ...base, detail: "" };
-  }
-
-  if (task.runState === "idle") {
-    return { phase: "idle", ...base, detail: "" };
-  }
-
-  return { phase: "queued", ...base, detail: "" };
 }
 
 /**

@@ -324,8 +324,10 @@ restart and cannot recover them.
 `tail_session` returns a bounded tail snapshot from a task's session-activity SSE
 stream — run identity, transport state (`live`/`reconnecting`/`static`), finite event
 window (default 50, max 200), gap truth, and terminal signal (complete/error/aborted).
-It resolves from the first snapshot and closes the underlying controller
-deterministically. It is for orchestrator inspection, not continuous monitoring.
+The SSE route always emits snapshot before terminal, so `tail_session` waits a bounded
+window after the snapshot to capture the terminal frame, then resolves. If the terminal
+does not arrive within the window the session may still be live; orchestrators should
+check the task column for completion. It is for orchestrator inspection, not continuous monitoring.
 
 ### Watchdog and retry (FR10)
 
@@ -335,7 +337,10 @@ every 30s: it allows at most two automatic fresh-session same-worktree retries
 total, preserves the original task baseline and partial worktree files, and
 supports cross-provider fallback via per-card `fallbackModel`. The watchdog is
 event-stream blindness-guarded — it reads OpenCode's REST status, not the `/event`
-stream, to avoid false-positive restarts.
+stream, to avoid false-positive restarts. If both automatic retries are exhausted,
+the watchdog stamps a synthetic `blocked` completion report itself, sets
+`completionSource: "watchdog"` (distinct from `"reported"` and `"idle-fallback"`),
+and moves the card to Review for human triage.
 
 ### Task evidence and lineage (FR11)
 

@@ -1,5 +1,5 @@
 import type { Column } from "./columns";
-import type { CompletionReport, TaskKind } from "./task";
+import type { CompletionReport, CompletionSource, TaskCompletionLocation, TaskKind } from "./task";
 
 export interface TaskHandoff {
   taskId: string;
@@ -13,6 +13,10 @@ export interface TaskHandoff {
   residualRisk: string;
   summary?: string;
   hasStructuredHandoff: boolean;
+  /** Whether completion was agent-reported, synthesized from idle, or watchdog-stamped. Present on the target task handoff from the context route. */
+  completionSource?: CompletionSource | null;
+  /** Where the reported changed files were found when the completion report landed. Present on the target task handoff from the context route. */
+  completionLocation?: TaskCompletionLocation | null;
 }
 
 export interface DirectParentContext extends TaskHandoff {

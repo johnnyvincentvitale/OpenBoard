@@ -253,7 +253,7 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
     "tail_session",
     {
       title: "Tail session activity",
-      description: "Fetch a bounded tail snapshot of a task's session activity events, plus run identity, transport/gap truth, and terminal signal. Uses client.streamSessionEvents with a snapshot-first collector. Not for continuous streaming — use the SSE endpoint directly for unbounded reads. Default limit 50, max 200.",
+      description: "Fetch a bounded tail snapshot of a task's session activity events, plus run identity, transport/gap truth, and terminal signal. Waits a bounded window after the snapshot to capture the terminal frame that follows on every SSE route path. Not for continuous streaming — use the SSE endpoint directly for unbounded reads. Default limit 50, max 200.",
       inputSchema: TailSessionInputSchema,
     },
     async (args) => toToolResult(await tailSession(args, toolOptions)),

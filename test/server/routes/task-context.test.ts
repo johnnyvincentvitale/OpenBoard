@@ -74,17 +74,21 @@ describe("GET /api/tasks/:id/context", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
 
-    expect(body.taskId).toBe(task.id);
-    expect(body.title).toBe("Lone Task");
-    expect(body.description).toBe("Go it alone");
-    expect(body.taskKind).toBe("none");
-    expect(body.hasStructuredHandoff).toBe(false);
+    // Nested task handoff shape (TaskContext.task).
+    expect(body.task.taskId).toBe(task.id);
+    expect(body.task.title).toBe("Lone Task");
+    expect(body.task.description).toBe("Go it alone");
+    expect(body.task.taskKind).toBe("none");
+    expect(body.task.hasStructuredHandoff).toBe(false);
+    expect(body.task.completionSource).toBeNull();
+    expect(body.task.completionLocation).toBeNull();
     expect(body.directParents).toEqual([]);
     expect(body.inheritedParents).toEqual([]);
     expect(body.codeAncestors).toEqual([]);
-    expect(body.completionSource).toBeNull();
-    expect(body.completionLocation).toBeNull();
-    expect(body.outcome).toBeNull();
+    // No flat hoisted fields.
+    expect(body).not.toHaveProperty("taskId");
+    expect(body).not.toHaveProperty("title");
+    expect(body).not.toHaveProperty("outcome");
     // No _summary field.
     expect(body).not.toHaveProperty("_summary");
     // Untruncated lineage must report truncated=false, not omit the field.
@@ -124,7 +128,7 @@ describe("GET /api/tasks/:id/context", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
 
-    expect(body.taskId).toBe(child.id);
+    expect(body.task.taskId).toBe(child.id);
     expect(body.directParents).toHaveLength(1);
     expect(body.directParents[0]).toMatchObject({
       kind: "direct-parent",
@@ -208,8 +212,8 @@ describe("GET /api/tasks/:id/context", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
 
-    expect(body.completionSource).toBe("reported");
-    expect(body.completionLocation).toBe("task-directory");
+    expect(body.task.completionSource).toBe("reported");
+    expect(body.task.completionLocation).toBe("task-directory");
   });
 
   it("returns no raw transcripts in response", async () => {

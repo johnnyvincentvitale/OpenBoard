@@ -504,12 +504,29 @@ export async function respondPermission(input: unknown, options: McpToolOptions 
 }
 
 /**
+ * Bounded window (ms) to capture the terminal frame after the snapshot
+ * arrives. The SSE route always emits snapshot before terminal on every
+ * path (see session-events.ts), so we defer resolution until the terminal
+ * arrives or this window expires — whichever comes first. This is bounded:
+ * it cannot hang, it cannot leak the AbortController, and the overall
+ * timeoutMs is still the hard backstop.
+ */
+const TERMINAL_WINDOW_MS = 500;
+
+/**
  * Collect buffered session-activity events for a task's current or most recent
  * run, plus transport/gap/generation-truth metadata. Returns a bounded tail
  * snapshot by default (up to 50 events); raise limit up to 200 with a longer
  * timeout. Callers that need unbounded streaming should use the SSE endpoint
  * (session-events) through the board-client directly — this function is for
  * diagnostic and orchestrator inspection, not continuous monitoring.
+ *
+ * Wire ordering: the SSE route emits snapshot, then terminal (then closes).
+ * This function resolves as soon as the terminal frame arrives after the
+ * snapshot. If the terminal does not arrive within a bounded window
+ * (TERMINAL_WINDOW_MS) after the snapshot, it resolves without a terminal
+ * signal — the session may still be live. The overall timeoutMs is the hard
+ * backstop for the case where no snapshot ever arrives.
  */
 export async function tailSession(input: unknown, options: McpToolOptions = {}): Promise<TailSessionResult> {
   const parsed = TailSessionInputSchema.parse(input);
@@ -519,48 +536,86 @@ export async function tailSession(input: unknown, options: McpToolOptions = {}):
 
   return new Promise<TailSessionResult>((resolve, reject) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error("tail_session timed out waiting for snapshot events"));
-    }, timeoutMs);
-
     let resolved = false;
+    let snapshotData: {
+      run: SessionActivityRun;
+      transport: SessionActivityTransport;
+      events: SessionActivityEvent[];
+      lastEventAt: number | null;
+    } | null = null;
     let terminalBuffer: { status: string } | undefined;
     let gapBuffer = false;
+    let terminalTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function finish(run: SessionActivityRun, transport: SessionActivityTransport, snapshotEvents: SessionActivityEvent[], lastEventAt: number | null) {
+    function doFinish() {
       if (resolved) return;
       resolved = true;
-      clearTimeout(timer);
+      clearTimeout(overallTimer);
+      if (terminalTimer) clearTimeout(terminalTimer);
       controller.abort();
-      const events = snapshotEvents.slice(0, limit);
-      const bounded = events.length >= limit || gapBuffer;
+      const rawEvents = snapshotData ? snapshotData.events : [];
+      const events = rawEvents.slice(0, limit);
+      // bounded = more events exist than we returned, or a gap was reported.
+      // Compare the pre-slice count to `limit`: exactly `limit` events (and
+      // nothing more) is not truncated.
+      const bounded = rawEvents.length > limit || gapBuffer;
       resolve({
         boardUrl: client.boardUrl,
         taskId: parsed.taskId,
-        run,
-        transport,
+        ...(snapshotData ? { run: snapshotData.run, transport: snapshotData.transport, lastEventAt: snapshotData.lastEventAt } : {}),
         events,
-        lastEventAt,
         hasGap: gapBuffer,
-        terminal: terminalBuffer,
+        ...(terminalBuffer ? { terminal: terminalBuffer } : {}),
         bounded,
       });
     }
+
+    // Overall timeout: reject if we never got a snapshot; resolve without
+    // a terminal signal if we got a snapshot but no terminal frame.
+    const overallTimer = setTimeout(() => {
+      if (resolved) return;
+      if (snapshotData) {
+        doFinish();
+      } else {
+        resolved = true;
+        controller.abort();
+        reject(new Error("tail_session timed out waiting for snapshot events"));
+      }
+    }, timeoutMs);
 
     client.streamSessionEvents(parsed.taskId, (frame) => {
       if (resolved) return;
 
       if (frame.kind === "snapshot") {
-        finish(frame.run, frame.transport, frame.events, frame.lastEventAt);
+        if (!snapshotData) {
+          snapshotData = {
+            run: frame.run,
+            transport: frame.transport,
+            events: frame.events,
+            lastEventAt: frame.lastEventAt,
+          };
+          // Start a bounded window to capture the terminal frame that
+          // follows the snapshot on every SSE route path.
+          terminalTimer = setTimeout(() => {
+            if (!resolved) doFinish();
+          }, TERMINAL_WINDOW_MS);
+        }
       } else if (frame.kind === "terminal") {
         terminalBuffer = { status: frame.status };
+        // Terminal is the last frame the route emits — resolve immediately
+        // whether or not a snapshot preceded it.
+        doFinish();
       } else if (frame.kind === "gap") {
         gapBuffer = true;
       }
     }, { limit, cursor: parsed.cursor, signal: controller.signal }).catch((err) => {
-      clearTimeout(timer);
-      if (!resolved) reject(err);
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(overallTimer);
+        if (terminalTimer) clearTimeout(terminalTimer);
+        controller.abort();
+        reject(err);
+      }
     });
   });
 }
@@ -580,7 +635,19 @@ export async function taskContext(input: unknown, options: McpToolOptions = {}):
     const text = await response.text().catch(() => "");
     throw new Error(`task_context failed (${response.status}): ${text}`);
   }
-  const context = (await response.json()) as TaskContext;
+  const json = await response.json();
+  // Validate the response matches the TaskContext contract (nested `task`
+  // key) rather than casting blindly.
+  if (
+    typeof json !== "object" || json === null ||
+    typeof (json as Record<string, unknown>).task !== "object" || (json as Record<string, unknown>).task === null ||
+    !Array.isArray((json as Record<string, unknown>).directParents) ||
+    !Array.isArray((json as Record<string, unknown>).inheritedParents) ||
+    !Array.isArray((json as Record<string, unknown>).codeAncestors)
+  ) {
+    throw new Error("task_context returned an unexpected response shape (missing task/directParents/inheritedParents/codeAncestors)");
+  }
+  const context = json as TaskContext;
   return { boardUrl, taskId: parsed.taskId, context };
 }
 

@@ -43,21 +43,16 @@ export function registerTaskContextRoutes(app: Hono, deps: TaskContextRouteDeps)
       );
     }
 
-    // Build the response body: structured lineage minus raw transcripts.
+    // Build the response body as a TaskContext: nested `task` key matching
+    // the shared type, plus directParents/inheritedParents/codeAncestors.
+    // completionSource and completionLocation are added to the target task
+    // handoff from the raw task record (they are not in buildHandoff).
     const body = {
-      taskId: lineage.task.taskId,
-      title: lineage.task.title,
-      description: lineage.task.description,
-      taskKind: lineage.task.taskKind,
-      column: lineage.task.column,
-      completion: lineage.task.completion,
-      completionSource: task.completionSource ?? null,
-      completionLocation: task.completionLocation ?? null,
-      outcome: lineage.task.completion?.outcome ?? null,
-      changedFiles: lineage.task.changedFiles,
-      verification: lineage.task.verification,
-      residualRisk: lineage.task.residualRisk,
-      hasStructuredHandoff: lineage.task.hasStructuredHandoff,
+      task: {
+        ...lineage.task,
+        completionSource: task.completionSource ?? null,
+        completionLocation: task.completionLocation ?? null,
+      },
       directParents: lineage.directParents,
       inheritedParents: lineage.inheritedParents,
       codeAncestors: lineage.codeAncestors,

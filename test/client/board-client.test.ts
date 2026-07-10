@@ -190,6 +190,7 @@ describe("board client", () => {
         agent: "build",
         sessionId: "session-1",
         pendingPermissions: [],
+        dominantState: "review",
       },
     ]);
     await expect(client.listAgents()).resolves.toEqual(agents);

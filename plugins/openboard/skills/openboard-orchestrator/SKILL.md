@@ -224,12 +224,15 @@ the backstop, not an ask deadline.
 `tail_session` fetches a bounded tail snapshot of a task's session activity
 events (text, tool, status, permission, warning) plus the run identity,
 transport state (`live`, `reconnecting`, `static`), any gap truth, and the
-terminal signal (complete, error, aborted). It uses the same SSE stream the
-TUI consumes but resolves after collecting the bounded window. Default limit is
-50 events, max 200, with a configurable timeout (default 3s). Use it for
-orchestrator diagnostics — did the worker actually produce output? is a
-provider death leaving the session in `reconnecting`? — not for continuous
-monitoring; unbounded streaming requires the SSE endpoint directly.
+terminal signal (complete, error, aborted). The SSE route always emits
+snapshot before terminal, so `tail_session` waits a bounded window after the
+snapshot to capture the terminal frame, then resolves. If the terminal does
+not arrive within the window the session may still be live — check the task
+column for completion. Default limit is 50 events, max 200, with a
+configurable timeout (default 3s). Use it for orchestrator diagnostics — did
+the worker actually produce output? is a provider death leaving the session
+in `reconnecting`? — not for continuous monitoring; unbounded streaming
+requires the SSE endpoint directly.
 
 `task_context` retrieves the full resolved task lineage without raw
 transcripts: the target handoff, direct-parent handoffs, inherited-ancestor

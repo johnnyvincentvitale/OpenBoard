@@ -205,7 +205,9 @@ surface exposes read-only inspection tools for orchestrator diagnostics:
 
 - `tail_session` — bounded tail snapshot of session activity events (text,
   tool, status, permission) with run identity, transport state, gap truth, and
-  terminal signal. Default 50 events, configurable timeout.
+  terminal signal. Waits a bounded window after the snapshot to capture the
+  terminal frame that follows on every SSE route path. Default 50 events,
+  configurable timeout.
 - `task_context` — full resolved task lineage (target handoff, direct-parent
   handoffs, inherited-ancestor metadata, code-evidence candidates) without raw
   transcripts.
