@@ -326,6 +326,77 @@ describe("completion routes", () => {
     expect(body.completion).toMatchObject({ outcome: "blocked", residualRisk: "needs human decision" });
   });
 
+  it("POST /block trims and stores an explicit needsInput question", async () => {
+    const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+    store.update(task.id, { runState: "running" });
+    store.move(task.id, "in_progress", 0);
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/block`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, residualRisk: "blocked", needsInput: "  Which branch should I use?  " }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.completion.needsInput).toBe("Which branch should I use?");
+    const event = store.listEvents(task.id).find((item) => item.type === "task_blocked");
+    expect(event?.body.needsInput).toBe("Which branch should I use?");
+  });
+
+  it("POST /block preserves legacy blocked reports without persisting fallback question text", async () => {
+    const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+    store.update(task.id, { runState: "running" });
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/block`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, residualRisk: "Need credentials" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.completion).not.toHaveProperty("needsInput");
+    const event = store.listEvents(task.id).find((item) => item.type === "task_blocked");
+    expect(event?.body).not.toHaveProperty("needsInput");
+  });
+
+  it("POST /complete rejects needsInput", async () => {
+    const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+    store.update(task.id, { runState: "running" });
+    const app = appFor(store);
+
+    const res = await app.request(`/api/tasks/${task.id}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, needsInput: "should not stick" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toBe("needsInput is only valid for blocked reports");
+    expect(store.get(task.id)?.completion).toBeNull();
+  });
+
+  it("bounds event payload needsInput to 1..2000 trimmed characters", async () => {
+    const tooLong = `${"x".repeat(2000)} y`;
+    for (const needsInput of ["   ", tooLong]) {
+      const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+      store.update(task.id, { runState: "running" });
+      const app = appFor(store);
+
+      const res = await app.request(`/api/tasks/${task.id}/block`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...validBody, residualRisk: "blocked", needsInput }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(store.listEvents(task.id)).toEqual([]);
+    }
+  });
+
   it("returns 409 for a non-running task", async () => {
     const task = store.create({ title: "A", description: "do it", directory: "/repo" });
     const app = appFor(store);

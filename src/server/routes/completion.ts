@@ -64,7 +64,7 @@ async function handleCompletion(
       throw AdapterError.validation("Request body must be valid JSON");
     }
 
-    const payload = parseCompletionBody(body);
+    const payload = parseCompletionBody(body, outcome);
     const { finalSessionOutput, ...reportPayload } = payload;
     const report: CompletionReport = { ...reportPayload, outcome, reportedAt: Date.now() };
 
@@ -161,7 +161,7 @@ function staleRunMessage(c: Context, runStartedAt: number | undefined): string |
   return undefined;
 }
 
-function parseCompletionBody(body: unknown): CompletionBody {
+function parseCompletionBody(body: unknown, outcome: TaskRunOutcome): CompletionBody {
   if (body === null || typeof body !== "object") {
     throw AdapterError.validation("Request body must be an object");
   }
@@ -196,11 +196,26 @@ function parseCompletionBody(body: unknown): CompletionBody {
   ) {
     throw AdapterError.validation("finalSessionOutput must be a string or null");
   }
+  const hasNeedsInput = Object.prototype.hasOwnProperty.call(record, "needsInput");
+  if (hasNeedsInput && outcome === "complete") {
+    throw AdapterError.validation("needsInput is only valid for blocked reports");
+  }
+  let needsInput: string | undefined;
+  if (hasNeedsInput) {
+    if (typeof record.needsInput !== "string") {
+      throw AdapterError.validation("needsInput must be a string");
+    }
+    needsInput = record.needsInput.trim();
+    if (needsInput.length < 1 || needsInput.length > 2000) {
+      throw AdapterError.validation("needsInput must be 1..2000 characters");
+    }
+  }
   return {
     summary: record.summary,
     changedFiles: record.changedFiles,
     verification: record.verification,
     residualRisk: record.residualRisk,
+    ...(needsInput !== undefined ? { needsInput } : {}),
     ...(Object.prototype.hasOwnProperty.call(record, "finalSessionOutput")
       ? { finalSessionOutput: record.finalSessionOutput as string | null }
       : {}),
