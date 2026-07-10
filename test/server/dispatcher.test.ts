@@ -6,6 +6,8 @@ import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
 import type { Task, TaskKind } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { TaskDispatcher } from "../../src/server/dispatcher";
+import { SessionActivityCollector } from "../../src/server/session-activity";
+import type { SessionActivityFrame } from "../../src/shared";
 import type { ClaudeCodeRunnerLike } from "../../src/server/claude-code-runner";
 import { cleanupTestWorkspace, setupTestWorkspace } from "./test-workspace";
 
@@ -551,7 +553,7 @@ describe("TaskDispatcher", () => {
       expect(text).toContain("To inspect a parent's code changes, first call the openboard MCP tool task_diff with that parent's task id (listed below).");
       expect(text).toContain("If task_diff is unavailable, errors, or returns no-git evidence, fall back to the parent worktree with read/grep/glob/list tools only.");
       expect(text).toContain("Parent task worktrees are read-only. Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.");
-      expect(text).toContain("Board tools are limited to task_diff for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).");
+      expect(text).toContain("Board tools are limited to task_diff, task_context, and task_compare for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).");
       expect(text).toContain("Your cwd starts from the base branch: parent changes are NOT present in your cwd unless they were already integrated.");
       expect(text).toContain(`PARENT-000 WORKTREE: ${parentWorktreePath}`);
       expect(text).toContain(`PARENT-000 TASK ID: ${parent.id}`);
@@ -659,6 +661,92 @@ describe("TaskDispatcher", () => {
       expect(result.column).toBe("todo");
       expect(store.get(task.id)?.column).toBe("todo");
       expect(store.get(task.id)?.runState).toBe("error");
+    });
+
+    it("binds the OpenCode root run to activity before promptAsync", async () => {
+      const activity = new SessionActivityCollector();
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_activity_before_prompt";
+      client.promptShouldError = { error: { message: "prompt failed after create" } };
+      dispatcher = new TaskDispatcher({ client: client as never, store, activity });
+
+      await dispatcher.run(task.id);
+
+      const frames: SessionActivityFrame[] = [];
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+      expect(frames.find((frame) => frame.kind === "snapshot")).toMatchObject({
+        kind: "snapshot",
+        run: expect.objectContaining({
+          taskId: task.id,
+          sessionId: "ses_activity_before_prompt",
+          rootSessionId: "ses_activity_before_prompt",
+          harness: "opencode",
+        }),
+      });
+    });
+
+    it("attributes descendant session activity and marks runs reconnecting on stream loss", async () => {
+      const activity = new SessionActivityCollector({ clock: () => 42 });
+      const frames: SessionActivityFrame[] = [];
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_root";
+      client.queueScript([
+        {
+          type: "session.created",
+          properties: { info: { id: "ses_child" }, parentID: "ses_root" },
+        } as unknown as OpencodeEvent,
+        {
+          type: "session.next.text.ended",
+          properties: { sessionID: "ses_child", text: "child output" },
+        } as unknown as OpencodeEvent,
+      ]);
+      dispatcher = new TaskDispatcher({ client: client as never, store, activity });
+
+      await dispatcher.run(task.id);
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+      dispatcher.start();
+
+      await waitFor(() => frames.some((frame) => frame.kind === "append" && frame.event.sessionId === "ses_child" && frame.event.text === "child output"));
+      await waitFor(() => frames.some((frame) => frame.kind === "heartbeat" && frame.transport === "reconnecting"));
+    });
+
+    it("ends the old activity run before binding a watchdog retry replacement", async () => {
+      const activity = new SessionActivityCollector();
+      const frames: SessionActivityFrame[] = [];
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_watchdog_old";
+      dispatcher = new TaskDispatcher({ client: client as never, store, activity });
+      await dispatcher.run(task.id);
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+
+      const firstRunStartedAt = store.get(task.id)?.runStartedAt;
+      expect(firstRunStartedAt).toBeTypeOf("number");
+      client.nextSessionId = "ses_watchdog_retry";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: {
+          run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number };
+          reason: "liveness-timeout";
+          decidedAt: number;
+          outcome: "retry";
+          nextAttempt: number;
+        }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: firstRunStartedAt!, sessionId: "ses_watchdog_old", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      const terminalIndex = frames.findIndex((frame) => frame.kind === "terminal" && frame.status === "aborted");
+      const retrySnapshotIndex = frames.findIndex((frame) => frame.kind === "snapshot" && frame.run.sessionId === "ses_watchdog_retry");
+      expect(terminalIndex).toBeGreaterThan(-1);
+      expect(retrySnapshotIndex).toBeGreaterThan(terminalIndex);
+      expect(store.get(task.id)).toMatchObject({
+        sessionId: "ses_watchdog_retry",
+        runState: "running",
+        autoRetries: 1,
+      });
     });
   });
 

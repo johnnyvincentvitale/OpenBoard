@@ -14,7 +14,7 @@
  */
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, ModelRef, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -26,8 +26,12 @@ import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, GeminiAcpRunner, HermesAcpRunner, PiAcpRunner } from "./claude-acp-runner";
 import type { ClaudeCodeRunnerLike } from "./claude-code-runner";
 import { completionHandoffGuidance } from "./completion-contract";
+import { loadWatchdogConfig, type WatchdogConfig } from "./config";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
+import { SessionActivityCollector, type SessionActivityEventInput } from "./session-activity";
 import { taskExecutionContext } from "./task-context";
+import { resolveTaskLineage } from "./task-lineage";
+import { RunWatchdog, type WatchdogClock, type WatchdogRetryDecision, type WatchdogRunIdentity, type WatchdogTermination } from "./watchdog";
 import {
   isExternalDirectoriesAllowed,
   isUnderWorkspace,
@@ -105,6 +109,12 @@ export interface TaskDispatcherDeps {
   instanceName?: string;
   /** Override the stall-detection threshold (tests only; default DEFAULT_STALL_THRESHOLD_MS). */
   stallThresholdMs?: number;
+  /** Activity collector for OpenCode session-tree relay. */
+  activity?: SessionActivityCollector;
+  /** Watchdog config for OpenCode runs. Defaults to OPENBOARD_WATCHDOG_MS. */
+  watchdogConfig?: WatchdogConfig;
+  /** Watchdog clock injection for tests. */
+  watchdogClock?: WatchdogClock;
   /**
    * Called after a task moves to "done" via integrate(), so the chain
    * advancer (src/server/chain-advancer.ts) can auto-dispatch any autoRun
@@ -153,6 +163,7 @@ const DEFAULT_STALL_THRESHOLD_MS = 45_000;
 const MAX_CONSECUTIVE_FUTILE_NUDGES = 2;
 /** A denial older than this is treated as unrelated to the current stall (avoids citing stale info). */
 const DENIAL_RECENCY_WINDOW_MS = 2 * 60 * 1000;
+const LINEAGE_PROMPT_MAX_CHARS = 24_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -410,6 +421,20 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function sameProvider(a: ModelRef | null | undefined, b: ModelRef | null | undefined): boolean {
+  return !!a && !!b && a.providerID === b.providerID;
+}
+
+interface OpenCodeRunRecord {
+  taskId: string;
+  runStartedAt: number;
+  rootSessionId: string;
+  sessionIds: Set<string>;
+  watchdog: RunWatchdog;
+  transportLive: boolean;
+  attempt: number;
+}
+
 export class TaskDispatcher implements Dispatcher {
   private readonly client: OpencodeHandle["client"];
   private readonly store: TaskStore;
@@ -422,6 +447,9 @@ export class TaskDispatcher implements Dispatcher {
   private readonly allowExternalDirectories: boolean;
   private readonly resolveDirectory: (raw: string) => string;
   private readonly stallThresholdMs: number;
+  private readonly activity: SessionActivityCollector;
+  private readonly watchdogConfig: WatchdogConfig;
+  private readonly watchdogClock?: WatchdogClock;
   /** Not readonly — see setOnParentSatisfied() for why this is settable post-construction. */
   private onParentSatisfied?: (parentId: string) => Promise<void>;
 
@@ -431,6 +459,8 @@ export class TaskDispatcher implements Dispatcher {
   private consumeLoopPromise: Promise<void> | null = null;
   private readonly completionWatchers = new Map<string, { cancelled: boolean }>();
   private readonly outputCandidates = new Map<string, string>();
+  private readonly openCodeRunsByTask = new Map<string, OpenCodeRunRecord>();
+  private readonly openCodeSessionToTask = new Map<string, string>();
   private readonly permissionResponderPool: PermissionResponderPool;
 
   constructor(deps: TaskDispatcherDeps) {
@@ -504,6 +534,9 @@ export class TaskDispatcher implements Dispatcher {
           allowExternal: this.allowExternalDirectories,
         }));
     this.stallThresholdMs = deps.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+    this.activity = deps.activity ?? new SessionActivityCollector();
+    this.watchdogConfig = deps.watchdogConfig ?? loadWatchdogConfig();
+    this.watchdogClock = deps.watchdogClock;
     this.onParentSatisfied = deps.onParentSatisfied;
   }
 
@@ -563,9 +596,10 @@ export class TaskDispatcher implements Dispatcher {
     // agent in OpenCode 1.17.13. It also honors an agent's configured default
     // model when task.model is unset; the v2 prompt route can admit input
     // without producing a message turn.
+    const activeModel = task.model ?? null;
     const createInput = {
       agent: task.agent ?? undefined,
-      model: task.model ?? undefined,
+      model: activeModel ?? undefined,
       directory: execDirectory,
       permission: resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides),
     };
@@ -582,6 +616,7 @@ export class TaskDispatcher implements Dispatcher {
     }
 
     const runStartedAt = Date.now();
+    this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
     const taskPrompt = isolatedRun
       ? this.withWorktreeIsolationPreamble(execDirectory, baseRepoDirectory, task.description)
       : task.description;
@@ -596,6 +631,8 @@ export class TaskDispatcher implements Dispatcher {
     if (promptError) {
       const updated = this.store.update(taskId, {
         sessionId,
+        activeModel,
+        autoRetries: 0,
         runState: "error",
         error: promptError,
       });
@@ -607,6 +644,8 @@ export class TaskDispatcher implements Dispatcher {
 
     this.store.update(taskId, {
       sessionId,
+      activeModel,
+      autoRetries: 0,
       runState: "running",
       runStartedAt,
       error: undefined,
@@ -1062,8 +1101,8 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   private withParentHandoffs(task: Task, prompt: string): string {
-    const parentIds = task.parentIds ?? this.store.getParentIds(task.id);
-    if (parentIds.length === 0) return prompt;
+    const lineage = resolveTaskLineage(task.id, this.store);
+    if (!lineage || lineage.directParents.length === 0) return prompt;
 
     const lines = [
       prompt,
@@ -1071,14 +1110,15 @@ export class TaskDispatcher implements Dispatcher {
       "---",
       "PARENT CONTEXT",
       "To inspect a parent's code changes, first call the openboard MCP tool task_diff with that parent's task id (listed below).",
+      "Use task_context to retrieve full inherited handoffs, task_diff for baseline diffs, and task_compare for Build->Fix comparisons.",
       "If task_diff is unavailable, errors, or returns no-git evidence, fall back to the parent worktree with read/grep/glob/list tools only.",
       "Parent task worktrees are read-only. Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.",
       "Do all implementation and verification shell commands from your own cwd.",
-      "Board tools are limited to task_diff for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).",
+      "Board tools are limited to task_diff, task_context, and task_compare for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).",
       "",
     ];
-    for (const [index, parentId] of parentIds.entries()) {
-      const parent = this.store.get(parentId);
+    for (const [index, parentContext] of lineage.directParents.entries()) {
+      const parent = this.store.get(parentContext.taskId);
       if (!parent) continue;
       const label = `PARENT-${String(index).padStart(3, "0")}`;
       const changedFiles = parentWorktreeRelativeChangedFiles(parent);
@@ -1108,6 +1148,31 @@ export class TaskDispatcher implements Dispatcher {
       } else {
         lines.push("No structured handoff exists; parent is manually marked Done.");
       }
+      lines.push("");
+    }
+    if (lineage.inheritedParents.length > 0) {
+      const beforeCount = lines.length;
+      lines.push("INHERITED CONTEXT");
+      let omitted = 0;
+      for (const ancestor of lineage.inheritedParents) {
+        const row = [
+          `- ${ancestor.taskId}: ${ancestor.title}`,
+          `kind=${ancestor.taskKind ?? "none"}`,
+          `depth=${ancestor.depth}`,
+          `via=${ancestor.viaParentIds.join(",")}`,
+          `structured=${ancestor.hasStructuredHandoff}`,
+          `codeCandidate=${lineage.codeAncestors.some((candidate) => candidate.taskId === ancestor.taskId)}`,
+          ancestor.summary ? `summary=${ancestor.summary}` : "summary=none",
+        ].join("; ");
+        const candidate = [...lines, row].join("\n");
+        if (candidate.length > LINEAGE_PROMPT_MAX_CHARS) {
+          omitted += 1;
+          continue;
+        }
+        lines.push(row);
+      }
+      if (omitted > 0) lines.push(`Omitted ${omitted} inherited context item(s) from this prompt cap; use task_context for the full uncapped lineage.`);
+      if (lines.length === beforeCount + 1) lines.push("- none included under prompt cap; use task_context for full lineage.");
       lines.push("");
     }
     lines.push("Your cwd starts from the base branch: parent changes are NOT present in your cwd unless they were already integrated.");
@@ -1169,6 +1234,7 @@ export class TaskDispatcher implements Dispatcher {
     this.outputCandidates.delete(task.sessionId);
 
     const runStartedAt = Date.now();
+    this.bindOpenCodeRun({ task, sessionId: task.sessionId, runStartedAt, attempt: 0 });
     // retry() re-prompts an existing session — the worktree already exists from
     // run(), so its path comes off the task record rather than ensureWorktree().
     const isolatedRetry = wantsWorktree(task);
@@ -1282,6 +1348,7 @@ export class TaskDispatcher implements Dispatcher {
     await this.client.session.abort({ sessionID: task.sessionId });
     this.cancelCompletionWatcher(task.sessionId);
     this.stopPermissionResponder(task.sessionId);
+    this.endOpenCodeRun(taskId, task.runStartedAt, "aborted");
     this.outputCandidates.delete(task.sessionId);
     this.store.update(taskId, { runState: "idle" });
   }
@@ -1307,10 +1374,176 @@ export class TaskDispatcher implements Dispatcher {
     }
     this.completionWatchers.clear();
     this.outputCandidates.clear();
+    for (const [taskId, run] of this.openCodeRunsByTask) {
+      this.activity.endRun(taskId, run.runStartedAt, "aborted");
+      run.watchdog.dispose();
+    }
+    this.openCodeRunsByTask.clear();
+    this.openCodeSessionToTask.clear();
     this.permissionResponderPool.stop();
   }
 
   // ---- internals ----
+
+  private bindOpenCodeRun(input: { task: Task; sessionId: string; runStartedAt: number; attempt: number }): void {
+    const previous = this.openCodeRunsByTask.get(input.task.id);
+    if (previous) {
+      this.activity.endRun(input.task.id, previous.runStartedAt, "aborted");
+      previous.watchdog.dispose();
+      for (const session of previous.sessionIds) this.openCodeSessionToTask.delete(session);
+    }
+    const runIdentity: WatchdogRunIdentity = {
+      taskId: input.task.id,
+      runStartedAt: input.runStartedAt,
+      sessionId: input.sessionId,
+      attempt: input.attempt,
+    };
+    const watchdog = new RunWatchdog(
+      this.watchdogConfig,
+      {
+        onTerminate: (event) => this.handleWatchdogTermination(event),
+        onRetryDecision: (event) => this.handleWatchdogRetryDecision(event),
+      },
+      this.watchdogClock,
+    );
+    const record: OpenCodeRunRecord = {
+      taskId: input.task.id,
+      runStartedAt: input.runStartedAt,
+      rootSessionId: input.sessionId,
+      sessionIds: new Set([input.sessionId]),
+      watchdog,
+      transportLive: true,
+      attempt: input.attempt,
+    };
+    this.openCodeRunsByTask.set(input.task.id, record);
+    this.openCodeSessionToTask.set(input.sessionId, input.task.id);
+    this.activity.startRun({
+      taskId: input.task.id,
+      runStartedAt: input.runStartedAt,
+      sessionId: input.sessionId,
+      rootSessionId: input.sessionId,
+      harness: "opencode",
+    });
+    watchdog.startRun(runIdentity, input.runStartedAt);
+  }
+
+  private endOpenCodeRun(taskId: string, runStartedAt: number | undefined, status: "complete" | "error" | "aborted"): void {
+    const run = this.openCodeRunsByTask.get(taskId);
+    if (!run || run.runStartedAt !== runStartedAt) return;
+    this.activity.endRun(taskId, run.runStartedAt, status);
+    const identity: WatchdogRunIdentity = { taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt };
+    if (status === "complete") run.watchdog.complete(identity);
+    if (status === "aborted") run.watchdog.abort(identity);
+    run.watchdog.dispose();
+    for (const session of run.sessionIds) this.openCodeSessionToTask.delete(session);
+    this.openCodeRunsByTask.delete(taskId);
+  }
+
+  private recordOpenCodeActivity(
+    taskId: string,
+    sessionId: string,
+    input: Omit<SessionActivityEventInput, "sessionId" | "rootSessionId" | "harness">,
+  ): void {
+    const run = this.openCodeRunsByTask.get(taskId);
+    if (!run || !run.sessionIds.has(sessionId) || !run.transportLive) return;
+    this.activity.recordEvent(taskId, run.runStartedAt, {
+      sessionId,
+      rootSessionId: run.rootSessionId,
+      harness: "opencode",
+      ...input,
+    });
+    run.watchdog.recordActivity({ run: { taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
+  }
+
+  private markRunsReconnecting(): void {
+    for (const run of this.openCodeRunsByTask.values()) {
+      run.transportLive = false;
+      this.activity.setTransport(run.taskId, run.runStartedAt, "reconnecting");
+    }
+  }
+
+  private markRunsLive(): void {
+    for (const run of this.openCodeRunsByTask.values()) {
+      run.transportLive = true;
+      this.activity.setTransport(run.taskId, run.runStartedAt, "live");
+      run.watchdog.recordActivity({ run: { taskId: run.taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
+    }
+  }
+
+  private handleWatchdogTermination(event: WatchdogTermination): void {
+    const current = this.openCodeRunsByTask.get(event.run.taskId);
+    if (!current || current.runStartedAt !== event.run.runStartedAt || current.rootSessionId !== event.run.sessionId) return;
+    const task = this.store.get(event.run.taskId);
+    if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt) return;
+    this.store.addEvent({
+      taskId: task.id,
+      type: "task_watchdog_tripped",
+      body: { reason: event.reason, sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt, observedAt: event.terminatedAt },
+    });
+    void this.client.session.abort({ sessionID: event.run.sessionId }).catch(() => undefined);
+  }
+
+  private handleWatchdogRetryDecision(event: WatchdogRetryDecision): void {
+    void this.applyWatchdogRetryDecision(event);
+  }
+
+  private async applyWatchdogRetryDecision(event: WatchdogRetryDecision): Promise<void> {
+    const current = this.openCodeRunsByTask.get(event.run.taskId);
+    if (!current || current.runStartedAt !== event.run.runStartedAt || current.rootSessionId !== event.run.sessionId) return;
+    const task = this.store.get(event.run.taskId);
+    if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt || task.sessionId !== event.run.sessionId) return;
+    if (event.outcome === "exhausted") {
+      const report = {
+        outcome: "blocked" as const,
+        summary: "OpenCode watchdog exhausted automatic recovery after two retries.",
+        changedFiles: [],
+        verification: [{ command: "OPENBOARD_WATCHDOG_MS", result: `tripped for runStartedAt ${event.run.runStartedAt}` }],
+        residualRisk: "Agent session became silent while observation was live; human input is required before continuing.",
+        needsInput: "Review the partial worktree/session output and decide whether to retry manually, change model/provider, or edit the task.",
+        reportedAt: Date.now(),
+      };
+      this.store.setCompletion(task.id, report, "watchdog");
+      this.store.update(task.id, { runState: "error", error: report.residualRisk, completionLocation: "task-directory" });
+      this.store.move(task.id, "review", END_OF_COLUMN);
+      this.store.addEvent({ taskId: task.id, type: "task_watchdog_exhausted", body: { runStartedAt: event.run.runStartedAt } });
+      this.endOpenCodeRun(task.id, event.run.runStartedAt, "error");
+      return;
+    }
+
+    const nextAttempt = event.nextAttempt ?? event.run.attempt + 1;
+    const fallback = task.fallbackModel;
+    const primary = task.model ?? null;
+    const activeModel = nextAttempt === 2 && fallback && !sameProvider(primary, fallback) ? fallback : primary;
+    this.store.addEvent({ taskId: task.id, type: activeModel === fallback ? "task_watchdog_fallback" : "task_watchdog_retry", body: { attempt: nextAttempt, model: activeModel } });
+    await this.startFreshOpenCodeAttempt(task, nextAttempt, activeModel);
+  }
+
+  private async startFreshOpenCodeAttempt(task: Task, attempt: number, activeModel: ModelRef | null): Promise<void> {
+    const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
+    const created = await this.client.session.create({
+      agent: task.agent ?? undefined,
+      model: activeModel ?? undefined,
+      directory: execDirectory,
+      permission: resolveOpenCodePermissionRules(wantsWorktree(task), task.permissionOverrides),
+    });
+    const sessionId = extractSessionId((created as { data?: unknown }).data);
+    if (!sessionId || (created as { error?: unknown }).error) return;
+    const runStartedAt = Date.now();
+    this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt });
+    const prompt = wantsWorktree(task)
+      ? this.withWorktreeIsolationPreamble(execDirectory, this.resolveDirectory(task.directory), task.description)
+      : task.description;
+    const fullPrompt = this.withCompletionContract(task, this.withParentHandoffs(task, this.withTaskContext(task, prompt)), runStartedAt);
+    const promptError = await this.prompt(sessionId, fullPrompt, task.agent ?? undefined, activeModel);
+    if (promptError) {
+      this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "error", error: promptError });
+      this.endOpenCodeRun(task.id, runStartedAt, "error");
+      return;
+    }
+    this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "running", error: undefined });
+    this.startCompletionWatcher(task.id, sessionId);
+    if (wantsWorktree(task)) this.startPermissionResponder(sessionId, execDirectory);
+  }
 
   private startCompletionWatcher(taskId: string, sessionId: string): void {
     this.cancelCompletionWatcher(sessionId);
@@ -1373,7 +1606,10 @@ export class TaskDispatcher implements Dispatcher {
         if (watcher.cancelled) return;
 
         const task = this.getTaskForWatcher(taskId);
-        if (!task || task.sessionId !== sessionId || task.runState !== "running") return;
+        if (!task || task.sessionId !== sessionId || task.runState !== "running") {
+          if (task?.sessionId === sessionId) this.endOpenCodeRun(taskId, task.runStartedAt, task.runState === "error" ? "error" : "complete");
+          return;
+        }
 
         if (Date.now() - startedAt > COMPLETION_WATCH_TIMEOUT_MS) {
           this.updateTaskForWatcher(taskId, {
@@ -1406,6 +1642,7 @@ export class TaskDispatcher implements Dispatcher {
         }
 
         if (await this.blockOnBaseCheckoutEscape(taskId, beforeFallback)) {
+          this.endOpenCodeRun(taskId, beforeFallback.runStartedAt, "error");
           return;
         }
 
@@ -1426,6 +1663,7 @@ export class TaskDispatcher implements Dispatcher {
             .length;
           this.moveTaskForWatcher(taskId, "review", endOfReview);
         }
+        this.endOpenCodeRun(taskId, beforeFallback.runStartedAt, "complete");
         return;
       }
     } finally {
@@ -1688,12 +1926,25 @@ export class TaskDispatcher implements Dispatcher {
     const sessionId = eventSessionId(event);
     if (!sessionId) return;
 
-    const task = this.store.list().find((t) => t.sessionId === sessionId);
+    let task = this.store.list().find((t) => t.sessionId === sessionId);
+    if (!task) {
+      const taskId = this.openCodeSessionToTask.get(sessionId);
+      task = taskId ? this.store.get(taskId) : undefined;
+    }
+    if (!task && (event as { type?: unknown }).type === "session.created") {
+      const props = (event as { properties?: unknown }).properties;
+      const parentID = props && typeof props === "object" ? ((props as Record<string, unknown>).parentID ?? (props as Record<string, unknown>).parentSessionID) : undefined;
+      const taskId = typeof parentID === "string" ? this.openCodeSessionToTask.get(parentID) : undefined;
+      task = taskId ? this.store.get(taskId) : undefined;
+    }
     if (!task) return;
+
+    this.bindCreatedDescendant(event, task);
 
     const textOutput = extractTextEndedOutput(event);
     if (textOutput) {
       this.outputCandidates.set(sessionId, textOutput);
+      this.recordOpenCodeActivity(task.id, sessionId, { kind: "text", role: "assistant", text: textOutput });
     }
 
     const liveState = eventLiveState(event);
@@ -1701,6 +1952,7 @@ export class TaskDispatcher implements Dispatcher {
 
     switch (liveState) {
       case "running":
+        this.recordOpenCodeActivity(task.id, sessionId, { kind: "status", text: "running" });
         // Only stamp the clock when actually transitioning into running —
         // live events re-assert "running" mid-run and must not reset it.
         this.store.update(
@@ -1712,6 +1964,7 @@ export class TaskDispatcher implements Dispatcher {
         break;
 
       case "idle":
+        this.recordOpenCodeActivity(task.id, sessionId, { kind: "status", text: "idle" });
         // OpenCode can report idle between tool-call steps. Keep the card
         // running until session.messages() shows a final assistant step.
         this.startCompletionWatcher(task.id, sessionId);
@@ -1720,6 +1973,8 @@ export class TaskDispatcher implements Dispatcher {
       case "error": {
         const message = this.extractErrorMessage(event);
         this.store.update(task.id, { runState: "error", error: message });
+        this.recordOpenCodeActivity(task.id, sessionId, { kind: "status", text: message });
+        this.endOpenCodeRun(task.id, task.runStartedAt, "error");
         this.outputCandidates.delete(sessionId);
         break;
       }
@@ -1727,6 +1982,22 @@ export class TaskDispatcher implements Dispatcher {
       default:
         break;
     }
+  }
+
+  private bindCreatedDescendant(event: OpencodeEvent, task: Task): void {
+    if ((event as { type?: unknown }).type !== "session.created") return;
+    const props = (event as { properties?: unknown }).properties;
+    if (!props || typeof props !== "object") return;
+    const record = props as Record<string, unknown>;
+    const info = record.info;
+    const id = info && typeof info === "object" ? (info as Record<string, unknown>).id : undefined;
+    const parentID = record.parentID ?? record.parentSessionID;
+    if (typeof id !== "string" || typeof parentID !== "string") return;
+    const run = this.openCodeRunsByTask.get(task.id);
+    if (!run || !run.sessionIds.has(parentID) || run.sessionIds.size > 256) return;
+    run.sessionIds.add(id);
+    this.openCodeSessionToTask.set(id, task.id);
+    this.recordOpenCodeActivity(task.id, id, { kind: "status", text: "session.created", parentSessionId: parentID });
   }
 
   private extractErrorMessage(event: OpencodeEvent): string {
@@ -1757,6 +2028,7 @@ export class TaskDispatcher implements Dispatcher {
       try {
         const result = await this.client.event.subscribe();
         attempt = 0; // reset backoff once a connection succeeds
+        this.markRunsLive();
 
         for await (const event of result.stream) {
           if (!this.running || this.generation !== generation) return;
@@ -1770,6 +2042,7 @@ export class TaskDispatcher implements Dispatcher {
       } catch {
         // Stream errored — fall through to reconnect.
       }
+      this.markRunsReconnecting();
 
       if (!this.running || this.generation !== generation) return;
 
