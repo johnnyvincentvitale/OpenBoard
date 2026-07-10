@@ -69,6 +69,12 @@ function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
   });
 }
 
+function deferred<T = unknown>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
 /**
  * Fake OpenCode client. `session.create` returns a fixed fresh session id (or a
  * queued override), `promptAsync`/`abort` are spies, and `event.subscribe()` yields
@@ -84,6 +90,9 @@ class FakeOpencodeClient {
   }> = [];
   promptCalls: Array<{ sessionID: string; agent?: string; model?: unknown; parts: unknown }> = [];
   abortCalls: Array<{ sessionID: string }> = [];
+  abortShouldError: { error: unknown } | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  abortDeferred: { promise: Promise<any>; resolve: (value: any) => void } | null = null;
   messageResponses: unknown[] = [];
   /** When set, every messages() call returns this same value (not consumed) — for simulating
    * many polling ticks observing an unchanged, stable session state (e.g. a stall). */
@@ -92,6 +101,12 @@ class FakeOpencodeClient {
   nextSessionId = "ses_x";
   createShouldError: { error: unknown } | null = null;
   promptShouldError: { error: unknown } | null = null;
+  childrenResponses = new Map<string, unknown[]>();
+  childrenShouldError: { error: unknown } | null = null;
+  childrenCalls: Array<{ sessionID: string }> = [];
+  sessionStatus: Record<string, unknown> = {};
+  statusShouldError: { error: unknown } | null = null;
+  statusCalls = 0;
 
   private scripts: OpencodeEvent[][] = [];
   subscribeCallCount = 0;
@@ -111,6 +126,7 @@ class FakeOpencodeClient {
       if (this.createShouldError) {
         return { data: undefined, error: this.createShouldError.error };
       }
+      this.sessionStatus[this.nextSessionId] ??= "busy";
       return {
         data: { id: this.nextSessionId, agent: params.agent, model: params.model },
         error: undefined,
@@ -130,7 +146,19 @@ class FakeOpencodeClient {
     },
     abort: async (params: { sessionID: string }) => {
       this.abortCalls.push(params);
+      if (this.abortDeferred) return this.abortDeferred.promise;
+      if (this.abortShouldError) return { data: undefined, error: this.abortShouldError.error };
       return { data: {}, error: undefined };
+    },
+    children: async (params: { sessionID: string }) => {
+      this.childrenCalls.push(params);
+      if (this.childrenShouldError) return { data: undefined, error: this.childrenShouldError.error };
+      return { data: this.childrenResponses.get(params.sessionID) ?? [], error: undefined };
+    },
+    status: async () => {
+      this.statusCalls += 1;
+      if (this.statusShouldError) return { data: undefined, error: this.statusShouldError.error };
+      return { data: this.sessionStatus, error: undefined };
     },
     messages: async () => {
       if (this.stableMessagesResponse !== null) {
@@ -685,7 +713,7 @@ describe("TaskDispatcher", () => {
       });
     });
 
-    it("attributes descendant session activity and marks runs reconnecting on stream loss", async () => {
+    it("attributes root, child, and grandchild activity using actual info.parentID session.created shape", async () => {
       const activity = new SessionActivityCollector({ clock: () => 42 });
       const frames: SessionActivityFrame[] = [];
       const task = createTask({ directory: myProjectDir });
@@ -693,11 +721,15 @@ describe("TaskDispatcher", () => {
       client.queueScript([
         {
           type: "session.created",
-          properties: { info: { id: "ses_child" }, parentID: "ses_root" },
+          properties: { info: { id: "ses_child", parentID: "ses_root" } },
+        } as unknown as OpencodeEvent,
+        {
+          type: "session.created",
+          properties: { info: { id: "ses_grandchild", parentID: "ses_child" } },
         } as unknown as OpencodeEvent,
         {
           type: "session.next.text.ended",
-          properties: { sessionID: "ses_child", text: "child output" },
+          properties: { sessionID: "ses_grandchild", text: "grandchild output" },
         } as unknown as OpencodeEvent,
       ]);
       dispatcher = new TaskDispatcher({ client: client as never, store, activity });
@@ -706,8 +738,149 @@ describe("TaskDispatcher", () => {
       activity.subscribe(task.id, 0, (frame) => frames.push(frame));
       dispatcher.start();
 
-      await waitFor(() => frames.some((frame) => frame.kind === "append" && frame.event.sessionId === "ses_child" && frame.event.text === "child output"));
+      await waitFor(() => frames.some((frame) => frame.kind === "append" && frame.event.sessionId === "ses_grandchild" && frame.event.text === "grandchild output"));
+      expect(frames.filter((frame) => frame.kind === "append").map((frame) => frame.event.sessionId)).toContain("ses_child");
+      expect(frames.filter((frame) => frame.kind === "append").map((frame) => frame.event.sessionId)).toContain("ses_grandchild");
       await waitFor(() => frames.some((frame) => frame.kind === "heartbeat" && frame.transport === "reconnecting"));
+    });
+
+    it("caps descendant binding at 256 sessions and ignores cycle duplicates", async () => {
+      const activity = new SessionActivityCollector();
+      const frames: SessionActivityFrame[] = [];
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_cap_root";
+      const events: OpencodeEvent[] = [];
+      for (let i = 0; i < 260; i += 1) {
+        events.push({ type: "session.created", properties: { info: { id: `ses_child_${i}`, parentID: i === 0 ? "ses_cap_root" : `ses_child_${i - 1}` } } } as unknown as OpencodeEvent);
+      }
+      events.push({ type: "session.created", properties: { info: { id: "ses_child_1", parentID: "ses_child_2" } } } as unknown as OpencodeEvent);
+      events.push({ type: "session.next.text.ended", properties: { sessionID: "ses_child_259", text: "too deep" } } as unknown as OpencodeEvent);
+      client.queueScript(events);
+      dispatcher = new TaskDispatcher({ client: client as never, store, activity });
+
+      await dispatcher.run(task.id);
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+      dispatcher.start();
+      await waitFor(() => client.subscribeCallCount > 0);
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(frames.some((frame) => frame.kind === "append" && frame.event.sessionId === "ses_child_254")).toBe(true);
+      expect(frames.some((frame) => frame.kind === "append" && frame.event.sessionId === "ses_child_255")).toBe(false);
+      expect(frames.some((frame) => frame.kind === "append" && frame.event.text === "too deep")).toBe(false);
+    });
+
+    it("rebuilds child trees before declaring reconnect live and keeps blind failures reconnecting", async () => {
+      const activity = new SessionActivityCollector();
+      const frames: SessionActivityFrame[] = [];
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_rebuild_root";
+      dispatcher = new TaskDispatcher({ client: client as never, store, activity });
+      await dispatcher.run(task.id);
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+      (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting();
+      client.childrenResponses.set("ses_rebuild_root", [{ info: { id: "ses_rebuilt_child" } }]);
+      client.childrenResponses.set("ses_rebuilt_child", [{ info: { id: "ses_rebuilt_grandchild" } }]);
+      client.sessionStatus = { ses_rebuild_root: "busy" };
+
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+      (dispatcher as unknown as { handleEvent(event: OpencodeEvent): void }).handleEvent({ type: "session.next.text.ended", properties: { sessionID: "ses_rebuilt_grandchild", text: "rebuilt live" } } as unknown as OpencodeEvent);
+
+      expect(frames.some((frame) => frame.kind === "heartbeat" && frame.transport === "live")).toBe(true);
+      expect(frames.some((frame) => frame.kind === "append" && frame.event.text === "rebuilt live")).toBe(true);
+
+      client.childrenShouldError = { error: { message: "transport blind" } };
+      client.statusShouldError = { error: { message: "status unavailable" } };
+      (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting();
+      const liveCountBeforeBlind = frames.filter((frame) => frame.kind === "heartbeat" && frame.transport === "live").length;
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+      expect(frames.at(-1)).toMatchObject({ kind: "heartbeat", transport: "reconnecting" });
+      expect(frames.filter((frame) => frame.kind === "heartbeat" && frame.transport === "live")).toHaveLength(liveCountBeforeBlind);
+    });
+
+    it("reconciles a root that became idle during a blind reconnect gap without a new event", async () => {
+      vi.useFakeTimers();
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_blind_idle";
+      client.messageResponses = [[{ info: { role: "assistant" }, parts: [{ type: "step-finish", reason: "stop" }] }]];
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting();
+      client.sessionStatus = { ses_blind_idle: { type: "idle" } };
+
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(store.get(task.id)).toMatchObject({ column: "review", runState: "idle", completionSource: "idle-fallback" });
+      vi.useRealTimers();
+    });
+
+    it("calls reconnect status and children as bound SDK instance methods", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_bound_root";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const sessionWithThis = client.session as unknown as {
+        boundMarker?: true;
+        status(): Promise<unknown>;
+        children(input: { sessionID: string }): Promise<unknown>;
+      };
+      sessionWithThis.boundMarker = true;
+      sessionWithThis.status = async function status(this: typeof sessionWithThis) {
+        if (!this.boundMarker) throw new Error("unbound status");
+        return { data: { ses_bound_root: "busy" }, error: undefined };
+      };
+      sessionWithThis.children = async function children(this: typeof sessionWithThis, input: { sessionID: string }) {
+        if (!this.boundMarker) throw new Error("unbound children");
+        return { data: input.sessionID === "ses_bound_root" ? [{ info: { id: "ses_bound_child" } }] : [], error: undefined };
+      };
+      (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting();
+
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+      (dispatcher as unknown as { handleEvent(event: OpencodeEvent): void }).handleEvent({ type: "message.part.updated", properties: { sessionID: "ses_bound_child", part: { type: "text", text: "bound child text" } } } as unknown as OpencodeEvent);
+
+      expect(store.get(task.id)?.runState).toBe("running");
+    });
+
+    it("only explicit not-found children errors orphan a missing root", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_missing_root";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      client.childrenShouldError = { error: { status: 404, message: "session not found" } };
+
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+
+      expect(store.get(task.id)).toMatchObject({ runState: "error", error: expect.stringContaining("root session missing") });
+      expect(store.listEvents(task.id).map((event) => event.type)).toContain("task_watchdog_orphan");
+    });
+
+    it("normalizes SDK message.part.updated tool/retry/text activity without raw bodies or token deltas", async () => {
+      const activity = new SessionActivityCollector();
+      const frames: SessionActivityFrame[] = [];
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_tools";
+      dispatcher = new TaskDispatcher({ client: client as never, store, activity });
+      await dispatcher.run(task.id);
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+      const handle = (dispatcher as unknown as { handleEvent(event: OpencodeEvent): void }).handleEvent.bind(dispatcher);
+
+      handle({ type: "message.part.updated", properties: { sessionID: "ses_tools", delta: "t", part: { type: "text", text: "partial token" } } } as unknown as OpencodeEvent);
+      handle({ type: "message.part.updated", properties: { sessionID: "ses_tools", part: { type: "text", text: "coalesced text" } } } as unknown as OpencodeEvent);
+      handle({ type: "message.part.updated", properties: { sessionID: "ses_tools", part: { type: "tool", tool: "x".repeat(300), callID: "c".repeat(300), state: { status: "pending", input: "SECRET_INPUT" } } } } as unknown as OpencodeEvent);
+      handle({ type: "message.part.updated", properties: { sessionID: "ses_tools", part: { type: "tool", tool: "edit", callID: "call-1", state: { status: "running", time: { start: 10, end: 22 }, input: "SECRET_INPUT" } } } } as unknown as OpencodeEvent);
+      handle({ type: "message.part.updated", properties: { sessionID: "ses_tools", part: { type: "tool", tool: "edit", callID: "call-1", state: { status: "completed", time: { start: 30, end: 25 }, output: "SECRET_OUTPUT" } } } } as unknown as OpencodeEvent);
+      handle({ type: "message.part.updated", properties: { sessionID: "ses_tools", part: { type: "tool", tool: "edit", callID: "call-2", state: { status: "error", time: { start: 1, end: 4 }, error: "SECRET_ERROR" } } } } as unknown as OpencodeEvent);
+      handle({ type: "message.part.updated", properties: { sessionID: "ses_tools", part: { type: "retry" } } } as unknown as OpencodeEvent);
+
+      const appendEvents = frames.filter((frame) => frame.kind === "append").map((frame) => frame.event);
+      expect(appendEvents.some((event) => event.text === "partial token")).toBe(false);
+      expect(appendEvents.some((event) => event.text === "coalesced text")).toBe(true);
+      expect(JSON.stringify(appendEvents)).not.toContain("SECRET");
+      expect(appendEvents.find((event) => event.kind === "tool" && event.tool?.status === "started")?.tool).toMatchObject({ name: "x".repeat(256), callId: "c".repeat(256), status: "started" });
+      expect(appendEvents.find((event) => event.kind === "tool" && event.tool?.status === "running")?.tool).toMatchObject({ name: "edit", callId: "call-1", durationMs: 12 });
+      expect(appendEvents.find((event) => event.kind === "tool" && event.tool?.status === "complete")?.tool).toMatchObject({ name: "edit", callId: "call-1", durationMs: 0, outputBytes: "SECRET_OUTPUT".length });
+      expect(appendEvents.find((event) => event.kind === "tool" && event.tool?.status === "error")?.tool).toMatchObject({ name: "edit", callId: "call-2", durationMs: 3 });
+      expect(appendEvents.some((event) => event.kind === "status" && event.text === "retrying")).toBe(true);
     });
 
     it("ends the old activity run before binding a watchdog retry replacement", async () => {
@@ -747,6 +920,98 @@ describe("TaskDispatcher", () => {
         runState: "running",
         autoRetries: 1,
       });
+    });
+
+    it("does not create a watchdog retry writer until old root abort resolves", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_abort_pending_old";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+      const gate = deferred<{ data: unknown; error: undefined }>();
+      client.abortDeferred = gate;
+      client.nextSessionId = "ses_abort_pending_new";
+
+      const retryPromise = (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_abort_pending_old", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      await Promise.resolve();
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_abort_pending_old" }]);
+      expect(client.createCalls.map((call) => call.directory)).toHaveLength(1);
+      gate.resolve({ data: {}, error: undefined });
+      await retryPromise;
+
+      expect(client.createCalls).toHaveLength(2);
+      expect(client.createCalls[1]?.directory).toBe(myProjectDir);
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_abort_pending_new", autoRetries: 1, runState: "running" });
+    });
+
+    it("blocks watchdog retry when old root abort fails", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_abort_failed_old";
+      client.abortShouldError = { error: { message: "abort refused" } };
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+      client.nextSessionId = "ses_abort_failed_new";
+
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_abort_failed_old", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      expect(client.createCalls).toHaveLength(1);
+      expect(store.get(task.id)).toMatchObject({ runState: "error", error: expect.stringContaining("abort was not confirmed") });
+      expect(store.listEvents(task.id).map((event) => event.type)).toContain("task_watchdog_abort_failed");
+      expect(store.listEvents(task.id).map((event) => event.type)).toContain("task_watchdog_abort_unconfirmed");
+    });
+
+    it("uses fallback only on second retry with a different provider and exhausts on third trip", async () => {
+      const task = createTask({ directory: myProjectDir });
+      store.update(task.id, { model: { providerID: "primary", id: "p1" }, fallbackModel: { providerID: "fallback", id: "f1" } });
+      client.nextSessionId = "ses_retry_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      for (const [attempt, oldSession, newSession] of [[0, "ses_retry_0", "ses_retry_1"], [1, "ses_retry_1", "ses_retry_2"]] as const) {
+        const current = store.get(task.id)!;
+        client.nextSessionId = newSession;
+        await (dispatcher as unknown as {
+          applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+        }).applyWatchdogRetryDecision({
+          run: { taskId: task.id, runStartedAt: current.runStartedAt!, sessionId: oldSession, attempt },
+          reason: "liveness-timeout",
+          decidedAt: Date.now(),
+          outcome: "retry",
+          nextAttempt: attempt + 1,
+        });
+      }
+      expect(store.get(task.id)?.activeModel).toEqual({ providerID: "fallback", id: "f1" });
+      const second = store.get(task.id)!;
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "exhausted" }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: second.runStartedAt!, sessionId: "ses_retry_2", attempt: 2 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "exhausted",
+      });
+
+      expect(store.get(task.id)).toMatchObject({ column: "review", runState: "error", completionSource: "watchdog" });
+      expect(store.get(task.id)?.completion).toMatchObject({ outcome: "blocked", needsInput: expect.stringContaining("Review the partial") });
+      expect(store.listEvents(task.id).map((event) => event.type)).toEqual(expect.arrayContaining(["task_watchdog_retry", "task_watchdog_fallback", "task_watchdog_exhausted"]));
     });
   });
 

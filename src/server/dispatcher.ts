@@ -164,6 +164,8 @@ const MAX_CONSECUTIVE_FUTILE_NUDGES = 2;
 /** A denial older than this is treated as unrelated to the current stall (avoids citing stale info). */
 const DENIAL_RECENCY_WINDOW_MS = 2 * 60 * 1000;
 const LINEAGE_PROMPT_MAX_CHARS = 24_000;
+const SESSION_TREE_MAX_DEPTH = 16;
+const SESSION_TREE_MAX_SESSIONS = 256;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -425,13 +427,129 @@ function sameProvider(a: ModelRef | null | undefined, b: ModelRef | null | undef
   return !!a && !!b && a.providerID === b.providerID;
 }
 
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function stringProp(record: Record<string, unknown> | null, ...keys: string[]): string | undefined {
+  if (!record) return undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function numberProp(record: Record<string, unknown> | null, ...keys: string[]): number | undefined {
+  if (!record) return undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number") return value;
+  }
+  return undefined;
+}
+
+function byteLength(value: unknown): number | undefined {
+  return typeof value === "string" ? Buffer.byteLength(value) : undefined;
+}
+
+function durationFromTime(value: unknown): number | undefined {
+  const time = readRecord(value);
+  const start = numberProp(time, "start");
+  const end = numberProp(time, "end");
+  if (start === undefined || end === undefined) return undefined;
+  return Math.max(0, end - start);
+}
+
+function isNotFoundError(error: unknown): boolean {
+  const record = readRecord(error);
+  const data = readRecord(record?.data);
+  const code = stringProp(record, "code") ?? stringProp(data, "code");
+  const status = numberProp(record, "status", "statusCode") ?? numberProp(data, "status", "statusCode");
+  const message = stringProp(record, "message") ?? stringProp(data, "message") ?? "";
+  return status === 404 || code === "not_found" || code === "session_not_found" || /not found/i.test(message);
+}
+
+function extractCreatedSessionIds(event: OpencodeEvent): { id?: string; parentId?: string } {
+  if ((event as { type?: unknown }).type !== "session.created") return {};
+  const props = readRecord((event as { properties?: unknown }).properties);
+  const info = readRecord(props?.info);
+  return {
+    id: stringProp(info, "id") ?? stringProp(props, "sessionID", "id"),
+    parentId: stringProp(info, "parentID", "parentSessionID") ?? stringProp(props, "parentID", "parentSessionID"),
+  };
+}
+
+function extractChildSessionId(value: unknown): string | undefined {
+  const record = readRecord(value);
+  const info = readRecord(record?.info);
+  return stringProp(info, "id") ?? stringProp(record, "id", "sessionID");
+}
+
+function normalizeSessionStatus(value: unknown): "idle" | "busy" | "retry" | undefined {
+  if (value === "idle" || value === "busy" || value === "retry") return value;
+  const record = readRecord(value);
+  const type = stringProp(record, "type", "status");
+  return type === "idle" || type === "busy" || type === "retry" ? type : undefined;
+}
+
+function normalizeActivityFromEvent(event: OpencodeEvent): Omit<SessionActivityEventInput, "sessionId" | "rootSessionId" | "harness"> | null {
+  const type = (event as { type?: unknown }).type;
+  const props = readRecord((event as { properties?: unknown }).properties);
+  if (type === "message.part.updated") {
+    const part = readRecord(props?.part);
+    const partType = stringProp(part, "type");
+    if (partType === "tool") {
+      const state = readRecord(part?.state);
+      const rawStatus = stringProp(state, "status");
+      const status = rawStatus === "pending"
+        ? "started"
+        : rawStatus === "completed"
+          ? "complete"
+          : rawStatus === "error"
+            ? "error"
+            : "running";
+      return {
+        kind: "tool",
+        tool: {
+          name: stringProp(part, "tool") ?? "tool",
+          callId: stringProp(part, "callID", "callId", "id"),
+          status,
+          durationMs: durationFromTime(state?.time),
+          outputBytes: numberProp(state, "outputBytes", "bytes") ?? byteLength(state?.output),
+        },
+      };
+    }
+    if (partType === "retry") return { kind: "status", text: "retrying" };
+    if (partType === "text") {
+      if (typeof props?.delta === "string") return null;
+      const text = stringProp(part, "text");
+      return text ? { kind: "text", role: "assistant", text } : null;
+    }
+    return null;
+  }
+  switch (type) {
+    case "session.next.step.failed":
+    case "session.error":
+      return { kind: "status", text: "error" };
+    case "session.status": {
+      const status = readRecord(props?.status);
+      return { kind: "status", text: stringProp(status, "type") ?? "status" };
+    }
+    default:
+      return null;
+  }
+}
+
 interface OpenCodeRunRecord {
   taskId: string;
   runStartedAt: number;
   rootSessionId: string;
   sessionIds: Set<string>;
   watchdog: RunWatchdog;
+  abortPromise?: Promise<boolean>;
   transportLive: boolean;
+  lastLiveState: "running" | "idle" | "error" | null;
   attempt: number;
 }
 
@@ -1413,6 +1531,7 @@ export class TaskDispatcher implements Dispatcher {
       sessionIds: new Set([input.sessionId]),
       watchdog,
       transportLive: true,
+      lastLiveState: "running",
       attempt: input.attempt,
     };
     this.openCodeRunsByTask.set(input.task.id, record);
@@ -1462,12 +1581,82 @@ export class TaskDispatcher implements Dispatcher {
     }
   }
 
-  private markRunsLive(): void {
-    for (const run of this.openCodeRunsByTask.values()) {
+  private async rebuildRunsBeforeLive(): Promise<void> {
+    const statusMap = await this.fetchSessionStatusMap();
+    if (!statusMap) return;
+    for (const run of [...this.openCodeRunsByTask.values()]) {
+      const task = this.store.get(run.taskId);
+      if (!task || task.sessionId !== run.rootSessionId || task.runStartedAt !== run.runStartedAt) continue;
+      const rebuilt = await this.rebuildSessionTree(run);
+      if (rebuilt === "blind") continue;
+      const rootStatus = statusMap.get(run.rootSessionId);
+      if (rebuilt === "missing" || !rootStatus) {
+        this.store.update(task.id, { runState: "error", error: "OpenCode root session missing after reconnect; observation is no longer reliable" });
+        this.store.addEvent({ taskId: task.id, type: "task_watchdog_orphan", body: { sessionId: run.rootSessionId, runStartedAt: run.runStartedAt } });
+        this.endOpenCodeRun(task.id, run.runStartedAt, "error");
+        continue;
+      }
       run.transportLive = true;
       this.activity.setTransport(run.taskId, run.runStartedAt, "live");
-      run.watchdog.recordActivity({ run: { taskId: run.taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
+      if (rootStatus === "busy" || rootStatus === "retry") {
+        run.watchdog.recordActivity({ run: { taskId: run.taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
+        if (task.runState !== "running") this.store.update(task.id, { runState: "running", error: undefined });
+        continue;
+      }
+      if (rootStatus === "idle" && !this.completionWatchers.has(run.rootSessionId)) {
+        this.startCompletionWatcher(task.id, run.rootSessionId);
+      }
     }
+  }
+
+  private async fetchSessionStatusMap(): Promise<Map<string, "idle" | "busy" | "retry"> | null> {
+    try {
+      if (!("status" in this.client.session)) return null;
+      const result = await (this.client.session as unknown as { status(): Promise<unknown> }).status();
+      const error = (result as { error?: unknown }).error;
+      if (error) return null;
+      const data = (result as { data?: unknown }).data;
+      const entries = data instanceof Map ? [...data.entries()] : Object.entries(readRecord(data) ?? {});
+      const map = new Map<string, "idle" | "busy" | "retry">();
+      for (const [sessionId, rawStatus] of entries) {
+        if (typeof sessionId !== "string") continue;
+        const status = normalizeSessionStatus(rawStatus);
+        if (status) map.set(sessionId, status);
+      }
+      return map;
+    } catch {
+      return null;
+    }
+  }
+
+  private async rebuildSessionTree(run: OpenCodeRunRecord): Promise<"live" | "blind" | "missing"> {
+    const next = new Set<string>([run.rootSessionId]);
+    const queue: Array<{ sessionId: string; depth: number }> = [{ sessionId: run.rootSessionId, depth: 0 }];
+    for (let head = 0; head < queue.length; head += 1) {
+      const { sessionId, depth } = queue[head]!;
+      if (depth >= SESSION_TREE_MAX_DEPTH || next.size >= SESSION_TREE_MAX_SESSIONS) continue;
+      let result: unknown;
+      try {
+        if (!("children" in this.client.session)) return "blind";
+        result = await (this.client.session as unknown as { children(input: { sessionID: string }): Promise<unknown> }).children({ sessionID: sessionId });
+      } catch {
+        return "blind";
+      }
+      const error = (result as { error?: unknown }).error;
+      if (error) return sessionId === run.rootSessionId && isNotFoundError(error) ? "missing" : "blind";
+      const data = (result as { data?: unknown }).data;
+      if (!Array.isArray(data)) continue;
+      for (const child of data) {
+        const id = extractChildSessionId(child);
+        if (!id || next.has(id) || next.size >= SESSION_TREE_MAX_SESSIONS) continue;
+        next.add(id);
+        queue.push({ sessionId: id, depth: depth + 1 });
+      }
+    }
+    for (const oldSession of run.sessionIds) this.openCodeSessionToTask.delete(oldSession);
+    run.sessionIds = next;
+    for (const session of next) this.openCodeSessionToTask.set(session, run.taskId);
+    return "live";
   }
 
   private handleWatchdogTermination(event: WatchdogTermination): void {
@@ -1480,7 +1669,7 @@ export class TaskDispatcher implements Dispatcher {
       type: "task_watchdog_tripped",
       body: { reason: event.reason, sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt, observedAt: event.terminatedAt },
     });
-    void this.client.session.abort({ sessionID: event.run.sessionId }).catch(() => undefined);
+    current.abortPromise = this.confirmWatchdogAbort(event.run);
   }
 
   private handleWatchdogRetryDecision(event: WatchdogRetryDecision): void {
@@ -1492,6 +1681,14 @@ export class TaskDispatcher implements Dispatcher {
     if (!current || current.runStartedAt !== event.run.runStartedAt || current.rootSessionId !== event.run.sessionId) return;
     const task = this.store.get(event.run.taskId);
     if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt || task.sessionId !== event.run.sessionId) return;
+    const abortConfirmed = await (current.abortPromise ?? this.confirmWatchdogAbort(event.run));
+    const stillExpected = this.store.get(event.run.taskId);
+    if (!stillExpected || stillExpected.runState !== "running" || stillExpected.runStartedAt !== event.run.runStartedAt || stillExpected.sessionId !== event.run.sessionId) return;
+    if (!abortConfirmed) {
+      this.store.update(task.id, { runState: "error", error: "Watchdog tripped but old OpenCode root abort was not confirmed; refusing to start a second writer" });
+      this.store.addEvent({ taskId: task.id, type: "task_watchdog_abort_unconfirmed", body: { sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt } });
+      return;
+    }
     if (event.outcome === "exhausted") {
       const report = {
         outcome: "blocked" as const,
@@ -1516,6 +1713,26 @@ export class TaskDispatcher implements Dispatcher {
     const activeModel = nextAttempt === 2 && fallback && !sameProvider(primary, fallback) ? fallback : primary;
     this.store.addEvent({ taskId: task.id, type: activeModel === fallback ? "task_watchdog_fallback" : "task_watchdog_retry", body: { attempt: nextAttempt, model: activeModel } });
     await this.startFreshOpenCodeAttempt(task, nextAttempt, activeModel);
+  }
+
+  private async confirmWatchdogAbort(run: WatchdogRunIdentity): Promise<boolean> {
+    const task = this.store.get(run.taskId);
+    if (!task || task.sessionId !== run.sessionId || task.runStartedAt !== run.runStartedAt || task.runState !== "running") return false;
+    try {
+      const result = await this.client.session.abort({ sessionID: run.sessionId });
+      const error = (result as { error?: unknown }).error;
+      if (error) throw error;
+      this.cancelCompletionWatcher(run.sessionId);
+      this.stopPermissionResponder(run.sessionId);
+      return true;
+    } catch (err) {
+      this.store.addEvent({
+        taskId: run.taskId,
+        type: "task_watchdog_abort_failed",
+        body: { sessionId: run.sessionId, runStartedAt: run.runStartedAt, error: errorMessage(err, "abort failed") },
+      });
+      return false;
+    }
   }
 
   private async startFreshOpenCodeAttempt(task: Task, attempt: number, activeModel: ModelRef | null): Promise<void> {
@@ -1932,9 +2149,8 @@ export class TaskDispatcher implements Dispatcher {
       task = taskId ? this.store.get(taskId) : undefined;
     }
     if (!task && (event as { type?: unknown }).type === "session.created") {
-      const props = (event as { properties?: unknown }).properties;
-      const parentID = props && typeof props === "object" ? ((props as Record<string, unknown>).parentID ?? (props as Record<string, unknown>).parentSessionID) : undefined;
-      const taskId = typeof parentID === "string" ? this.openCodeSessionToTask.get(parentID) : undefined;
+      const { parentId } = extractCreatedSessionIds(event);
+      const taskId = parentId ? this.openCodeSessionToTask.get(parentId) : undefined;
       task = taskId ? this.store.get(taskId) : undefined;
     }
     if (!task) return;
@@ -1947,11 +2163,17 @@ export class TaskDispatcher implements Dispatcher {
       this.recordOpenCodeActivity(task.id, sessionId, { kind: "text", role: "assistant", text: textOutput });
     }
 
+    const normalizedActivity = normalizeActivityFromEvent(event);
+    if (normalizedActivity) {
+      this.recordOpenCodeActivity(task.id, sessionId, normalizedActivity);
+    }
+
     const liveState = eventLiveState(event);
     if (liveState === null) return;
 
     switch (liveState) {
       case "running":
+        if (this.openCodeRunsByTask.get(task.id)) this.openCodeRunsByTask.get(task.id)!.lastLiveState = "running";
         this.recordOpenCodeActivity(task.id, sessionId, { kind: "status", text: "running" });
         // Only stamp the clock when actually transitioning into running —
         // live events re-assert "running" mid-run and must not reset it.
@@ -1964,6 +2186,7 @@ export class TaskDispatcher implements Dispatcher {
         break;
 
       case "idle":
+        if (this.openCodeRunsByTask.get(task.id)) this.openCodeRunsByTask.get(task.id)!.lastLiveState = "idle";
         this.recordOpenCodeActivity(task.id, sessionId, { kind: "status", text: "idle" });
         // OpenCode can report idle between tool-call steps. Keep the card
         // running until session.messages() shows a final assistant step.
@@ -1972,6 +2195,7 @@ export class TaskDispatcher implements Dispatcher {
 
       case "error": {
         const message = this.extractErrorMessage(event);
+        if (this.openCodeRunsByTask.get(task.id)) this.openCodeRunsByTask.get(task.id)!.lastLiveState = "error";
         this.store.update(task.id, { runState: "error", error: message });
         this.recordOpenCodeActivity(task.id, sessionId, { kind: "status", text: message });
         this.endOpenCodeRun(task.id, task.runStartedAt, "error");
@@ -1985,19 +2209,13 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   private bindCreatedDescendant(event: OpencodeEvent, task: Task): void {
-    if ((event as { type?: unknown }).type !== "session.created") return;
-    const props = (event as { properties?: unknown }).properties;
-    if (!props || typeof props !== "object") return;
-    const record = props as Record<string, unknown>;
-    const info = record.info;
-    const id = info && typeof info === "object" ? (info as Record<string, unknown>).id : undefined;
-    const parentID = record.parentID ?? record.parentSessionID;
-    if (typeof id !== "string" || typeof parentID !== "string") return;
+    const { id, parentId } = extractCreatedSessionIds(event);
+    if (!id || !parentId) return;
     const run = this.openCodeRunsByTask.get(task.id);
-    if (!run || !run.sessionIds.has(parentID) || run.sessionIds.size > 256) return;
+    if (!run || !run.sessionIds.has(parentId) || run.sessionIds.size >= SESSION_TREE_MAX_SESSIONS) return;
     run.sessionIds.add(id);
     this.openCodeSessionToTask.set(id, task.id);
-    this.recordOpenCodeActivity(task.id, id, { kind: "status", text: "session.created", parentSessionId: parentID });
+    this.recordOpenCodeActivity(task.id, id, { kind: "status", text: "session.created", parentSessionId: parentId });
   }
 
   private extractErrorMessage(event: OpencodeEvent): string {
@@ -2028,7 +2246,9 @@ export class TaskDispatcher implements Dispatcher {
       try {
         const result = await this.client.event.subscribe();
         attempt = 0; // reset backoff once a connection succeeds
-        this.markRunsLive();
+        if ([...this.openCodeRunsByTask.values()].some((run) => !run.transportLive)) {
+          await this.rebuildRunsBeforeLive();
+        }
 
         for await (const event of result.stream) {
           if (!this.running || this.generation !== generation) return;
