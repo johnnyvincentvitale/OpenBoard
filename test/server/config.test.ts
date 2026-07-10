@@ -9,7 +9,9 @@ import {
   deriveStorePaths,
   findFreePort,
   loadConfig,
+  loadPermissionConfig,
   loadWatchdogConfig,
+  PERMISSION_DEFAULTS,
   resolveAdapterConfig,
   resolveInstanceConfig,
   WATCHDOG_DEFAULTS,
@@ -434,5 +436,22 @@ describe("loadWatchdogConfig", () => {
       OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "1",
       OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: "1",
     })).toEqual(WATCHDOG_DEFAULTS);
+  });
+});
+
+describe("loadPermissionConfig", () => {
+  it("defaults OPENBOARD_PERMISSION_GRACE_MS to 60000", () => {
+    expect(loadPermissionConfig({})).toEqual(PERMISSION_DEFAULTS);
+    expect(loadPermissionConfig({}).graceMs).toBe(60_000);
+  });
+
+  it("honors OPENBOARD_PERMISSION_GRACE_MS=0 as immediate policy fallback", () => {
+    expect(loadPermissionConfig({ OPENBOARD_PERMISSION_GRACE_MS: "0" })).toEqual({ graceMs: 0 });
+  });
+
+  it("rejects malformed or negative OPENBOARD_PERMISSION_GRACE_MS values", () => {
+    expect(() => loadPermissionConfig({ OPENBOARD_PERMISSION_GRACE_MS: "-1" })).toThrow(ConfigError);
+    expect(() => loadPermissionConfig({ OPENBOARD_PERMISSION_GRACE_MS: "1.5" })).toThrow(ConfigError);
+    expect(() => loadPermissionConfig({ OPENBOARD_PERMISSION_GRACE_MS: "many" })).toThrow(/OPENBOARD_PERMISSION_GRACE_MS/);
   });
 });
