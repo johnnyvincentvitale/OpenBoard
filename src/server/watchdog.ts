@@ -8,9 +8,9 @@ export interface WatchdogRunIdentity {
   attempt: number;
 }
 
-export type WatchdogReason = "provider-silence" | "task-inactivity";
-export type WatchdogStage = "idle" | "healthy" | "suspected" | "stalled" | "terminated" | "exhausted" | "circuit-open";
-export type WatchdogTerminalOutcome = "retry" | "exhausted" | "circuit-open" | "completed" | "aborted";
+export type WatchdogReason = "liveness-timeout";
+export type WatchdogStage = "idle" | "healthy" | "suspected" | "stalled" | "terminated" | "exhausted";
+export type WatchdogTerminalOutcome = "retry" | "exhausted" | "completed" | "aborted";
 
 export interface WatchdogNudge {
   run: WatchdogRunIdentity;
@@ -29,7 +29,7 @@ export interface WatchdogRetryDecision {
   run: WatchdogRunIdentity;
   reason: WatchdogReason;
   decidedAt: number;
-  outcome: "retry" | "exhausted" | "circuit-open";
+  outcome: "retry" | "exhausted";
   nextAttempt?: number;
 }
 
@@ -49,17 +49,14 @@ export interface WatchdogSnapshot {
   run: WatchdogRunIdentity | null;
   stage: WatchdogStage;
   reason: WatchdogReason | null;
-  lastProviderActivityAt: number | null;
-  lastMeaningfulActivityAt: number | null;
+  lastActivityAt: number | null;
   diagnosticDeadlineAt: number | null;
-  consecutiveFailures: number;
-  circuitOpenedAt: number | null;
 }
 
 export interface WatchdogActivityInput {
   run: WatchdogRunIdentity;
   occurredAt?: number;
-  meaningful?: boolean;
+  /** Heartbeat-only board frames/noise do not refresh liveness. */
   noise?: boolean;
 }
 
@@ -82,11 +79,8 @@ export class RunWatchdog {
   private run: WatchdogRunIdentity | null = null;
   private stage: WatchdogStage = "idle";
   private reason: WatchdogReason | null = null;
-  private lastProviderActivityAt: number | null = null;
-  private lastMeaningfulActivityAt: number | null = null;
+  private lastActivityAt: number | null = null;
   private diagnosticDeadlineAt: number | null = null;
-  private consecutiveFailures = 0;
-  private circuitOpenedAt: number | null = null;
 
   constructor(
     private readonly config: WatchdogConfig,
@@ -99,12 +93,10 @@ export class RunWatchdog {
 
   startRun(run: WatchdogRunIdentity, startedAt = this.clock.now()): WatchdogSnapshot {
     this.clearTimer();
-    this.maybeResetCircuit(startedAt);
     this.run = copyRun(run);
-    this.stage = this.isCircuitOpen(startedAt) ? "circuit-open" : "healthy";
+    this.stage = "healthy";
     this.reason = null;
-    this.lastProviderActivityAt = startedAt;
-    this.lastMeaningfulActivityAt = startedAt;
+    this.lastActivityAt = startedAt;
     this.diagnosticDeadlineAt = null;
     this.scheduleNext();
     return this.snapshot();
@@ -112,10 +104,10 @@ export class RunWatchdog {
 
   recordActivity(input: WatchdogActivityInput): boolean {
     if (!sameRun(this.run, input.run) || this.isTerminal()) return false;
+    if (input.noise) return true;
     const occurredAt = input.occurredAt ?? this.clock.now();
-    if (occurredAt < (this.lastProviderActivityAt ?? 0)) return false;
-    this.lastProviderActivityAt = occurredAt;
-    if (input.meaningful && !input.noise) this.lastMeaningfulActivityAt = occurredAt;
+    if (occurredAt < (this.lastActivityAt ?? 0)) return false;
+    this.lastActivityAt = occurredAt;
     if (this.stage === "suspected" || this.stage === "stalled") {
       this.stage = "healthy";
       this.reason = null;
@@ -127,14 +119,13 @@ export class RunWatchdog {
 
   complete(run: WatchdogRunIdentity): WatchdogTerminalOutcome | null {
     if (!sameRun(this.run, run)) return null;
-    this.consecutiveFailures = 0;
-    this.stop("completed");
+    this.stop();
     return "completed";
   }
 
   abort(run: WatchdogRunIdentity): WatchdogTerminalOutcome | null {
     if (!sameRun(this.run, run)) return null;
-    this.stop("aborted");
+    this.stop();
     return "aborted";
   }
 
@@ -143,11 +134,8 @@ export class RunWatchdog {
       run: this.run ? copyRun(this.run) : null,
       stage: this.stage,
       reason: this.reason,
-      lastProviderActivityAt: this.lastProviderActivityAt,
-      lastMeaningfulActivityAt: this.lastMeaningfulActivityAt,
+      lastActivityAt: this.lastActivityAt,
       diagnosticDeadlineAt: this.diagnosticDeadlineAt,
-      consecutiveFailures: this.consecutiveFailures,
-      circuitOpenedAt: this.circuitOpenedAt,
     };
   }
 
@@ -156,11 +144,8 @@ export class RunWatchdog {
     this.run = snapshot.run ? copyRun(snapshot.run) : null;
     this.stage = snapshot.stage;
     this.reason = snapshot.reason;
-    this.lastProviderActivityAt = snapshot.lastProviderActivityAt;
-    this.lastMeaningfulActivityAt = snapshot.lastMeaningfulActivityAt;
+    this.lastActivityAt = snapshot.lastActivityAt;
     this.diagnosticDeadlineAt = snapshot.diagnosticDeadlineAt;
-    this.consecutiveFailures = snapshot.consecutiveFailures;
-    this.circuitOpenedAt = snapshot.circuitOpenedAt;
     this.scheduleNext();
   }
 
@@ -171,12 +156,6 @@ export class RunWatchdog {
   private evaluate(): void {
     if (!this.config.enabled || !this.run || this.isTerminal()) return;
     const now = this.clock.now();
-    this.maybeResetCircuit(now);
-    if (this.isCircuitOpen(now)) {
-      this.stage = "circuit-open";
-      this.clearTimer();
-      return;
-    }
 
     if (this.stage === "suspected" || this.stage === "stalled") {
       if (this.diagnosticDeadlineAt !== null && now >= this.diagnosticDeadlineAt) {
@@ -187,31 +166,20 @@ export class RunWatchdog {
       return;
     }
 
-    const reason = this.thresholdReason(now);
-    if (reason) this.suspect(reason, now);
+    if (this.lastActivityAt !== null && now >= this.lastActivityAt + this.config.timeoutMs) {
+      this.suspect(now);
+    }
     this.scheduleNext();
   }
 
-  private thresholdReason(now: number): WatchdogReason | null {
-    const providerDue = this.config.providerSilenceMs > 0 && this.lastProviderActivityAt !== null
-      ? this.lastProviderActivityAt + this.config.providerSilenceMs
-      : Number.POSITIVE_INFINITY;
-    const taskDue = this.config.taskInactivityMs > 0 && this.lastMeaningfulActivityAt !== null
-      ? this.lastMeaningfulActivityAt + this.config.taskInactivityMs
-      : Number.POSITIVE_INFINITY;
-    const due = Math.min(providerDue, taskDue);
-    if (now < due) return null;
-    return providerDue <= taskDue ? "provider-silence" : "task-inactivity";
-  }
-
-  private suspect(reason: WatchdogReason, now: number): void {
+  private suspect(now: number): void {
     if (!this.run || this.stage !== "healthy") return;
     this.stage = "suspected";
-    this.reason = reason;
-    this.diagnosticDeadlineAt = now + this.config.diagnosticWindowMs;
-    this.callbacks.onNudge?.({ run: copyRun(this.run), reason, observedAt: now, deadlineAt: this.diagnosticDeadlineAt });
+    this.reason = "liveness-timeout";
+    this.diagnosticDeadlineAt = now + this.config.sweepIntervalMs;
+    this.callbacks.onNudge?.({ run: copyRun(this.run), reason: this.reason, observedAt: now, deadlineAt: this.diagnosticDeadlineAt });
     this.stage = "stalled";
-    if (this.config.diagnosticWindowMs === 0) this.terminate(now);
+    if (this.config.sweepIntervalMs === 0) this.terminate(now);
   }
 
   private terminate(now: number): void {
@@ -221,68 +189,34 @@ export class RunWatchdog {
     this.stage = "terminated";
     this.clearTimer();
     this.callbacks.onTerminate?.({ run, reason, terminatedAt: now });
-    this.consecutiveFailures += 1;
-    const outcome = this.decideRetry(now, run);
-    this.callbacks.onRetryDecision?.({ run, reason, decidedAt: now, ...outcome });
-  }
-
-  private decideRetry(now: number, run: WatchdogRunIdentity): Pick<WatchdogRetryDecision, "outcome" | "nextAttempt"> {
-    const threshold = this.config.circuitBreaker.failureThreshold;
-    if (threshold > 0 && this.consecutiveFailures >= threshold) {
-      this.circuitOpenedAt = now;
-      this.stage = "circuit-open";
-      return { outcome: "circuit-open" };
-    }
-    if (run.attempt < this.config.maxRetries) {
-      return { outcome: "retry", nextAttempt: run.attempt + 1 };
-    }
-    this.stage = "exhausted";
-    return { outcome: "exhausted" };
+    const decision = run.attempt < this.config.maxAutomaticRetries
+      ? { outcome: "retry" as const, nextAttempt: run.attempt + 1 }
+      : { outcome: "exhausted" as const };
+    if (decision.outcome === "exhausted") this.stage = "exhausted";
+    this.callbacks.onRetryDecision?.({ run, reason, decidedAt: now, ...decision });
   }
 
   private scheduleNext(): void {
     this.clearTimer();
-    if (!this.config.enabled || !this.run || this.isTerminal()) return;
-    const now = this.clock.now();
-    const dueTimes = [
-      this.config.providerSilenceMs > 0 && this.lastProviderActivityAt !== null ? this.lastProviderActivityAt + this.config.providerSilenceMs : null,
-      this.config.taskInactivityMs > 0 && this.lastMeaningfulActivityAt !== null ? this.lastMeaningfulActivityAt + this.config.taskInactivityMs : null,
-      this.diagnosticDeadlineAt,
-    ].filter((value): value is number => value !== null);
-    if (dueTimes.length === 0) return;
-    const delay = Math.max(0, Math.min(...dueTimes) - now);
+    if (!this.config.enabled || !this.run || this.isTerminal() || this.lastActivityAt === null) return;
+    const due = this.diagnosticDeadlineAt ?? this.lastActivityAt + this.config.timeoutMs;
+    const delay = Math.max(0, due - this.clock.now());
     const tokenRun = this.run;
     this.timer = this.clock.setTimeout(() => {
       if (sameRun(this.run, tokenRun)) this.evaluate();
     }, delay);
   }
 
-  private maybeResetCircuit(now: number): void {
-    if (this.circuitOpenedAt === null || this.config.circuitBreaker.resetMs === 0) return;
-    if (now - this.circuitOpenedAt >= this.config.circuitBreaker.resetMs) {
-      this.circuitOpenedAt = null;
-      this.consecutiveFailures = 0;
-      if (this.stage === "circuit-open") this.stage = this.run ? "healthy" : "idle";
-    }
-  }
-
-  private isCircuitOpen(now: number): boolean {
-    this.maybeResetCircuit(now);
-    return this.circuitOpenedAt !== null;
-  }
-
   private isTerminal(): boolean {
-    return this.stage === "exhausted" || this.stage === "circuit-open" || this.stage === "idle";
+    return this.stage === "exhausted" || this.stage === "idle";
   }
 
-  private stop(stage: "completed" | "aborted"): void {
-    void stage;
+  private stop(): void {
     this.clearTimer();
     this.run = null;
     this.stage = "idle";
     this.reason = null;
-    this.lastProviderActivityAt = null;
-    this.lastMeaningfulActivityAt = null;
+    this.lastActivityAt = null;
     this.diagnosticDeadlineAt = null;
   }
 

@@ -384,69 +384,55 @@ describe("resolveAdapterConfig", () => {
 });
 
 describe("loadWatchdogConfig", () => {
-  it("uses safe FR10 defaults when watchdog env is absent", () => {
+  it("uses the approved FR10 default when watchdog env is absent", () => {
     expect(loadWatchdogConfig({})).toEqual(WATCHDOG_DEFAULTS);
   });
 
-  it("honors timeout, retry, and circuit-breaker overrides", () => {
-    expect(loadWatchdogConfig({
-      OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS: "1000",
-      OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: "2000",
-      OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS: "300",
-      OPENBOARD_WATCHDOG_MAX_RETRIES: "2",
-      OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "4",
-      OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: "5000",
-    })).toEqual({
+  it("honors only OPENBOARD_WATCHDOG_MS as the public FR10 env", () => {
+    expect(loadWatchdogConfig({ OPENBOARD_WATCHDOG_MS: "1000" })).toEqual({
       enabled: true,
-      providerSilenceMs: 1000,
-      taskInactivityMs: 2000,
-      diagnosticWindowMs: 300,
-      maxRetries: 2,
-      circuitBreaker: { failureThreshold: 4, resetMs: 5000 },
+      timeoutMs: 1000,
+      sweepIntervalMs: 30_000,
+      maxAutomaticRetries: 2,
     });
   });
 
-  it("supports zero/disable semantics", () => {
-    expect(loadWatchdogConfig({
-      OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS: "0",
-      OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: "0",
-      OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS: "0",
-      OPENBOARD_WATCHDOG_MAX_RETRIES: "0",
-      OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "0",
-      OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: "0",
-    })).toEqual({
+  it("supports OPENBOARD_WATCHDOG_MS=0 as the disable switch", () => {
+    expect(loadWatchdogConfig({ OPENBOARD_WATCHDOG_MS: "0" })).toEqual({
       enabled: false,
-      providerSilenceMs: 0,
-      taskInactivityMs: 0,
-      diagnosticWindowMs: 0,
-      maxRetries: 0,
-      circuitBreaker: { failureThreshold: 0, resetMs: 0 },
+      timeoutMs: 0,
+      sweepIntervalMs: 30_000,
+      maxAutomaticRetries: 2,
     });
   });
 
-  it("lets OPENBOARD_WATCHDOG_ENABLED=false disable even nonzero detectors", () => {
-    expect(loadWatchdogConfig({ OPENBOARD_WATCHDOG_ENABLED: "false" }).enabled).toBe(false);
-  });
-
-  it("rejects malformed or negative documented watchdog values", () => {
-    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_MAX_RETRIES: "-1" })).toThrow(ConfigError);
-    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: "1.5" })).toThrow(ConfigError);
-    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "many" })).toThrow(/OPENBOARD_WATCHDOG_CIRCUIT_FAILURES/);
-  });
-
-  it("bounds excessive values instead of allowing unbounded timers/retries", () => {
-    const config = loadWatchdogConfig({
-      OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS: String(Number.MAX_SAFE_INTEGER),
-      OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: String(Number.MAX_SAFE_INTEGER),
-      OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS: String(Number.MAX_SAFE_INTEGER),
-      OPENBOARD_WATCHDOG_MAX_RETRIES: String(Number.MAX_SAFE_INTEGER),
-      OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: String(Number.MAX_SAFE_INTEGER),
-      OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: String(Number.MAX_SAFE_INTEGER),
+  it("uses dependency-injected sweep/retry values without exposing extra env vars", () => {
+    expect(loadWatchdogConfig({ OPENBOARD_WATCHDOG_MS: "500" }, { sweepIntervalMs: 5, maxAutomaticRetries: 1 })).toEqual({
+      enabled: true,
+      timeoutMs: 500,
+      sweepIntervalMs: 5,
+      maxAutomaticRetries: 1,
     });
-    expect(config.providerSilenceMs).toBe(86_400_000);
-    expect(config.taskInactivityMs).toBe(86_400_000);
-    expect(config.diagnosticWindowMs).toBe(3_600_000);
-    expect(config.maxRetries).toBe(5);
-    expect(config.circuitBreaker).toEqual({ failureThreshold: 20, resetMs: 86_400_000 });
+  });
+
+  it("rejects malformed or negative OPENBOARD_WATCHDOG_MS values", () => {
+    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_MS: "-1" })).toThrow(ConfigError);
+    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_MS: "1.5" })).toThrow(ConfigError);
+    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_MS: "many" })).toThrow(/OPENBOARD_WATCHDOG_MS/);
+  });
+
+  it("bounds excessive OPENBOARD_WATCHDOG_MS values", () => {
+    expect(loadWatchdogConfig({ OPENBOARD_WATCHDOG_MS: String(Number.MAX_SAFE_INTEGER) }).timeoutMs).toBe(86_400_000);
+  });
+
+  it("ignores removed/undocumented FR10 watchdog env vars", () => {
+    expect(loadWatchdogConfig({
+      OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS: "1",
+      OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: "1",
+      OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS: "1",
+      OPENBOARD_WATCHDOG_MAX_RETRIES: "1",
+      OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "1",
+      OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: "1",
+    })).toEqual(WATCHDOG_DEFAULTS);
   });
 });
