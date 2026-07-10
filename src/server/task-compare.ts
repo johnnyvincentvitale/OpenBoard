@@ -23,6 +23,7 @@ import {
   resolveGitCommonDir,
   resolveGitRepoRoot,
   execGit,
+  isSafeRef,
 } from "./diff-engine";
 
 export type ResolvedRefSource = {
@@ -77,6 +78,12 @@ async function resolveBaseSource(task: Task): Promise<ResolvedRefSource | Unsupp
     return { kind: "unsupported", reason: `Task ${task.id} has no durable branch or commit snapshot` };
   }
 
+  // Validate ref safety before any git invocation, including rev-parse —
+  // a dash-prefixed stored ref must never reach git argv.
+  if (!isSafeRef(ref)) {
+    return { kind: "unsupported", reason: `Task ${task.id} durable ref is unsafe and was rejected before git invocation` };
+  }
+
   if (!(await isValidRef(cwd, ref))) {
     return { kind: "unsupported", reason: `Task ${task.id} durable ref ${ref} is not available` };
   }
@@ -101,7 +108,7 @@ async function resolveTargetSource(task: Task): Promise<ResolvedSource | Unsuppo
   }
 
   const ref = task.worktreeBranch ?? task.harnessBranch ?? task.harnessCommit;
-  if (ref && (await isValidRef(cwd, ref))) {
+  if (ref && isSafeRef(ref) && (await isValidRef(cwd, ref))) {
     return { kind: "ref", repoRoot: identity.repoRoot, gitCommonDir: identity.gitCommonDir, ref };
   }
 

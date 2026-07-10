@@ -13,6 +13,7 @@ import {
   parseUnifiedDiff,
   capBytes,
   assertSafeRef,
+  isSafeRef,
 } from "../../src/server/diff-engine";
 import type { DiffFile, Task } from "../../src/shared";
 
@@ -140,11 +141,13 @@ describe("computeDiff", () => {
       }
     });
 
-    it("rejects a dash-prefixed baseCommit ref defensively instead of passing it to git argv", async () => {
+    it("returns an honest no-git response for a dash-prefixed baseCommit ref instead of throwing or invoking git", async () => {
       const repoDir = join(tmpDir, "repo");
       initRepo(repoDir);
-      const worktreePath = join(tmpDir, "wt");
-      runGit(repoDir, ["worktree", "add", "-b", "board/task_test", worktreePath, "HEAD"]);
+      // The worktree path is deliberately never created — if the dash-prefixed
+      // ref guard were skipped, git would be invoked against a nonexistent
+      // cwd and fail with a spawn/ENOENT error, not this clean message.
+      const worktreePath = join(tmpDir, "wt-not-created");
 
       const task = makeBaseTask({
         directory: repoDir,
@@ -154,7 +157,11 @@ describe("computeDiff", () => {
         baseCommit: "--upload-pack=evil",
       });
 
-      await expect(computeDiff(task)).rejects.toThrow(/dash-prefixed ref/i);
+      const result = await computeDiff(task);
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toMatch(/dash-prefixed ref/i);
+      }
     });
   });
 
@@ -246,16 +253,20 @@ describe("computeDiff", () => {
       }
     });
 
-    it("rejects a dash-prefixed baseCommit ref defensively instead of passing it to git argv", async () => {
-      const repoDir = join(tmpDir, "repo");
-      initRepo(repoDir);
-
+    it("returns an honest no-git response for a dash-prefixed baseCommit ref instead of throwing or invoking git", async () => {
+      // The directory is deliberately never created — if the dash-prefixed
+      // ref guard were skipped, git would be invoked against a nonexistent
+      // cwd and fail with a spawn/ENOENT error, not this clean message.
       const task = makeBaseTask({
-        directory: repoDir,
+        directory: join(tmpDir, "not-created"),
         baseCommit: "--output=/etc/passwd",
       });
 
-      await expect(computeDiff(task)).rejects.toThrow(/dash-prefixed ref/i);
+      const result = await computeDiff(task);
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toMatch(/dash-prefixed ref/i);
+      }
     });
   });
 
@@ -301,11 +312,14 @@ describe("computeDiff", () => {
       }
     });
 
-    it("rejects a dash-prefixed harnessBranch ref defensively instead of passing it to git argv", async () => {
+    it("returns an honest no-git response for a dash-prefixed harnessBranch ref instead of throwing or invoking git", async () => {
       const repoDir = join(tmpDir, "repo");
       const baseCommit = initRepo(repoDir);
-      const harnessDir = join(tmpDir, "harness");
-      runGit(repoDir, ["worktree", "add", "-b", "harness-branch", harnessDir, "HEAD"]);
+      // harnessCwd is deliberately never created as a worktree — if the
+      // dash-prefixed ref guard were skipped, git would be invoked against a
+      // nonexistent cwd and fail with a spawn/ENOENT error, not this clean
+      // message.
+      const harnessDir = join(tmpDir, "harness-not-created");
 
       const task = makeBaseTask({
         harness: "claude-code",
@@ -315,7 +329,11 @@ describe("computeDiff", () => {
         baseCommit,
       });
 
-      await expect(computeDiff(task)).rejects.toThrow(/dash-prefixed ref/i);
+      const result = await computeDiff(task);
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toMatch(/dash-prefixed ref/i);
+      }
     });
   });
 
@@ -553,6 +571,21 @@ describe("diff-engine exported primitives", () => {
     });
   });
 
+  describe("isSafeRef", () => {
+    it("returns false for dash-prefixed refs without throwing", () => {
+      expect(isSafeRef("--upload-pack=evil")).toBe(false);
+      expect(isSafeRef("-x")).toBe(false);
+    });
+
+    it("returns true for ordinary branch names, commit shas, or refs with dots/slashes", () => {
+      expect(isSafeRef("main")).toBe(true);
+      expect(isSafeRef("board/task_1")).toBe(true);
+      expect(isSafeRef("HEAD")).toBe(true);
+      expect(isSafeRef("main...board/task_1")).toBe(true);
+      expect(isSafeRef("deadbeef1234")).toBe(true);
+    });
+  });
+
   describe("parseUnifiedDiff", () => {
     it("parses added, deleted, and modified files", () => {
       const raw = `diff --git a/add.ts b/add.ts
@@ -637,15 +670,17 @@ diff --git a/mod.ts b/mod.ts
       }
     });
 
-    it("rejects a dash-prefixed ref defensively instead of passing it to git argv (Build->Fix style comparison)", async () => {
-      const repoDir = join(tmpDir, "repo");
-      initRepo(repoDir);
-      runGit(repoDir, ["checkout", "-b", "board/build"]);
-      runGit(repoDir, ["checkout", "-b", "board/fix"]);
+    it("returns an honest no-git response for a dash-prefixed ref instead of throwing or invoking git (Build->Fix style comparison)", async () => {
+      // The cwd is deliberately never created as a repo — if the dash-prefixed
+      // ref guard were skipped, git would be invoked against a nonexistent
+      // cwd and fail with a spawn/ENOENT error, not this clean message.
+      const repoDir = join(tmpDir, "not-created");
 
-      await expect(
-        computeDiffBetweenRefs(repoDir, "board/build", "--upload-pack=evil"),
-      ).rejects.toThrow(/dash-prefixed ref/i);
+      const result = await computeDiffBetweenRefs(repoDir, "board/build", "--upload-pack=evil");
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toMatch(/dash-prefixed ref/i);
+      }
     });
 
     it("returns an honest no-git result when git output exceeds a configured maxBuffer, never parsing truncated stdout", async () => {
@@ -712,15 +747,17 @@ diff --git a/mod.ts b/mod.ts
       expect(result.kind).toBe("no-git");
     });
 
-    it("rejects a dash-prefixed base ref defensively instead of passing it to git argv", async () => {
-      const repoDir = join(tmpDir, "repo");
-      initRepo(repoDir);
-      const wt = join(tmpDir, "wt");
-      runGit(repoDir, ["worktree", "add", "-b", "board/wt", wt, "HEAD"]);
+    it("returns an honest no-git response for a dash-prefixed base ref instead of throwing or invoking git", async () => {
+      // wt is deliberately never created — if the dash-prefixed ref guard
+      // were skipped, git would be invoked against a nonexistent cwd and
+      // fail with a spawn/ENOENT error, not this clean message.
+      const wt = join(tmpDir, "wt-not-created");
 
-      await expect(
-        computeDiffAgainstWorkingTree(wt, "--upload-pack=evil"),
-      ).rejects.toThrow(/dash-prefixed ref/i);
+      const result = await computeDiffAgainstWorkingTree(wt, "--upload-pack=evil");
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toMatch(/dash-prefixed ref/i);
+      }
     });
 
     it("returns an honest no-git result when git output exceeds a configured maxBuffer, never parsing truncated stdout (working-tree path, consistent with the ref path)", async () => {

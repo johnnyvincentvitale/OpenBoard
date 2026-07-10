@@ -2,9 +2,18 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { compareTaskEvidence } from "../../src/server/task-compare";
 import type { Task } from "../../src/shared";
+
+// Wraps execGit in a spy so tests can prove that task-compare's isValidRef()
+// never invokes `git rev-parse --verify <ref>` with an unsafe, dash-prefixed
+// ref, while every other diff-engine export keeps its real implementation.
+vi.mock("../../src/server/diff-engine", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/server/diff-engine")>();
+  return { ...actual, execGit: vi.fn(actual.execGit) };
+});
+import { execGit } from "../../src/server/diff-engine";
 
 function runGit(cwd: string, args: string[]): string {
   const env = Object.fromEntries(
@@ -394,5 +403,72 @@ describe("compareTaskEvidence", () => {
     expect(runGit(baseWt, ["rev-parse", "HEAD"])).toBe(beforeBaseHead);
     expect(runGit(targetWt, ["rev-parse", "HEAD"])).toBe(beforeTargetHead);
     expect(readFileSync(join(targetWt, "untracked.ts"), "utf-8")).toBe("should remain;\n");
+  });
+
+  describe("dash-prefixed ref safety", () => {
+    it("rejects a dash-prefixed base worktreeBranch before any rev-parse validation, returning an honest unsupported reason", async () => {
+      const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+      const baseTask = makeTask({
+        id: "task_base",
+        directory: repoDir,
+        worktreeBranch: "--upload-pack=evil",
+        baseBranch: "main",
+        baseCommit,
+      });
+      const targetTask = makeTask({
+        id: "task_target",
+        directory: repoDir,
+        worktreeBranch: "main",
+        baseBranch: "main",
+        baseCommit,
+      });
+
+      vi.mocked(execGit).mockClear();
+      const result = await compareTaskEvidence(baseTask, targetTask);
+
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.baseRef).toBeNull();
+        expect(result.reason).toMatch(/unsafe/i);
+      }
+      // isValidRef must never reach `git rev-parse --verify` with the unsafe ref.
+      const unsafeRevParseCalls = vi.mocked(execGit).mock.calls.filter(
+        ([, args]) => args.includes("--upload-pack=evil"),
+      );
+      expect(unsafeRevParseCalls).toHaveLength(0);
+    });
+
+    it("rejects a dash-prefixed target harnessBranch before any rev-parse validation, returning an honest unsupported reason", async () => {
+      const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+      const baseTask = makeTask({
+        id: "task_base",
+        directory: repoDir,
+        worktreeBranch: "main",
+        baseBranch: "main",
+        baseCommit,
+      });
+      const targetTask = makeTask({
+        id: "task_target",
+        harness: "claude-code",
+        directory: repoDir,
+        harnessBranch: "--upload-pack=evil",
+        baseBranch: "main",
+        baseCommit,
+      });
+
+      vi.mocked(execGit).mockClear();
+      const result = await compareTaskEvidence(baseTask, targetTask);
+
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toBeTruthy();
+      }
+      const unsafeRevParseCalls = vi.mocked(execGit).mock.calls.filter(
+        ([, args]) => args.includes("--upload-pack=evil"),
+      );
+      expect(unsafeRevParseCalls).toHaveLength(0);
+    });
   });
 });

@@ -2238,6 +2238,55 @@ describe("GET /api/tasks/:id/diff", () => {
     const body = await res.json();
     expect(["diff", "no-git"]).toContain(body.kind);
   });
+
+  it("returns a 200 honest no-git response for a dash-prefixed baseCommit instead of a 500", async () => {
+    const task = store.create({ title: "Review", description: "", directory: repoDir });
+    store.move(task.id, "review", 0);
+    store.update(task.id, { baseCommit: "--upload-pack=evil", dirtyAtDispatch: false });
+
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/diff`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe("no-git");
+    expect(body.reason).toMatch(/dash-prefixed ref/i);
+  });
+
+  it("returns a 200 honest no-git response for a dash-prefixed worktreeBranch on a Done card instead of a 500", async () => {
+    const task = store.create({ title: "Done", description: "", directory: repoDir });
+    store.move(task.id, "done", 0);
+    store.update(task.id, {
+      baseCommit: "abc123def",
+      worktreeBranch: "--upload-pack=evil",
+      dirtyAtDispatch: false,
+    });
+
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/diff`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe("no-git");
+    expect(body.reason).toMatch(/dash-prefixed ref/i);
+  });
+
+  it("returns a 200 honest no-git response for a dash-prefixed harnessBranch on an ACP harness card instead of a 500", async () => {
+    const task = store.create({ title: "Review", description: "", directory: repoDir });
+    store.move(task.id, "review", 0);
+    store.update(task.id, {
+      harness: "claude-code",
+      harnessCwd: repoDir,
+      harnessBranch: "--upload-pack=evil",
+      baseCommit: "abc123def",
+      dirtyAtDispatch: false,
+    });
+
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/diff`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe("no-git");
+    expect(body.reason).toMatch(/dash-prefixed ref/i);
+  });
 });
 
 // --- Parent/child dependency tests --------------------------------------------

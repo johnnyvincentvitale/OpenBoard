@@ -84,19 +84,40 @@ export async function execGit(cwd: string, args: string[]): Promise<GitResult> {
 }
 
 /**
- * Reject refs that start with `-` before they reach git argv construction.
- * A dash-prefixed ref (e.g. `--output=/etc/passwd`) could be interpreted as
- * a git option rather than a positional ref argument. This is a defense-in-
- * depth guard; ref validity and same-repo safety are still enforced by the
- * callers' existing checks.
- *
- * Throws an Error when the ref is dash-prefixed; callers should catch and
- * return an honest no-git result.
+ * Non-throwing check for refs that start with `-`. A dash-prefixed ref (e.g.
+ * `--output=/etc/passwd`) could be interpreted as a git option rather than a
+ * positional ref argument. This is a defense-in-depth guard; ref validity and
+ * same-repo safety are still enforced by the callers' existing checks.
+ */
+export function isSafeRef(ref: string): boolean {
+  return !ref.startsWith("-");
+}
+
+/**
+ * Throws an Error when the ref is dash-prefixed. Kept for callers (and unit
+ * tests) that want a throwing primitive; every public diff/compare entry
+ * point in this file uses the non-throwing `unsafeRefNoGit` boundary guard
+ * below instead, so a dash-prefixed stored ref becomes an honest no-git
+ * result rather than a rejected promise that routes/MCP would surface as an
+ * internal error.
  */
 export function assertSafeRef(ref: string): void {
-  if (ref.startsWith("-")) {
+  if (!isSafeRef(ref)) {
     throw new Error(`Refuses dash-prefixed ref for git argv safety: "${ref}"`);
   }
+}
+
+/**
+ * Boundary guard used by every public diff entry point before its first git
+ * invocation for a caller-supplied ref. Returns a no-git DiffResponse when
+ * the ref is unsafe, otherwise null.
+ */
+function unsafeRefNoGit(ref: string): DiffResponse | null {
+  if (isSafeRef(ref)) return null;
+  return {
+    kind: "no-git",
+    reason: `Refuses dash-prefixed ref for git argv safety: "${ref}"`,
+  };
 }
 
 /**
@@ -111,8 +132,10 @@ export async function computeDiffBetweenRefs(
   options: { contextLines?: number; maxBytes?: number; gitMaxBuffer?: number } = {},
 ): Promise<DiffResponse> {
   const contextLines = options.contextLines ?? DIFF_CONTEXT_LINES;
-  assertSafeRef(leftRef);
-  assertSafeRef(rightRef);
+  const leftRefGuard = unsafeRefNoGit(leftRef);
+  if (leftRefGuard) return leftRefGuard;
+  const rightRefGuard = unsafeRefNoGit(rightRef);
+  if (rightRefGuard) return rightRefGuard;
   const result = await git(cwd, ["diff", `--unified=${contextLines}`, leftRef, rightRef, "--"], options.gitMaxBuffer);
   if (result.maxBufferExceeded) {
     return {
@@ -169,7 +192,8 @@ export async function computeDiffAgainstWorkingTree(
   const contextLines = options.contextLines ?? DIFF_CONTEXT_LINES;
   const maxBytes = options.maxBytes ?? MAX_TOTAL_PATCH_BYTES;
 
-  assertSafeRef(baseRef);
+  const baseRefGuard = unsafeRefNoGit(baseRef);
+  if (baseRefGuard) return baseRefGuard;
   const diffResult = await git(cwd, ["diff", `--unified=${contextLines}`, baseRef, "--"], options.gitMaxBuffer);
   // git diff exits 1 when there are differences and 0 when there are none;
   // codes >= 128 are real errors. maxBuffer overflow is also a real error.
@@ -414,7 +438,8 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     if (!baseRef) {
       return { kind: "no-git", reason: "No base reference recorded for this worktree task" };
     }
-    assertSafeRef(baseRef);
+    const baseRefGuard = unsafeRefNoGit(baseRef);
+    if (baseRefGuard) return baseRefGuard;
     const result = await git(task.worktreePath, [
       "diff",
       `--unified=${DIFF_CONTEXT_LINES}`,
@@ -470,8 +495,10 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     if (!baseRef) {
       return { kind: "no-git", reason: "No base reference recorded for this completed worktree task" };
     }
-    assertSafeRef(baseRef);
-    assertSafeRef(task.worktreeBranch);
+    const baseRefGuard = unsafeRefNoGit(baseRef);
+    if (baseRefGuard) return baseRefGuard;
+    const worktreeBranchGuard = unsafeRefNoGit(task.worktreeBranch);
+    if (worktreeBranchGuard) return worktreeBranchGuard;
     const result = await git(task.directory, [
       "diff",
       `--unified=${DIFF_CONTEXT_LINES}`,
@@ -498,8 +525,10 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     const worktreeRef = task.harnessBranch ?? task.harnessCommit;
     if (worktreeRef) {
       const ref = task.baseCommit ?? "HEAD";
-      assertSafeRef(ref);
-      assertSafeRef(worktreeRef);
+      const refGuard = unsafeRefNoGit(ref);
+      if (refGuard) return refGuard;
+      const worktreeRefGuard = unsafeRefNoGit(worktreeRef);
+      if (worktreeRefGuard) return worktreeRefGuard;
       // Diff the harness worktree against the recorded baseline.
       const result = await git(task.harnessCwd, [
         "diff",
@@ -523,7 +552,8 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
 
   // --- In-place cards ---
   if (task.baseCommit) {
-    assertSafeRef(task.baseCommit);
+    const baseCommitGuard = unsafeRefNoGit(task.baseCommit);
+    if (baseCommitGuard) return baseCommitGuard;
     // Run working-tree diff against the recorded base commit, including
     // unstaged changes.
     const diffResult = await git(task.directory, [
