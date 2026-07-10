@@ -61,7 +61,7 @@ describe("task compare route", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns 200 with a comparison result for two known tasks", async () => {
+  it("returns 200 with a DiffResponse-style comparison result for two known tasks", async () => {
     const base = storeCreate(store, "Base", "/repo");
     const target = storeCreate(store, "Target", "/repo");
     const app = appFor(store);
@@ -69,11 +69,10 @@ describe("task compare route", () => {
     const res = await app.request(`/api/tasks/${target.id}/compare?baseTaskId=${encodeURIComponent(base.id)}`);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.kind).toBe("comparison");
+    expect(body.kind).toBe("no-git"); // /repo is not a real git repo
     expect(body.baseTaskId).toBe(base.id);
     expect(body.targetTaskId).toBe(target.id);
-    expect(Array.isArray(body.files)).toBe(true);
-    expect(Array.isArray(body.unavailable)).toBe(true);
+    expect(body.reason).toBeTruthy();
   });
 
   it("URL-decodes task ids", async () => {

@@ -1,9 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { computeDiff, execGit, computeDiffBetweenRefs, parseUnifiedDiff, capBytes } from "../../src/server/diff-engine";
+import {
+  computeDiff,
+  execGit,
+  computeDiffBetweenRefs,
+  computeDiffAgainstWorkingTree,
+  resolveGitRepoRoot,
+  resolveGitCommonDir,
+  parseUnifiedDiff,
+  capBytes,
+} from "../../src/server/diff-engine";
 import type { DiffFile, Task } from "../../src/shared";
 
 function runGit(cwd: string, args: string[]): string {
@@ -564,6 +573,90 @@ diff --git a/mod.ts b/mod.ts
         expect(result.files.map((f) => f.file)).toEqual(["feat.ts"]);
         expect(result.files[0].status).toBe("added");
       }
+    });
+  });
+
+  describe("computeDiffAgainstWorkingTree", () => {
+    it("diffs a base ref against the current working tree including untracked files", async () => {
+      const repoDir = join(tmpDir, "repo");
+      const baseCommit = initRepo(repoDir);
+
+      const wt = join(tmpDir, "wt");
+      runGit(repoDir, ["worktree", "add", "-b", "board/wt", wt, "HEAD"]);
+      writeFileSync(join(wt, "tracked.ts"), "tracked change;\n");
+      writeFileSync(join(wt, "untracked.ts"), "untracked content;\n");
+
+      const result = await computeDiffAgainstWorkingTree(wt, baseCommit);
+      expect(result.kind).toBe("diff");
+      if (result.kind === "diff") {
+        const files = result.files.map((f) => f.file).sort();
+        expect(files).toEqual(["tracked.ts", "untracked.ts"]);
+        expect(result.root).toBe(wt);
+      }
+    });
+
+    it("returns an empty diff when the working tree matches the base ref", async () => {
+      const repoDir = join(tmpDir, "repo");
+      const baseCommit = initRepo(repoDir);
+
+      const wt = join(tmpDir, "wt");
+      runGit(repoDir, ["worktree", "add", "-b", "board/wt", wt, "HEAD"]);
+
+      const result = await computeDiffAgainstWorkingTree(wt, baseCommit);
+      expect(result.kind).toBe("diff");
+      if (result.kind === "diff") {
+        expect(result.files).toEqual([]);
+      }
+    });
+
+    it("returns no-git when the base ref does not exist", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      const wt = join(tmpDir, "wt");
+      runGit(repoDir, ["worktree", "add", "-b", "board/wt", wt, "HEAD"]);
+
+      const result = await computeDiffAgainstWorkingTree(wt, "deadbeef");
+      expect(result.kind).toBe("no-git");
+    });
+  });
+
+  describe("resolveGitRepoRoot and resolveGitCommonDir", () => {
+    it("resolve the repo root and shared git dir for a normal repo", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+
+      const root = await resolveGitRepoRoot(repoDir);
+      const common = await resolveGitCommonDir(repoDir);
+      expect(root).toBe(realpathSync(repoDir));
+      expect(common).toBe(realpathSync(join(repoDir, ".git")));
+    });
+
+    it("share a common git dir across worktrees of the same repo", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+
+      const wtA = join(tmpDir, "wtA");
+      const wtB = join(tmpDir, "wtB");
+      runGit(repoDir, ["worktree", "add", "-b", "board/a", wtA, "HEAD"]);
+      runGit(repoDir, ["worktree", "add", "-b", "board/b", wtB, "HEAD"]);
+
+      const rootA = await resolveGitRepoRoot(wtA);
+      const rootB = await resolveGitRepoRoot(wtB);
+      expect(rootA).toBe(realpathSync(wtA));
+      expect(rootB).toBe(realpathSync(wtB));
+      expect(rootA).not.toBe(rootB);
+
+      const commonA = await resolveGitCommonDir(wtA);
+      const commonB = await resolveGitCommonDir(wtB);
+      expect(commonA).toBe(commonB);
+      expect(commonA).not.toBe(realpathSync(join(wtA, ".git")));
+    });
+
+    it("return null for a non-git directory", async () => {
+      const nonRepo = join(tmpDir, "not-a-repo");
+      mkdirSync(nonRepo, { recursive: true });
+      expect(await resolveGitRepoRoot(nonRepo)).toBeNull();
+      expect(await resolveGitCommonDir(nonRepo)).toBeNull();
     });
   });
 });

@@ -14,7 +14,9 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { realpathSync } from "node:fs";
 import { open, readFile, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import type { DiffFile, DiffResponse, Task } from "../shared";
 
 const execFileAsync = promisify(execFile);
@@ -89,6 +91,77 @@ export async function computeDiffBetweenRefs(
   const maxBytes = options.maxBytes ?? MAX_TOTAL_PATCH_BYTES;
   const capped = capBytes(files, maxBytes);
   return { kind: "diff", files: capped.files, capped: capped.capped };
+}
+
+/**
+ * Resolve the absolute filesystem root of the git repository containing `cwd`.
+ */
+export async function resolveGitRepoRoot(cwd: string): Promise<string | null> {
+  const result = await git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (result.code !== 0 || !result.stdout.trim()) return null;
+  return realpathSync(result.stdout.trim());
+}
+
+/**
+ * Resolve the absolute path to the shared git directory for the repository
+ * containing `cwd`. Worktrees of the same repo share a git-common-dir, making
+ * this the canonical identity for same-repo checks. The result is symlink-
+ * resolved so worktree paths on macOS (/var -> /private/var) compare cleanly.
+ */
+export async function resolveGitCommonDir(cwd: string): Promise<string | null> {
+  const result = await git(cwd, ["rev-parse", "--git-common-dir"]);
+  if (result.code !== 0 || !result.stdout.trim()) return null;
+  const common = result.stdout.trim();
+  const resolved = isAbsolute(common) ? common : resolve(cwd, common);
+  return realpathSync(resolved);
+}
+
+/**
+ * Compute the diff from a durable base ref to a live working tree directory.
+ * Includes tracked changes and untracked files, with the same binary/large
+ * guards and byte cap as computeDiff. Used by task-compare when the target
+ * card has a live worktree and the base card has a durable output ref.
+ */
+export async function computeDiffAgainstWorkingTree(
+  cwd: string,
+  baseRef: string,
+  options: { contextLines?: number; maxBytes?: number } = {},
+): Promise<DiffResponse> {
+  const contextLines = options.contextLines ?? DIFF_CONTEXT_LINES;
+  const maxBytes = options.maxBytes ?? MAX_TOTAL_PATCH_BYTES;
+
+  const diffResult = await git(cwd, ["diff", `--unified=${contextLines}`, baseRef]);
+  // git diff exits 1 when there are differences and 0 when there are none;
+  // codes >= 128 are real errors.
+  if (diffResult.code >= 128) {
+    return {
+      kind: "no-git",
+      reason: `Working-tree diff failed: ${(diffResult.stderr || diffResult.stdout).trim() || "unknown git error"}`,
+    };
+  }
+
+  let files = parseUnifiedDiff(diffResult.stdout);
+  let forcedCapped = false;
+
+  const untrackedResult = await git(cwd, ["ls-files", "--others", "--exclude-standard"]);
+  if (untrackedResult.code === 0) {
+    const untrackedPaths = untrackedResult.stdout
+      .split("\n")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    for (const path of untrackedPaths) {
+      const { file: df, forcedCap } = await untrackedFileDiff(cwd, path);
+      files.push(df);
+      if (forcedCap) forcedCapped = true;
+    }
+  }
+
+  if (files.length === 0) {
+    return { kind: "diff", files: [], capped: false, root: cwd };
+  }
+
+  const capped = capBytes(files, maxBytes);
+  return { kind: "diff", files: capped.files, capped: capped.capped || forcedCapped, root: cwd };
 }
 
 /**
