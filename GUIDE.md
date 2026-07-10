@@ -335,7 +335,7 @@ the worktree. Conflicts are reported, never forced. Rule of thumb: isolate
 whenever more than one card can touch the same repo, and press **`v`** on the
 Review card to read the worktree diff before integrating.
 
-**Fix it yourself without leaving the diff.** From the DiffView (`v`), press
+**Fix it yourself without leaving the diff.** From a Review card's DiffView (`v`), press
 **`e`** to open the selected file at the selected hunk's line in your own
 editor — `$VISUAL`/`$EDITOR`, whichever is set (`$VISUAL` wins if both are).
 Terminal editors (vim, nvim, vi, emacs, emacsclient, nano, micro, kak, hx) take
@@ -349,6 +349,9 @@ rides straight into the same Integrate — no separate PR round trip. Requires a
 **local board** and a **configured editor**; there's no fallback guessing, so
 an unset `$EDITOR` on a remote board fails loud with a status message instead
 of silently doing nothing.
+
+On a Done card, `v` opens the historical task diff read-only. Edit and commit
+actions are omitted, and pressing `e` reports that historical files cannot be edited.
 
 ## 9. Harnesses: OpenCode, Claude Code, and other ACP agents
 

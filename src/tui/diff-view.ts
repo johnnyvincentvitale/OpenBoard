@@ -32,6 +32,8 @@ export interface SelectedHunk {
 export interface DiffViewState {
   taskId: string;
   sourceLabel: string;
+  /** Done-card evidence is historical and must never expose edit/commit actions. */
+  historical: boolean;
   dirtyAtDispatch: boolean;
   loading: boolean;
   error?: string;
@@ -58,15 +60,16 @@ export function diffSourceLabel(task: Pick<Task, "harness" | "isolation">): stri
   return "working tree diff";
 }
 
-/** `v` only opens the diff view for Review-column agent cards, never manual/PM cards. */
+/** `v` opens current Review evidence or historical Done evidence for agent cards. */
 export function canOpenDiffView(task: Pick<Task, "column" | "type"> | undefined): boolean {
-  return Boolean(task) && task!.column === "review" && task!.type !== "manual";
+  return Boolean(task) && (task!.column === "review" || task!.column === "done") && task!.type !== "manual";
 }
 
 export function createLoadingDiffViewState(task: Task): DiffViewState {
   return {
     taskId: task.id,
     sourceLabel: diffSourceLabel(task),
+    historical: task.column === "done",
     dirtyAtDispatch: task.dirtyAtDispatch,
     loading: true,
     capped: false,
@@ -440,19 +443,21 @@ export function filetypeForFile(file: string): string {
 }
 
 export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
-  if (!state) return "select a Review card";
-  if (state.loading) return `${state.sourceLabel} · loading…`;
-  if (state.error) return `${state.sourceLabel} · error: ${state.error}`;
-  if (state.kind === "no-git") return `${state.sourceLabel} · no git evidence`;
+  if (!state) return "select a Review or Done card";
+  const sourceLabel = state.historical ? `historical ${state.sourceLabel}` : state.sourceLabel;
+  if (state.loading) return `${sourceLabel} · loading…`;
+  if (state.error) return `${sourceLabel} · error: ${state.error}`;
+  if (state.kind === "no-git") return `${sourceLabel} · no git evidence`;
   const fileWord = state.files.length === 1 ? "file" : "files";
   const dirty = state.dirtyAtDispatch ? " · includes pre-existing changes" : "";
   const capped = state.capped ? " · capped" : "";
-  return `${state.sourceLabel} · ${state.files.length} ${fileWord}${dirty}${capped}`;
+  return `${sourceLabel} · ${state.files.length} ${fileWord}${dirty}${capped}`;
 }
 
 export function diffViewKeyHints(state?: DiffViewState): string {
   const vertical = state?.fileSelectionLocked ? "↑/↓ scroll · enter files" : "↑/↓ files · enter scroll";
-  return `${vertical} · ←/→ hunks · m mark · c commit · t split/inline · e edit · r refresh · b back · q quit`;
+  const mutableActions = state?.historical ? "" : " · c commit · e edit";
+  return `${vertical} · ←/→ hunks · m mark · t split/inline${mutableActions} · r refresh · b back · q quit`;
 }
 
 export interface DiffViewTheme {

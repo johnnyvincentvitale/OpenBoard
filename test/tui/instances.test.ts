@@ -375,7 +375,7 @@ describe("TUI label cleanup", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("a archive · d delete");
+    expect(text).toContain("v diff · a archive · d delete");
     expect(text).toContain("m move · ↵ details");
     expect(text).not.toContain("r run · R retry");
     expect(text).not.toContain("s sync");
@@ -2158,6 +2158,7 @@ describe("TUI selected Review diff stat", () => {
       diffView: {
         taskId: "review-card",
         sourceLabel: "worktree diff",
+        historical: false,
         dirtyAtDispatch: false,
         loading: false,
         kind: "diff",

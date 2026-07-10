@@ -66,12 +66,13 @@ function diffFile(overrides: Partial<DiffFile> = {}): DiffFile {
 }
 
 describe("diff view entry gate", () => {
-  it("only allows opening the diff view for Review-column agent cards", () => {
+  it("allows Review and Done agent cards while blocking active and manual cards", () => {
     expect(canOpenDiffView(task({ column: "review" }))).toBe(true);
+    expect(canOpenDiffView(task({ column: "done" }))).toBe(true);
     expect(canOpenDiffView(task({ column: "todo" }))).toBe(false);
     expect(canOpenDiffView(task({ column: "in_progress" }))).toBe(false);
-    expect(canOpenDiffView(task({ column: "done" }))).toBe(false);
     expect(canOpenDiffView(task({ column: "review", type: "manual" }))).toBe(false);
+    expect(canOpenDiffView(task({ column: "done", type: "manual" }))).toBe(false);
     expect(canOpenDiffView(undefined)).toBe(false);
   });
 });
@@ -145,7 +146,13 @@ describe("diff view header label", () => {
       { kind: "diff", files: [diffFile(), diffFile({ file: "b.ts" })], capped: false },
     );
     expect(diffViewHeaderLabel(clean)).toBe("working tree diff · 2 files");
-    expect(diffViewHeaderLabel(undefined)).toContain("select a Review card");
+    expect(diffViewHeaderLabel(undefined)).toContain("select a Review or Done card");
+
+    const historical = applyDiffResponse(
+      createLoadingDiffViewState(task({ column: "done", isolation: "worktree" })),
+      { kind: "diff", files: [diffFile()], capped: false },
+    );
+    expect(diffViewHeaderLabel(historical)).toBe("historical worktree diff · 1 file");
   });
 
   it("surfaces capped server diffs in the header label", () => {
@@ -198,6 +205,10 @@ describe("diff file navigation", () => {
     expect(diffViewKeyHints(base)).toContain("↑/↓ files · enter scroll");
     expect(diffViewKeyHints(locked)).toContain("e edit");
     expect(diffViewKeyHints(base)).toContain("e edit");
+
+    const historical = createLoadingDiffViewState(task({ column: "done" }));
+    expect(diffViewKeyHints(historical)).not.toContain("e edit");
+    expect(diffViewKeyHints(historical)).not.toContain("c commit");
   });
 });
 

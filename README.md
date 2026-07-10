@@ -28,8 +28,8 @@ The public repo is TUI/CLI/server-first:
   autonomously reads/writes/runs to completion.
 - **Cards move themselves.** The dispatcher watches OpenCode's `/event` stream and advances
   the card to Review when the session goes idle; the UI updates live over SSE.
-- **Review diffs in place.** On Review cards, press `v` to open the full-screen diff view
-  before syncing, integrating, or accepting the work.
+- **Review current and historical diffs in place.** On Review or Done cards, press `v` to
+  open the full-screen diff view. Done-card diffs are historical and read-only.
 - **Fix it without leaving the diff.** Press `e` on a DiffView selection to open that file —
   at the selected hunk's line — in `$VISUAL`/`$EDITOR` (or an `OPENBOARD_EDITOR` template).
   Terminal editors take over the terminal until you quit; GUI editors open detached. The diff
@@ -300,7 +300,8 @@ requires `confirmReviewed: true`.
 Review and Done cards expose `GET /api/tasks/:id/diff`, also available to MCP
 clients as `task_diff`; keeping it available after acceptance lets dependent
 cards inspect a non-integrated parent's changes. The TUI uses the same endpoint
-for the Review-only `v` full-screen diff view. To Do and In Progress cards return
+for the `v` full-screen diff view; Done-card views are historical and block edit
+or commit actions. To Do and In Progress cards return
 409, unknown tasks return 404, and missing or removed git evidence returns a
 readable no-git response instead of crashing.
 
@@ -421,6 +422,9 @@ From a Review card's DiffView (`v`), press **`e`** to open the currently selecte
 selected hunk's line — in your own editor. This is the in-app fix-then-integrate path: no
 in-app editor, just a suspend/resume handoff to the terminal (or a detached launch for GUI
 editors).
+
+Done-card DiffViews are historical and read-only. They omit edit/commit actions, and pressing
+`e` reports that historical files cannot be edited.
 
 - **Resolution order:** `OPENBOARD_EDITOR` (a command template) → `$VISUAL` → `$EDITOR` → a
   clear "no editor configured" status message. Nothing ever falls back to a platform default

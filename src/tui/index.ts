@@ -3216,7 +3216,7 @@ function filesTabScrollRows(state: TuiState, task: Task): number {
 function renderFilesTab(ui: OpenTui, state: TuiState, task: Task) {
   const scrollId = `board-detail-files-${task.id}`;
   if (!canOpenDiffView(task)) {
-    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "Files are only available on Review cards", fg: COLORS.muted, height: 1 }));
+    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "Files are only available on Review or Done agent cards", fg: COLORS.muted, height: 1 }));
   }
 
   const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
@@ -3256,9 +3256,10 @@ function renderFilesTab(ui: OpenTui, state: TuiState, task: Task) {
 function filesTabFooter(state: TuiState, task: Task): string {
   const files = reviewDiffFiles(state, task);
   const detail = filesDetailState(state, task.id, files.length);
+  const commitHint = task.column === "review" ? " · c commit" : "";
   return detail.mode === "patch"
-    ? "↑/↓ scroll · c commit · esc files · ←/→ tabs"
-    : "↑/↓ files · enter patch · c commit · esc details · ←/→ tabs";
+    ? `↑/↓ scroll${commitHint} · esc files · ←/→ tabs`
+    : `↑/↓ files · enter patch${commitHint} · esc details · ←/→ tabs`;
 }
 
 function reviewDiffFiles(state: TuiState, task: Task | undefined): Array<{ file: string; additions: number; deletions: number; patch?: string }> {
@@ -3590,7 +3591,9 @@ const SELECTED_CARD_SHORTCUTS: Record<SelectedCardAction, SelectedCardShortcut> 
 
 function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
   if (task.column === "done") {
-    return shortcutList("archive", "delete", "move", "details");
+    return task.type === "manual"
+      ? shortcutList("archive", "delete", "move", "details")
+      : shortcutList("view-diff", "archive", "delete", "move", "details");
   }
 
   if (task.runState === "error") {
@@ -3653,7 +3656,7 @@ function selectedCardActionUnavailableMessage(action: SelectedCardAction, task: 
     case "abort":
       return "abort is only available for In Progress cards";
     case "view-diff":
-      return "diff view is only available for Review cards";
+      return "diff view is only available for Review or Done agent cards";
     case "integrate":
       return "integrate is only available for Review cards";
     case "discard-worktree":
@@ -3917,7 +3920,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["g", "init git and run"],
     ["n", "new task"],
     ["p", "settings"],
-    ["v", "view diff (Review cards)"],
+    ["v", "view diff (Review or Done cards)"],
     ["u", "refresh board"],
     ["b", "switch instances"],
     ["esc", "detach / close overlay"],
@@ -5212,7 +5215,7 @@ async function openDiffViewForSelection(state: TuiState, actions: TuiActions): P
   clearPendingConfirmation(state);
   const task = selectedTask(state);
   if (!canOpenDiffView(task)) {
-    state.status = "diff view is only available for Review cards";
+    state.status = "diff view is only available for Review or Done agent cards";
     actions.render();
     return;
   }
@@ -5354,6 +5357,12 @@ export function editorResolutionEnv(env: Record<string, string | undefined>): Re
 }
 
 async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): Promise<void> {
+  if (state.diffView?.historical) {
+    state.status = "historical diff: files cannot be edited";
+    actions.render();
+    return;
+  }
+
   if (!isLocalBoardUrl(state.boardUrl)) {
     state.status = "editor needs a local board";
     actions.render();
@@ -5404,6 +5413,11 @@ async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): P
 
 async function commitSelectedDiffViewFile(state: TuiState, actions: TuiActions): Promise<void> {
   const diffView = state.diffView;
+  if (diffView?.historical) {
+    state.status = "historical diff: files cannot be committed";
+    actions.render();
+    return;
+  }
   if (!diffView || diffView.kind !== "diff") {
     state.status = "no diff file selected";
     actions.render();
@@ -5420,6 +5434,11 @@ async function commitSelectedDiffViewFile(state: TuiState, actions: TuiActions):
 
 async function commitSelectedFilesTabFile(state: TuiState, actions: TuiActions): Promise<void> {
   const task = selectedTask(state);
+  if (task?.column === "done") {
+    state.status = "historical diff: files cannot be committed";
+    actions.render();
+    return;
+  }
   const files = reviewDiffFiles(state, task);
   if (!task || files.length === 0) {
     state.status = "no file selected";
@@ -7345,7 +7364,7 @@ function isSameReviewCommitStatusIdentity(cache: ReviewCommitStatusState | undef
 }
 
 function canFetchReviewCommitStatus(task: Task | undefined): task is Task {
-  return Boolean(task && canOpenDiffView(task) && task.worktreePath);
+  return Boolean(task && task.column === "review" && canOpenDiffView(task) && task.worktreePath);
 }
 
 function reconcileReviewCommitStatusCache(cache: ReviewCommitStatusState | undefined, task: Task | undefined): ReviewCommitStatusState | undefined {

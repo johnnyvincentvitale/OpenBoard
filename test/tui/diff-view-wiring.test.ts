@@ -132,8 +132,39 @@ describe("TUI diff view entry (v)", () => {
     expect(s.diffView?.files).toHaveLength(1);
   });
 
-  it("does not open the diff view for To Do, In Progress, Done, or manual cards", async () => {
-    const columns: Column[] = ["todo", "in_progress", "done"];
+  it("opens a Done card's historical diff and blocks edit and commit actions", async () => {
+    const doneTask = task("done-1", "done", { isolation: "worktree" });
+    const s = state({ tasks: [doneTask], selectedTaskId: "done-1" });
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [{ file: "src/a.ts", additions: 2, deletions: 1, status: "modified" as const, patch: "@@ -1,1 +1,1 @@\n-a\n+b\n" }],
+      capped: false,
+      root: "/repo",
+    }));
+    const commitTaskFile = vi.fn();
+    const a = actions({ client: { getTaskDiff, commitTaskFile } });
+
+    await handleKeypress({ sequence: "v", name: "v" } as any, s, a);
+
+    expect(s.viewState.view).toBe("diff");
+    expect(s.diffView?.historical).toBe(true);
+    expect(getTaskDiff).toHaveBeenCalledWith("done-1");
+    expect(textOf(renderApp(fakeUi(), s))).toContain("historical worktree diff");
+    expect(textOf(renderApp(fakeUi(), s))).not.toContain("e edit");
+    expect(textOf(renderApp(fakeUi(), s))).not.toContain("c commit");
+
+    await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
+    expect(a.editorSpawner.runTerminalEditor).not.toHaveBeenCalled();
+    expect(a.editorSpawner.spawnGuiEditor).not.toHaveBeenCalled();
+    expect(s.status).toBe("historical diff: files cannot be edited");
+
+    await handleKeypress({ sequence: "c", name: "c" } as any, s, a);
+    expect(commitTaskFile).not.toHaveBeenCalled();
+    expect(s.status).toBe("historical diff: files cannot be committed");
+  });
+
+  it("does not open the diff view for To Do, In Progress, or manual cards", async () => {
+    const columns: Column[] = ["todo", "in_progress"];
     for (const column of columns) {
       const t = task(`card-${column}`, column);
       const s = state({ tasks: [t], selectedTaskId: t.id });
@@ -149,6 +180,13 @@ describe("TUI diff view entry (v)", () => {
     await handleKeypress({ sequence: "v", name: "v" } as any, s, a);
     expect(s.viewState.view).not.toBe("diff");
     expect(a.client.getTaskDiff).not.toHaveBeenCalled();
+
+    const manualDone = task("manual-done", "done", { type: "manual" });
+    const manualDoneState = state({ tasks: [manualDone], selectedTaskId: manualDone.id });
+    const manualDoneActions = actions();
+    await handleKeypress({ sequence: "v", name: "v" } as any, manualDoneState, manualDoneActions);
+    expect(manualDoneState.viewState.view).not.toBe("diff");
+    expect(manualDoneActions.client.getTaskDiff).not.toHaveBeenCalled();
   });
 
   it("renders a readable no-git message instead of crashing", async () => {
