@@ -16,6 +16,8 @@ import type {
   PermissionOverrideAction,
   PermissionOverrideCategory,
   PermissionOverrides,
+  BlockedAcceptance,
+  BlockedAnswerContext,
   RespondPermissionInput,
   RespondPermissionOutcome,
   RosterAgent,
@@ -185,15 +187,16 @@ export interface BoardClient {
   createTasks(input: CreateBoardTaskInput[]): Promise<Task[]>;
   updateTask(id: string, input: UpdateBoardTaskInput): Promise<Task>;
   runTask(id: string): Promise<Task>;
-  retryTask(id: string, feedback?: string): Promise<Task>;
+  retryTask(id: string, feedback?: string, blockedAnswer?: BlockedAnswerContext): Promise<Task>;
+  answerBlockedTask(id: string, answer: string, context: BlockedAnswerContext): Promise<Task>;
   abortTask(id: string): Promise<Task>;
-  moveTask(id: string, column: Column, position: number, completedBy?: string | null): Promise<Task[]>;
+  moveTask(id: string, column: Column, position: number, completedBy?: string | null, blockedAcceptance?: BlockedAcceptance): Promise<Task[]>;
   deleteTask(id: string, options?: { forceWorktree?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; message?: string }>;
   initGitAndRun(id: string): Promise<Task>;
   syncTask(id: string): Promise<MergeOutcome>;
   getTaskCommitStatus(id: string, targetBranch?: string): Promise<WorktreeCommitStatus>;
   commitTaskFile(id: string, file: string, message?: string): Promise<FileCommitOutcome>;
-  integrateTask(id: string, targetBranch?: string, options?: { commitRemaining?: boolean }): Promise<MergeOutcome>;
+  integrateTask(id: string, targetBranch?: string, options?: { commitRemaining?: boolean; blockedAcceptance?: BlockedAcceptance }): Promise<MergeOutcome>;
   discardWorktree(id: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
   resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome>;
   linkTasks(parentId: string, childId: string): Promise<Task>;
@@ -321,12 +324,15 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       });
     },
     runTask: (id) => postJson<Task>(resolved, buildTaskPath.run(id), {}),
-    retryTask: (id, feedback) =>
-      postJson<Task>(resolved, buildTaskPath.retry(id), feedback === undefined ? {} : { feedback }),
+    retryTask: (id, feedback, blockedAnswer) =>
+      postJson<Task>(resolved, buildTaskPath.retry(id), { ...(feedback === undefined ? {} : { feedback }), ...(blockedAnswer === undefined ? {} : { blockedAnswer }) }),
+    answerBlockedTask: (id, answer, context) =>
+      postJson<Task>(resolved, buildTaskPath.retry(id), { feedback: answer, blockedAnswer: context }),
     abortTask: (id) => postJson<Task>(resolved, buildTaskPath.abort(id), {}),
-    moveTask: (id, column, position, completedBy) => {
-      const body: { column: Column; position: number; completedBy?: string | null } = { column, position };
+    moveTask: (id, column, position, completedBy, blockedAcceptance) => {
+      const body: { column: Column; position: number; completedBy?: string | null; blockedAcceptance?: BlockedAcceptance } = { column, position };
       if (completedBy !== undefined) body.completedBy = completedBy;
+      if (blockedAcceptance !== undefined) body.blockedAcceptance = blockedAcceptance;
       return postJson<Task[]>(resolved, buildTaskPath.move(id), body);
     },
     deleteTask: (id, options) => {
@@ -365,6 +371,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
         {
           ...(targetBranch === undefined ? {} : { targetBranch }),
           ...(options?.commitRemaining ? { commitRemaining: true } : {}),
+          ...(options?.blockedAcceptance === undefined ? {} : { blockedAcceptance: options.blockedAcceptance }),
         },
       ),
     discardWorktree: (id, options) =>

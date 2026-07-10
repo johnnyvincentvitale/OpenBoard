@@ -454,7 +454,7 @@ describe("auth regression — route categories", () => {
         headers: authHeaders(),
       });
       expect(res.status).toBe(202);
-      expect(dispatcher.retry).toHaveBeenCalledWith(task.id, undefined);
+      expect(dispatcher.retry).toHaveBeenCalledWith(task.id, undefined, undefined);
     });
   });
 

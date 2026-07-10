@@ -6,7 +6,8 @@ export type DonePolicyErrorCode =
   | "blocked_acceptance_required"
   | "blocked_acceptance_incomplete"
   | "blocked_acceptance_stale"
-  | "blocked_acceptance_attribution_required";
+  | "blocked_acceptance_attribution_required"
+  | "blocked_acceptance_unexpected";
 
 export interface DonePolicyError {
   code: DonePolicyErrorCode;
@@ -26,6 +27,9 @@ export interface DonePolicyInput {
 
 export function evaluateDonePolicy(input: DonePolicyInput): DonePolicyResult {
   if (!isCurrentlyBlocked(input.task)) {
+    if (input.blockedAcceptance) {
+      return blockedError("blocked_acceptance_unexpected", "Blocked acceptance is only valid for currently blocked tasks");
+    }
     return { ok: true, acceptedBy: normalizeAttribution(input.completedBy ?? input.acceptor), blockedAccepted: false };
   }
 

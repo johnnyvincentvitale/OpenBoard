@@ -1,3 +1,4 @@
+import type { BlockedAnswerContext } from "./blocked-task";
 import type { Column } from "./columns";
 import type { WorktreeOrphan } from "./diagnostics";
 
@@ -601,7 +602,7 @@ export interface Dispatcher {
   /** create session in task.directory → prompt with task.description → link + move to in_progress. */
   run(taskId: string): Promise<Task>;
   /** Send follow-up input (feedback) to the task's existing session and re-run. */
-  retry(taskId: string, feedback?: string): Promise<Task>;
+  retry(taskId: string, feedback?: string, blockedAnswer?: BlockedAnswerContext): Promise<Task>;
   /** Abort the task's running session. */
   abort(taskId: string): Promise<void>;
   /** `git init` + commit the task's directory (answering the non-repo prompt), then run it. */
@@ -613,7 +614,7 @@ export interface Dispatcher {
   /** Commit one file's current worktree changes onto the task branch. */
   commitFile(taskId: string, file: string, message?: string): Promise<FileCommitOutcome>;
   /** Merge the task's worktree branch into `targetBranch`, remove the worktree, keep the branch. */
-  integrate(taskId: string, targetBranch?: string, options?: { commitRemaining?: boolean }): Promise<MergeOutcome>;
+  integrate(taskId: string, targetBranch?: string, options?: { commitRemaining?: boolean; blockedAcceptance?: BlockedAcceptance }): Promise<MergeOutcome>;
   /** Delete a task and, when safe/confirmed, remove its worktree while keeping the branch. */
   removeTask(taskId: string, options?: { force?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; worktree?: WorktreeCleanupOutcome; message?: string }>;
   /** Remove a Review card's worktree without merging; keeps the branch and card. */

@@ -17,6 +17,13 @@ import { cleanupTestWorkspace, setupTestWorkspace } from "../test-workspace";
 let workspaceDir: string;
 let repoDir: string;
 
+function deferred<T = unknown>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   const ws = setupTestWorkspace();
   workspaceDir = ws.workspace;
@@ -1393,7 +1400,7 @@ describe("POST /api/tasks/:id/retry", () => {
     expect(body.id).toBe(task.id);
 
     expect(dispatcher.retry).toHaveBeenCalledTimes(1);
-    expect(dispatcher.retry).toHaveBeenCalledWith(task.id, "try again");
+    expect(dispatcher.retry).toHaveBeenCalledWith(task.id, "try again", undefined);
   });
 
   it("allows an empty body (feedback optional)", async () => {
@@ -1403,7 +1410,103 @@ describe("POST /api/tasks/:id/retry", () => {
     const res = await app.request(`/api/tasks/${task.id}/retry`, { method: "POST" });
 
     expect(res.status).toBe(202);
-    expect(dispatcher.retry).toHaveBeenCalledWith(task.id, undefined);
+    expect(dispatcher.retry).toHaveBeenCalledWith(task.id, undefined, undefined);
+  });
+
+  it("accepts an exact blocked answer, records it, and dispatches answeredBlock retry", async () => {
+    const task = store.create({ title: "A", description: "do it", directory: repoDir });
+    store.setCompletion(task.id, { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "Need choice", reportedAt: 123 }, "reported");
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}/retry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ feedback: "Use A", blockedAnswer: { blockedReportedAt: 123, answeredBy: " Reviewer " } }),
+    });
+
+    expect(res.status).toBe(202);
+    expect(dispatcher.retry).toHaveBeenCalledWith(task.id, "Use A", { blockedReportedAt: 123, answeredBy: "Reviewer" });
+    const events = store.listEvents(task.id);
+    expect(events.map((event) => event.type).sort()).toEqual(["task_blocked_answered", "task_retried"]);
+    const answered = events.find((event) => event.type === "task_blocked_answered")!;
+    const retried = events.find((event) => event.type === "task_retried")!;
+    expect(answered.body).toMatchObject({ blockedReportedAt: 123, answeredBy: "Reviewer", question: "Need choice", answerProvided: true });
+    expect(answered.body).not.toHaveProperty("answer");
+    expect(retried.body).toMatchObject({ answeredBlock: true });
+  });
+
+  it("rejects stale, partial, and duplicate blocked answers without retrying", async () => {
+    const app = buildApp(store, dispatcher);
+    const blocked = store.create({ title: "A", description: "do it", directory: repoDir });
+    store.setCompletion(blocked.id, { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "Need choice", reportedAt: 123 }, "reported");
+    const done = store.create({ title: "B", description: "done", directory: repoDir });
+
+    for (const [id, blockedAnswer] of [
+      [blocked.id, { blockedReportedAt: 122, answeredBy: "Reviewer" }],
+      [blocked.id, { blockedReportedAt: 123 }],
+      [done.id, { blockedReportedAt: 123, answeredBy: "Reviewer" }],
+    ] as const) {
+      const res = await app.request(`/api/tasks/${id}/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ feedback: "Use A", blockedAnswer }),
+      });
+      expect(res.status).toBe(409);
+    }
+    const empty = await app.request(`/api/tasks/${blocked.id}/retry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ feedback: "  ", blockedAnswer: { blockedReportedAt: 123, answeredBy: "Reviewer" } }),
+    });
+    expect(empty.status).toBe(409);
+    expect(dispatcher.retry).not.toHaveBeenCalled();
+    expect(store.listEvents(blocked.id)).toEqual([]);
+  });
+
+  it("records blocked retry failure without answered/retried success events", async () => {
+    const task = store.create({ title: "A", description: "do it", directory: repoDir });
+    store.setCompletion(task.id, { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "Need choice", reportedAt: 123 }, "reported");
+    dispatcher.retry.mockRejectedValueOnce(new Error("prompt failed"));
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}/retry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ feedback: "Use A", blockedAnswer: { blockedReportedAt: 123, answeredBy: "Reviewer" } }),
+    });
+
+    expect(res.status).toBe(500);
+    expect(store.get(task.id)?.completion?.outcome).toBe("blocked");
+    expect(store.listEvents(task.id).map((event) => event.type)).toEqual(["task_blocked_retry_failed"]);
+  });
+
+  it("rejects a duplicate in-flight blocked answer and releases the guard after failure", async () => {
+    const task = store.create({ title: "A", description: "do it", directory: repoDir });
+    store.setCompletion(task.id, { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "Need choice", reportedAt: 123 }, "reported");
+    const first = deferred<Task>();
+    dispatcher.retry.mockReturnValueOnce(first.promise);
+    const app = buildApp(store, dispatcher);
+    const request = () => app.request(`/api/tasks/${task.id}/retry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ feedback: "Use A", blockedAnswer: { blockedReportedAt: 123, answeredBy: "Reviewer" } }),
+    });
+
+    const pending = request();
+    const duplicate = await request();
+    expect(duplicate.status).toBe(409);
+    expect((await duplicate.json()).error.code).toBe("blocked_answer_duplicate");
+    expect(dispatcher.retry).toHaveBeenCalledTimes(1);
+    expect(store.listEvents(task.id)).toEqual([]);
+
+    first.reject(new Error("prompt failed"));
+    await pending;
+    expect(store.listEvents(task.id).map((event) => event.type)).toEqual(["task_blocked_retry_failed"]);
+
+    dispatcher.retry.mockResolvedValueOnce(store.update(task.id, { runState: "running", runStartedAt: 456 })!);
+    const retry = await request();
+    expect(retry.status).toBe(202);
+    expect(dispatcher.retry).toHaveBeenCalledTimes(2);
   });
 
   it("returns 409 and does not dispatch retry for an archived task", async () => {
@@ -1546,6 +1649,50 @@ describe("POST /api/tasks/:id/move", () => {
     expect(moved.column).toBe("done");
     expect(moved.completedBy).toBe(USER_COMPLETED_BY);
     expect(store.get(a.id)?.completedBy).toBe(USER_COMPLETED_BY);
+  });
+
+  it("requires exact blocked acceptance before moving a blocked task to Done", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.setCompletion(a.id, { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "Need choice", reportedAt: 321 }, "reported");
+    const app = buildApp(store, dispatcher);
+
+    const denied = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "done", position: 0, completedBy: "Reviewer" }),
+    });
+    expect(denied.status).toBe(409);
+    expect((await denied.json()).error.requirement).toMatchObject({ blockedReportedAt: 321, completedBy: "required", question: "Need choice", transition: "move" });
+    expect(store.get(a.id)?.column).not.toBe("done");
+
+    const accepted = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "done", position: 0, completedBy: "Reviewer", blockedAcceptance: { acceptIncomplete: true, blockedReportedAt: 321 } }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(store.get(a.id)?.column).toBe("done");
+    expect(store.get(a.id)?.completion?.outcome).toBe("blocked");
+    expect(store.listEvents(a.id).find((event) => event.type === "task_blocked_accepted")?.body).toMatchObject({
+      completedBy: "Reviewer",
+      blockedReportedAt: 321,
+      question: "Need choice",
+      summary: "stuck",
+      residualRisk: "Need choice",
+      transition: "move",
+    });
+  });
+
+  it("rejects stray blocked acceptance on nonblocked Done moves", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "done", position: 0, blockedAcceptance: { acceptIncomplete: true, blockedReportedAt: 1 } }),
+    });
+    expect(res.status).toBe(409);
+    expect(store.get(a.id)?.column).not.toBe("done");
   });
 
   it("fires the advancer when a manual move lands the task in Done", async () => {

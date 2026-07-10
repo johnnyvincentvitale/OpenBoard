@@ -13,6 +13,7 @@ import {
   CURSOR_ACP_MODEL_PROVIDER,
   GEMINI_ACP_MODEL_PROVIDER,
   HERMES_MODEL_PROVIDER,
+  INTEGRATED_COMPLETED_BY,
   PERMISSION_OVERRIDE_ACTIONS,
   PERMISSION_OVERRIDE_CATEGORIES,
   PI_CODING_AGENT_MODEL_PROVIDER,
@@ -22,16 +23,37 @@ import {
   TASK_KINDS,
   TASK_TYPES,
   USER_COMPLETED_BY,
+  blockedQuestion,
   canAutoRun,
+  type BlockedAcceptance,
+  type BlockedAnswerContext,
   isColumn,
 } from "../../shared";
-import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
+import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CompletionReport, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, Task, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
 import { computeDiff } from "../diff-engine";
 import { fireChainAdvance, type ChainAdvancer } from "../chain-advancer";
 import { projectPendingPermissions } from "../dto";
+import { evaluateDonePolicy } from "../done-policy";
+
+const BLOCKED_ANSWER_MAX_LENGTH = 2000;
+const BLOCKED_ATTRIBUTION_MAX_LENGTH = 200;
+const inFlightBlockedAnswers = new Set<string>();
+
+class ConflictRouteError extends Error {
+  readonly status = 409;
+  readonly code: string;
+  readonly details?: Record<string, unknown>;
+
+  constructor(code: string, message: string, details?: Record<string, unknown>) {
+    super(message);
+    this.name = "ConflictRouteError";
+    this.code = code;
+    this.details = details;
+  }
+}
 
 function isReachableViaChildren(store: TaskStore, fromId: string, targetId: string): boolean {
   const visited = new Set<string>();
@@ -138,6 +160,7 @@ function isAcpOptions(value: unknown): value is AcpOptions {
 
 interface RetryTaskBody {
   feedback?: unknown;
+  blockedAnswer?: unknown;
 }
 
 /**
@@ -442,6 +465,7 @@ export function registerTaskRoutes(
 
   app.post(TASK_ROUTE_PATTERNS.retry, async (c) => {
     const id = c.req.param("id");
+    let blockedAnswerKey: string | undefined;
 
     try {
       assertRunnableActiveTask(store, id, "retry");
@@ -454,12 +478,42 @@ export function registerTaskRoutes(
       }
 
       const feedback = typeof body.feedback === "string" ? body.feedback : undefined;
+      const current = store.get(id);
+      if (!current) throw AdapterError.notFound(`Task not found: ${id}`);
+      const blockedAnswer = parseBlockedAnswer(body.blockedAnswer, current, feedback);
+      blockedAnswerKey = blockedAnswer ? `${id}:${blockedAnswer.blockedReportedAt}` : undefined;
+      if (blockedAnswerKey) {
+        if (inFlightBlockedAnswers.has(blockedAnswerKey)) {
+          throw new ConflictRouteError("blocked_answer_duplicate", "Blocked answer submission is already in flight");
+        }
+        inFlightBlockedAnswers.add(blockedAnswerKey);
+      }
+      const oldSessionId = current.sessionId ?? current.harnessSessionId;
+      const oldRunStartedAt = current.runStartedAt;
+      const question = current.completion ? blockedQuestion(current.completion) : undefined;
 
-      const task = await dispatcher.retry(id, feedback);
-      store.addEvent({ taskId: id, type: "task_retried", body: { sessionId: task.sessionId, runStartedAt: task.runStartedAt, feedbackProvided: feedback !== undefined } });
+      let task: Task;
+      try {
+        task = await dispatcher.retry(id, feedback, blockedAnswer);
+      } catch (err) {
+        if (blockedAnswer) {
+          store.addEvent({ taskId: id, type: "task_blocked_retry_failed", body: { blockedReportedAt: blockedAnswer.blockedReportedAt, answeredBy: blockedAnswer.answeredBy, question, error: err instanceof Error ? err.message : String(err) } });
+        }
+        throw err;
+      }
+      if (blockedAnswer) {
+        const newSessionId = task.sessionId ?? task.harnessSessionId;
+        const resumeMode = oldSessionId && oldSessionId === newSessionId ? "same-session" : "fresh-session";
+        store.addEvent({ taskId: id, type: "task_blocked_answered", body: { blockedReportedAt: blockedAnswer.blockedReportedAt, answeredBy: blockedAnswer.answeredBy, question, answerProvided: true, resumeMode } });
+        store.addEvent({ taskId: id, type: "task_retried", body: { oldSessionId, oldRunStartedAt, newSessionId, runStartedAt: task.runStartedAt, feedbackProvided: true, answeredBlock: true } });
+      } else {
+        store.addEvent({ taskId: id, type: "task_retried", body: { sessionId: task.sessionId ?? task.harnessSessionId, runStartedAt: task.runStartedAt, feedbackProvided: feedback !== undefined } });
+      }
       return c.json(task, 202);
     } catch (err) {
       return respondWithError(c, err);
+    } finally {
+      if (blockedAnswerKey) inFlightBlockedAnswers.delete(blockedAnswerKey);
     }
   });
 
@@ -502,10 +556,27 @@ export function registerTaskRoutes(
         throw AdapterError.validation("completedBy must be a string or null");
       }
 
-      store.move(id, column, position);
-
+      const task = store.get(id);
+      if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
+      const isBlockedDone = column === "done" && task.completion?.outcome === "blocked";
       const nextCompletedBy: string | null =
-        completedBy !== undefined ? (completedBy as string | null) : column === "done" ? USER_COMPLETED_BY : null;
+        completedBy !== undefined ? (completedBy as string | null) : column === "done" && !isBlockedDone ? USER_COMPLETED_BY : null;
+
+      if (column === "done") {
+        const policy = evaluateDonePolicy({
+          task,
+          completedBy: nextCompletedBy,
+          blockedAcceptance: parseBlockedAcceptanceValue(body.blockedAcceptance),
+        });
+        if (!policy.ok) throw blockedPolicyConflict(policy.error.code, policy.error.message, task, "move");
+        if (policy.blockedAccepted) {
+          store.addEvent({ taskId: id, type: "task_blocked_accepted", body: blockedAcceptanceEvidence(task, policy.acceptedBy, "move") });
+        }
+      } else if (body.blockedAcceptance !== undefined) {
+        throw new ConflictRouteError("blocked_acceptance_unexpected", "Blocked acceptance is only valid when moving to Done");
+      }
+
+      store.move(id, column, position);
 
       store.update(id, { completedBy: nextCompletedBy });
       store.addEvent({ taskId: id, type: "task_moved", body: { column, position, completedBy: nextCompletedBy } });
@@ -835,14 +906,22 @@ export function registerTaskRoutes(
     try {
       let target: string | undefined;
       let commitRemaining = false;
+      let blockedAcceptance: BlockedAcceptance | undefined;
+      let rawBlockedAcceptance: unknown;
       try {
-        const body = (await c.req.json()) as { targetBranch?: unknown; commitRemaining?: unknown };
+        const body = (await c.req.json()) as { targetBranch?: unknown; commitRemaining?: unknown; blockedAcceptance?: unknown };
         if (typeof body?.targetBranch === "string") target = body.targetBranch;
         commitRemaining = body?.commitRemaining === true;
+        rawBlockedAcceptance = body?.blockedAcceptance;
       } catch {
         // Body optional — integrate falls back to the task's recorded base branch.
       }
-      const outcome = await dispatcher.integrate(id, target, { commitRemaining });
+      blockedAcceptance = parseBlockedAcceptanceValue(rawBlockedAcceptance);
+      const task = store.get(id);
+      if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
+      const policy = evaluateDonePolicy({ task, completedBy: INTEGRATED_COMPLETED_BY, blockedAcceptance });
+      if (!policy.ok) throw blockedPolicyConflict(policy.error.code, policy.error.message, task, "integrate");
+      const outcome = await dispatcher.integrate(id, target, { commitRemaining, blockedAcceptance });
       store.addEvent({
         taskId: id,
         type: "task_integrated",
@@ -924,6 +1003,66 @@ function assertRunnableActiveTask(store: TaskStore, id: string, action: "run" | 
   if (task.type === "manual") throw AdapterError.validation(`Manual tasks cannot ${action}; convert it to an agent task first.`);
 }
 
+function parseBlockedAnswer(value: unknown, task: { completion?: CompletionReport | null; archived?: boolean }, feedback: string | undefined): BlockedAnswerContext | undefined {
+  if (value === undefined) return undefined;
+  if (task.archived) throw new ConflictRouteError("blocked_answer_archived", "Archived blocked tasks cannot be answered");
+  if (!task.completion || task.completion.outcome !== "blocked") {
+    throw new ConflictRouteError("blocked_answer_unexpected", "Blocked answer is only valid for the current blocked report");
+  }
+  if (value === null || typeof value !== "object") throw new ConflictRouteError("blocked_answer_incomplete", "blockedAnswer must be an object");
+  const record = value as Record<string, unknown>;
+  if (record.blockedReportedAt !== task.completion.reportedAt) {
+    throw new ConflictRouteError("blocked_answer_stale", "Blocked answer does not match the current blocked report");
+  }
+  cleanBounded(feedback, "feedback", BLOCKED_ANSWER_MAX_LENGTH, "blocked_answer_incomplete");
+  const answeredBy = cleanBounded(record.answeredBy, "answeredBy", BLOCKED_ATTRIBUTION_MAX_LENGTH, "blocked_answer_incomplete");
+  return { blockedReportedAt: task.completion.reportedAt, answeredBy };
+}
+
+function parseBlockedAcceptanceValue(value: unknown): BlockedAcceptance | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object") throw new ConflictRouteError("blocked_acceptance_incomplete", "blockedAcceptance must be an object");
+  const record = value as Record<string, unknown>;
+  if (record.acceptIncomplete !== true || typeof record.blockedReportedAt !== "number") {
+    throw new ConflictRouteError("blocked_acceptance_incomplete", "Blocked acceptance must include acceptIncomplete=true and blockedReportedAt");
+  }
+  return { acceptIncomplete: true, blockedReportedAt: record.blockedReportedAt };
+}
+
+function cleanBounded(value: unknown, field: string, max: number, code: string): string {
+  if (typeof value !== "string") throw new ConflictRouteError(code, `${field} must be a string`);
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > max) throw new ConflictRouteError(code, `${field} must be 1..${max} characters`);
+  return trimmed;
+}
+
+function blockedPolicyConflict(code: string, message: string, task: Task, transition: "move" | "integrate"): ConflictRouteError {
+  const completion = task.completion;
+  return new ConflictRouteError(code, message, completion?.outcome === "blocked" ? {
+    requirement: {
+      acceptIncomplete: true,
+      blockedReportedAt: completion.reportedAt,
+      completedBy: "required",
+      question: blockedQuestion(completion),
+      summary: completion.summary,
+      residualRisk: completion.residualRisk,
+      transition,
+    },
+  } : undefined);
+}
+
+function blockedAcceptanceEvidence(task: Task, completedBy: string | undefined, transition: "move" | "integrate"): Record<string, unknown> {
+  const completion = task.completion;
+  return {
+    completedBy,
+    blockedReportedAt: completion?.reportedAt,
+    question: completion ? blockedQuestion(completion) : undefined,
+    summary: completion?.summary,
+    residualRisk: completion?.residualRisk,
+    transition,
+  };
+}
+
 /** Translate a thrown value into the AdapterError JSON envelope + status. */
 function respondWithError(c: Context, err: unknown): Response {
   if (err instanceof DependencyGateError) {
@@ -943,6 +1082,9 @@ function respondWithError(c: Context, err: unknown): Response {
       { error: { code: "validation", message: err.message } },
       err.status as ContentfulStatusCode,
     );
+  }
+  if (err instanceof ConflictRouteError) {
+    return c.json({ error: { code: err.code, message: err.message, ...(err.details ?? {}) } }, err.status as ContentfulStatusCode);
   }
   const adapterError = toAdapterError(err);
   return c.json(adapterError.toEnvelope(), adapterError.status as ContentfulStatusCode);

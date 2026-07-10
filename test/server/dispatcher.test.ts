@@ -1846,6 +1846,39 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)?.worktreePath).toBeUndefined();
     });
 
+    it("integrate() emits exactly one full blocked acceptance evidence event", async () => {
+      const task = createTask({ isolation: "worktree", directory: gitProjectDir });
+      client.nextSessionId = "ses_integrate_blocked";
+      dispatcher = new TaskDispatcher({
+        client: client as never,
+        store,
+        worktreeBaseDir: () => join(workspace, "worktrees-blocked-integrate"),
+      });
+
+      const ran = await dispatcher.run(task.id);
+      const wtPath = ran.worktreePath!;
+      writeFileSync(join(wtPath, "blocked.txt"), "accepted partial work\n");
+      execFileSync("git", ["add", "blocked.txt"], { cwd: wtPath, env: cleanGitEnv() });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "--no-gpg-sign", "-m", "blocked partial"], { cwd: wtPath, env: cleanGitEnv() });
+      queueFinishedTurn();
+      await waitFor(() => store.get(task.id)?.runState !== "running", 3000);
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Partial work exists", changedFiles: ["blocked.txt"], verification: [], residualRisk: "Need human acceptance", needsInput: "Accept incomplete work?", reportedAt: 99 }, "reported");
+
+      const outcome = await dispatcher.integrate(task.id, undefined, { blockedAcceptance: { acceptIncomplete: true, blockedReportedAt: 99 } });
+
+      expect(outcome.ok).toBe(true);
+      const events = store.listEvents(task.id).filter((event) => event.type === "task_blocked_accepted");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.body).toEqual({
+        completedBy: "Integrated by User",
+        blockedReportedAt: 99,
+        question: "Accept incomplete work?",
+        summary: "Partial work exists",
+        residualRisk: "Need human acceptance",
+        transition: "integrate",
+      });
+    });
+
     it("a sibling worktree task created after this task's dispatch does not falsely block it (concurrent nested worktrees)", async () => {
       const taskA = createTask({ isolation: "worktree", directory: gitProjectDir, title: "Task A" });
       // Nest worktrees inside the repo (the isUnderWorkspace fallback layout,
@@ -2571,6 +2604,98 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)?.completion).toBeNull();
       expect(store.get(task.id)?.completionSource).toBeNull();
       expect(store.get(task.id)?.finalSessionOutput).toBeNull();
+    });
+
+    it("answered agent-reported blocked retry reuses the same OpenCode session when status map contains idle", async () => {
+      const task = createTask();
+      store.update(task.id, { sessionId: "ses_live", baseCommit: "original-base", baseCheckoutSnapshot: "original-snapshot" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 10 }, "reported");
+      client.sessionStatus = { ses_live: "idle" };
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.retry(task.id, "Use option A", { blockedReportedAt: 10, answeredBy: "Reviewer" });
+
+      expect(client.statusCalls).toBe(1);
+      expect(client.createCalls).toHaveLength(0);
+      expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: "ses_live" });
+      expect(String((client.promptCalls.at(-1)?.parts as Array<{ text: string }>)[0]?.text)).toContain("OPERATOR ANSWER TO BLOCKED QUESTION");
+      expect(result.sessionId).toBe("ses_live");
+      expect(store.get(task.id)?.baseCommit).toBe("original-base");
+      expect(store.get(task.id)?.baseCheckoutSnapshot).toBe("original-snapshot");
+      expect(store.get(task.id)?.completion).toBeNull();
+    });
+
+    it("answered blocked retry starts a fresh session in the same existing cwd when OpenCode status is absent", async () => {
+      for (const [label, sessionStatus] of Object.entries({ missing: {} })) {
+        store.close();
+        store = new SqliteTaskStore(":memory:");
+        client = new FakeOpencodeClient();
+        const worktreePath = join(projectDir, `wt-${label}`);
+        mkdirSync(worktreePath, { recursive: true });
+        const task = createTask({ isolation: "worktree" });
+        store.update(task.id, { sessionId: "ses_old", worktreePath, baseCommit: "original-base", baseCheckoutSnapshot: `original-snapshot-${label}` });
+        store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 20 }, "reported");
+        client.sessionStatus = sessionStatus;
+        client.nextSessionId = `ses_new_${label}`;
+        dispatcher = new TaskDispatcher({ client: client as never, store });
+
+        const result = await dispatcher.retry(task.id, "Use option B", { blockedReportedAt: 20, answeredBy: "Reviewer" });
+
+        expect(client.statusCalls).toBe(1);
+        expect(client.createCalls).toHaveLength(1);
+        expect(client.createCalls[0]?.directory).toBe(worktreePath);
+        expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: `ses_new_${label}` });
+        expect(result.sessionId).toBe(`ses_new_${label}`);
+        expect(store.get(task.id)?.baseCommit).toBe("original-base");
+        expect(store.get(task.id)?.baseCheckoutSnapshot).toBe(`original-snapshot-${label}`);
+        expect(store.get(task.id)?.completion).toBeNull();
+      }
+    });
+
+    it("answered watchdog blocked retry starts fresh even when the old session is busy", async () => {
+      const worktreePath = join(projectDir, "wt-watchdog");
+      mkdirSync(worktreePath, { recursive: true });
+      const task = createTask({ isolation: "worktree" });
+      store.update(task.id, { sessionId: "ses_watchdog", worktreePath, baseCommit: "original-base" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Watchdog blocked", changedFiles: [], verification: [], residualRisk: "Need review", reportedAt: 21 }, "watchdog");
+      client.sessionStatus = { ses_watchdog: "busy" };
+      client.nextSessionId = "ses_watchdog_fresh";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.retry(task.id, "Continue", { blockedReportedAt: 21, answeredBy: "Reviewer" });
+
+      expect(client.statusCalls).toBe(0);
+      expect(client.createCalls).toHaveLength(1);
+      expect(client.createCalls[0]?.directory).toBe(worktreePath);
+      expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: "ses_watchdog_fresh" });
+      expect(result.sessionId).toBe("ses_watchdog_fresh");
+    });
+
+    it("answered blocked retry prompt failure retains the current block", async () => {
+      const task = createTask();
+      store.update(task.id, { sessionId: "ses_live" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 30 }, "reported");
+      client.sessionStatus = { ses_live: "busy" };
+      client.promptShouldError = { error: { message: "prompt failed" } };
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await expect(dispatcher.retry(task.id, "Use option C", { blockedReportedAt: 30, answeredBy: "Reviewer" })).rejects.toMatchObject({ code: "opencode_unreachable" });
+
+      expect(store.get(task.id)?.completion).toMatchObject({ outcome: "blocked", reportedAt: 30 });
+      expect(store.get(task.id)?.completionSource).toBe("reported");
+    });
+
+    it("answered ACP retry launch failure retains the current block", async () => {
+      const task = store.create({ title: "Claude blocked", description: "Original", directory: projectDir, harness: "claude-code" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 40 }, "reported");
+      const claudeRunner = makeClaudeRunner();
+      claudeRunner.retry.mockRejectedValueOnce(new Error("launch failed"));
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+
+      await expect(dispatcher.retry(task.id, "Use option D", { blockedReportedAt: 40, answeredBy: "Reviewer" })).rejects.toMatchObject({ code: "opencode_unreachable" });
+
+      expect(store.get(task.id)?.completion).toMatchObject({ outcome: "blocked", reportedAt: 40 });
+      expect(store.get(task.id)?.completionSource).toBe("reported");
     });
 
     it("relaunches claude-code tasks through the Claude runner retry hook", async () => {

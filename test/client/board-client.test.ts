@@ -209,6 +209,7 @@ describe("board client", () => {
 
     await client.runTask("task-1");
     await client.retryTask("task-1", "try again");
+    await client.answerBlockedTask("task-1", "Use option A", { blockedReportedAt: 123, answeredBy: "Reviewer" });
     await client.abortTask("task-1");
     await client.moveTask("task-1", "review", 0);
     await client.linkTasks("task-0", "task-1");
@@ -229,6 +230,7 @@ describe("board client", () => {
     expect(calls.map(([url, init]) => [String(url), init?.method])).toEqual([
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/run`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/retry`, "POST"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/retry`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/abort`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/move`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/links`, "POST"],
@@ -245,8 +247,9 @@ describe("board client", () => {
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1`, "DELETE"],
     ]);
     expect(JSON.parse(String(calls[1][1]?.body))).toEqual({ feedback: "try again" });
-    expect(JSON.parse(String(calls[4][1]?.body))).toEqual({ parentId: "task-0" });
-    expect(JSON.parse(String(calls[10][1]?.body))).toEqual({ targetBranch: "main" });
+    expect(JSON.parse(String(calls[2][1]?.body))).toEqual({ feedback: "Use option A", blockedAnswer: { blockedReportedAt: 123, answeredBy: "Reviewer" } });
+    expect(JSON.parse(String(calls[5][1]?.body))).toEqual({ parentId: "task-0" });
+    expect(JSON.parse(String(calls[11][1]?.body))).toEqual({ targetBranch: "main" });
   });
 
   it("rejects bad task input before POSTing", async () => {

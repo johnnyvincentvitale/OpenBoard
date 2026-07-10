@@ -14,8 +14,8 @@
  */
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
-import { AdapterError, INTEGRATED_COMPLETED_BY, resolveOpenCodePermissionRules } from "../shared";
+import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "./escape-detector";
@@ -33,6 +33,7 @@ import { taskExecutionContext } from "./task-context";
 import type { PermissionAskEvent, RespondOutcome } from "./permission-broker";
 import { resolveTaskLineage } from "./task-lineage";
 import { RunWatchdog, type WatchdogClock, type WatchdogRetryDecision, type WatchdogRunIdentity, type WatchdogTermination } from "./watchdog";
+import { evaluateDonePolicy } from "./done-policy";
 import {
   isExternalDirectoriesAllowed,
   isUnderWorkspace,
@@ -825,6 +826,7 @@ export class TaskDispatcher implements Dispatcher {
     execDirectory: string,
     prompt: string,
     action: "run" | "retry",
+    preserveBlocked = false,
   ): Promise<Task> {
     const runStartedAt = Date.now();
     const warning = await dirtyWarning(execDirectory);
@@ -843,6 +845,7 @@ export class TaskDispatcher implements Dispatcher {
       });
       this.store.update(task.id, {
         sessionId: undefined,
+        ...(action === "retry" ? { completion: null, completionSource: null, finalSessionOutput: null } : {}),
         harnessSessionId: launched.sessionId,
         harnessSessionName: launched.sessionName,
         harnessStatus: launched.status,
@@ -874,6 +877,7 @@ export class TaskDispatcher implements Dispatcher {
         error: errorMessage(err, `Failed to launch ${label} background session`),
       });
       if (!updated) throw AdapterError.notFound(`Task not found: ${task.id}`);
+      if (preserveBlocked) throw AdapterError.unreachable(updated.error ?? `Failed to launch ${label} background session`);
       return updated;
     }
 
@@ -1009,9 +1013,13 @@ export class TaskDispatcher implements Dispatcher {
     return { task: this.store.get(taskId) ?? task, ...result };
   }
 
-  async integrate(taskId: string, targetBranch?: string, options: { commitRemaining?: boolean } = {}): Promise<MergeOutcome> {
+  async integrate(taskId: string, targetBranch?: string, options: { commitRemaining?: boolean; blockedAcceptance?: BlockedAcceptance } = {}): Promise<MergeOutcome> {
     const task = this.store.get(taskId);
     if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    const donePolicy = evaluateDonePolicy({ task, completedBy: INTEGRATED_COMPLETED_BY, blockedAcceptance: options.blockedAcceptance });
+    if (!donePolicy.ok) {
+      throw new AdapterError("validation", donePolicy.error.message);
+    }
     if (!task.worktreePath || !task.worktreeBranch) {
       throw AdapterError.validation("Task has no worktree to integrate");
     }
@@ -1078,6 +1086,9 @@ export class TaskDispatcher implements Dispatcher {
         pending: undefined,
         rebaseConflictPaths: undefined,
       });
+      if (donePolicy.blockedAccepted) {
+        this.store.addEvent({ taskId, type: "task_blocked_accepted", body: this.blockedAcceptanceEvidence(task, donePolicy.acceptedBy, "integrate") });
+      }
       this.fireOnParentSatisfied(taskId);
     }
     return { task: this.store.get(taskId) ?? task, ...result };
@@ -1375,42 +1386,121 @@ export class TaskDispatcher implements Dispatcher {
     return `${prompt}\n\n---\nOPENBOARD PREFLIGHT WARNING\n${warning}\nIf you avoid the dirty target by using a ${label}-managed worktree or branch, report the actual cwd, branch, and commit in your final OpenBoard report.`;
   }
 
-  async retry(taskId: string, feedback?: string): Promise<Task> {
+  private assertBlockedAnswerCurrent(task: Task, answer: BlockedAnswerContext): void {
+    if (!task.completion || task.completion.outcome !== "blocked") {
+      throw AdapterError.validation("Blocked answer is only valid for the current blocked report");
+    }
+    if (task.completion.reportedAt !== answer.blockedReportedAt) {
+      throw AdapterError.validation("Blocked answer does not match the current blocked report");
+    }
+  }
+
+  private async canReuseOpenCodeBlockedSession(task: Task): Promise<boolean> {
+    if (task.completionSource !== "reported") return false;
+    if (!task.sessionId) return false;
+    const statuses = await this.fetchSessionStatusMap();
+    const status = statuses?.get(task.sessionId);
+    return status === "idle" || status === "busy" || status === "retry";
+  }
+
+  private withBlockedAnswerPrompt(task: Task, answer: BlockedAnswerContext, feedback: string | undefined, liveSession: boolean): string {
+    const question = blockedQuestion(task.completion ?? { summary: "", residualRisk: "" });
+    const header = liveSession ? "OPERATOR ANSWER TO BLOCKED QUESTION" : "OPENBOARD BLOCKED RETRY CONTEXT";
+    return `${header}\nBlocked reportedAt: ${answer.blockedReportedAt}\nQuestion: ${question}\nAnswered by: ${answer.answeredBy}\nAnswer: ${feedback ?? ""}\n\nContinue from the preserved baseline/partial files in this task cwd. Do not discard existing work. Report via the OpenBoard completion contract when done or blocked again.`;
+  }
+
+  private blockedAcceptanceEvidence(task: Task, completedBy: string | undefined, transition: "integrate"): Record<string, unknown> {
+    const completion = task.completion;
+    return {
+      completedBy,
+      blockedReportedAt: completion?.reportedAt,
+      question: completion ? blockedQuestion(completion) : undefined,
+      summary: completion?.summary,
+      residualRisk: completion?.residualRisk,
+      transition,
+    };
+  }
+
+  private async startFreshOpenCodeAnsweredBlock(task: Task, prompt: string): Promise<Task> {
+    const taskId = task.id;
+    const isolatedRun = wantsWorktree(task);
+    const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
+    const permissionRules = resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides);
+    const activeModel = task.model ?? null;
+    const created = await this.client.session.create({
+      agent: task.agent ?? undefined,
+      model: activeModel ?? undefined,
+      directory: execDirectory,
+      permission: permissionRules,
+    });
+    if ((created as { error?: unknown }).error) throw AdapterError.unreachable("Failed to create OpenCode session", (created as { error?: unknown }).error);
+    const sessionId = extractSessionId((created as { data?: unknown }).data);
+    if (!sessionId) throw AdapterError.unreachable("OpenCode session create returned no id");
+    const runStartedAt = Date.now();
+    this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
+    this.store.update(taskId, { sessionId, activeModel, autoRetries: 0, runStartedAt });
+    if (hasAskRule(permissionRules)) this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override");
+    const retryPrompt = isolatedRun ? this.withWorktreeIsolationPreamble(execDirectory, this.resolveDirectory(task.directory), prompt) : prompt;
+    const fullPrompt = this.withCompletionContract(task, this.withParentHandoffs(task, this.withTaskContext(task, retryPrompt)), runStartedAt);
+    const promptError = await this.prompt(sessionId, fullPrompt, task.agent ?? undefined, task.model ?? undefined);
+    if (promptError) {
+      this.stopPermissionResponder(sessionId);
+      this.endOpenCodeRun(task.id, runStartedAt, "error");
+      const updated = this.store.update(taskId, { sessionId, activeModel, autoRetries: 0, runState: "error", error: promptError });
+      if (!updated) throw AdapterError.notFound(`Task not found: ${taskId}`);
+      throw AdapterError.unreachable(promptError);
+    }
+    this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null, sessionId, activeModel, autoRetries: 0, runState: "running", runStartedAt, error: undefined, pending: undefined });
+    this.store.move(taskId, "in_progress", END_OF_COLUMN);
+    this.startCompletionWatcher(taskId, sessionId);
+    const fresh = this.store.get(taskId);
+    if (!fresh) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    return fresh;
+  }
+
+  async retry(taskId: string, feedback?: string, blockedAnswer?: BlockedAnswerContext): Promise<Task> {
     const task = this.store.get(taskId);
     if (!task) {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
     this.assertNotArchived(task, "retry");
+    if (blockedAnswer) this.assertBlockedAnswerCurrent(task, blockedAnswer);
     if (isAcpHarness(task.harness)) {
       this.assertParentsSatisfied(task);
-      this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
+      if (!blockedAnswer) this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
       const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
-      await this.captureDispatchBaseline(task, wantsWorktree(task), execDirectory);
-      return this.runAcpTask(task, execDirectory, feedback ?? task.description, "retry");
+      if (!blockedAnswer) await this.captureDispatchBaseline(task, wantsWorktree(task), execDirectory);
+      return this.runAcpTask(task, execDirectory, blockedAnswer ? this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false) : feedback ?? task.description, "retry", blockedAnswer !== undefined);
     }
 
-    if (!task.sessionId) {
+    if (!task.sessionId && !blockedAnswer) {
       throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
     }
     this.assertParentsSatisfied(task);
-    this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
-    this.outputCandidates.delete(task.sessionId);
+    if (!blockedAnswer) this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
+    if (task.sessionId) this.outputCandidates.delete(task.sessionId);
+
+    if (blockedAnswer && !(await this.canReuseOpenCodeBlockedSession(task))) {
+      return this.startFreshOpenCodeAnsweredBlock(task, this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false));
+    }
+    const sessionId = task.sessionId;
+    if (!sessionId) throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
 
     const runStartedAt = Date.now();
-    this.bindOpenCodeRun({ task, sessionId: task.sessionId, runStartedAt, attempt: 0 });
+    this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
     // retry() re-prompts an existing session — the worktree already exists from
     // run(), so its path comes off the task record rather than ensureWorktree().
     const isolatedRetry = wantsWorktree(task);
     const retryDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
-    await this.captureDispatchBaseline(task, isolatedRetry, retryDirectory);
+    if (!blockedAnswer) await this.captureDispatchBaseline(task, isolatedRetry, retryDirectory);
     const permissionRules = resolveOpenCodePermissionRules(isolatedRetry, task.permissionOverrides);
     this.store.update(taskId, { runStartedAt });
     if (hasAskRule(permissionRules)) {
-      this.startPermissionResponder(task.sessionId, retryDirectory, isolatedRetry ? "worktree-fence" : "in-place-override");
+      this.startPermissionResponder(sessionId, retryDirectory, isolatedRetry ? "worktree-fence" : "in-place-override");
     } else {
-      this.stopPermissionResponder(task.sessionId);
+      this.stopPermissionResponder(sessionId);
     }
-    const baseRetryPrompt = this.withRebaseConflictContext(task, feedback ?? task.description);
+    const baseRetryPrompt = this.withRebaseConflictContext(task, blockedAnswer ? this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, true) : feedback ?? task.description);
     const retryPrompt = isolatedRetry
       ? this.withWorktreeIsolationPreamble(
           retryDirectory,
@@ -1421,29 +1511,33 @@ export class TaskDispatcher implements Dispatcher {
     const contextPrompt = this.withTaskContext(task, retryPrompt);
     const parentPrompt = this.withParentHandoffs(task, contextPrompt);
     const promptError = await this.prompt(
-      task.sessionId,
+      sessionId,
       this.withCompletionContract(task, parentPrompt, runStartedAt),
       task.agent ?? undefined,
       task.model ?? undefined,
     );
     if (promptError) {
-      this.stopPermissionResponder(task.sessionId);
+      this.stopPermissionResponder(sessionId);
       this.endOpenCodeRun(task.id, runStartedAt, "error");
       const updated = this.store.update(taskId, { runState: "error", error: promptError });
       if (!updated) {
         throw AdapterError.notFound(`Task not found: ${taskId}`);
       }
+      if (blockedAnswer) throw AdapterError.unreachable(promptError);
       return updated;
     }
 
     this.store.update(taskId, {
+      completion: null,
+      completionSource: null,
+      finalSessionOutput: null,
       runState: "running",
       runStartedAt,
       error: undefined,
       pending: undefined,
     });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
-    this.startCompletionWatcher(taskId, task.sessionId);
+    this.startCompletionWatcher(taskId, sessionId);
 
     const fresh = this.store.get(taskId);
     if (!fresh) {
