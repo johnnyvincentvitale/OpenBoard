@@ -612,31 +612,55 @@ export class TaskDispatcher implements Dispatcher {
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
+        permissionGraceMs: deps.permissionGraceMs,
+        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
+        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
       codex: deps.codexRunner ?? new CodexAcpRunner({
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
+        permissionGraceMs: deps.permissionGraceMs,
+        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
+        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
       "gemini-acp": deps.geminiRunner ?? new GeminiAcpRunner({
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
+        permissionGraceMs: deps.permissionGraceMs,
+        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
+        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
       hermes: deps.hermesRunner ?? new HermesAcpRunner({
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
+        permissionGraceMs: deps.permissionGraceMs,
+        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
+        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
       "pi-coding-agent": deps.piRunner ?? new PiAcpRunner({
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
+        permissionGraceMs: deps.permissionGraceMs,
+        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
+        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
       "cursor-acp": deps.cursorRunner ?? new CursorAcpRunner({
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
+        permissionGraceMs: deps.permissionGraceMs,
+        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
+        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
     };
     this.workspace = deps.workspace ?? resolveBoardWorkspace();
@@ -831,6 +855,13 @@ export class TaskDispatcher implements Dispatcher {
         error: undefined,
         pending: undefined,
         completionLocation: undefined,
+      });
+      this.activity.startRun({
+        taskId: task.id,
+        runStartedAt,
+        sessionId: launched.sessionId,
+        rootSessionId: launched.sessionId,
+        harness,
       });
       if (warning) {
         this.store.addEvent({ taskId: task.id, type: "task_warning", body: { warning } });
@@ -1534,6 +1565,10 @@ export class TaskDispatcher implements Dispatcher {
     if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
     const owned = this.pendingPermissionsForTask(task).some((ask) => ask.id === input.askId);
     if (!owned) return { ok: false, askId: input.askId, conflict: "not-found" };
+    if (isAcpHarness(task.harness) && task.harnessSessionName) {
+      const runner = this.acpRunners[task.harness] as ClaudeCodeRunnerLike & { respondPermission?: (sessionName: string, input: RespondPermissionInput) => Promise<RespondOutcome> };
+      return runner.respondPermission?.(task.harnessSessionName, input) ?? { ok: false, askId: input.askId, conflict: "not-found" };
+    }
     return this.permissionResponderPool.respond(input);
   }
 
@@ -1869,16 +1904,20 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   private pendingPermissionsForTask(task: Task): PendingPermissionAsk[] {
+    if (isAcpHarness(task.harness) && task.harnessSessionName) {
+      const runner = this.acpRunners[task.harness] as ClaudeCodeRunnerLike & { listPendingPermissions?: (sessionName: string) => PendingPermissionAsk[] };
+      return runner.listPendingPermissions?.(task.harnessSessionName) ?? [];
+    }
     if (!task.sessionId) return [];
     return this.permissionResponderPool.listPending(task.sessionId);
   }
 
   private handlePermissionEvent(event: PermissionAskEvent): void {
-    const task = this.listTasksForWatcher().find((candidate) => candidate.sessionId === event.runId);
+    const task = this.listTasksForWatcher().find((candidate) => candidate.sessionId === event.runId || candidate.harnessSessionId === event.runId);
     if (!task) return;
     const runStartedAt = this.openCodeRunsByTask.get(task.id)?.runStartedAt ?? task.runStartedAt ?? event.occurredAt;
     const pending = event.type === "permission_asked"
-      ? this.permissionResponderPool.listPending(event.runId).find((ask) => ask.id === event.askId)
+      ? this.pendingPermissionsForTask(task).find((ask) => ask.id === event.askId)
       : undefined;
     if (pending) {
       this.permissionAskMeta.set(event.askId, {
@@ -1918,7 +1957,7 @@ export class TaskDispatcher implements Dispatcher {
     this.activity.recordEvent(task.id, runStartedAt, {
       sessionId: event.runId,
       rootSessionId: event.runId,
-      harness: "opencode",
+      harness: event.harness,
       kind: "permission",
       text: `${event.permission}:${event.type}${event.decision ? `:${event.decision}` : ""}`,
     });

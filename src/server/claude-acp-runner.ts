@@ -2,7 +2,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { DEFAULT_ACP_PERMISSION_MODE, type AcpPermissionMode } from "../shared";
-import type { AcpConfigOption, AcpConfigValueOption, AcpHarnessConfig, AcpModelOption, AcpOptionValue, AcpTaskHarness } from "../shared";
+import type { AcpConfigOption, AcpConfigValueOption, AcpHarnessConfig, AcpModelOption, AcpOptionValue, AcpTaskHarness, PendingPermissionAsk, RespondPermissionInput } from "../shared";
 import type {
   ClaudeCodeRunInput,
   ClaudeCodeRunResult,
@@ -11,6 +11,8 @@ import type {
   ClaudeCodeStatus,
 } from "./claude-code-runner";
 import { completionHandoffGuidance } from "./completion-contract";
+import { createPermissionBroker, type PermissionAskEvent, type PermissionBroker, type PermissionBrokerClock, type RespondOutcome } from "./permission-broker";
+import type { SessionActivityEventInput } from "./session-activity";
 
 type Spawn = typeof nodeSpawn;
 type SpawnedProcess = ReturnType<Spawn>;
@@ -39,6 +41,9 @@ interface AcpPermissionParams {
 
 interface AcpSessionState {
   child: SpawnedProcess;
+  taskId: string;
+  runStartedAt: number;
+  harness: AcpTaskHarness;
   sessionId: string;
   sessionName: string;
   cwd: string;
@@ -69,8 +74,15 @@ export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
   commandArgs?: string[];
   service?: AcpRunnerServiceConfig;
   mcpCommand?: string;
+  permissionGraceMs?: number;
+  permissionClock?: PermissionBrokerClock;
+  onPermissionEvent?: (event: PermissionAskEvent) => void;
+  onActivity?: (taskId: string, runStartedAt: number, input: SessionActivityEventInput) => void;
+  onRunTerminal?: (taskId: string, runStartedAt: number, status: "complete" | "error" | "aborted") => void;
 }
 
+const ACP_PERMISSION_GRACE_MS = 60_000;
+const SUMMARY_MAX = 240;
 const READ_TOOL_NAMES = new Set(["Read", "LS", "Glob", "Grep", "TodoRead", "TaskList", "TaskGet"]);
 const OPENBOARD_REPORT_TOOLS = new Set([
   "mcp__openboard__complete_task",
@@ -266,17 +278,21 @@ export function decideClaudeAcpPermission(
   return "reject";
 }
 
-function chooseOption(options: AcpPermissionParams["options"], decision: "allow" | "reject"): string {
+function truncate(value: string, max = SUMMARY_MAX): string {
+  return value.length <= max ? value : `${value.slice(0, Math.max(max - 1, 0))}…`;
+}
+
+function chooseOption(options: AcpPermissionParams["options"], decision: "allow" | "reject"): string | undefined {
   const preferred =
     decision === "allow"
-      ? ["allow", "allow_once", "once", "allow_always"]
+      ? ["allow_once", "once"]
       : ["reject", "reject_once", "reject_always"];
   for (const id of preferred) {
     const match = options.find((option) => option.optionId === id || option.kind === id);
     if (match) return match.optionId;
   }
-  if (decision === "allow") return options[0]?.optionId ?? "allow";
-  return "reject";
+  if (decision === "reject") return options.find((option) => option.kind === "reject" || option.optionId === "reject")?.optionId ?? "reject";
+  return undefined;
 }
 
 function errorFromRpc(error: unknown): Error {
@@ -488,7 +504,12 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   private readonly commandArgs: string[];
   private readonly mcpCommand: string;
   private readonly permissionMode: AcpPermissionMode;
+  private readonly permissionGraceMs: number;
+  private readonly permissionNow: () => number;
   private readonly service: AcpRunnerServiceConfig;
+  private readonly broker: PermissionBroker;
+  private readonly onActivity?: (taskId: string, runStartedAt: number, input: SessionActivityEventInput) => void;
+  private readonly onRunTerminal?: (taskId: string, runStartedAt: number, status: "complete" | "error" | "aborted") => void;
   private readonly sessions = new Map<string, AcpSessionState>();
 
   constructor(deps: ClaudeAcpRunnerDeps) {
@@ -504,6 +525,11 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     this.mcpCommand = (deps.mcpCommand ?? (this.service.mcpCommandEnv ? this.env[this.service.mcpCommandEnv]?.trim() : undefined)) || "openboard";
     const envPermissionMode = this.env.OPENBOARD_CLAUDE_PERMISSION_MODE?.trim();
     this.permissionMode = (deps.permissionMode as AcpPermissionMode | undefined) ?? (envPermissionMode as AcpPermissionMode | undefined) ?? DEFAULT_ACP_PERMISSION_MODE;
+    this.permissionGraceMs = deps.permissionGraceMs ?? ACP_PERMISSION_GRACE_MS;
+    this.permissionNow = deps.permissionClock?.now ?? (() => Date.now());
+    this.broker = createPermissionBroker({ clock: deps.permissionClock, onEvent: deps.onPermissionEvent });
+    this.onActivity = deps.onActivity;
+    this.onRunTerminal = deps.onRunTerminal;
   }
 
   run(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult> {
@@ -532,7 +558,21 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     session.status = "aborted";
     session.terminal = true;
     session.error = "aborted";
+    this.clearRun(session, "aborted");
     session.child.kill();
+  }
+
+  listPendingPermissions(sessionName: string): PendingPermissionAsk[] {
+    const session = this.sessions.get(sessionName);
+    return session ? this.broker.listPending(session.sessionId) : [];
+  }
+
+  respondPermission(sessionName: string, input: RespondPermissionInput): Promise<RespondOutcome> {
+    const session = this.sessions.get(sessionName);
+    if (!session || !this.broker.listPending(session.sessionId).some((ask) => ask.id === input.askId)) {
+      return Promise.resolve({ ok: false, askId: input.askId, conflict: "not-found" });
+    }
+    return this.broker.respond(input);
   }
 
   private async start(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult> {
@@ -545,6 +585,9 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     });
     const state: AcpSessionState = {
       child,
+      taskId: input.task.id,
+      runStartedAt: input.runStartedAt,
+      harness: (input.task.harness ?? "claude-code") as AcpTaskHarness,
       sessionId: sessionName,
       sessionName,
       cwd: input.directory,
@@ -589,12 +632,14 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
         state.status = stopReason === "cancelled" ? "cancelled" : "idle";
         state.terminal = true;
         if (stopReason === "cancelled") state.error = "cancelled";
+        this.clearRun(state, stopReason === "cancelled" ? "aborted" : "complete");
         state.child.kill();
       },
       (error) => {
         state.status = "error";
         state.terminal = true;
         state.error = error.message;
+        this.clearRun(state, "error");
         state.child.kill();
       },
     );
@@ -727,6 +772,10 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     }
     if (typeof message.method === "string" && id !== undefined) {
       void this.handleRequest(state, id, message.method, message.params);
+      return;
+    }
+    if (typeof message.method === "string" && id === undefined) {
+      this.handleNotification(state, message.method, message.params);
     }
   }
 
@@ -740,18 +789,70 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       this.write(state, { jsonrpc: "2.0", id, error: { code: -32601, message: `Unsupported client method: ${method}` } });
       return;
     }
-    const permission = params as AcpPermissionParams;
-    const decision = decideClaudeAcpPermission(permission, state.cwd, state.permissionMode);
+    const permission = normalizePermissionParams(params);
+    if (!permission) {
+      this.write(state, { jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid ACP permission request" } });
+      return;
+    }
+    if (permission.sessionId !== state.sessionId) {
+      this.write(state, { jsonrpc: "2.0", id, error: { code: -32000, message: "Stale ACP permission request" } });
+      return;
+    }
+    if (state.permissionMode === "bypassPermissions") {
+      this.writePermissionResponse(state, id, permission, "allow_once");
+      return;
+    }
+    const nativeId = String(id);
+    const policy = decideClaudeAcpPermission(permission, state.cwd, state.permissionMode) === "allow" ? "allow_once" : "deny";
+    this.broker.submitAsk({
+      runId: state.sessionId,
+      nativeId,
+      harness: state.harness,
+      source: "acp",
+      permission: permission.toolCall.kind ?? toolName(permission.toolCall) ?? "tool",
+      tool: toolName(permission.toolCall) ?? permission.toolCall.title,
+      summary: summarizePermission(permission),
+      patterns: summarizeLocations(permission),
+      deadline: this.permissionNow() + Math.max(0, this.permissionGraceMs),
+      timeoutDecision: policy,
+      reopenOnReplyFailure: true,
+      replyToProvider: async (decision) => this.writePermissionResponse(state, id, permission, decision),
+    });
+  }
+
+  private writePermissionResponse(state: AcpSessionState, id: JsonRpcId, permission: AcpPermissionParams, decision: RespondPermissionInput["action"]): void {
+    const rpcDecision = decision === "allow_once" ? "allow" : "reject";
+    let optionId = chooseOption(permission.options ?? [], rpcDecision);
+    if (!optionId) throw new Error("ACP permission request does not offer a supported option");
     this.write(state, {
       jsonrpc: "2.0",
       id,
       result: {
         outcome: {
           outcome: "selected",
-          optionId: chooseOption(permission.options ?? [], decision),
+          optionId,
         },
       },
     });
+  }
+
+  private handleNotification(state: AcpSessionState, method: string, params: unknown): void {
+    if (!["session/update", "session/notification", "session/event"].includes(method)) return;
+    const event = normalizeAcpActivity(params);
+    if (!event) return;
+    if (event.sessionId !== state.sessionId && event.sessionId !== state.sessionName) return;
+    if (event.status) state.status = event.status;
+    this.onActivity?.(state.taskId, state.runStartedAt, {
+      sessionId: state.sessionId,
+      rootSessionId: state.sessionId,
+      harness: state.harness,
+      ...event.activity,
+    });
+  }
+
+  private clearRun(state: AcpSessionState, status: "complete" | "error" | "aborted"): void {
+    this.broker.clearRun(state.sessionId);
+    this.onRunTerminal?.(state.taskId, state.runStartedAt, status);
   }
 
   private failSession(state: AcpSessionState, error: Error): void {
@@ -760,7 +861,67 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     state.error = error.message;
     for (const pending of state.pending.values()) pending.reject(error);
     state.pending.clear();
+    this.clearRun(state, "error");
   }
+}
+
+function normalizePermissionParams(params: unknown): AcpPermissionParams | null {
+  if (params === null || typeof params !== "object") return null;
+  const record = params as Record<string, unknown>;
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId : "";
+  const toolCall = record.toolCall;
+  const options = record.options;
+  if (!sessionId || toolCall === null || typeof toolCall !== "object" || !Array.isArray(options)) return null;
+  return { sessionId, toolCall: toolCall as AcpToolCall, options: options as AcpPermissionParams["options"] };
+}
+
+function summarizePermission(params: AcpPermissionParams): string {
+  const tool = toolName(params.toolCall) ?? params.toolCall.title ?? "tool";
+  const kind = params.toolCall.kind ?? "unknown";
+  const locations = summarizeLocations(params).join(", ");
+  return truncate([tool, kind, locations].filter(Boolean).join(" · "));
+}
+
+function summarizeLocations(params: AcpPermissionParams): string[] {
+  const values = [
+    ...valuesFromInput(params.toolCall.rawInput, new Set(["file_path", "path", "notebook_path"])),
+    ...(params.toolCall.locations ?? []).flatMap((location) => (typeof location.path === "string" ? [location.path] : [])),
+  ];
+  return [...new Set(values)].slice(0, 8).map((value) => truncate(value));
+}
+
+function normalizeAcpActivity(params: unknown): { sessionId: string; status?: string; activity: Omit<SessionActivityEventInput, "sessionId" | "rootSessionId" | "harness"> } | null {
+  if (params === null || typeof params !== "object") return null;
+  const record = params as Record<string, unknown>;
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId : typeof record.session_id === "string" ? record.session_id : "";
+  if (!sessionId) return null;
+  const status = typeof record.status === "string" ? record.status : typeof record.state === "string" ? record.state : undefined;
+  const role = record.role === "assistant" || record.role === "user" || record.role === "system" ? record.role : undefined;
+  const text = textValue(record.message) ?? textValue(record.content) ?? textValue(record.text);
+  if (text) return { sessionId, status, activity: { kind: "text", role: role ?? "assistant", text: truncate(text, 10_000) } };
+  const tool = toolActivity(record);
+  if (tool) return { sessionId, status, activity: { kind: "tool", tool } };
+  if (status) return { sessionId, status, activity: { kind: "status", text: truncate(status) } };
+  return null;
+}
+
+function textValue(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return textValue(record.text) ?? textValue(record.content);
+  }
+  return undefined;
+}
+
+function toolActivity(record: Record<string, unknown>): SessionActivityEventInput["tool"] | null {
+  const raw = record.toolCall ?? record.tool_call ?? record.tool;
+  if (raw === null || typeof raw !== "object") return null;
+  const tool = raw as Record<string, unknown>;
+  const name = typeof tool.name === "string" ? tool.name : typeof tool.title === "string" ? tool.title : typeof tool.kind === "string" ? tool.kind : "tool";
+  const callId = typeof tool.toolCallId === "string" ? tool.toolCallId : typeof tool.id === "string" ? tool.id : undefined;
+  const status = tool.status === "complete" || tool.status === "error" || tool.status === "running" || tool.status === "started" ? tool.status : "running";
+  return { name: truncate(name), callId: callId ? truncate(callId) : undefined, status };
 }
 
 export class CodexAcpRunner extends ClaudeAcpRunner {

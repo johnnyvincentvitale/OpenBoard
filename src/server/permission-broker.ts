@@ -96,6 +96,10 @@ export interface SubmitAskInput {
   patterns?: string[];
   /** Epoch ms (per the injected clock). Policy denies once `clock.now()` reaches this without an operator reply. */
   deadline: number;
+  /** Decision used when the deadline expires. Defaults to deny for existing providers. */
+  timeoutDecision?: PermissionDecision;
+  /** Keep the same board ask pending if the provider reply fails. Defaults false for polling providers. */
+  reopenOnReplyFailure?: boolean;
   /** Called at most once per resolution attempt to actually answer the provider. */
   replyToProvider: (decision: PermissionDecision) => Promise<void>;
 }
@@ -136,6 +140,8 @@ interface AskRecord {
   patterns?: string[];
   raisedAt: number;
   deadline: number;
+  timeoutDecision: PermissionDecision;
+  reopenOnReplyFailure: boolean;
   generation: number;
   replyToProvider: (decision: PermissionDecision) => Promise<void>;
   state: "pending" | "claimed";
@@ -230,7 +236,7 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
     if (!record) return; // already resolved/removed — a late callback is a no-op.
     if (record.state !== "pending") return;
     if (generationFor(record.runId) !== record.generation) return; // run was cleared/replaced.
-    void resolve(record, "deny", "policy-timeout");
+    void resolve(record, record.timeoutDecision, "policy-timeout");
   }
 
   async function resolve(
@@ -253,7 +259,12 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
       // Provider failure: drop the ask as failed rather than mark it
       // answered. A fresh native poll re-raising the same request mints a
       // new board ask (submitAsk no longer finds this identity).
-      forget(record);
+      if (record.reopenOnReplyFailure) {
+        record.state = "pending";
+        if (reason === "operator" && record.deadline > clock.now()) armTimer(record);
+      } else {
+        forget(record);
+      }
       const message = errorText(err);
       emit("permission_reply_failed", record, { decision, reason, answeredBy, error: truncate(message, MAX_TEXT_LENGTH) });
       return { ok: false, askId: record.askId, conflict: "reply-failed", error: message };
@@ -286,6 +297,8 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
         patterns: input.patterns?.slice(0, MAX_PATTERNS).map((pattern) => truncate(pattern, MAX_TEXT_LENGTH)),
         raisedAt: clock.now(),
         deadline: input.deadline,
+        timeoutDecision: input.timeoutDecision ?? "deny",
+        reopenOnReplyFailure: input.reopenOnReplyFailure ?? false,
         generation,
         replyToProvider: input.replyToProvider,
         state: "pending",

@@ -498,6 +498,85 @@ describe("TaskDispatcher", () => {
       expect((dispatcher as unknown as { permissionAskMeta: Map<string, unknown> }).permissionAskMeta.has(askId)).toBe(false);
     });
 
+    it("records ACP permission event metadata from the task-scoped pending projection", () => {
+      const task = store.create({
+        title: "ACP permission",
+        description: "Use ACP",
+        directory: myProjectDir,
+        harness: "claude-code",
+      });
+      store.update(task.id, {
+        harnessSessionId: "acp-session-1",
+        harnessSessionName: "openboard-task-acp",
+        runState: "running",
+        runStartedAt: 1_000,
+      });
+      const claudeRunner = {
+        ...makeClaudeRunner(),
+        listPendingPermissions: vi.fn(() => [{
+          id: "ask_acp",
+          harness: "claude-code" as const,
+          source: "acp" as const,
+          permission: "edit",
+          tool: "Edit",
+          summary: "Edit · edit · /repo/file.ts",
+          patterns: ["/repo/file.ts"],
+          raisedAt: 1_010,
+          deadline: 2_010,
+        }]),
+      };
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+
+      const handle = (dispatcher as unknown as { handlePermissionEvent(event: unknown): void }).handlePermissionEvent.bind(dispatcher);
+      handle({
+        type: "permission_asked",
+        askId: "ask_acp",
+        runId: "acp-session-1",
+        harness: "claude-code",
+        source: "acp",
+        permission: "edit",
+        tool: "Edit",
+        summary: "Edit · edit · /repo/file.ts",
+        occurredAt: 1_010,
+      });
+      handle({
+        type: "permission_answered",
+        askId: "ask_acp",
+        runId: "acp-session-1",
+        harness: "claude-code",
+        source: "acp",
+        permission: "edit",
+        tool: "Edit",
+        summary: "Edit · edit · /repo/file.ts",
+        occurredAt: 1_125,
+        decision: "allow_once",
+        reason: "operator",
+        answeredBy: "Operator",
+      });
+
+      const events = store.listEvents(task.id);
+      const asked = events.find((event) => event.type === "task_permission_asked")!;
+      expect(asked.body).toMatchObject({
+        askId: "ask_acp",
+        harness: "claude-code",
+        source: "acp",
+        permission: "edit",
+        tool: "Edit",
+        summary: "Edit · edit · /repo/file.ts",
+        raisedAt: 1_010,
+        deadline: 2_010,
+        patterns: ["/repo/file.ts"],
+      });
+      const answered = events.find((event) => event.type === "task_permission_answered")!;
+      expect(answered.body).toMatchObject({
+        askId: "ask_acp",
+        resolution: "operator",
+        action: "allow_once",
+        answeredBy: "Operator",
+        latencyMs: 115,
+      });
+    });
+
     it("launches claude-code tasks through the Claude runner instead of OpenCode sessions", async () => {
       const task = store.create({
         title: "Claude lane",
