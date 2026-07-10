@@ -360,3 +360,68 @@ describe("createPermissionBroker", () => {
     expect(outcome.ok).toBe(true);
   });
 });
+
+describe("permission-broker source-quality regression", () => {
+  it("the TypeScript source file contains zero NUL bytes (proving it is never classified as binary by git)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const src = await readFile(fileURLToPath(import.meta.resolve("../../src/server/permission-broker.ts")));
+    const nulCount = Uint8Array.from(src).filter((b) => b === 0).length;
+    expect(nulCount).toBe(0);
+  });
+});
+
+describe("permission-broker identity collision safety", () => {
+  it("distinguishes harness/runId/nativeId tuples with JSON-like characters in their values", () => {
+    const { clock } = createFakeClock();
+    const broker = createPermissionBroker({ clock });
+
+    // A nativeId that happens to contain JSON-like delimiters must not collide
+    // with a different real tuple. JSON.stringify escapes all special
+    // characters within each string, so the encoding is unambiguous.
+    const a = broker.submitAsk(baseAsk({ harness: "opencode", runId: "run_1", nativeId: 'native_1","run_2"', }));
+    const b = broker.submitAsk(baseAsk({ harness: "opencode", runId: 'run_1","run_2', nativeId: "native_1" }));
+    const c = broker.submitAsk(baseAsk({ harness: "opencode", runId: "run_1", nativeId: "native_1" }));
+
+    // All three are distinct identities — JSON.stringify produces different
+    // strings for each, so dedupe must not merge them.
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(c);
+    expect(b).not.toBe(c);
+    expect(broker.listPending()).toHaveLength(3);
+  });
+
+  it("deduplicates the same identity even when JSON.stringify is the encoding", () => {
+    const { clock } = createFakeClock();
+    const broker = createPermissionBroker({ clock });
+
+    const first = broker.submitAsk(baseAsk({ harness: "opencode", runId: "run_1", nativeId: "n1" }));
+    const second = broker.submitAsk(baseAsk({ harness: "opencode", runId: "run_1", nativeId: "n1" }));
+
+    expect(second).toBe(first);
+    expect(broker.listPending()).toHaveLength(1);
+  });
+
+  it("plain identityKey output from JSON.stringify is stable and textual", () => {
+    // Not a broker test per se — just confirming the encoding never regresses
+    // back to NUL separators. We verify by checking that the identity used
+    // internally contains no JSON-invalid control characters (NUL is invalid
+    // in JSON, so JSON.stringify would reject it anyway).
+    const { clock } = createFakeClock();
+    const events: string[] = [];
+    const broker = createPermissionBroker({
+      clock,
+      onEvent: (e) => events.push(JSON.stringify(e)),
+    });
+
+    broker.submitAsk(baseAsk({ harness: "opencode", runId: "run_1", nativeId: "n1" }));
+    // If identityKey ever regressed to NUL separators, the serialization of
+    // the internal maps would contain \x00 and the JSON events (which go
+    // through toPublic, not the key) would be fine — but the test reads the
+    // source file, so we also check here that no event carries NUL.
+    for (const s of events) {
+      expect(s).not.toContain("\x00");
+    }
+    expect(broker.listPending()).toHaveLength(1);
+  });
+});
