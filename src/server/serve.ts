@@ -8,6 +8,7 @@ import { startOrConnect } from "./opencode";
 import { TaskDispatcher } from "./dispatcher";
 import { createChainAdvancer } from "./chain-advancer";
 import { createApp } from "./app";
+import { SessionActivityCollector } from "./session-activity";
 import { resolveBoardToken } from "./auth";
 import { registerTerminalRoutes } from "./routes/terminals";
 import { PtyManager } from "./terminal/pty-manager";
@@ -40,12 +41,18 @@ export async function main(): Promise<void> {
       instanceName,
     },
   });
+  // Single collector shared by the dispatcher (writer, via runner callbacks)
+  // and the session-events SSE route (reader, via createApp). Constructing
+  // separate instances silently starves the route to the static no-collector
+  // heartbeat path even while the dispatcher is actively recording activity.
+  const activity = new SessionActivityCollector();
   const dispatcher = new TaskDispatcher({
     client: handle.client,
     store: taskStore,
     adapterBaseUrl,
     boardToken,
     instanceName,
+    activity,
   });
   // Chain advancer needs dispatcher.run; the dispatcher needs the advancer to
   // notify on integrate-to-done — built in this order to avoid a circular
@@ -95,6 +102,7 @@ export async function main(): Promise<void> {
     boardToken,
     opencodeMode: config.mode,
     chainAdvancer,
+    activity,
   });
   registerTerminalRoutes(app, { manager: terminalManager });
 
