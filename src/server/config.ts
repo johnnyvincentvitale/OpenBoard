@@ -41,6 +41,46 @@ export interface AdapterConfig {
   };
 }
 
+export interface WatchdogConfig {
+  /** Entire FR10 watchdog is inert when false. */
+  enabled: boolean;
+  /** Any provider/transport frame silence threshold. 0 disables this detector. */
+  providerSilenceMs: number;
+  /** Meaningful task activity silence threshold. 0 disables this detector. */
+  taskInactivityMs: number;
+  /** Observation window after one diagnostic nudge before termination. 0 terminates immediately. */
+  diagnosticWindowMs: number;
+  /** Automatic retry budget after the first run. 0 means never auto-retry. */
+  maxRetries: number;
+  circuitBreaker: {
+    /** Consecutive watchdog terminations that open the circuit. 0 disables the breaker. */
+    failureThreshold: number;
+    /** Time after which an open circuit is eligible to close. 0 means stay open until restart/handoff reset. */
+    resetMs: number;
+  };
+}
+
+export const WATCHDOG_DEFAULTS: WatchdogConfig = {
+  enabled: true,
+  providerSilenceMs: 120_000,
+  taskInactivityMs: 600_000,
+  diagnosticWindowMs: 30_000,
+  maxRetries: 1,
+  circuitBreaker: {
+    failureThreshold: 3,
+    resetMs: 300_000,
+  },
+};
+
+const WATCHDOG_BOUNDS = {
+  providerSilenceMs: 24 * 60 * 60 * 1000,
+  taskInactivityMs: 24 * 60 * 60 * 1000,
+  diagnosticWindowMs: 60 * 60 * 1000,
+  maxRetries: 5,
+  circuitBreakerFailureThreshold: 20,
+  circuitBreakerResetMs: 24 * 60 * 60 * 1000,
+};
+
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   const normalized = value.trim().toLowerCase();
@@ -53,6 +93,70 @@ function parsePort(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === "") return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoundedNonNegativeInt(
+  value: string | undefined,
+  varName: string,
+  fallback: number,
+  max: number,
+): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 0 || !/^\d+$/.test(trimmed)) {
+    throw new ConfigError(`${varName} must be a non-negative integer, got: "${value}"`);
+  }
+  return Math.min(parsed, max);
+}
+
+export function loadWatchdogConfig(env: NodeJS.ProcessEnv = process.env): WatchdogConfig {
+  const enabled = parseBoolean(env.OPENBOARD_WATCHDOG_ENABLED, WATCHDOG_DEFAULTS.enabled);
+  const providerSilenceMs = parseBoundedNonNegativeInt(
+    env.OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS,
+    "OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS",
+    WATCHDOG_DEFAULTS.providerSilenceMs,
+    WATCHDOG_BOUNDS.providerSilenceMs,
+  );
+  const taskInactivityMs = parseBoundedNonNegativeInt(
+    env.OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS,
+    "OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS",
+    WATCHDOG_DEFAULTS.taskInactivityMs,
+    WATCHDOG_BOUNDS.taskInactivityMs,
+  );
+  const diagnosticWindowMs = parseBoundedNonNegativeInt(
+    env.OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS,
+    "OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS",
+    WATCHDOG_DEFAULTS.diagnosticWindowMs,
+    WATCHDOG_BOUNDS.diagnosticWindowMs,
+  );
+  const maxRetries = parseBoundedNonNegativeInt(
+    env.OPENBOARD_WATCHDOG_MAX_RETRIES,
+    "OPENBOARD_WATCHDOG_MAX_RETRIES",
+    WATCHDOG_DEFAULTS.maxRetries,
+    WATCHDOG_BOUNDS.maxRetries,
+  );
+  const failureThreshold = parseBoundedNonNegativeInt(
+    env.OPENBOARD_WATCHDOG_CIRCUIT_FAILURES,
+    "OPENBOARD_WATCHDOG_CIRCUIT_FAILURES",
+    WATCHDOG_DEFAULTS.circuitBreaker.failureThreshold,
+    WATCHDOG_BOUNDS.circuitBreakerFailureThreshold,
+  );
+  const resetMs = parseBoundedNonNegativeInt(
+    env.OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS,
+    "OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS",
+    WATCHDOG_DEFAULTS.circuitBreaker.resetMs,
+    WATCHDOG_BOUNDS.circuitBreakerResetMs,
+  );
+
+  return {
+    enabled: enabled && (providerSilenceMs > 0 || taskInactivityMs > 0),
+    providerSilenceMs,
+    taskInactivityMs,
+    diagnosticWindowMs,
+    maxRetries,
+    circuitBreaker: { failureThreshold, resetMs },
+  };
 }
 
 /** Thrown by strict, instance-config port/value parsing — carries a clear, user-facing message. */

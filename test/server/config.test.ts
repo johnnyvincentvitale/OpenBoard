@@ -9,8 +9,10 @@ import {
   deriveStorePaths,
   findFreePort,
   loadConfig,
+  loadWatchdogConfig,
   resolveAdapterConfig,
   resolveInstanceConfig,
+  WATCHDOG_DEFAULTS,
 } from "../../src/server/config";
 import { OPENCODE_DEFAULTS, BOARD_SERVER_DEFAULTS } from "../../src/shared/opencode-defaults";
 
@@ -378,5 +380,73 @@ describe("resolveAdapterConfig", () => {
   it("defaults with no env set reproduce the pre-multi-instance boardPort default", async () => {
     const config = await resolveAdapterConfig({ BOARD_WORKSPACE: makeWorkspace() });
     expect(config.boardPort).toBe(BOARD_SERVER_DEFAULTS.port);
+  });
+});
+
+describe("loadWatchdogConfig", () => {
+  it("uses safe FR10 defaults when watchdog env is absent", () => {
+    expect(loadWatchdogConfig({})).toEqual(WATCHDOG_DEFAULTS);
+  });
+
+  it("honors timeout, retry, and circuit-breaker overrides", () => {
+    expect(loadWatchdogConfig({
+      OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS: "1000",
+      OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: "2000",
+      OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS: "300",
+      OPENBOARD_WATCHDOG_MAX_RETRIES: "2",
+      OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "4",
+      OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: "5000",
+    })).toEqual({
+      enabled: true,
+      providerSilenceMs: 1000,
+      taskInactivityMs: 2000,
+      diagnosticWindowMs: 300,
+      maxRetries: 2,
+      circuitBreaker: { failureThreshold: 4, resetMs: 5000 },
+    });
+  });
+
+  it("supports zero/disable semantics", () => {
+    expect(loadWatchdogConfig({
+      OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS: "0",
+      OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: "0",
+      OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS: "0",
+      OPENBOARD_WATCHDOG_MAX_RETRIES: "0",
+      OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "0",
+      OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: "0",
+    })).toEqual({
+      enabled: false,
+      providerSilenceMs: 0,
+      taskInactivityMs: 0,
+      diagnosticWindowMs: 0,
+      maxRetries: 0,
+      circuitBreaker: { failureThreshold: 0, resetMs: 0 },
+    });
+  });
+
+  it("lets OPENBOARD_WATCHDOG_ENABLED=false disable even nonzero detectors", () => {
+    expect(loadWatchdogConfig({ OPENBOARD_WATCHDOG_ENABLED: "false" }).enabled).toBe(false);
+  });
+
+  it("rejects malformed or negative documented watchdog values", () => {
+    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_MAX_RETRIES: "-1" })).toThrow(ConfigError);
+    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: "1.5" })).toThrow(ConfigError);
+    expect(() => loadWatchdogConfig({ OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: "many" })).toThrow(/OPENBOARD_WATCHDOG_CIRCUIT_FAILURES/);
+  });
+
+  it("bounds excessive values instead of allowing unbounded timers/retries", () => {
+    const config = loadWatchdogConfig({
+      OPENBOARD_WATCHDOG_PROVIDER_SILENCE_MS: String(Number.MAX_SAFE_INTEGER),
+      OPENBOARD_WATCHDOG_TASK_INACTIVITY_MS: String(Number.MAX_SAFE_INTEGER),
+      OPENBOARD_WATCHDOG_DIAGNOSTIC_WINDOW_MS: String(Number.MAX_SAFE_INTEGER),
+      OPENBOARD_WATCHDOG_MAX_RETRIES: String(Number.MAX_SAFE_INTEGER),
+      OPENBOARD_WATCHDOG_CIRCUIT_FAILURES: String(Number.MAX_SAFE_INTEGER),
+      OPENBOARD_WATCHDOG_CIRCUIT_RESET_MS: String(Number.MAX_SAFE_INTEGER),
+    });
+    expect(config.providerSilenceMs).toBe(86_400_000);
+    expect(config.taskInactivityMs).toBe(86_400_000);
+    expect(config.diagnosticWindowMs).toBe(3_600_000);
+    expect(config.maxRetries).toBe(5);
+    expect(config.circuitBreaker).toEqual({ failureThreshold: 20, resetMs: 86_400_000 });
   });
 });
