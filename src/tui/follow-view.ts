@@ -12,6 +12,8 @@ export interface FollowViewState {
   lastRenderAt: number;
   maxEvents: number;
   gapReason?: string;
+  /** Set when a frame was applied but rendering was throttled (P3-5). */
+  needsTrailingFlush?: boolean;
 }
 
 export const FOLLOW_MAX_RENDER_FPS = 10;
@@ -93,4 +95,48 @@ export function descendantSessionLabel(event: Pick<SessionActivityEvent, "sessio
 function trimFollowEvents(state: FollowViewState): FollowViewState {
   if (state.events.length <= state.maxEvents) return state;
   return { ...state, events: state.events.slice(-state.maxEvents) };
+}
+
+/**
+ * Apply a frame and set the trailing-flush flag when rendering is throttled (P3-5).
+ * Returns the updated state plus whether an immediate render should occur.
+ */
+export function applyFollowFrameWithRender(
+  state: FollowViewState,
+  frame: SessionActivityFrame,
+  now = Date.now(),
+): { state: FollowViewState; shouldRender: boolean } {
+  const next = applyFollowFrame(state, frame);
+  if (shouldRenderFollowFrame(next, now)) {
+    return { state: { ...next, needsTrailingFlush: false }, shouldRender: true };
+  }
+  return { state: { ...next, needsTrailingFlush: true }, shouldRender: false };
+}
+
+/**
+ * Schedule a trailing flush after the render throttle interval (P3-5).
+ * If a frame was applied but not rendered (throttled), this ensures the
+ * final state is rendered after the interval, rather than depending on
+ * the next heartbeat to trigger a render.
+ *
+ * @param state the current follow view state
+ * @param onFlush called when the trailing flush fires
+ * @param existingTimer an existing pending timer to cancel (if any)
+ * @returns the timer handle (pass to the next call to cancel/replace)
+ */
+export function scheduleFollowTrailingFlush(
+  state: FollowViewState,
+  onFlush: () => void,
+  existingTimer?: ReturnType<typeof setTimeout>,
+): ReturnType<typeof setTimeout> | undefined {
+  if (existingTimer) clearTimeout(existingTimer);
+  if (!state.needsTrailingFlush) return undefined;
+  return setTimeout(() => {
+    onFlush();
+  }, FOLLOW_RENDER_INTERVAL_MS);
+}
+
+/** Clear a pending trailing flush timer (P3-5). */
+export function cancelFollowTrailingFlush(timer: ReturnType<typeof setTimeout> | undefined): void {
+  if (timer) clearTimeout(timer);
 }

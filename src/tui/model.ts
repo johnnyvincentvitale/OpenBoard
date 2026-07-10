@@ -426,12 +426,13 @@ export function nextTaskId(tasks: Task[], selectedTaskId: string | undefined, de
   const ordered = orderedTasks(tasks);
   if (ordered.length === 0) return undefined;
 
-  const current = Math.max(
-    0,
-    selectedTaskId ? ordered.findIndex((task) => task.id === selectedTaskId) : 0,
-  );
-  const index = current === -1 ? 0 : current;
-  const next = (index + delta + ordered.length) % ordered.length;
+  const current = selectedTaskId ? ordered.findIndex((task) => task.id === selectedTaskId) : -1;
+  if (current === -1) {
+    // Selection is missing or filtered out of `tasks` — land on the first
+    // (down) or last (up) visible task instead of skipping one (P3-7).
+    return delta > 0 ? ordered[0]?.id : ordered[ordered.length - 1]?.id;
+  }
+  const next = (current + delta + ordered.length) % ordered.length;
   return ordered[next]?.id;
 }
 

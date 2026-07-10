@@ -53,3 +53,34 @@ export function firstPendingPermissionAsk(task: Pick<Task, "pendingPermissions">
 export function permissionInFlightKey(taskId: string, askId: string): string {
   return `${taskId}:${askId}`;
 }
+
+/** The specific task+ask a permission response is bound to (P3-8). */
+export interface PermissionAskBinding {
+  taskId: string;
+  askId: string;
+}
+
+/** Bind to a task's current oldest pending ask, if any. */
+export function bindPermissionAsk(task: Pick<Task, "id" | "pendingPermissions"> | undefined): PermissionAskBinding | undefined {
+  if (!task) return undefined;
+  const ask = firstPendingPermissionAsk(task);
+  return ask ? { taskId: task.id, askId: ask.id } : undefined;
+}
+
+/**
+ * Resolve a binding against the current task list. Returns undefined if the
+ * bound task no longer exists or the bound ask is no longer pending on it —
+ * callers must treat that as "not safe to answer silently", not as
+ * permission to fall back to whatever is currently selected.
+ */
+export function resolveBoundPermissionAsk(
+  binding: PermissionAskBinding | undefined,
+  tasks: Pick<Task, "id" | "pendingPermissions">[],
+): { task: Pick<Task, "id" | "pendingPermissions">; ask: PendingPermissionAsk } | undefined {
+  if (!binding) return undefined;
+  const task = tasks.find((candidate) => candidate.id === binding.taskId);
+  if (!task) return undefined;
+  const ask = pendingPermissionAsks(task).find((candidate) => candidate.id === binding.askId);
+  if (!ask) return undefined;
+  return { task, ask };
+}

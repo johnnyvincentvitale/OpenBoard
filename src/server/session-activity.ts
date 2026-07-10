@@ -25,6 +25,7 @@ import type {
 
 const MAX_TEXT_LENGTH = 10_000;
 const MAX_NAME_LENGTH = 256;
+const MAX_ID_LENGTH = 256;
 const TEXT_TRUNCATION_SENTINEL = "[...truncated]";
 const SAFE_MAX_INT = Number.MAX_SAFE_INTEGER;
 
@@ -98,11 +99,37 @@ function sanitizeName(raw: string): string {
   return raw.slice(0, MAX_NAME_LENGTH);
 }
 
+/** Bound a public session identifier to MAX_ID_LENGTH (P3-2). */
+function sanitizeId(raw: string): string {
+  if (raw.length <= MAX_ID_LENGTH) return raw;
+  return raw.slice(0, MAX_ID_LENGTH);
+}
+
+/** Bound an optional/null session identifier (P3-2). */
+function sanitizeOptionalId(raw: string | null | undefined): string | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  return sanitizeId(raw);
+}
+
 function sanitizeNonNegInt(raw: number | undefined): number | undefined {
   if (raw === undefined) return undefined;
   if (!Number.isFinite(raw) || raw < 0) return 0;
   if (raw > SAFE_MAX_INT) return SAFE_MAX_INT;
   return Math.trunc(raw);
+}
+
+/** Deep-clone a session activity event so subscribers cannot mutate the ring (P3-4). */
+function cloneEvent(event: SessionActivityEvent): SessionActivityEvent {
+  return {
+    ...event,
+    tool: event.tool ? { ...event.tool } : undefined,
+  };
+}
+
+/** Deep-clone a run so subscribers cannot mutate the stored run (P3-4). */
+function cloneRun(run: SessionActivityRun): SessionActivityRun {
+  return { ...run };
 }
 
 // ── Collector ─────────────────────────────────────────────────────────────
@@ -131,12 +158,13 @@ export class SessionActivityCollector {
    */
   startRun(run: SessionActivityRun): void {
     // Deep-clone run to avoid retaining caller-owned mutable objects.
+    // Bound public identifiers to MAX_ID_LENGTH (P3-2).
     const cloned: SessionActivityRun = {
       taskId: run.taskId,
       runStartedAt: run.runStartedAt,
-      sessionId: run.sessionId,
-      rootSessionId: run.rootSessionId,
-      parentSessionId: run.parentSessionId,
+      sessionId: sanitizeId(run.sessionId),
+      rootSessionId: sanitizeId(run.rootSessionId),
+      parentSessionId: sanitizeOptionalId(run.parentSessionId),
       harness: run.harness,
     };
 
@@ -168,15 +196,16 @@ export class SessionActivityCollector {
     }
 
     // Always emit a fresh-run snapshot to existing subscribers.
-    const snapshotFrame: SessionActivityFrame = {
-      kind: "snapshot",
-      run: cloned,
-      events: [],
-      lastEventAt: null,
-      transport: "live",
-    };
+    // Defensively copy the run per subscriber so one cannot mutate another (P3-4).
     for (const sub of this.subscribers) {
       if (sub.taskId === cloned.taskId) {
+        const snapshotFrame: SessionActivityFrame = {
+          kind: "snapshot",
+          run: cloneRun(cloned),
+          events: [],
+          lastEventAt: null,
+          transport: "live",
+        };
         this.safeCall(sub.callback, snapshotFrame);
       }
     }
@@ -208,9 +237,9 @@ export class SessionActivityCollector {
       seq,
       taskId,
       runStartedAt,
-      sessionId: normalized.sessionId,
-      rootSessionId: normalized.rootSessionId,
-      parentSessionId: normalized.parentSessionId,
+      sessionId: sanitizeId(normalized.sessionId),
+      rootSessionId: sanitizeId(normalized.rootSessionId),
+      parentSessionId: sanitizeOptionalId(normalized.parentSessionId),
       harness: normalized.harness,
       occurredAt: this.clock(),
       kind: normalized.kind,
@@ -291,13 +320,28 @@ export class SessionActivityCollector {
       });
     }
 
+    // Gap: cursor is beyond the current run's entire sequence range (P3-3).
+    // seq resets to 1 on each startRun, so a cursor from a replaced run is
+    // always >= nextSeq. Emit an explicit gap/reset rather than an ambiguous
+    // empty snapshot.
+    if (cursor > 0 && cursor >= runState.nextSeq) {
+      this.safeCall(callback, {
+        kind: "gap",
+        afterSeq: cursor,
+        reason: `Sequence reset: cursor ${cursor} is beyond the current run's range (nextSeq=${runState.nextSeq}); the run may have been replaced`,
+      });
+    }
+
     // Snapshot: always sent for an active run.
     // lastEventAt reflects the run's latest buffered event, not only those after cursor.
+    // Defensively copy the run and events so subscribers cannot mutate the ring (P3-4).
     const latestEvent = runState.events[runState.events.length - 1];
-    const eventsAfterCursor = runState.events.filter((e) => e.seq > cursor);
+    const eventsAfterCursor = runState.events
+      .filter((e) => e.seq > cursor)
+      .map((e) => cloneEvent(e));
     this.safeCall(callback, {
       kind: "snapshot",
-      run: runState.run,
+      run: cloneRun(runState.run),
       events: eventsAfterCursor,
       lastEventAt: latestEvent?.occurredAt ?? null,
       transport: runState.transport,
@@ -428,9 +472,10 @@ export class SessionActivityCollector {
 
   /** Fan out an append frame to task-scoped subscribers, isolating throws. */
   private fanoutAppend(taskId: string, event: SessionActivityEvent): void {
-    const frame: SessionActivityFrame = { kind: "append", event };
     for (const sub of this.subscribers) {
       if (sub.taskId === taskId) {
+        // Defensively copy the event so one subscriber cannot mutate the ring or other subscribers (P3-4).
+        const frame: SessionActivityFrame = { kind: "append", event: cloneEvent(event) };
         this.safeCall(sub.callback, frame);
       }
     }

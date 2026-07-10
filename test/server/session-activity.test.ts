@@ -377,6 +377,53 @@ describe("SessionActivityCollector", () => {
       const gaps = frames.filter((f) => f.kind === "gap");
       expect(gaps).toHaveLength(0);
     });
+
+    it("emits an honest gap (not an ambiguous empty snapshot) when a reconnecting subscriber's cursor is from a replaced run (P3-3)", () => {
+      now = 1000;
+      collector.startRun(makeRun({ runStartedAt: 1000 }));
+      collector.recordEvent("task_1", 1000, makeInput({ text: "a" })); // seq 1
+      collector.recordEvent("task_1", 1000, makeInput({ text: "b" })); // seq 2
+      collector.recordEvent("task_1", 1000, makeInput({ text: "c" })); // seq 3
+
+      // Run is replaced (e.g. a fresh dispatcher attempt) — seq resets to 1.
+      collector.startRun(makeRun({ runStartedAt: 2000, sessionId: "ses_2" }));
+
+      // A subscriber reconnects with a cursor from the OLD run (seq 3), which
+      // is now >= the new run's nextSeq. Without the fix this silently reads
+      // as an empty/partial snapshot; with the fix it's an explicit gap.
+      const { frames } = collectFrames(collector, "task_1", 3);
+
+      const gap = frames.find((f) => f.kind === "gap");
+      expect(gap).toBeDefined();
+      if (gap?.kind === "gap") {
+        expect(gap.afterSeq).toBe(3);
+        expect(gap.reason).toContain("reset");
+      }
+
+      const snapshot = frames.find((f) => f.kind === "snapshot");
+      expect(snapshot).toBeDefined();
+      if (snapshot?.kind === "snapshot") {
+        expect(snapshot.run.runStartedAt).toBe(2000);
+        expect(snapshot.events).toHaveLength(0);
+      }
+    });
+
+    it("does not emit a spurious gap for a subscriber resuming mid-run at a still-valid cursor", () => {
+      now = 1000;
+      collector.startRun(makeRun({ runStartedAt: 1000 }));
+      collector.recordEvent("task_1", 1000, makeInput({ text: "a" })); // seq 1
+      collector.recordEvent("task_1", 1000, makeInput({ text: "b" })); // seq 2
+
+      // cursor=2 is the last real seq of the SAME still-active run — valid resume.
+      const { frames } = collectFrames(collector, "task_1", 2);
+
+      const gaps = frames.filter((f) => f.kind === "gap");
+      expect(gaps).toHaveLength(0);
+      const snapshot = frames.find((f) => f.kind === "snapshot");
+      if (snapshot?.kind === "snapshot") {
+        expect(snapshot.events).toHaveLength(0); // nothing after cursor yet
+      }
+    });
   });
 
   // ── Config validation ──────────────────────────────────────────────────
@@ -700,6 +747,58 @@ describe("SessionActivityCollector", () => {
       const snapshot = frames.find((f) => f.kind === "snapshot");
       if (snapshot?.kind === "snapshot") {
         expect(snapshot.events[0].text).toBe("original");
+      }
+    });
+
+    it("a subscriber mutating its delivered snapshot run/events cannot corrupt another subscriber's view (P3-4)", () => {
+      now = 1000;
+      collector.startRun(makeRun());
+      collector.recordEvent("task_1", 1000, makeInput({ text: "shared" }));
+
+      const subA = collectFrames(collector, "task_1", 0);
+      const subB = collectFrames(collector, "task_1", 0);
+
+      const snapshotA = subA.frames.find((f) => f.kind === "snapshot");
+      if (snapshotA?.kind === "snapshot") {
+        // Subscriber A mutates its own delivered copy.
+        (snapshotA.run as { sessionId: string }).sessionId = "corrupted";
+        (snapshotA.events[0] as { text?: string }).text = "corrupted";
+      }
+
+      const snapshotB = subB.frames.find((f) => f.kind === "snapshot");
+      if (snapshotB?.kind === "snapshot") {
+        expect(snapshotB.run.sessionId).toBe("ses_1");
+        expect(snapshotB.events[0].text).toBe("shared");
+      }
+
+      // Internal state is unaffected too — a fresh subscribe sees clean data.
+      const subC = collectFrames(collector, "task_1", 0);
+      const snapshotC = subC.frames.find((f) => f.kind === "snapshot");
+      if (snapshotC?.kind === "snapshot") {
+        expect(snapshotC.run.sessionId).toBe("ses_1");
+        expect(snapshotC.events[0].text).toBe("shared");
+      }
+    });
+
+    it("mutating an append frame's event does not corrupt another subscriber's copy (P3-4)", () => {
+      now = 1000;
+      collector.startRun(makeRun());
+
+      const subA = collectFrames(collector, "task_1", 0);
+      const subB = collectFrames(collector, "task_1", 0);
+      subA.frames.length = 0;
+      subB.frames.length = 0;
+
+      collector.recordEvent("task_1", 1000, makeInput({ text: "appended" }));
+
+      const appendA = subA.frames.find((f) => f.kind === "append");
+      if (appendA?.kind === "append") {
+        (appendA.event as { text?: string }).text = "corrupted";
+      }
+
+      const appendB = subB.frames.find((f) => f.kind === "append");
+      if (appendB?.kind === "append") {
+        expect(appendB.event.text).toBe("appended");
       }
     });
   });
@@ -1118,6 +1217,40 @@ describe("SessionActivityCollector", () => {
         expect(tool).not.toHaveProperty("output");
         expect(tool).not.toHaveProperty("inputSummary");
         expect(tool).not.toHaveProperty("outputSummary");
+      }
+    });
+
+    it("truncates sessionId/rootSessionId/parentSessionId exceeding MAX_ID_LENGTH (P3-2)", () => {
+      now = 1000;
+      const longId = "s".repeat(500);
+      collector.startRun(makeRun({ sessionId: longId, rootSessionId: longId }));
+
+      collector.recordEvent("task_1", 1000, makeInput({
+        sessionId: longId,
+        rootSessionId: longId,
+        parentSessionId: longId,
+      }));
+
+      const { frames } = collectFrames(collector, "task_1", 0);
+      const snapshot = frames.find((f) => f.kind === "snapshot");
+      if (snapshot?.kind === "snapshot") {
+        expect(snapshot.run.sessionId.length).toBe(256);
+        expect(snapshot.run.rootSessionId.length).toBe(256);
+        expect(snapshot.events[0].sessionId.length).toBe(256);
+        expect(snapshot.events[0].rootSessionId.length).toBe(256);
+        expect(snapshot.events[0].parentSessionId).toHaveLength(256);
+      }
+    });
+
+    it("leaves null/undefined parentSessionId untouched (P3-2)", () => {
+      now = 1000;
+      collector.startRun(makeRun());
+      collector.recordEvent("task_1", 1000, makeInput({ parentSessionId: null }));
+
+      const { frames } = collectFrames(collector, "task_1", 0);
+      const snapshot = frames.find((f) => f.kind === "snapshot");
+      if (snapshot?.kind === "snapshot") {
+        expect(snapshot.events[0].parentSessionId).toBeNull();
       }
     });
   });

@@ -77,6 +77,14 @@ describe("TUI task model", () => {
     expect(nearestTaskInColumn(tasks, "review-1", -1)).toBe("todo-1");
   });
 
+  it("lands on the first (down) or last (up) task, not a skipped neighbor, when the selection is missing from the list (P3-7)", () => {
+    // Simulates a selection that's filtered out of the visible/ordered set.
+    expect(nextTaskId(tasks, "not-in-list", 1)).toBe(orderedTasks(tasks)[0]?.id);
+    expect(nextTaskId(tasks, "not-in-list", -1)).toBe(orderedTasks(tasks)[orderedTasks(tasks).length - 1]?.id);
+    expect(nextTaskId(tasks, undefined, 1)).toBe(orderedTasks(tasks)[0]?.id);
+    expect(nextTaskId(tasks, undefined, -1)).toBe(orderedTasks(tasks)[orderedTasks(tasks).length - 1]?.id);
+  });
+
   it("formats labels for compact terminal display", () => {
     expect(runStateLabel("idle")).toBe("READY");
     expect(runStateGlyph("running")).toBe("●");

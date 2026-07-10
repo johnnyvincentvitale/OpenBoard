@@ -2140,9 +2140,13 @@ describe("TUI selected Review diff stat", () => {
     expect(s.filesDetail).toMatchObject({ ownerId: "review-card", selectedIndex: 1, mode: "list" });
     expect(textOf(renderApp(fakeUi(), s))).not.toContain("+test line");
 
+    // "m" (move) is a card action, not a Files-tab-local key — it must fall
+    // through and open move-target selection instead of being silently
+    // swallowed by the tab (P3-6), matching how it behaves from every other
+    // detail tab.
     await handleKeypress({ name: "m", sequence: "m" } as any, s, actions());
-    expect(s.detailTab).toBe("files");
-    expect(s.moveTargetColumn).toBeUndefined();
+    expect(s.detailTab).toBeUndefined();
+    expect(s.moveTargetColumn).toBe("review");
   });
 
   it("files tab c commits the selected file and refreshes the selected-card diff", async () => {

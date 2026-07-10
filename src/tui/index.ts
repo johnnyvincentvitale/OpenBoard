@@ -91,8 +91,8 @@ import {
   type PendingConfirmation,
 } from "./confirmations";
 import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
-import { firstPendingPermissionAsk, permissionInFlightKey } from "./permission-surface";
-import { applyFollowFrame, createFollowViewState, descendantSessionLabel, followVisibleEvents, markFollowRendered, scrollFollow, shouldRenderFollowFrame, tailFollow, type FollowViewState } from "./follow-view";
+import { bindPermissionAsk, firstPendingPermissionAsk, permissionInFlightKey, resolveBoundPermissionAsk, type PermissionAskBinding } from "./permission-surface";
+import { applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, descendantSessionLabel, followVisibleEvents, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, tailFollow, type FollowViewState } from "./follow-view";
 import { backspaceBlockedAnswerDraft, blockedAnswerDraftKey, blockedAnswerSubmitLabel, createBlockedAnswerDraft, editBlockedAnswerDraft, lineDeleteBlockedAnswerDraft, staleBlockedAnswerDraft, type BlockedAnswerDraft } from "./blocked-answer";
 import { createDiffLineageState, diffLineageHeader, fetchSelectedDiffEvidence, moveAncestorSelection, type DiffLineageState } from "./diff-lineage";
 import { fallbackModelOptions, modelRetryLabel, predictedBlockedAnswerResumeMode } from "./model-fallback";
@@ -678,6 +678,10 @@ interface TuiState {
   // renderable's scrollY. Mouse-wheel scroll leaves it false so that scroll is captured.
   diffScrollIntent?: boolean;
   permissionAnswersInFlight?: Set<string>;
+  // The task+ask that y/N is bound to (P3-8). Rebound only on explicit
+  // selection changes, never by a background refresh, so a poll-driven
+  // reselection cannot make y/N silently answer a different card's ask.
+  permissionAskBinding?: PermissionAskBinding;
   followView?: FollowViewState;
   followStream?: { close(): void };
   blockedAnswer?: BlockedAnswerDraft;
@@ -1069,6 +1073,7 @@ export async function runOpenBoardTui(
       state.agents = [];
       state.providers = [];
       state.selectedTaskId = undefined;
+      state.permissionAskBinding = undefined;
       state.reviewDiffStat = undefined;
       state.viewState = transitionView(state.viewState, "board");
       state.status = `attached to ${item.definition.name} (${item.runtime.boardUrl})`;
@@ -1086,6 +1091,7 @@ export async function runOpenBoardTui(
     state.agents = [];
     state.providers = [];
     state.selectedTaskId = undefined;
+    state.permissionAskBinding = undefined;
     state.reviewDiffStat = undefined;
     state.status = "detached; back to instance list";
     render();
@@ -4781,6 +4787,26 @@ function renderFieldShell(ui: OpenTui, label: string, focused: boolean, height: 
   );
 }
 
+/**
+ * If an active board filter has hidden the currently selected task, snap
+ * selection to the nearest visible task before any navigation or single-key
+ * card action runs — otherwise r/d/y/etc. would silently target a card the
+ * user cannot see on screen (P3-7).
+ */
+function reconcileFilteredSelection(state: TuiState): void {
+  if (!state.boardFilter) return;
+  const visibleTasks = filterTasks(state.tasks, state.boardFilter);
+  if (visibleTasks.some((task) => task.id === state.selectedTaskId)) return;
+  state.selectedTaskId = visibleTasks[0]?.id;
+  state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
+  state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selectedTask(state));
+  state.reviewCommitStatus = reconcileReviewCommitStatusCache(state.reviewCommitStatus, selectedTask(state));
+  state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
+  if (state.integrateCommitReview && state.integrateCommitReview.taskId !== state.selectedTaskId) {
+    state.integrateCommitReview = undefined;
+  }
+}
+
 export async function handleKeypress(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
   const keyName = key.name || key.sequence;
 
@@ -4922,8 +4948,9 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       actions.render();
       return;
     }
-    actions.render();
-    return;
+    // Any other key (card actions like r/d, permission y/N, etc.) falls
+    // through to the board-level switch below, matching the generic detail
+    // tab's behavior — the Files tab must not swallow valid card actions (P3-6).
   }
 
   if (state.detailTab) {
@@ -4957,6 +4984,15 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       actions.render();
       return;
     }
+  }
+
+  // Arrow-key navigation below already resolves a filtered-out selection
+  // correctly on its own (nextTaskId/nearestTaskInColumn treat "not found"
+  // as "land on the first/last visible task"); reconciling here too would
+  // double-step past the first visible card. Every other action reads
+  // selectedTask() directly, so it still needs the reconciliation.
+  if (keyName !== "down" && keyName !== "up" && keyName !== "left" && keyName !== "right") {
+    reconcileFilteredSelection(state);
   }
 
   // Board view keybindings
@@ -5117,6 +5153,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     else if (keyName === "up") state.selectedTaskId = nextTaskId(visibleTasks, state.selectedTaskId, -1);
     else if (keyName === "left") state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, -1);
     else state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, 1);
+    state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
     state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selectedTask(state));
     state.reviewCommitStatus = reconcileReviewCommitStatusCache(state.reviewCommitStatus, selectedTask(state));
     state.pendingConfirmation = clearPendingForSelection(state, state.selectedTaskId);
@@ -5379,13 +5416,35 @@ function moveTaskToDone(state: TuiState, actions: TuiActions, task: Task): Promi
 
 async function answerSelectedPermission(state: TuiState, actions: TuiActions, action: "allow_once" | "deny"): Promise<void> {
   clearPendingConfirmation(state);
-  const task = selectedTask(state);
-  const ask = firstPendingPermissionAsk(task);
-  if (!task || !ask) {
+  const selected = selectedTask(state);
+  if (!selected) {
     state.status = "no pending permission ask on selected card";
     actions.render();
     return;
   }
+
+  // Bind to the ask/card actually shown, not whatever a background refresh
+  // may have silently reselected in the meantime (P3-8). A prior binding
+  // that no longer resolves means the selection or its ask changed since it
+  // was last bound — rebind and require an explicit follow-up press rather
+  // than answering a card the user never confirmed.
+  const bound = resolveBoundPermissionAsk(state.permissionAskBinding, state.tasks);
+  if (state.permissionAskBinding && !bound) {
+    state.permissionAskBinding = bindPermissionAsk(selected);
+    state.status = "selection changed since last view; press again to answer this card's permission ask";
+    actions.render();
+    return;
+  }
+
+  const task = bound?.task ?? selected;
+  const ask = bound?.ask ?? firstPendingPermissionAsk(selected);
+  if (!ask) {
+    state.permissionAskBinding = bindPermissionAsk(selected);
+    state.status = "no pending permission ask on selected card";
+    actions.render();
+    return;
+  }
+
   const key = permissionInFlightKey(task.id, ask.id);
   const inFlight = state.permissionAnswersInFlight ?? (state.permissionAnswersInFlight = new Set());
   if (inFlight.has(key)) {
@@ -5417,6 +5476,7 @@ async function answerSelectedPermission(state: TuiState, actions: TuiActions, ac
     }
   } finally {
     inFlight.delete(key);
+    state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
     actions.render();
   }
 }
@@ -5678,6 +5738,7 @@ async function cycleDiffEvidenceSource(state: TuiState, actions: TuiActions): Pr
 }
 
 async function openFollowViewForSelection(state: TuiState, actions: TuiActions): Promise<void> {
+  let followTrailingTimer: ReturnType<typeof setTimeout> | undefined;
   clearPendingConfirmation(state);
   const task = selectedTask(state);
   if (!task || (!task.sessionId && !task.harnessSessionId)) {
@@ -5688,16 +5749,30 @@ async function openFollowViewForSelection(state: TuiState, actions: TuiActions):
   closeInlineDetail(state);
   state.moveTargetColumn = undefined;
   state.followStream?.close();
+  cancelFollowTrailingFlush(followTrailingTimer);
+  followTrailingTimer = undefined;
   state.followView = createFollowViewState(task.id);
   state.viewState = transitionView(state.viewState, "follow");
   actions.render();
   try {
     state.followStream = await actions.client.streamSessionEvents(task.id, (frame) => {
       if (!state.followView || state.followView.taskId !== task.id) return;
-      state.followView = applyFollowFrame(state.followView, frame);
-      if (shouldRenderFollowFrame(state.followView)) {
+      const result = applyFollowFrameWithRender(state.followView, frame);
+      state.followView = result.state;
+      if (result.shouldRender) {
+        cancelFollowTrailingFlush(followTrailingTimer);
+        followTrailingTimer = undefined;
         state.followView = markFollowRendered(state.followView);
         actions.render();
+      } else {
+        // Schedule a trailing flush so the final frame of a burst is always rendered (P3-5).
+        followTrailingTimer = scheduleFollowTrailingFlush(state.followView, () => {
+          followTrailingTimer = undefined;
+          if (state.followView && state.followView.taskId === task.id) {
+            state.followView = markFollowRendered(state.followView);
+            actions.render();
+          }
+        }, followTrailingTimer);
       }
     });
   } catch (error) {
@@ -6145,6 +6220,7 @@ async function handleFilterModeKey(key: KeyEvent, state: TuiState, actions: TuiA
       const visibleTasks = filterTasks(state.tasks, state.boardFilter);
       if (!visibleTasks.some((task) => task.id === state.selectedTaskId)) {
         state.selectedTaskId = visibleTasks[0]?.id;
+        state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
         clearPendingConfirmation(state);
       }
     }
@@ -6554,6 +6630,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
     state.status = isEditing ? `saved task: ${task.title}` : `created task: ${task.title}`;
     await actions.refresh(true);
     state.selectedTaskId = task.id;
+    state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
     actions.render();
   } catch (error) {
     draft.submitting = false;
@@ -7504,6 +7581,7 @@ async function handleInlineMoveKey(key: KeyEvent, state: TuiState, actions: TuiA
       state.tasks = freshTasks;
       state.status = `moved ${task.title} to ${TUI_COLUMN_LABELS[target]}`;
       state.selectedTaskId = task.id;
+      state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
     } catch (error) {
       state.error = errorMessage(error);
       state.status = "move failed";
