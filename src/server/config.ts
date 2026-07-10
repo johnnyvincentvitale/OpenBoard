@@ -52,11 +52,20 @@ export interface WatchdogConfig {
   maxAutomaticRetries: number;
 }
 
+export interface PermissionConfig {
+  /** Operator grace window before brokered OpenCode asks fall back to the existing deny policy. */
+  graceMs: number;
+}
+
 export const WATCHDOG_DEFAULTS: WatchdogConfig = {
   enabled: true,
   timeoutMs: 600_000,
   sweepIntervalMs: 30_000,
   maxAutomaticRetries: 2,
+};
+
+export const PERMISSION_DEFAULTS: PermissionConfig = {
+  graceMs: 60_000,
 };
 
 const WATCHDOG_TIMEOUT_MAX_MS = 24 * 60 * 60 * 1000;
@@ -106,6 +115,17 @@ export function loadWatchdogConfig(
     timeoutMs,
     sweepIntervalMs: overrides.sweepIntervalMs ?? WATCHDOG_DEFAULTS.sweepIntervalMs,
     maxAutomaticRetries: overrides.maxAutomaticRetries ?? WATCHDOG_DEFAULTS.maxAutomaticRetries,
+  };
+}
+
+export function loadPermissionConfig(env: NodeJS.ProcessEnv = process.env): PermissionConfig {
+  return {
+    graceMs: parseBoundedNonNegativeInt(
+      env.OPENBOARD_PERMISSION_GRACE_MS,
+      "OPENBOARD_PERMISSION_GRACE_MS",
+      PERMISSION_DEFAULTS.graceMs,
+      WATCHDOG_TIMEOUT_MAX_MS,
+    ),
   };
 }
 
