@@ -178,6 +178,7 @@ class FakeOpencodeClient {
 
   permissionListCalls: Array<{ directory?: string }> = [];
   permissionReplyCalls: Array<{ requestID: string; directory?: string; reply: string }> = [];
+  permissionReplyShouldError: { error: unknown } | null = null;
   permissionListShouldErrorCount = 0;
   /** Pending requests permission.list() returns every call (not consumed) — for
    * making the real permission-responder pool actually deny something in a test. */
@@ -194,6 +195,7 @@ class FakeOpencodeClient {
     },
     reply: async (params: { requestID: string; directory?: string; reply: string }) => {
       this.permissionReplyCalls.push(params);
+      if (this.permissionReplyShouldError) return { data: undefined, error: this.permissionReplyShouldError.error };
       return { data: true, error: undefined };
     },
   };
@@ -331,6 +333,108 @@ describe("TaskDispatcher", () => {
       expect(persisted?.sessionId).toBe("ses_abc123");
       expect(persisted?.runState).toBe("running");
       expect(persisted?.column).toBe("in_progress");
+    });
+
+    it("registers in-place ask rules before prompt admission and projects broker-only pending asks oldest-first", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_ask";
+      client.stableMessagesResponse = [{ info: { id: "msg1" }, parts: [{ type: "tool", callID: "call1", tool: "bash" }] }];
+      client.pendingPermissionRequests = [
+        { id: "native_newer", sessionID: "ses_ask", permission: "bash", tool: { messageID: "msg1", callID: "call1" } },
+        { id: "native_second", sessionID: "ses_ask", permission: "edit", tool: { messageID: "msg1", callID: "call1" } },
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000 });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 2);
+
+      const pending = (dispatcher as never as { listPendingPermissions(id: string): Array<Record<string, unknown>> }).listPendingPermissions(task.id);
+      expect(pending.map((ask) => ask.id)).toEqual(["ask_1", "ask_2"]);
+      expect(pending[0]).toMatchObject({ harness: "opencode", source: "in-place-override", permission: "bash", tool: "bash" });
+      expect(pending[0]).not.toHaveProperty("nativeId");
+      expect(pending[0]).not.toHaveProperty("requestID");
+      expect(store.get(task.id)?.pendingPermissions).toBeUndefined();
+      expect(client.promptCalls).toHaveLength(1);
+    });
+
+    it("responds to a task-owned ask atomically through the dispatcher broker and records bounded events", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_answer";
+      client.stableMessagesResponse = [{ info: { id: "msg1" }, parts: [{ type: "tool", callID: "call1", tool: "bash" }] }];
+      client.pendingPermissionRequests = [
+        { id: "native_req", sessionID: "ses_answer", permission: "bash", patterns: ["**"], tool: { messageID: "msg1", callID: "call1" } },
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000 });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 1);
+      const askId = (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string }> }).listPendingPermissions(task.id)[0]!.id;
+
+      const [first, second] = await Promise.all([
+        (dispatcher as never as { respondPermission(id: string, input: unknown): Promise<unknown> }).respondPermission(task.id, { askId, action: "allow_once", answeredBy: "Operator" }),
+        (dispatcher as never as { respondPermission(id: string, input: unknown): Promise<unknown> }).respondPermission(task.id, { askId, action: "deny", answeredBy: "Operator" }),
+      ]);
+
+      expect([first, second].filter((outcome) => (outcome as { ok?: boolean }).ok)).toHaveLength(1);
+      expect(client.permissionReplyCalls).toEqual([{ requestID: "native_req", directory: projectDir, reply: "once" }]);
+      const events = store.listEvents(task.id);
+      expect(events.map((event) => event.type)).toContain("task_permission_asked");
+      expect(events.map((event) => event.type)).toContain("task_permission_answered");
+      const answered = events.find((event) => event.type === "task_permission_answered")!;
+      expect(answered.body).toMatchObject({ askId, action: "allow_once", answeredBy: "Operator", source: "in-place-override" });
+      expect(answered.body).not.toHaveProperty("nativeId");
+    });
+
+    it("cleans up pending asks when prompt admission fails", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_fail_prompt";
+      client.promptShouldError = { error: { message: "prompt rejected" } };
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000 });
+
+      await dispatcher.run(task.id);
+
+      expect((dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id)).toEqual([]);
+    });
+
+    it("records reply failures and lets a later poll re-project a fresh broker ask", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_reply_fail";
+      client.stableMessagesResponse = [{ info: { id: "msg1" }, parts: [{ type: "tool", callID: "call1", tool: "bash" }] }];
+      client.pendingPermissionRequests = [
+        { id: "native_req", sessionID: "ses_reply_fail", permission: "bash", tool: { messageID: "msg1", callID: "call1" } },
+      ];
+      client.permissionReplyShouldError = { error: { message: "reply failed" } };
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000 });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 1);
+      const askId = (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string }> }).listPendingPermissions(task.id)[0]!.id;
+      const outcome = await (dispatcher as never as { respondPermission(id: string, input: unknown): Promise<unknown> }).respondPermission(task.id, { askId, action: "deny", answeredBy: "Operator" });
+
+      expect(outcome).toMatchObject({ ok: false, conflict: "reply-failed" });
+      expect(store.listEvents(task.id).map((event) => event.type)).toContain("task_permission_reply_failed");
+      client.permissionReplyShouldError = null;
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string }> }).listPendingPermissions(task.id).some((ask) => ask.id !== askId));
+    });
+
+    it("rejects stale answers after retry replacement clears the old run ask", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_stale";
+      client.stableMessagesResponse = [{ info: { id: "msg1" }, parts: [{ type: "tool", callID: "call1", tool: "bash" }] }];
+      client.pendingPermissionRequests = [
+        { id: "native_req", sessionID: "ses_stale", permission: "bash", tool: { messageID: "msg1", callID: "call1" } },
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000 });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 1);
+      const staleAskId = (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string }> }).listPendingPermissions(task.id)[0]!.id;
+      client.pendingPermissionRequests = [];
+      await dispatcher.retry(task.id, "try again");
+
+      const outcome = await (dispatcher as never as { respondPermission(id: string, input: unknown): Promise<unknown> }).respondPermission(task.id, { askId: staleAskId, action: "deny", answeredBy: "Operator" });
+      expect(outcome).toEqual({ ok: false, askId: staleAskId, conflict: "not-found" });
+      expect(client.permissionReplyCalls).toEqual([]);
     });
 
     it("launches claude-code tasks through the Claude runner instead of OpenCode sessions", async () => {
