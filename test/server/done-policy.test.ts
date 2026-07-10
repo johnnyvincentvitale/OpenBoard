@@ -35,6 +35,15 @@ describe("Done policy", () => {
     expect(result).toEqual({ ok: true, acceptedBy: "Reviewer", blockedAccepted: true });
   });
 
+  it("requires exact acceptance and attribution for watchdog blocked completions", () => {
+    const current = task({ completionSource: "watchdog", completion: blockedCompletion });
+
+    expect(evaluateDonePolicy({ task: current, completedBy: "Reviewer" })).toMatchObject({ ok: false, error: { code: "blocked_acceptance_required" } });
+    expect(evaluateDonePolicy({ task: current, blockedAcceptance: { blockedReportedAt: 123, acceptIncomplete: true } })).toMatchObject({ ok: false, error: { code: "blocked_acceptance_attribution_required" } });
+    expect(evaluateDonePolicy({ task: current, blockedAcceptance: { blockedReportedAt: 122, acceptIncomplete: true }, completedBy: "Reviewer" })).toMatchObject({ ok: false, error: { code: "blocked_acceptance_stale" } });
+    expect(evaluateDonePolicy({ task: current, blockedAcceptance: { blockedReportedAt: 123, acceptIncomplete: true }, completedBy: "Reviewer" })).toEqual({ ok: true, acceptedBy: "Reviewer", blockedAccepted: true });
+  });
+
   it("rejects missing, partial, stale, and unattributed blocked acceptance", () => {
     const current = task({ completionSource: "reported", completion: blockedCompletion });
 

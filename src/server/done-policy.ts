@@ -18,7 +18,7 @@ export type DonePolicyResult =
   | { ok: false; error: DonePolicyError };
 
 export interface DonePolicyInput {
-  task: Pick<Task, "completion" | "completionSource">;
+  task: Pick<Task, "completion">;
   blockedAcceptance?: Partial<BlockedAcceptance> | null;
   completedBy?: string | null;
   acceptor?: string | null;
@@ -47,8 +47,8 @@ export function evaluateDonePolicy(input: DonePolicyInput): DonePolicyResult {
   return { ok: true, acceptedBy, blockedAccepted: true };
 }
 
-function isCurrentlyBlocked(task: Pick<Task, "completion" | "completionSource">): boolean {
-  return task.completionSource === "reported" && task.completion?.outcome === "blocked";
+function isCurrentlyBlocked(task: Pick<Task, "completion">): boolean {
+  return task.completion?.outcome === "blocked";
 }
 
 function normalizeAttribution(value: string | null | undefined): string | undefined {
