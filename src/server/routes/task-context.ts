@@ -61,6 +61,9 @@ export function registerTaskContextRoutes(app: Hono, deps: TaskContextRouteDeps)
       directParents: lineage.directParents,
       inheritedParents: lineage.inheritedParents,
       codeAncestors: lineage.codeAncestors,
+      // Consumers must not assume the lineage is exhaustive when this is
+      // true — a depth/count/via-parent bound omitted ancestors.
+      truncated: lineage.truncated ?? false,
     };
 
     return c.json(body, 200);

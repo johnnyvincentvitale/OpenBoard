@@ -87,6 +87,28 @@ describe("GET /api/tasks/:id/context", () => {
     expect(body.outcome).toBeNull();
     // No _summary field.
     expect(body).not.toHaveProperty("_summary");
+    // Untruncated lineage must report truncated=false, not omit the field.
+    expect(body.truncated).toBe(false);
+  });
+
+  it("surfaces truncated=true on the route response when the lineage traversal hits the depth bound", async () => {
+    const CHAIN_LENGTH = 25;
+    let prev = createTask({ title: "root" });
+    for (let i = 1; i < CHAIN_LENGTH; i++) {
+      const next = createTask({ title: `link-${i}` });
+      store.addLink(prev.id, next.id);
+      prev = next;
+    }
+    const child = createTask({ title: "Child" });
+    store.addLink(prev.id, child.id);
+
+    const res = await app.request(`/api/tasks/${child.id}/context`, {
+      headers: authHeaders(),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.truncated).toBe(true);
   });
 
   it("returns structured lineage with direct parents", async () => {

@@ -15,6 +15,21 @@ interface LineageNode {
   createdAt: number;
 }
 
+// --- Bounded traversal guards (prevents unbounded payload on deep/wide DAGs) ---
+
+/** Maximum ancestor depth to traverse from any direct parent. Mirrors the
+ * dispatcher's descendant-attribution depth cap. Nodes at depth > this are
+ * not enqueued, preventing exponential blowup on wide DAGs. */
+const MAX_LINEAGE_DEPTH = 16;
+
+/** Maximum number of ancestor nodes to collect across all branches combined.
+ * Prevents a wide DAG from producing an unbounded payload. */
+const MAX_LINEAGE_NODES = 256;
+
+/** Maximum via-parent IDs to record per ancestor. Prevents a diamond-heavy
+ * DAG from inflating each node's viaParentIds array without bound. */
+const MAX_VIA_PARENT_IDS = 64;
+
 function buildHandoff(task: Task): TaskHandoff {
   return {
     taskId: task.id,
@@ -64,14 +79,19 @@ function directParentOrder(a: Task, b: Task): number {
  * depth across all branches and the UNION of all viaParentIds that lead
  * to it. This correctly propagates routes through reconverged nodes to
  * their own ancestors.
+ *
+ * Traversal is bounded by MAX_LINEAGE_DEPTH (per-branch) and MAX_LINEAGE_NODES
+ * (global). When either cap is hit, remaining ancestors are omitted and the
+ * `truncated` flag is set so callers know the lineage is not exhaustive.
  */
 function traverseLineage(
   store: TaskStore,
   targetId: string,
   directParentIds: string[],
-): Map<string, LineageNode> {
+): { merged: Map<string, LineageNode>; truncated: boolean } {
   // Per-direct-parent branch results: branchKey -> Map<taskId, LineageNode>
   const branchMaps: Map<string, LineageNode>[] = [];
+  let truncated = false;
 
   for (const dpId of directParentIds) {
     const branch = new Map<string, LineageNode>();
@@ -84,12 +104,24 @@ function traverseLineage(
     while (head < queue.length) {
       const { taskId, depth } = queue[head++];
 
+      // Depth cap: stop enqueuing further ancestors beyond the max depth.
+      if (depth > MAX_LINEAGE_DEPTH) {
+        truncated = true;
+        continue;
+      }
+
       // Cycle safety within this branch.
       if (branch.has(taskId)) {
         const existing = branch.get(taskId)!;
         if (depth < existing.depth) {
           existing.depth = depth;
         }
+        continue;
+      }
+
+      // Node-count cap: stop collecting once the branch is full.
+      if (branch.size >= MAX_LINEAGE_NODES) {
+        truncated = true;
         continue;
       }
 
@@ -119,6 +151,12 @@ function traverseLineage(
 
   for (const branch of branchMaps) {
     for (const [taskId, node] of branch) {
+      // Global node-count cap during merge.
+      if (!merged.has(taskId) && merged.size >= MAX_LINEAGE_NODES) {
+        truncated = true;
+        continue;
+      }
+
       const existing = merged.get(taskId);
       if (!existing) {
         merged.set(taskId, { ...node, viaParentIds: [...node.viaParentIds] });
@@ -127,8 +165,12 @@ function traverseLineage(
         if (node.depth < existing.depth) {
           existing.depth = node.depth;
         }
-        // Union viaParentIds.
+        // Union viaParentIds (bounded).
         for (const v of node.viaParentIds) {
+          if (existing.viaParentIds.length >= MAX_VIA_PARENT_IDS) {
+            truncated = true;
+            break;
+          }
           if (!existing.viaParentIds.includes(v)) {
             existing.viaParentIds.push(v);
           }
@@ -137,7 +179,7 @@ function traverseLineage(
     }
   }
 
-  return merged;
+  return { merged, truncated };
 }
 
 /**
@@ -159,7 +201,7 @@ export function resolveTaskLineage(
   const directParentIds = store.getParentIds(taskId);
 
   // --- Per-direct-parent BFS with global merge ---
-  const visited = traverseLineage(store, taskId, directParentIds);
+  const { merged: visited, truncated } = traverseLineage(store, taskId, directParentIds);
 
   // --- Build direct parent contexts (depth 1, full handoff, ordered by createdAt/id) ---
   const directParents: DirectParentContext[] = [];
@@ -259,5 +301,6 @@ export function resolveTaskLineage(
     directParents,
     inheritedParents,
     codeAncestors,
+    truncated,
   };
 }

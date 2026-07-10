@@ -465,6 +465,124 @@ describe("resolveTaskLineage", () => {
     });
   });
 
+  describe("traversal bounds", () => {
+    it("leaves truncated unset/false when a small graph fits well within the bounds", () => {
+      const grandparent = create({ title: "Grandparent", taskKind: "research" });
+      const parent = create({ title: "Parent", taskKind: "synthesis" });
+      const child = create({ title: "Child", taskKind: "build" });
+
+      link(grandparent.id, parent.id);
+      link(parent.id, child.id);
+
+      const result = resolveTaskLineage(child.id, store);
+      expect(result!.truncated).toBe(false);
+    });
+
+    it("caps a deep linear chain at the depth bound, sets truncated, and preserves ordering up to the cap", () => {
+      // Build a chain of 25 ancestors feeding into `child` through a single
+      // direct parent: root -> link1 -> ... -> link23 -> directParent -> child.
+      // Depth cap is 16, so only depth 1 (direct parent) through depth 16
+      // (15 inherited ancestors) should be collected; anything deeper must be
+      // omitted and `truncated` must be set.
+      const CHAIN_LENGTH = 25;
+      const chain = [create({ title: "chain-0" })];
+      for (let i = 1; i < CHAIN_LENGTH; i++) {
+        const next = create({ title: `chain-${i}` });
+        link(chain[i - 1].id, next.id);
+        chain.push(next);
+      }
+      const directParent = chain[chain.length - 1];
+      const child = create({ title: "Child", taskKind: "build" });
+      link(directParent.id, child.id);
+
+      const result = resolveTaskLineage(child.id, store);
+
+      expect(result!.truncated).toBe(true);
+      expect(result!.directParents).toHaveLength(1);
+      expect(result!.directParents[0].taskId).toBe(directParent.id);
+
+      // depth 1 (direct parent) + depth 2..16 inherited = 15 inherited nodes.
+      expect(result!.inheritedParents).toHaveLength(15);
+      const depths = result!.inheritedParents.map((p) => p.depth);
+      expect(Math.max(...depths)).toBe(16);
+      expect(Math.min(...depths)).toBe(2);
+
+      // Ordering (depth, createdAt, id) is preserved among the surviving nodes.
+      const sorted = [...result!.inheritedParents].sort(
+        (a, b) => a.depth - b.depth || a.taskId.localeCompare(b.taskId),
+      );
+      expect(result!.inheritedParents.map((p) => p.taskId)).toEqual(
+        sorted.map((p) => p.taskId),
+      );
+
+      // The chain's earliest root ancestors (beyond depth 16) must not appear.
+      const rootId = chain[0].id;
+      expect(result!.inheritedParents.some((p) => p.taskId === rootId)).toBe(false);
+    });
+
+    it("caps a wide fan-out at the node-count bound and sets truncated, while keeping dedup and diamond merging correct within the cap", () => {
+      // One direct parent with 260 of its own distinct parents (grandparents
+      // of `child`). 260 > MAX_LINEAGE_NODES(256), so the branch-level
+      // node-count cap must trigger, and the surviving set must still be
+      // internally consistent (no duplicates).
+      const WIDE_COUNT = 260;
+      const directParent = create({ title: "DirectParent", taskKind: "synthesis" });
+      const grandparents = [];
+      for (let i = 0; i < WIDE_COUNT; i++) {
+        const gp = create({ title: `gp-${i}`, taskKind: "research" });
+        link(gp.id, directParent.id);
+        grandparents.push(gp);
+      }
+      const child = create({ title: "Child", taskKind: "build" });
+      link(directParent.id, child.id);
+
+      const result = resolveTaskLineage(child.id, store);
+
+      expect(result!.truncated).toBe(true);
+      expect(result!.directParents).toHaveLength(1);
+
+      // Total collected ancestors (direct parent + inherited) must not
+      // exceed the global node cap.
+      const totalCollected = result!.directParents.length + result!.inheritedParents.length;
+      expect(totalCollected).toBeLessThanOrEqual(256);
+
+      // Every inherited node must be a distinct grandparent (no duplicates
+      // introduced by the bounded traversal).
+      const inheritedIds = result!.inheritedParents.map((p) => p.taskId);
+      expect(new Set(inheritedIds).size).toBe(inheritedIds.length);
+      for (const id of inheritedIds) {
+        expect(grandparents.some((gp) => gp.id === id)).toBe(true);
+      }
+
+      // Not every grandparent made it in — proves the cap actually bound
+      // the traversal rather than silently allowing everything through.
+      expect(inheritedIds.length).toBeLessThan(WIDE_COUNT);
+    });
+
+    it("still merges viaParentIds correctly through a diamond that stays well within the bounds", () => {
+      // Sanity check that adding caps did not disturb small-graph diamond
+      // dedup behavior (already covered above, re-asserted here alongside
+      // the bound-specific tests for locality).
+      const root = create({ title: "Root", taskKind: "research" });
+      const left = create({ title: "Left", taskKind: "research" });
+      const right = create({ title: "Right", taskKind: "synthesis" });
+      const child = create({ title: "Child", taskKind: "build" });
+
+      link(root.id, left.id);
+      link(root.id, right.id);
+      link(left.id, child.id);
+      link(right.id, child.id);
+
+      const result = resolveTaskLineage(child.id, store);
+
+      expect(result!.truncated).toBe(false);
+      expect(result!.inheritedParents).toHaveLength(1);
+      expect(result!.inheritedParents[0].viaParentIds.sort()).toEqual(
+        [left.id, right.id].sort(),
+      );
+    });
+  });
+
   describe("task handoff fields", () => {
     it("returns hasStructuredHandoff false for tasks without completion", () => {
       const parent = create({ title: "No Completion Parent" });

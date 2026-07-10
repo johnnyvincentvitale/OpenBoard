@@ -23,6 +23,12 @@ const execFileAsync = promisify(execFile);
 
 export const DIFF_CONTEXT_LINES = 12;
 export const MAX_TOTAL_PATCH_BYTES = 2 * 1024 * 1024; // 2 MB
+/** Maximum bytes of stdout/stderr the child git process may emit before
+ * Node.js kills it with ERR_CHILD_PROCESS_STDIO_MAXBUFFER. Set generously
+ * (32 MB) so genuine diffs are not truncated, but small enough to prevent
+ * a runaway diff from consuming unbounded memory. When exceeded, callers
+ * must return an honest no-git result rather than parsing truncated output. */
+export const MAX_GIT_BUFFER_BYTES = 1024 * 1024 * 32;
 // Per-file guard for untracked files, applied before any content is read
 // into memory. Keeps a single huge or binary untracked file from spiking
 // memory or producing a garbage text patch ahead of the total byte cap.
@@ -35,6 +41,10 @@ export interface GitResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** True when the git process was killed because its output exceeded the
+   * maxBuffer. When set, `stdout` is truncated and MUST NOT be parsed as
+   * a successful diff. Callers should return an honest no-git result. */
+  maxBufferExceeded?: boolean;
 }
 
 function cleanGitEnv(): NodeJS.ProcessEnv {
@@ -45,20 +55,25 @@ function cleanGitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-async function git(cwd: string, args: string[]): Promise<GitResult> {
+async function git(cwd: string, args: string[], maxBuffer?: number): Promise<GitResult> {
   try {
     const { stdout, stderr } = await execFileAsync("git", args, {
       cwd,
       env: cleanGitEnv(),
-      maxBuffer: 1024 * 1024 * 32,
+      maxBuffer: maxBuffer ?? MAX_GIT_BUFFER_BYTES,
     });
     return { code: 0, stdout, stderr };
   } catch (err) {
-    const e = err as { code?: number; stdout?: string; stderr?: string };
+    const e = err as { code?: number | string; stdout?: string; stderr?: string; message?: string };
+    const isMaxBuffer = e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
     return {
-      code: typeof e.code === "number" ? e.code : 1,
+      // Treat maxBuffer overflow as a real error (code 128+) so all callers
+      // that check code >= 128 or code !== 0 will return no-git consistently.
+      code: isMaxBuffer ? 128 : (typeof e.code === "number" ? e.code : 1),
       stdout: e.stdout ?? "",
-      stderr: e.stderr ?? "",
+      stderr: e.stderr ??
+        (isMaxBuffer ? "git output exceeded maxBuffer; output truncated" : ""),
+      maxBufferExceeded: isMaxBuffer,
     };
   }
 }
@@ -66,6 +81,22 @@ async function git(cwd: string, args: string[]): Promise<GitResult> {
 /** Shared low-level git runner used by comparison and diff engines. */
 export async function execGit(cwd: string, args: string[]): Promise<GitResult> {
   return git(cwd, args);
+}
+
+/**
+ * Reject refs that start with `-` before they reach git argv construction.
+ * A dash-prefixed ref (e.g. `--output=/etc/passwd`) could be interpreted as
+ * a git option rather than a positional ref argument. This is a defense-in-
+ * depth guard; ref validity and same-repo safety are still enforced by the
+ * callers' existing checks.
+ *
+ * Throws an Error when the ref is dash-prefixed; callers should catch and
+ * return an honest no-git result.
+ */
+export function assertSafeRef(ref: string): void {
+  if (ref.startsWith("-")) {
+    throw new Error(`Refuses dash-prefixed ref for git argv safety: "${ref}"`);
+  }
 }
 
 /**
@@ -77,10 +108,18 @@ export async function computeDiffBetweenRefs(
   cwd: string,
   leftRef: string,
   rightRef: string,
-  options: { contextLines?: number; maxBytes?: number } = {},
+  options: { contextLines?: number; maxBytes?: number; gitMaxBuffer?: number } = {},
 ): Promise<DiffResponse> {
   const contextLines = options.contextLines ?? DIFF_CONTEXT_LINES;
-  const result = await git(cwd, ["diff", `--unified=${contextLines}`, leftRef, rightRef]);
+  assertSafeRef(leftRef);
+  assertSafeRef(rightRef);
+  const result = await git(cwd, ["diff", `--unified=${contextLines}`, leftRef, rightRef, "--"], options.gitMaxBuffer);
+  if (result.maxBufferExceeded) {
+    return {
+      kind: "no-git",
+      reason: "Diff output exceeded the git maxBuffer (32MB); result truncated for safety",
+    };
+  }
   if (result.code !== 0) {
     return {
       kind: "no-git",
@@ -125,14 +164,21 @@ export async function resolveGitCommonDir(cwd: string): Promise<string | null> {
 export async function computeDiffAgainstWorkingTree(
   cwd: string,
   baseRef: string,
-  options: { contextLines?: number; maxBytes?: number } = {},
+  options: { contextLines?: number; maxBytes?: number; gitMaxBuffer?: number } = {},
 ): Promise<DiffResponse> {
   const contextLines = options.contextLines ?? DIFF_CONTEXT_LINES;
   const maxBytes = options.maxBytes ?? MAX_TOTAL_PATCH_BYTES;
 
-  const diffResult = await git(cwd, ["diff", `--unified=${contextLines}`, baseRef]);
+  assertSafeRef(baseRef);
+  const diffResult = await git(cwd, ["diff", `--unified=${contextLines}`, baseRef, "--"], options.gitMaxBuffer);
   // git diff exits 1 when there are differences and 0 when there are none;
-  // codes >= 128 are real errors.
+  // codes >= 128 are real errors. maxBuffer overflow is also a real error.
+  if (diffResult.maxBufferExceeded) {
+    return {
+      kind: "no-git",
+      reason: "Working-tree diff output exceeded the git maxBuffer (32MB); result truncated for safety",
+    };
+  }
   if (diffResult.code >= 128) {
     return {
       kind: "no-git",
@@ -368,11 +414,16 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     if (!baseRef) {
       return { kind: "no-git", reason: "No base reference recorded for this worktree task" };
     }
+    assertSafeRef(baseRef);
     const result = await git(task.worktreePath, [
       "diff",
       `--unified=${DIFF_CONTEXT_LINES}`,
       baseRef,
+      "--",
     ]);
+    if (result.maxBufferExceeded) {
+      return { kind: "no-git", reason: "Worktree diff output exceeded the git maxBuffer (32MB); result truncated for safety" };
+    }
     if (result.code !== 0) {
       return {
         kind: "no-git",
@@ -419,12 +470,18 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     if (!baseRef) {
       return { kind: "no-git", reason: "No base reference recorded for this completed worktree task" };
     }
+    assertSafeRef(baseRef);
+    assertSafeRef(task.worktreeBranch);
     const result = await git(task.directory, [
       "diff",
       `--unified=${DIFF_CONTEXT_LINES}`,
       baseRef,
       task.worktreeBranch,
+      "--",
     ]);
+    if (result.maxBufferExceeded) {
+      return { kind: "no-git", reason: "Completed branch diff output exceeded the git maxBuffer (32MB); result truncated for safety" };
+    }
     if (result.code !== 0) {
       return {
         kind: "no-git",
@@ -441,12 +498,18 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
     const worktreeRef = task.harnessBranch ?? task.harnessCommit;
     if (worktreeRef) {
       const ref = task.baseCommit ?? "HEAD";
+      assertSafeRef(ref);
+      assertSafeRef(worktreeRef);
       // Diff the harness worktree against the recorded baseline.
       const result = await git(task.harnessCwd, [
         "diff",
         `--unified=${DIFF_CONTEXT_LINES}`,
         `${ref}...${worktreeRef}`,
+        "--",
       ]);
+      if (result.maxBufferExceeded) {
+        return { kind: "no-git", reason: "ACP harness diff output exceeded the git maxBuffer (32MB); result truncated for safety" };
+      }
       if (result.code === 0) {
         let files = parseUnifiedDiff(result.stdout);
         if (files.length > 0) {
@@ -460,15 +523,24 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
 
   // --- In-place cards ---
   if (task.baseCommit) {
+    assertSafeRef(task.baseCommit);
     // Run working-tree diff against the recorded base commit, including
     // unstaged changes.
     const diffResult = await git(task.directory, [
       "diff",
       `--unified=${DIFF_CONTEXT_LINES}`,
       task.baseCommit,
+      "--",
     ]);
     // Non-zero exit is ok (it can mean there are diffs — git diff exits
     // with 1 when there are differences). Only fail on real errors (code 128).
+    // maxBuffer overflow is also a real error — never parse truncated stdout.
+    if (diffResult.maxBufferExceeded) {
+      return {
+        kind: "no-git",
+        reason: "In-place diff output exceeded the git maxBuffer (32MB); result truncated for safety",
+      };
+    }
     if (diffResult.code >= 128) {
       return {
         kind: "no-git",

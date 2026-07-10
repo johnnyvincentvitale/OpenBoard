@@ -12,6 +12,7 @@ import {
   resolveGitCommonDir,
   parseUnifiedDiff,
   capBytes,
+  assertSafeRef,
 } from "../../src/server/diff-engine";
 import type { DiffFile, Task } from "../../src/shared";
 
@@ -138,6 +139,23 @@ describe("computeDiff", () => {
         expect(result.root).toBeUndefined();
       }
     });
+
+    it("rejects a dash-prefixed baseCommit ref defensively instead of passing it to git argv", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      const worktreePath = join(tmpDir, "wt");
+      runGit(repoDir, ["worktree", "add", "-b", "board/task_test", worktreePath, "HEAD"]);
+
+      const task = makeBaseTask({
+        directory: repoDir,
+        worktreePath,
+        worktreeBranch: "board/task_test",
+        baseBranch: "main",
+        baseCommit: "--upload-pack=evil",
+      });
+
+      await expect(computeDiff(task)).rejects.toThrow(/dash-prefixed ref/i);
+    });
   });
 
   describe("in-place cards", () => {
@@ -227,6 +245,18 @@ describe("computeDiff", () => {
         expect(result.root).toBe(repoDir);
       }
     });
+
+    it("rejects a dash-prefixed baseCommit ref defensively instead of passing it to git argv", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+
+      const task = makeBaseTask({
+        directory: repoDir,
+        baseCommit: "--output=/etc/passwd",
+      });
+
+      await expect(computeDiff(task)).rejects.toThrow(/dash-prefixed ref/i);
+    });
   });
 
   describe("Claude Code cards", () => {
@@ -269,6 +299,23 @@ describe("computeDiff", () => {
         // root is the harness's own worktree cwd, not the task's base directory.
         expect(result.root).toBe(harnessDir);
       }
+    });
+
+    it("rejects a dash-prefixed harnessBranch ref defensively instead of passing it to git argv", async () => {
+      const repoDir = join(tmpDir, "repo");
+      const baseCommit = initRepo(repoDir);
+      const harnessDir = join(tmpDir, "harness");
+      runGit(repoDir, ["worktree", "add", "-b", "harness-branch", harnessDir, "HEAD"]);
+
+      const task = makeBaseTask({
+        harness: "claude-code",
+        directory: repoDir,
+        harnessCwd: harnessDir,
+        harnessBranch: "--upload-pack=evil",
+        baseCommit,
+      });
+
+      await expect(computeDiff(task)).rejects.toThrow(/dash-prefixed ref/i);
     });
   });
 
@@ -491,6 +538,21 @@ describe("diff-engine exported primitives", () => {
     });
   });
 
+  describe("assertSafeRef", () => {
+    it("throws for a dash-prefixed ref", () => {
+      expect(() => assertSafeRef("--upload-pack=evil")).toThrow(/dash-prefixed ref/i);
+      expect(() => assertSafeRef("-x")).toThrow(/dash-prefixed ref/i);
+    });
+
+    it("does not throw for ordinary branch names, commit shas, or refs with dots/slashes", () => {
+      expect(() => assertSafeRef("main")).not.toThrow();
+      expect(() => assertSafeRef("board/task_1")).not.toThrow();
+      expect(() => assertSafeRef("HEAD")).not.toThrow();
+      expect(() => assertSafeRef("main...board/task_1")).not.toThrow();
+      expect(() => assertSafeRef("deadbeef1234")).not.toThrow();
+    });
+  });
+
   describe("parseUnifiedDiff", () => {
     it("parses added, deleted, and modified files", () => {
       const raw = `diff --git a/add.ts b/add.ts
@@ -574,6 +636,37 @@ diff --git a/mod.ts b/mod.ts
         expect(result.files[0].status).toBe("added");
       }
     });
+
+    it("rejects a dash-prefixed ref defensively instead of passing it to git argv (Build->Fix style comparison)", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      runGit(repoDir, ["checkout", "-b", "board/build"]);
+      runGit(repoDir, ["checkout", "-b", "board/fix"]);
+
+      await expect(
+        computeDiffBetweenRefs(repoDir, "board/build", "--upload-pack=evil"),
+      ).rejects.toThrow(/dash-prefixed ref/i);
+    });
+
+    it("returns an honest no-git result when git output exceeds a configured maxBuffer, never parsing truncated stdout", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      runGit(repoDir, ["checkout", "-b", "board/build"]);
+      writeFileSync(join(repoDir, "feat.ts"), "export const feat = true;\n".repeat(50));
+      runGit(repoDir, ["add", "feat.ts"]);
+      runGit(repoDir, ["commit", "-m", "feature"]);
+      runGit(repoDir, ["checkout", "-b", "board/fix"]);
+
+      // A tiny maxBuffer forces Node to kill the git child process even for
+      // this small diff, simulating the real 32MB overflow deterministically.
+      const result = await computeDiffBetweenRefs(repoDir, "main", "board/build", {
+        gitMaxBuffer: 10,
+      });
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toContain("maxBuffer");
+      }
+    });
   });
 
   describe("computeDiffAgainstWorkingTree", () => {
@@ -617,6 +710,33 @@ diff --git a/mod.ts b/mod.ts
 
       const result = await computeDiffAgainstWorkingTree(wt, "deadbeef");
       expect(result.kind).toBe("no-git");
+    });
+
+    it("rejects a dash-prefixed base ref defensively instead of passing it to git argv", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      const wt = join(tmpDir, "wt");
+      runGit(repoDir, ["worktree", "add", "-b", "board/wt", wt, "HEAD"]);
+
+      await expect(
+        computeDiffAgainstWorkingTree(wt, "--upload-pack=evil"),
+      ).rejects.toThrow(/dash-prefixed ref/i);
+    });
+
+    it("returns an honest no-git result when git output exceeds a configured maxBuffer, never parsing truncated stdout (working-tree path, consistent with the ref path)", async () => {
+      const repoDir = join(tmpDir, "repo");
+      const baseCommit = initRepo(repoDir);
+      const wt = join(tmpDir, "wt");
+      runGit(repoDir, ["worktree", "add", "-b", "board/wt", wt, "HEAD"]);
+      // Must modify an already-tracked file: untracked files are read directly
+      // (not via `git diff`) and would bypass the maxBuffer path entirely.
+      writeFileSync(join(wt, "README.md"), "tracked change;\n".repeat(50));
+
+      const result = await computeDiffAgainstWorkingTree(wt, baseCommit, { gitMaxBuffer: 10 });
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toContain("maxBuffer");
+      }
     });
   });
 

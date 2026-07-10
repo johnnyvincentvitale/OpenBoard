@@ -49,4 +49,10 @@ export interface TaskContext {
   directParents: DirectParentContext[];
   inheritedParents: InheritedParentContext[];
   codeAncestors: CodeAncestorCandidate[];
+  /**
+   * True when the lineage traversal hit a depth, node-count, or via-parent
+   * cap and omitted ancestors beyond the bound. Consumers should not assume
+   * the lineage is exhaustive when this is set.
+   */
+  truncated?: boolean;
 }

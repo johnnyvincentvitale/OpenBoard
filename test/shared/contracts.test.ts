@@ -246,6 +246,11 @@ describe("FR08-FR12 shared contracts", () => {
     expect(context.directParents.map((parent) => parent.parentId)).toEqual(["p1"]);
     expect(context.inheritedParents[0].viaParentIds).toEqual(["p1", "p2"]);
     expect(context.codeAncestors[0]).not.toHaveProperty("files");
+    // `truncated` is optional so untruncated lineages need not set it...
+    expect(context.truncated).toBeUndefined();
+    // ...but bounded traversals must be able to signal it explicitly.
+    const boundedContext: import("../../src/shared").TaskContext = { ...context, truncated: true };
+    expect(boundedContext.truncated).toBe(true);
   });
 
   it("derives blocked questions from needsInput first, then residualRisk, without mutating reports", () => {
