@@ -70,6 +70,9 @@ describe("SqliteTaskStore", () => {
       expect(task.finalSessionOutput).toBeNull();
       expect(task.completionSource).toBeNull();
       expect(task.completedBy).toBeNull();
+      expect(task.fallbackModel).toBeNull();
+      expect(task.activeModel).toBeNull();
+      expect(task.autoRetries).toBe(0);
       expect(task.createdAt).toBe(1_000);
       expect(task.updatedAt).toBe(1_000);
     });
@@ -217,6 +220,16 @@ describe("SqliteTaskStore", () => {
       expect(created.model).toEqual(model);
       expect(store.get(created.id)?.model).toEqual(model);
     });
+
+    it("round-trips user-configured fallback model on create", () => {
+      const fallbackModel: ModelRef = { id: "fallback", providerID: "p", variant: "cheap" };
+      const created = store.create(input({ fallbackModel }));
+
+      expect(created.fallbackModel).toEqual(fallbackModel);
+      expect(created.activeModel).toBeNull();
+      expect(created.autoRetries).toBe(0);
+      expect(store.get(created.id)).toMatchObject({ fallbackModel, activeModel: null, autoRetries: 0 });
+    });
   });
 
   describe("list / get ordering", () => {
@@ -336,6 +349,30 @@ describe("SqliteTaskStore", () => {
       const fetched = store.get(task.id)!;
       expect(fetched.agent).toBe("plan");
       expect(fetched.model).toEqual(model);
+    });
+
+    it("can set and clear fallback/active models and autoRetries", () => {
+      const task = store.create(input());
+      const fallbackModel: ModelRef = { id: "fallback", providerID: "p" };
+      const activeModel: ModelRef = { id: "active", providerID: "p" };
+
+      const updated = store.update(task.id, { fallbackModel, activeModel, autoRetries: 3 });
+      expect(updated?.fallbackModel).toEqual(fallbackModel);
+      expect(updated?.activeModel).toEqual(activeModel);
+      expect(updated?.autoRetries).toBe(3);
+
+      const cleared = store.update(task.id, { fallbackModel: null, activeModel: null, autoRetries: 0 });
+      expect(cleared?.fallbackModel).toBeNull();
+      expect(cleared?.activeModel).toBeNull();
+      expect(cleared?.autoRetries).toBe(0);
+    });
+
+    it("does not persist runtime-only pendingPermissions", () => {
+      const task = store.create(input());
+      store.update(task.id, {
+        pendingPermissions: [{ id: "ask_1", harness: "opencode", source: "worktree-fence", permission: "external_directory", summary: "Allow?", raisedAt: 2, deadline: 3 }],
+      });
+      expect(store.get(task.id)?.pendingPermissions).toBeUndefined();
     });
 
     it("can clear agent and model back to undefined", () => {
@@ -729,18 +766,23 @@ describe("SqliteTaskStore", () => {
       expect(taskColumns.has("base_commit")).toBe(true);
       expect(taskColumns.has("dirty_at_dispatch")).toBe(true);
       expect(taskColumns.has("auto_run")).toBe(true);
+      expect(taskColumns.has("fallback_model")).toBe(true);
+      expect(taskColumns.has("active_model")).toBe(true);
+      expect(taskColumns.has("auto_retries")).toBe(true);
 
       // Existing row got the defaults
       const existing = migratedStore.get("task_pre");
       expect(existing?.baseCommit).toBeNull();
       expect(existing?.dirtyAtDispatch).toBe(false);
       expect(existing?.autoRun).toBe(false);
+      expect(existing?.autoRetries).toBe(0);
 
       // New rows created after migration also work
       const created = migratedStore.create(input({ title: "Post" }));
       expect(created.baseCommit).toBeNull();
       expect(created.dirtyAtDispatch).toBe(false);
       expect(created.autoRun).toBe(false);
+      expect(created.autoRetries).toBe(0);
 
       migratedStore.close();
       db.close();
@@ -765,6 +807,7 @@ describe("SqliteTaskStore", () => {
 
       const legacy = migratedStore.get("task_legacy");
       expect(legacy?.autoRun).toBe(false);
+      expect(legacy?.autoRetries).toBe(0);
       expect(legacy?.isolation).toBe("worktree");
 
       migratedStore.close();

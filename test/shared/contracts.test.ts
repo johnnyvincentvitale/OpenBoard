@@ -24,6 +24,8 @@ import {
   HERMES_MODELS,
   PI_CODING_AGENT_MODELS,
   CURSOR_ACP_MODELS,
+  TASK_ROUTE_PATTERNS,
+  blockedQuestion,
 } from "../../src/shared/index";
 
 describe("frozen contracts", () => {
@@ -137,6 +139,148 @@ describe("diff contract", () => {
       };
       expect(f.status).toBe(s);
     }
+  });
+});
+
+describe("FR08-FR12 shared contracts", () => {
+  it("exposes additive task routes without handler registration", () => {
+    expect(TASK_ROUTE_PATTERNS.permissionReply).toBe("/api/tasks/:id/permission");
+    expect(TASK_ROUTE_PATTERNS.sessionEvents).toBe("/api/tasks/:id/session-events");
+    expect(TASK_ROUTE_PATTERNS.context).toBe("/api/tasks/:id/context");
+    expect(TASK_ROUTE_PATTERNS.compare).toBe("/api/tasks/:targetId/compare?baseTaskId=:baseTaskId");
+    expect(buildTaskPath.permissionReply("task/a")).toBe("/api/tasks/task%2Fa/permission");
+    expect(buildTaskPath.sessionEvents("task/a")).toBe("/api/tasks/task%2Fa/session-events");
+    expect(buildTaskPath.context("task/a")).toBe("/api/tasks/task%2Fa/context");
+    expect(buildTaskPath.compare("target/a", "base/b")).toBe("/api/tasks/target%2Fa/compare?baseTaskId=base%2Fb");
+  });
+
+  it("keeps native permission ids out of public permission ask/reply contracts", () => {
+    const ask: import("../../src/shared").PendingPermissionAsk = {
+      id: "ask_public_1",
+      harness: "opencode",
+      source: "worktree-fence",
+      permission: "external_directory",
+      tool: "edit",
+      summary: "External directory write requested",
+      patterns: ["/repo/**"],
+      raisedAt: 124,
+      deadline: 224,
+    };
+    const reply: import("../../src/shared").RespondPermissionInput = {
+      askId: "ask_public_1",
+      action: "deny",
+      answeredBy: "reviewer",
+    };
+    expect(Object.keys(ask).sort()).toEqual([
+      "deadline",
+      "harness",
+      "id",
+      "patterns",
+      "permission",
+      "raisedAt",
+      "source",
+      "summary",
+      "tool",
+    ]);
+    expect(reply).toEqual({ askId: "ask_public_1", action: "deny", answeredBy: "reviewer" });
+  });
+
+  it("keeps active model retry state out of public create/update inputs", () => {
+    const createInput: import("../../src/shared").CreateTaskInput = {
+      title: "Task",
+      description: "Do it",
+      directory: "/repo",
+      fallbackModel: { providerID: "p", id: "fallback" },
+    };
+    expect(createInput.fallbackModel?.id).toBe("fallback");
+
+    // @ts-expect-error activeModel is server-owned state, not create input.
+    const invalidCreate: import("../../src/shared").CreateTaskInput = { ...createInput, activeModel: { providerID: "p", id: "active" } };
+    expect(invalidCreate).toBeTruthy();
+
+    // @ts-expect-error autoRetries is server-owned state, not update input.
+    const invalidUpdate: import("../../src/shared").UpdateTaskInput = { autoRetries: 1 };
+    expect(invalidUpdate).toBeTruthy();
+  });
+
+  it("types session activity frames with monotonic seq identity", () => {
+    const event: import("../../src/shared").SessionActivityEvent = {
+      seq: 2,
+      taskId: "task_1",
+      runStartedAt: 1,
+      sessionId: "ses_1",
+      rootSessionId: "ses_root",
+      parentSessionId: null,
+      harness: "opencode",
+      occurredAt: 3,
+      kind: "tool",
+      role: "assistant",
+      text: "bounded text",
+      tool: { name: "bash", callId: "call_1", status: "complete", durationMs: 10, outputBytes: 42 },
+    };
+    const frame: import("../../src/shared").SessionActivityFrame = {
+      kind: "append",
+      event,
+    };
+    expect(frame.event.seq).toBe(event.seq);
+    expect(event.tool).not.toHaveProperty("inputSummary");
+    expect(event.tool).not.toHaveProperty("outputSummary");
+    const snapshot: import("../../src/shared").SessionActivityFrame = {
+      kind: "snapshot",
+      run: { taskId: "task_1", runStartedAt: 1, sessionId: "ses_1", rootSessionId: "ses_root", harness: "opencode" },
+      events: [event],
+      lastEventAt: 3,
+      transport: "live",
+    };
+    expect(snapshot.kind).toBe("snapshot");
+  });
+
+  it("adds public lineage/context response shapes without changing direct parent ids", () => {
+    const context: import("../../src/shared").TaskContext = {
+      task: { taskId: "child", title: "Child", completion: null, changedFiles: [], verification: [], residualRisk: "none", hasStructuredHandoff: false },
+      directParents: [{ kind: "direct-parent", parentId: "p1", taskId: "p1", title: "Parent", completion: null, changedFiles: [], verification: [], residualRisk: "none", hasStructuredHandoff: true }],
+      inheritedParents: [{ kind: "inherited-parent", taskId: "a1", title: "Ancestor", taskKind: "research", column: "done", depth: 2, viaParentIds: ["p1", "p2"], summary: "Older evidence", hasStructuredHandoff: true }],
+      codeAncestors: [{ taskId: "a1", title: "Ancestor", column: "done", branch: "board/a1", changedFiles: ["src/a.ts"], hasStructuredHandoff: true }],
+    };
+    expect(context.task.taskId).toBe("child");
+    expect(context.directParents.map((parent) => parent.parentId)).toEqual(["p1"]);
+    expect(context.inheritedParents[0].viaParentIds).toEqual(["p1", "p2"]);
+    expect(context.codeAncestors[0]).not.toHaveProperty("files");
+  });
+
+  it("derives blocked questions from needsInput first, then residualRisk, without mutating reports", () => {
+    const oldReport: import("../../src/shared").CompletionReport = {
+      outcome: "blocked",
+      summary: "Could not continue",
+      changedFiles: [],
+      verification: [],
+      residualRisk: "Need the deploy token",
+      reportedAt: 1,
+    };
+    expect(blockedQuestion(oldReport)).toBe("Need the deploy token");
+    expect(oldReport).not.toHaveProperty("needsInput");
+
+    expect(blockedQuestion({ ...oldReport, needsInput: "  Which branch should I target?  " })).toBe("Which branch should I target?");
+    expect(blockedQuestion({ ...oldReport, needsInput: " ", residualRisk: " " })).toBe("No question was reported; inspect the block summary before retrying.");
+  });
+
+  it("types blocked answer, retry, and blocked acceptance contracts", () => {
+    const blockedAnswer: import("../../src/shared").BlockedAnswerContext = {
+      blockedReportedAt: 10,
+      answeredBy: "reviewer",
+    };
+    const retry: import("../../src/shared").RetryTaskBody = {
+      feedback: "Continue with option A",
+      blockedAnswer,
+    };
+    const move: import("../../src/shared").MoveTaskBody = {
+      column: "done",
+      position: 0,
+      completedBy: "Reviewer",
+      blockedAcceptance: { blockedReportedAt: 10, acceptIncomplete: true },
+    };
+    expect(retry.blockedAnswer).toEqual(blockedAnswer);
+    expect(move.blockedAcceptance?.acceptIncomplete).toBe(true);
   });
 });
 

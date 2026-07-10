@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS task (
   agent       TEXT,
   assigned_to TEXT,
   model       TEXT,
+  fallback_model TEXT,
+  active_model TEXT,
+  auto_retries INTEGER NOT NULL DEFAULT 0,
   isolation       TEXT,
   auto_run        INTEGER NOT NULL DEFAULT 0,
   permission_overrides TEXT,
@@ -150,6 +153,9 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["rebase_conflict_paths", "TEXT"],
   ["permission_overrides", "TEXT"],
   ["auto_run", "INTEGER NOT NULL DEFAULT 0"],
+  ["fallback_model", "TEXT"],
+  ["active_model", "TEXT"],
+  ["auto_retries", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 const WORKTREE_REPO_ROOTS_SETTING = "worktreeRepoRoots";
@@ -182,6 +188,9 @@ interface TaskRowRecord {
   agent: string | null;
   assigned_to: string | null;
   model: string | null;
+  fallback_model: string | null;
+  active_model: string | null;
+  auto_retries: number;
   isolation: string | null;
   auto_run: number;
   permission_overrides: string | null;
@@ -246,6 +255,9 @@ function toTask(record: TaskRowRecord): Task {
     agent: record.agent ?? undefined,
     assignedTo: record.assigned_to ?? undefined,
     model: record.model ? (JSON.parse(record.model) as ModelRef) : undefined,
+    fallbackModel: record.fallback_model ? (JSON.parse(record.fallback_model) as ModelRef) : null,
+    activeModel: record.active_model ? (JSON.parse(record.active_model) as ModelRef) : null,
+    autoRetries: record.auto_retries ?? 0,
     archived: record.archived === 1,
     autoRun: record.auto_run === 1,
     parentIds: [],
@@ -364,8 +376,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, task_kind, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, isolation, auto_run, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
-         VALUES (@id, @type, @taskKind, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @isolation, @autoRun, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, task_kind, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, fallback_model, active_model, auto_retries, isolation, auto_run, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
+         VALUES (@id, @type, @taskKind, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @fallbackModel, @activeModel, @autoRetries, @isolation, @autoRun, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -394,6 +406,9 @@ export class SqliteTaskStore implements TaskStore {
            agent = @agent,
            assigned_to = @assignedTo,
            model = @model,
+           fallback_model = @fallbackModel,
+           active_model = @activeModel,
+           auto_retries = @autoRetries,
            isolation = @isolation,
            auto_run = @autoRun,
            permission_overrides = @permissionOverrides,
@@ -556,6 +571,9 @@ export class SqliteTaskStore implements TaskStore {
         agent: data.agent ?? null,
         assignedTo: data.assignedTo ?? null,
         model: data.model ? JSON.stringify(data.model) : null,
+        fallbackModel: data.fallbackModel ? JSON.stringify(data.fallbackModel) : null,
+        activeModel: null,
+        autoRetries: 0,
         isolation: data.isolation ?? null,
         autoRun: data.autoRun ? 1 : 0,
         permissionOverrides: data.permissionOverrides ? JSON.stringify(data.permissionOverrides) : null,
@@ -620,6 +638,9 @@ export class SqliteTaskStore implements TaskStore {
         agent: merged.agent ?? null,
         assignedTo: merged.assignedTo ?? null,
         model: merged.model ? JSON.stringify(merged.model) : null,
+        fallbackModel: merged.fallbackModel ? JSON.stringify(merged.fallbackModel) : null,
+        activeModel: merged.activeModel ? JSON.stringify(merged.activeModel) : null,
+        autoRetries: merged.autoRetries ?? 0,
         isolation: merged.isolation ?? null,
         autoRun: merged.autoRun ? 1 : 0,
         permissionOverrides: merged.permissionOverrides ? JSON.stringify(merged.permissionOverrides) : null,

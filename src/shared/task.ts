@@ -154,6 +154,8 @@ export interface CompletionReport {
   changedFiles: string[];
   verification: CompletionVerification[];
   residualRisk: string;
+  /** Optional structured input request for blocked runs. Older reports omit it unchanged. */
+  needsInput?: string;
   reportedAt: number;
 }
 
@@ -174,7 +176,25 @@ export interface TaskEvent {
   createdAt: number;
 }
 
-export type CompletionSource = "reported" | "idle-fallback";
+export type CompletionSource = "reported" | "idle-fallback" | "watchdog";
+
+export interface PendingPermissionAsk {
+  id: string;
+  harness: TaskHarness;
+  source: "worktree-fence" | "in-place-override" | "acp";
+  permission: string;
+  tool?: string;
+  summary: string;
+  patterns?: string[];
+  raisedAt: number;
+  deadline: number;
+}
+
+export interface RespondPermissionInput {
+  askId: string;
+  action: "allow_once" | "deny";
+  answeredBy: string;
+}
 
 export interface InstanceConfig {
   port: number;
@@ -251,6 +271,12 @@ export interface Task {
   assignedTo?: string | null;
   /** Model the dispatched session runs on. For new tasks with an assigned agent and no explicit model, the create route resolves this from the live roster. */
   model?: ModelRef | null;
+  /** Retry fallback model, stored with the same ModelRef JSON shape as model. */
+  fallbackModel?: ModelRef | null;
+  /** Model currently active for the run, stored with the same ModelRef JSON shape as model. */
+  activeModel?: ModelRef | null;
+  /** Automatic retry count. Legacy rows hydrate as zero. */
+  autoRetries?: number;
   column: Column;
   /** Dense integer, unique within a column. */
   position: number;
@@ -319,6 +345,8 @@ export interface Task {
   baseCheckoutSnapshot?: string | null;
   /** A decision the run is blocked on and the UI must resolve (e.g. "git-init" for a non-repo dir). */
   pending?: TaskPending;
+  /** Runtime-only provider permission asks. Never persisted to SQLite. */
+  pendingPermissions?: PendingPermissionAsk[];
   /** Base-checkout paths the escape detector found changed outside the worktree, when `pending` is "base-checkout-escape". */
   escapeDetectedPaths?: string[];
   /** Paths that stopped an integrate rebase inside the task worktree, when `pending` is "rebase-conflict". */
@@ -358,6 +386,12 @@ export interface MoveTaskBody {
    * to `User` when moving to Done or to clear the value when moving elsewhere.
    */
   completedBy?: string | null;
+  blockedAcceptance?: BlockedAcceptance;
+}
+
+export interface BlockedAcceptance {
+  blockedReportedAt: number;
+  acceptIncomplete: true;
 }
 
 /** A decision a run is waiting on the user to resolve before it can proceed. */
@@ -377,6 +411,7 @@ export interface CreateTaskInput {
   acpOptions?: AcpOptions;
   assignedTo?: string;
   model?: ModelRef;
+  fallbackModel?: ModelRef;
   isolation?: TaskIsolationMode;
   autoRun?: boolean;
   permissionOverrides?: PermissionOverrides;
@@ -397,6 +432,7 @@ export interface UpdateTaskInput {
   acpOptions?: AcpOptions | null;
   assignedTo?: string | null;
   model?: ModelRef | null;
+  fallbackModel?: ModelRef | null;
   isolation?: TaskIsolationMode | null;
   autoRun?: boolean;
   permissionOverrides?: PermissionOverrides | null;
@@ -638,6 +674,10 @@ export const TASK_ROUTE_PATTERNS = {
   diff: "/api/tasks/:id/diff",
   comments: "/api/tasks/:id/comments",
   taskEvents: "/api/tasks/:id/events",
+  permissionReply: "/api/tasks/:id/permission",
+  sessionEvents: "/api/tasks/:id/session-events",
+  context: "/api/tasks/:id/context",
+  compare: "/api/tasks/:targetId/compare?baseTaskId=:baseTaskId",
 } as const;
 
 export const buildTaskPath = {
@@ -661,4 +701,9 @@ export const buildTaskPath = {
     `/api/tasks/${encodeURIComponent(id)}/links/${encodeURIComponent(parentId)}`,
   comments: (id: string) => `/api/tasks/${encodeURIComponent(id)}/comments`,
   taskEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/events`,
+  permissionReply: (id: string) => `/api/tasks/${encodeURIComponent(id)}/permission`,
+  sessionEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/session-events`,
+  context: (id: string) => `/api/tasks/${encodeURIComponent(id)}/context`,
+  compare: (targetId: string, baseTaskId: string) =>
+    `/api/tasks/${encodeURIComponent(targetId)}/compare?baseTaskId=${encodeURIComponent(baseTaskId)}`,
 } as const;

@@ -1,5 +1,6 @@
 /** Canonical REST route contracts. */
-import type { CompletionReport } from "./task";
+import type { BlockedAcceptance, CompletionReport } from "./task";
+import type { BlockedAnswerContext } from "./blocked-task";
 
 export const ROUTE_PATTERNS = {
   health: "/api/health",
@@ -19,6 +20,14 @@ export type CompleteTaskBody = Omit<CompletionReport, "reportedAt" | "outcome"> 
 
 /** POST /api/tasks/:id/block body. Server supplies outcome="blocked" and reportedAt. */
 export type BlockTaskBody = Omit<CompletionReport, "reportedAt" | "outcome"> & FinalSessionOutputBody;
+
+/** POST /api/tasks/:id/retry body. */
+export interface RetryTaskBody {
+  feedback?: string;
+  blockedAnswer?: BlockedAnswerContext;
+}
+
+export type { BlockedAcceptance };
 
 /** POST /api/tasks/:id/archive body. */
 export type ArchiveTaskBody = Record<string, never>;
