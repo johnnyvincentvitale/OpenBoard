@@ -1,10 +1,18 @@
 import type { TaskKind } from "../shared";
+import type { TaskContext } from "../shared/lineage-context";
 
 type TaskContextOptions = {
   hasParents?: boolean;
 };
 
 const LINKED_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
+  research: [
+    "For research, the mode is:",
+    "Investigate the question using read-only cwd tools and parent context.",
+    "Available read-only board tools: task_context (retrieve full ancestor handoffs), task_diff (inspect parent code diffs), task_compare (compare any two task worktrees).",
+    "Describe what you found, cite evidence, note gaps, and flag decisions the operator needs to make.",
+    "Do not edit code or run mutating commands.",
+  ],
   build: [
     "Create or modify the requested implementation/artifact in cwd.",
     "If starting from scratch, establish the minimal structure needed for the requested result.",
@@ -15,7 +23,7 @@ const LINKED_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
   ],
   synthesis: [
     "For synthesis, the mode is:",
-    "Read parent context first.",
+    "Read parent context first. Use task_context to retrieve full ancestor handoffs for any parent.",
     "Evaluate parent findings for agreement, conflict, evidence strength, gaps, and implications.",
     "Preserve the user/card prompt as the authority for the actual output shape.",
     "Do not implement build changes unless explicitly asked.",
@@ -41,6 +49,12 @@ const LINKED_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
 };
 
 const STANDALONE_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
+  research: [
+    "For research, the mode is:",
+    "Investigate the question using read-only cwd tools.",
+    "Describe what you found, cite evidence, note gaps, and flag decisions the operator needs to make.",
+    "Do not edit code or run mutating commands.",
+  ],
   build: [
     "Create or modify the requested implementation/artifact in cwd.",
     "If starting from scratch, establish the minimal structure needed for the requested result.",
@@ -72,10 +86,84 @@ const STANDALONE_TASK_CONTEXT: Partial<Record<TaskKind, string[]>> = {
   ],
 };
 
-export function taskExecutionContext(kind: TaskKind | null | undefined, options: TaskContextOptions = {}): string | null {
+/**
+ * Dispatcher prompt injection: returns the execution context block for a given
+ * task kind, gating on whether the task has parent links. This is the existing
+ * contract used by the dispatcher to inject context guidance into agent prompts.
+ *
+ * Now covers Research in addition to Build/Synthesis/Audit/Fix.
+ */
+export function taskExecutionContext(
+  kind: TaskKind | null | undefined,
+  options: TaskContextOptions = {},
+): string | null {
   const label = kind ?? "none";
   const contextByKind = options.hasParents ? LINKED_TASK_CONTEXT : STANDALONE_TASK_CONTEXT;
   const lines = contextByKind[label];
   if (!lines) return null;
   return ["OPENBOARD TASK CONTEXT", `Task type: ${label}`, ...lines].join("\n");
+}
+
+/**
+ * Format a lineage-aware parent context block for dispatcher prompt injection.
+ *
+ * This is the "direct-only dependency gating" surface: only direct parents
+ * appear in the injected prompt. Inherited ancestors are available through
+ * the task_context MCP tool (not the prompt block). Permitted read-only
+ * board tools include task_context, task_diff, and task_compare.
+ */
+export function directParentPromptBlock(lineage: TaskContext | null): string | null {
+  if (!lineage || lineage.directParents.length === 0) return null;
+
+  const parts: string[] = ["PARENT CONTEXT"];
+
+  parts.push(
+    "To inspect a parent's code changes, first call the openboard MCP tool task_diff with that parent's task id (listed below).",
+  );
+  parts.push(
+    "To retrieve full handoff details for inherited ancestors, use the openboard MCP tool task_context with the ancestor's task id.",
+  );
+  parts.push(
+    "To compare any two task worktrees, use the openboard MCP tool task_compare.",
+  );
+  parts.push(
+    "If task_diff is unavailable, errors, or returns no-git evidence, fall back to the parent worktree with read/grep/glob/list tools only.",
+  );
+  parts.push(
+    "Parent task worktrees are read-only. Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.",
+  );
+  parts.push(
+    "Do all implementation and verification shell commands from your own cwd.",
+  );
+  parts.push(
+    "Board tools are limited to task_diff, task_context, and task_compare for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).",
+  );
+  parts.push("");
+
+  for (const parent of lineage.directParents) {
+    parts.push(
+      `PARENT-${parent.parentId.slice(-8)}: ${parent.title}`,
+    );
+    if (parent.summary) {
+      parts.push(`PARENT-${parent.parentId.slice(-8)} SUMMARY: ${parent.summary}`);
+    }
+    if (parent.changedFiles.length > 0) {
+      parts.push(`PARENT-${parent.parentId.slice(-8)} Changed files:`);
+      for (const f of parent.changedFiles) {
+        parts.push(`- ${f}`);
+      }
+    }
+    if (parent.verification && parent.verification.length > 0) {
+      parts.push(`PARENT-${parent.parentId.slice(-8)} Verification:`);
+      for (const v of parent.verification) {
+        parts.push(`- ${v.command}: ${v.result}`);
+      }
+    }
+    if (parent.residualRisk) {
+      parts.push(`PARENT-${parent.parentId.slice(-8)} Residual risk: ${parent.residualRisk}`);
+    }
+    parts.push("");
+  }
+
+  return parts.join("\n");
 }

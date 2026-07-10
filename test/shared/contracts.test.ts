@@ -237,8 +237,8 @@ describe("FR08-FR12 shared contracts", () => {
 
   it("adds public lineage/context response shapes without changing direct parent ids", () => {
     const context: import("../../src/shared").TaskContext = {
-      task: { taskId: "child", title: "Child", completion: null, changedFiles: [], verification: [], residualRisk: "none", hasStructuredHandoff: false },
-      directParents: [{ kind: "direct-parent", parentId: "p1", taskId: "p1", title: "Parent", completion: null, changedFiles: [], verification: [], residualRisk: "none", hasStructuredHandoff: true }],
+      task: { taskId: "child", title: "Child", description: "Child desc", completion: null, changedFiles: [], verification: [], residualRisk: "none", hasStructuredHandoff: false },
+      directParents: [{ kind: "direct-parent", parentId: "p1", taskId: "p1", title: "Parent", description: "Parent desc", completion: null, changedFiles: [], verification: [], residualRisk: "none", hasStructuredHandoff: true }],
       inheritedParents: [{ kind: "inherited-parent", taskId: "a1", title: "Ancestor", taskKind: "research", column: "done", depth: 2, viaParentIds: ["p1", "p2"], summary: "Older evidence", hasStructuredHandoff: true }],
       codeAncestors: [{ taskId: "a1", title: "Ancestor", column: "done", branch: "board/a1", changedFiles: ["src/a.ts"], hasStructuredHandoff: true }],
     };

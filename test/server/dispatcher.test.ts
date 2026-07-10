@@ -470,8 +470,21 @@ describe("TaskDispatcher", () => {
       expect(text).not.toContain("parent worktrees");
     });
 
-    it("omits task execution context for none and research cards", async () => {
+    it("includes task execution context for research cards", async () => {
       const task = createTask({ description: "Research only", taskKind: "research" });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+
+      const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
+      expect(text).toContain("OPENBOARD TASK CONTEXT");
+      expect(text).toContain("Task type: research");
+      expect(text).toContain("For research, the mode is:");
+      expect(text).toContain("OPENBOARD HANDOFF GUIDANCE");
+    });
+
+    it("omits task execution context for none cards", async () => {
+      const task = createTask({ description: "No kind", taskKind: "none" });
       dispatcher = new TaskDispatcher({ client: client as never, store });
 
       await dispatcher.run(task.id);
@@ -479,7 +492,6 @@ describe("TaskDispatcher", () => {
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
       expect(text).not.toContain("OPENBOARD TASK CONTEXT");
       expect(text).toContain("OPENBOARD HANDOFF GUIDANCE");
-      expect(text).toContain("Task type: research");
     });
 
     it("injects task execution context into ACP prompts", async () => {

@@ -4,6 +4,7 @@ import type { CompletionReport, TaskKind } from "./task";
 export interface TaskHandoff {
   taskId: string;
   title: string;
+  description: string;
   taskKind?: TaskKind | null;
   column?: Column;
   completion: CompletionReport | null;
