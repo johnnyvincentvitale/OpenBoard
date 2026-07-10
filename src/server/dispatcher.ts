@@ -14,7 +14,7 @@
  */
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, ModelRef, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import type { AcpTaskHarness, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -26,10 +26,11 @@ import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, GeminiAcpRunner, HermesAcpRunner, PiAcpRunner } from "./claude-acp-runner";
 import type { ClaudeCodeRunnerLike } from "./claude-code-runner";
 import { completionHandoffGuidance } from "./completion-contract";
-import { loadWatchdogConfig, type WatchdogConfig } from "./config";
+import { loadPermissionConfig, loadWatchdogConfig, type WatchdogConfig } from "./config";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
 import { SessionActivityCollector, type SessionActivityEventInput } from "./session-activity";
 import { taskExecutionContext } from "./task-context";
+import type { PermissionAskEvent, RespondOutcome } from "./permission-broker";
 import { resolveTaskLineage } from "./task-lineage";
 import { RunWatchdog, type WatchdogClock, type WatchdogRetryDecision, type WatchdogRunIdentity, type WatchdogTermination } from "./watchdog";
 import {
@@ -109,6 +110,8 @@ export interface TaskDispatcherDeps {
   instanceName?: string;
   /** Override the stall-detection threshold (tests only; default DEFAULT_STALL_THRESHOLD_MS). */
   stallThresholdMs?: number;
+  /** Override OPENBOARD_PERMISSION_GRACE_MS (tests only; default loadPermissionConfig()). */
+  permissionGraceMs?: number;
   /** Activity collector for OpenCode session-tree relay. */
   activity?: SessionActivityCollector;
   /** Watchdog config for OpenCode runs. Defaults to OPENBOARD_WATCHDOG_MS. */
@@ -423,6 +426,10 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function hasAskRule(rules: Array<{ action: string }>): boolean {
+  return rules.some((rule) => rule.action === "ask");
+}
+
 function sameProvider(a: ModelRef | null | undefined, b: ModelRef | null | undefined): boolean {
   return !!a && !!b && a.providerID === b.providerID;
 }
@@ -580,6 +587,7 @@ export class TaskDispatcher implements Dispatcher {
   private readonly openCodeRunsByTask = new Map<string, OpenCodeRunRecord>();
   private readonly openCodeSessionToTask = new Map<string, string>();
   private readonly permissionResponderPool: PermissionResponderPool;
+  private readonly permissionAskMeta = new Map<string, Pick<PendingPermissionAsk, "raisedAt" | "deadline" | "patterns">>();
 
   constructor(deps: TaskDispatcherDeps) {
     this.client = deps.client;
@@ -590,7 +598,9 @@ export class TaskDispatcher implements Dispatcher {
     // in silence.
     this.permissionResponderPool = createPermissionResponderPool({
       client: this.client,
+      interactiveTimeoutMs: deps.permissionGraceMs ?? loadPermissionConfig().graceMs,
       onError: (sessionId, context, err) => this.handlePermissionResponderError(sessionId, context, err),
+      onPermissionEvent: (event) => this.handlePermissionEvent(event),
     });
     this.worktrees = deps.worktrees ?? new GitWorktreeManager();
     this.adapterBaseUrl = deps.adapterBaseUrl ?? "http://127.0.0.1:0";
@@ -714,12 +724,13 @@ export class TaskDispatcher implements Dispatcher {
     // agent in OpenCode 1.17.13. It also honors an agent's configured default
     // model when task.model is unset; the v2 prompt route can admit input
     // without producing a message turn.
+    const permissionRules = resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides);
     const activeModel = task.model ?? null;
     const createInput = {
       agent: task.agent ?? undefined,
       model: activeModel ?? undefined,
       directory: execDirectory,
-      permission: resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides),
+      permission: permissionRules,
     };
     const created = await this.client.session.create(createInput);
     if ((created as { error?: unknown }).error) {
@@ -735,6 +746,10 @@ export class TaskDispatcher implements Dispatcher {
 
     const runStartedAt = Date.now();
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
+    this.store.update(taskId, { sessionId, activeModel, autoRetries: 0, runStartedAt });
+    if (hasAskRule(permissionRules)) {
+      this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override");
+    }
     const taskPrompt = isolatedRun
       ? this.withWorktreeIsolationPreamble(execDirectory, baseRepoDirectory, task.description)
       : task.description;
@@ -747,6 +762,8 @@ export class TaskDispatcher implements Dispatcher {
       task.model ?? undefined,
     );
     if (promptError) {
+      this.stopPermissionResponder(sessionId);
+      this.endOpenCodeRun(task.id, runStartedAt, "error");
       const updated = this.store.update(taskId, {
         sessionId,
         activeModel,
@@ -771,9 +788,6 @@ export class TaskDispatcher implements Dispatcher {
     });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
     this.startCompletionWatcher(taskId, sessionId);
-    if (isolatedRun) {
-      this.startPermissionResponder(sessionId, execDirectory);
-    }
 
     const fresh = this.store.get(taskId);
     if (!fresh) {
@@ -1356,11 +1370,19 @@ export class TaskDispatcher implements Dispatcher {
     // retry() re-prompts an existing session — the worktree already exists from
     // run(), so its path comes off the task record rather than ensureWorktree().
     const isolatedRetry = wantsWorktree(task);
-    await this.captureDispatchBaseline(task, isolatedRetry, this.resolveDirectory(task.worktreePath ?? task.directory));
+    const retryDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
+    await this.captureDispatchBaseline(task, isolatedRetry, retryDirectory);
+    const permissionRules = resolveOpenCodePermissionRules(isolatedRetry, task.permissionOverrides);
+    this.store.update(taskId, { runStartedAt });
+    if (hasAskRule(permissionRules)) {
+      this.startPermissionResponder(task.sessionId, retryDirectory, isolatedRetry ? "worktree-fence" : "in-place-override");
+    } else {
+      this.stopPermissionResponder(task.sessionId);
+    }
     const baseRetryPrompt = this.withRebaseConflictContext(task, feedback ?? task.description);
     const retryPrompt = isolatedRetry
       ? this.withWorktreeIsolationPreamble(
-          this.resolveDirectory(task.worktreePath ?? task.directory),
+          retryDirectory,
           this.resolveDirectory(task.directory),
           baseRetryPrompt,
         )
@@ -1374,6 +1396,8 @@ export class TaskDispatcher implements Dispatcher {
       task.model ?? undefined,
     );
     if (promptError) {
+      this.stopPermissionResponder(task.sessionId);
+      this.endOpenCodeRun(task.id, runStartedAt, "error");
       const updated = this.store.update(taskId, { runState: "error", error: promptError });
       if (!updated) {
         throw AdapterError.notFound(`Task not found: ${taskId}`);
@@ -1389,9 +1413,6 @@ export class TaskDispatcher implements Dispatcher {
     });
     this.store.move(taskId, "in_progress", END_OF_COLUMN);
     this.startCompletionWatcher(taskId, task.sessionId);
-    if (isolatedRetry) {
-      this.startPermissionResponder(task.sessionId, this.resolveDirectory(task.worktreePath ?? task.directory));
-    }
 
     const fresh = this.store.get(taskId);
     if (!fresh) {
@@ -1492,6 +1513,7 @@ export class TaskDispatcher implements Dispatcher {
     }
     this.completionWatchers.clear();
     this.outputCandidates.clear();
+      this.permissionAskMeta.clear();
     for (const [taskId, run] of this.openCodeRunsByTask) {
       this.activity.endRun(taskId, run.runStartedAt, "aborted");
       run.watchdog.dispose();
@@ -1499,6 +1521,20 @@ export class TaskDispatcher implements Dispatcher {
     this.openCodeRunsByTask.clear();
     this.openCodeSessionToTask.clear();
     this.permissionResponderPool.stop();
+  }
+
+  listPendingPermissions(taskId: string): PendingPermissionAsk[] {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    return this.pendingPermissionsForTask(task);
+  }
+
+  async respondPermission(taskId: string, input: RespondPermissionInput): Promise<RespondOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    const owned = this.pendingPermissionsForTask(task).some((ask) => ask.id === input.askId);
+    if (!owned) return { ok: false, askId: input.askId, conflict: "not-found" };
+    return this.permissionResponderPool.respond(input);
   }
 
   // ---- internals ----
@@ -1516,14 +1552,7 @@ export class TaskDispatcher implements Dispatcher {
       sessionId: input.sessionId,
       attempt: input.attempt,
     };
-    const watchdog = new RunWatchdog(
-      this.watchdogConfig,
-      {
-        onTerminate: (event) => this.handleWatchdogTermination(event),
-        onRetryDecision: (event) => this.handleWatchdogRetryDecision(event),
-      },
-      this.watchdogClock,
-    );
+    const watchdog = this.createRunWatchdog();
     const record: OpenCodeRunRecord = {
       taskId: input.task.id,
       runStartedAt: input.runStartedAt,
@@ -1544,6 +1573,17 @@ export class TaskDispatcher implements Dispatcher {
       harness: "opencode",
     });
     watchdog.startRun(runIdentity, input.runStartedAt);
+  }
+
+  private createRunWatchdog(): RunWatchdog {
+    return new RunWatchdog(
+      this.watchdogConfig,
+      {
+        onTerminate: (event) => this.handleWatchdogTermination(event),
+        onRetryDecision: (event) => this.handleWatchdogRetryDecision(event),
+      },
+      this.watchdogClock,
+    );
   }
 
   private endOpenCodeRun(taskId: string, runStartedAt: number | undefined, status: "complete" | "error" | "aborted"): void {
@@ -1664,12 +1704,35 @@ export class TaskDispatcher implements Dispatcher {
     if (!current || current.runStartedAt !== event.run.runStartedAt || current.rootSessionId !== event.run.sessionId) return;
     const task = this.store.get(event.run.taskId);
     if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt) return;
+    if (this.suppressWatchdogForPendingPermission(current, event)) return;
     this.store.addEvent({
       taskId: task.id,
       type: "task_watchdog_tripped",
       body: { reason: event.reason, sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt, observedAt: event.terminatedAt },
     });
     current.abortPromise = this.confirmWatchdogAbort(event.run);
+  }
+
+  private suppressWatchdogForPendingPermission(run: OpenCodeRunRecord, event: WatchdogTermination): boolean {
+    const pending = this.permissionResponderPool.listPending(event.run.sessionId)
+      .filter((ask) => ask.deadline > event.terminatedAt)
+      .sort((a, b) => a.raisedAt - b.raisedAt)[0];
+    if (!pending) return false;
+    run.watchdog.dispose();
+    run.watchdog = this.createRunWatchdog();
+    run.watchdog.startRun(event.run, pending.deadline);
+    this.store.addEvent({
+      taskId: event.run.taskId,
+      type: "task_watchdog_permission_wait",
+      body: {
+        askId: pending.id,
+        sessionId: event.run.sessionId,
+        runStartedAt: event.run.runStartedAt,
+        deadline: pending.deadline,
+        reason: event.reason,
+      },
+    });
+    return true;
   }
 
   private handleWatchdogRetryDecision(event: WatchdogRetryDecision): void {
@@ -1737,29 +1800,35 @@ export class TaskDispatcher implements Dispatcher {
 
   private async startFreshOpenCodeAttempt(task: Task, attempt: number, activeModel: ModelRef | null): Promise<void> {
     const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
+    const isolatedRun = wantsWorktree(task);
+    const permissionRules = resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides);
     const created = await this.client.session.create({
       agent: task.agent ?? undefined,
       model: activeModel ?? undefined,
       directory: execDirectory,
-      permission: resolveOpenCodePermissionRules(wantsWorktree(task), task.permissionOverrides),
+      permission: permissionRules,
     });
     const sessionId = extractSessionId((created as { data?: unknown }).data);
     if (!sessionId || (created as { error?: unknown }).error) return;
     const runStartedAt = Date.now();
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt });
-    const prompt = wantsWorktree(task)
+    this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt });
+    if (hasAskRule(permissionRules)) {
+      this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override");
+    }
+    const prompt = isolatedRun
       ? this.withWorktreeIsolationPreamble(execDirectory, this.resolveDirectory(task.directory), task.description)
       : task.description;
     const fullPrompt = this.withCompletionContract(task, this.withParentHandoffs(task, this.withTaskContext(task, prompt)), runStartedAt);
     const promptError = await this.prompt(sessionId, fullPrompt, task.agent ?? undefined, activeModel);
     if (promptError) {
+      this.stopPermissionResponder(sessionId);
       this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "error", error: promptError });
       this.endOpenCodeRun(task.id, runStartedAt, "error");
       return;
     }
     this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "running", error: undefined });
     this.startCompletionWatcher(task.id, sessionId);
-    if (wantsWorktree(task)) this.startPermissionResponder(sessionId, execDirectory);
   }
 
   private startCompletionWatcher(taskId: string, sessionId: string): void {
@@ -1784,13 +1853,80 @@ export class TaskDispatcher implements Dispatcher {
     }
   }
 
-  /** Start (or restart) the external_directory ask auto-responder for a worktree session. */
-  private startPermissionResponder(sessionId: string, directory: string): void {
-    this.permissionResponderPool.register(sessionId, directory);
+  /** Start (or restart) the ask auto-responder for a session with effective ask rules. */
+  private startPermissionResponder(sessionId: string, directory: string, source: PendingPermissionAsk["source"]): void {
+    for (const ask of this.permissionResponderPool.listPending(sessionId)) {
+      this.permissionAskMeta.delete(ask.id);
+    }
+    this.permissionResponderPool.register(sessionId, directory, { source });
   }
 
   private stopPermissionResponder(sessionId: string): void {
+    for (const ask of this.permissionResponderPool.listPending(sessionId)) {
+      this.permissionAskMeta.delete(ask.id);
+    }
     this.permissionResponderPool.unregister(sessionId);
+  }
+
+  private pendingPermissionsForTask(task: Task): PendingPermissionAsk[] {
+    if (!task.sessionId) return [];
+    return this.permissionResponderPool.listPending(task.sessionId);
+  }
+
+  private handlePermissionEvent(event: PermissionAskEvent): void {
+    const task = this.listTasksForWatcher().find((candidate) => candidate.sessionId === event.runId);
+    if (!task) return;
+    const runStartedAt = this.openCodeRunsByTask.get(task.id)?.runStartedAt ?? task.runStartedAt ?? event.occurredAt;
+    const pending = event.type === "permission_asked"
+      ? this.permissionResponderPool.listPending(event.runId).find((ask) => ask.id === event.askId)
+      : undefined;
+    if (pending) {
+      this.permissionAskMeta.set(event.askId, {
+        raisedAt: pending.raisedAt,
+        deadline: pending.deadline,
+        patterns: pending.patterns,
+      });
+    }
+    const meta = this.permissionAskMeta.get(event.askId);
+    const resolution = event.reason === "operator"
+      ? "operator"
+      : event.reason === "policy-timeout" && meta && meta.deadline <= meta.raisedAt
+        ? "policy-immediate"
+        : event.reason === "policy-timeout"
+          ? "policy-timeout"
+          : "operator";
+    const body: Record<string, unknown> = {
+      askId: event.askId,
+      harness: event.harness,
+      source: event.source,
+      permission: event.permission,
+      summary: event.summary,
+      ...(event.tool ? { tool: event.tool } : {}),
+      ...(pending ? { raisedAt: pending.raisedAt, deadline: pending.deadline } : {}),
+      ...(pending?.patterns ? { patterns: pending.patterns } : {}),
+      ...(event.type !== "permission_asked" ? { resolution } : {}),
+      ...(event.decision ? { action: event.decision } : {}),
+      ...(event.answeredBy ? { answeredBy: event.answeredBy } : {}),
+      ...(event.error ? { error: event.error } : {}),
+      ...(event.type !== "permission_asked" && meta ? { latencyMs: Math.max(0, event.occurredAt - meta.raisedAt) } : {}),
+    };
+    this.store.addEvent({
+      taskId: task.id,
+      type: event.type === "permission_asked" ? "task_permission_asked" : event.type === "permission_answered" ? "task_permission_answered" : "task_permission_reply_failed",
+      body,
+    });
+    this.activity.recordEvent(task.id, runStartedAt, {
+      sessionId: event.runId,
+      rootSessionId: event.runId,
+      harness: "opencode",
+      kind: "permission",
+      text: `${event.permission}:${event.type}${event.decision ? `:${event.decision}` : ""}`,
+    });
+    if (event.type !== "permission_asked") {
+      this.permissionAskMeta.delete(event.askId);
+      const run = this.openCodeRunsByTask.get(task.id);
+      if (run) run.watchdog.recordActivity({ run: { taskId: task.id, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
+    }
   }
 
   /** Surface a persistently failing permission-responder list/reply call against its task. */
@@ -1897,6 +2033,10 @@ export class TaskDispatcher implements Dispatcher {
       // dispatcher, so this finally block is the only place that reliably
       // observes every completion path for this sessionId).
       this.stopPermissionResponder(sessionId);
+      const finalTask = this.getTaskForWatcher(taskId);
+      if (finalTask?.sessionId === sessionId && finalTask.runStartedAt !== undefined) {
+        this.endOpenCodeRun(taskId, finalTask.runStartedAt, finalTask.runState === "error" ? "error" : "complete");
+      }
     }
   }
 
