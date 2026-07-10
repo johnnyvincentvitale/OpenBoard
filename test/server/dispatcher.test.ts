@@ -380,9 +380,34 @@ describe("TaskDispatcher", () => {
       const events = store.listEvents(task.id);
       expect(events.map((event) => event.type)).toContain("task_permission_asked");
       expect(events.map((event) => event.type)).toContain("task_permission_answered");
+      const asked = events.find((event) => event.type === "task_permission_asked")!;
+      expect(asked.body).toEqual({
+        askId,
+        harness: "opencode",
+        source: "in-place-override",
+        permission: "bash",
+        summary: 'Tool "bash" requested a permission this worktree fence denies by default.',
+        tool: "bash",
+        raisedAt: expect.any(Number),
+        deadline: expect.any(Number),
+        patterns: ["**"],
+      });
+      expect(asked.body).not.toHaveProperty("resolution");
       const answered = events.find((event) => event.type === "task_permission_answered")!;
-      expect(answered.body).toMatchObject({ askId, action: "allow_once", answeredBy: "Operator", source: "in-place-override" });
+      expect(answered.body).toEqual({
+        askId,
+        harness: "opencode",
+        source: "in-place-override",
+        permission: "bash",
+        summary: 'Tool "bash" requested a permission this worktree fence denies by default.',
+        resolution: "operator",
+        tool: "bash",
+        action: "allow_once",
+        answeredBy: "Operator",
+        latencyMs: expect.any(Number),
+      });
       expect(answered.body).not.toHaveProperty("nativeId");
+      expect(answered.body).not.toHaveProperty("policy");
     });
 
     it("cleans up pending asks when prompt admission fails", async () => {
@@ -412,7 +437,22 @@ describe("TaskDispatcher", () => {
       const outcome = await (dispatcher as never as { respondPermission(id: string, input: unknown): Promise<unknown> }).respondPermission(task.id, { askId, action: "deny", answeredBy: "Operator" });
 
       expect(outcome).toMatchObject({ ok: false, conflict: "reply-failed" });
-      expect(store.listEvents(task.id).map((event) => event.type)).toContain("task_permission_reply_failed");
+      const failed = store.listEvents(task.id).find((event) => event.type === "task_permission_reply_failed")!;
+      expect(failed.body).toEqual({
+        askId,
+        harness: "opencode",
+        source: "in-place-override",
+        permission: "bash",
+        summary: 'Tool "bash" requested a permission this worktree fence denies by default.',
+        resolution: "operator",
+        tool: "bash",
+        action: "deny",
+        answeredBy: "Operator",
+        error: "reply failed",
+        latencyMs: expect.any(Number),
+      });
+      expect(failed.body).not.toHaveProperty("policy");
+      expect(failed.body).not.toHaveProperty("nativeId");
       client.permissionReplyShouldError = null;
       await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string }> }).listPendingPermissions(task.id).some((ask) => ask.id !== askId));
     });
@@ -435,6 +475,27 @@ describe("TaskDispatcher", () => {
       const outcome = await (dispatcher as never as { respondPermission(id: string, input: unknown): Promise<unknown> }).respondPermission(task.id, { askId: staleAskId, action: "deny", answeredBy: "Operator" });
       expect(outcome).toEqual({ ok: false, askId: staleAskId, conflict: "not-found" });
       expect(client.permissionReplyCalls).toEqual([]);
+      expect((dispatcher as unknown as { permissionAskMeta: Map<string, unknown> }).permissionAskMeta.has(staleAskId)).toBe(false);
+    });
+
+    it("cleans pending permission timing metadata on abort", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_abort_permission";
+      client.stableMessagesResponse = [{ info: { id: "msg1" }, parts: [{ type: "tool", callID: "call1", tool: "bash" }] }];
+      client.pendingPermissionRequests = [
+        { id: "native_req", sessionID: "ses_abort_permission", permission: "bash", tool: { messageID: "msg1", callID: "call1" } },
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000 });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 1);
+      const askId = (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string }> }).listPendingPermissions(task.id)[0]!.id;
+      expect((dispatcher as unknown as { permissionAskMeta: Map<string, unknown> }).permissionAskMeta.has(askId)).toBe(true);
+
+      await dispatcher.abort(task.id);
+
+      expect((dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id)).toEqual([]);
+      expect((dispatcher as unknown as { permissionAskMeta: Map<string, unknown> }).permissionAskMeta.has(askId)).toBe(false);
     });
 
     it("launches claude-code tasks through the Claude runner instead of OpenCode sessions", async () => {
@@ -1055,6 +1116,36 @@ describe("TaskDispatcher", () => {
       expect(client.createCalls).toHaveLength(2);
       expect(client.createCalls[1]?.directory).toBe(myProjectDir);
       expect(store.get(task.id)).toMatchObject({ sessionId: "ses_abort_pending_new", autoRetries: 1, runState: "running" });
+    });
+
+    it("suppresses watchdog abort/retry while an operator permission ask is still within grace", async () => {
+      const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
+      client.nextSessionId = "ses_watchdog_permission";
+      client.stableMessagesResponse = [{ info: { id: "msg1" }, parts: [{ type: "tool", callID: "call1", tool: "bash" }] }];
+      client.pendingPermissionRequests = [
+        { id: "native_req", sessionID: "ses_watchdog_permission", permission: "bash", tool: { messageID: "msg1", callID: "call1" } },
+      ];
+      dispatcher = new TaskDispatcher({ client: client as never, store, permissionGraceMs: 60_000, watchdogConfig: { enabled: true, timeoutMs: 60_000, sweepIntervalMs: 0, maxAutomaticRetries: 2 } });
+
+      await dispatcher.run(task.id);
+      await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 1);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+      const ask = (dispatcher as never as { listPendingPermissions(id: string): Array<{ id: string; deadline: number }> }).listPendingPermissions(task.id)[0]!;
+
+      (dispatcher as unknown as { handleWatchdogTermination(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; terminatedAt: number }): void }).handleWatchdogTermination({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_watchdog_permission", attempt: 0 },
+        reason: "liveness-timeout",
+        terminatedAt: ask.deadline - 1,
+      });
+
+      expect(client.abortCalls).toEqual([]);
+      expect(client.createCalls).toHaveLength(1);
+      expect(store.get(task.id)?.runState).toBe("running");
+      expect(store.listEvents(task.id).find((event) => event.type === "task_watchdog_permission_wait")?.body).toMatchObject({
+        askId: ask.id,
+        sessionId: "ses_watchdog_permission",
+        deadline: ask.deadline,
+      });
     });
 
     it("blocks watchdog retry when old root abort fails", async () => {
@@ -1781,6 +1872,7 @@ describe("TaskDispatcher", () => {
         store,
         worktreeBaseDir: () => join(workspace, "worktrees-stall"),
         stallThresholdMs: 10,
+        permissionGraceMs: 0,
       });
 
       await dispatcher.run(task.id);
@@ -1813,6 +1905,7 @@ describe("TaskDispatcher", () => {
         store,
         worktreeBaseDir: () => join(workspace, "worktrees-stall"),
         stallThresholdMs: 10,
+        permissionGraceMs: 0,
       });
 
       await dispatcher.run(task.id);
@@ -1836,6 +1929,7 @@ describe("TaskDispatcher", () => {
         store,
         worktreeBaseDir: () => join(workspace, "worktrees-stall"),
         stallThresholdMs: 10,
+        permissionGraceMs: 0,
       });
 
       await dispatcher.run(task.id);
@@ -1860,6 +1954,7 @@ describe("TaskDispatcher", () => {
         store,
         worktreeBaseDir: () => join(workspace, "worktrees-stall"),
         stallThresholdMs: 10,
+        permissionGraceMs: 0,
       });
 
       await dispatcher.run(task.id);
@@ -1893,9 +1988,11 @@ describe("TaskDispatcher", () => {
         store,
         worktreeBaseDir: () => join(workspace, "worktrees-stall"),
         stallThresholdMs: 10,
+        permissionGraceMs: 0,
       });
 
       await dispatcher.run(task.id);
+      await waitFor(() => store.listEvents(task.id).some((event) => event.type === "task_permission_answered"), 3000);
       await waitFor(() => store.get(task.id)?.runState === "error", 5000);
 
       expect(store.get(task.id)?.error).toContain("apply_patch");

@@ -233,6 +233,11 @@ describe("createPermissionBroker", () => {
     expect(outcome).toMatchObject({ ok: false, conflict: "reply-failed" });
     expect(events.some((e) => e.type === "permission_answered")).toBe(false);
     expect(events.some((e) => e.type === "permission_reply_failed")).toBe(true);
+    expect(events.find((e) => e.type === "permission_reply_failed")).toMatchObject({
+      decision: "allow_once",
+      reason: "operator",
+      answeredBy: "reviewer",
+    });
     // Never falsely answered: the ask is gone (not silently left "pending" forever, and not marked resolved).
     expect(broker.listPending()).toHaveLength(0);
     expect(await broker.respond({ askId, action: "allow_once", answeredBy: "reviewer" })).toMatchObject({

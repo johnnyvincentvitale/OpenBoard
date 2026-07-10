@@ -147,6 +147,14 @@ function truncate(value: string, max: number): string {
   return `${value.slice(0, Math.max(max - 1, 0))}…`;
 }
 
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err !== null && typeof err === "object" && typeof (err as { message?: unknown }).message === "string") {
+    return (err as { message: string }).message;
+  }
+  return String(err);
+}
+
 function identityKey(harness: TaskHarness, runId: string, nativeId: string): string {
   return JSON.stringify([harness, runId, nativeId]);
 }
@@ -246,8 +254,8 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
       // answered. A fresh native poll re-raising the same request mints a
       // new board ask (submitAsk no longer finds this identity).
       forget(record);
-      const message = err instanceof Error ? err.message : String(err);
-      emit("permission_reply_failed", record, { error: truncate(message, MAX_TEXT_LENGTH) });
+      const message = errorText(err);
+      emit("permission_reply_failed", record, { decision, reason, answeredBy, error: truncate(message, MAX_TEXT_LENGTH) });
       return { ok: false, askId: record.askId, conflict: "reply-failed", error: message };
     }
 
