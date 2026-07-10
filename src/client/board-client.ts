@@ -5,6 +5,7 @@ import type {
   Column,
   CreateTaskInput,
   CompletionReport,
+  CompletionSource,
   DiffResponse,
   FileCommitOutcome,
   MergeOutcome,
@@ -18,6 +19,7 @@ import type {
   PermissionOverrides,
   BlockedAcceptance,
   BlockedAnswerContext,
+  PendingPermissionAsk,
   RespondPermissionInput,
   RespondPermissionOutcome,
   RosterAgent,
@@ -35,6 +37,7 @@ import type {
   WorktreeCommitStatus,
   WorktreeCleanupOutcome,
   BoardHealth,
+  TaskCompareResponse,
 } from "../shared";
 import {
   AUTO_RUN_REQUIREMENT,
@@ -52,6 +55,7 @@ import {
   TASK_HARNESSES,
   TASK_ISOLATION_MODES,
   TASK_KINDS,
+  blockedQuestion,
 } from "../shared";
 
 export type { BoardHealth } from "../shared/health";
@@ -74,6 +78,22 @@ export interface BoardClientOptions {
   requireExplicitBoardUrl?: boolean;
 }
 
+/** Compact blocked-information projection surfaced by toTaskSummary. Never contains raw answer text. */
+export interface CompactBlockedProjection {
+  /** The blocked completion report timestamp. */
+  reportedAt: number;
+  /** The question the agent asked (extracted from needsInput, residualRisk, or summary fallback). */
+  question: string;
+  /** The blocked completion report summary. */
+  summary: string;
+  /** The blocked completion report residual risk. */
+  residualRisk: string;
+  /** Completion source that produced the blocked report. */
+  source: CompletionSource | null;
+  /** True when there was a needsInput field explicitly set on the completion report. */
+  hasExplicitQuestion?: boolean;
+}
+
 export interface TaskSummary {
   id: string;
   type: TaskType;
@@ -89,6 +109,12 @@ export interface TaskSummary {
   acpOptions?: AcpOptions;
   assignedTo?: string;
   model?: ModelRef;
+  /** Fallback model for mid-run provider recovery, stored with the same ModelRef JSON shape as fallbackModel. */
+  fallbackModel?: ModelRef | null;
+  /** Model currently active for the run, stored with the same ModelRef JSON shape as activeModel. */
+  activeModel?: ModelRef | null;
+  /** Automatic retry count. Legacy rows hydrate as zero. */
+  autoRetries?: number;
   isolation?: TaskIsolationMode;
   /** Unlike permissionOverrides (deliberately not projected), this is chain-planning metadata an orchestrator needs. */
   autoRun?: boolean;
@@ -104,6 +130,14 @@ export interface TaskSummary {
   parentIds?: string[];
   completionLocation?: Task["completionLocation"];
   completedBy?: string | null;
+  /** Compact blocked-information projection when the card is blocked. Never contains raw answer text. */
+  blocked?: CompactBlockedProjection | null;
+  /** Live pending permission asks on this task; empty when none or no broker is live. */
+  pendingPermissions: PendingPermissionAsk[];
+  /** True when this task has parent dependencies (lineage metadata available). */
+  hasParentIds?: boolean;
+  /** True when this task has a completion report (handoff evidence available). */
+  hasCompletion?: boolean;
 }
 
 export interface CreateBoardTaskInput {
@@ -207,6 +241,8 @@ export interface BoardClient {
   listComments(id: string): Promise<TaskComment[]>;
   listTaskEvents(id: string): Promise<TaskEvent[]>;
   getTaskDiff(id: string): Promise<DiffResponse>;
+  /** Compare two cards' durable code evidence via GET /api/tasks/:targetId/compare?baseTaskId=:baseTaskId. */
+  getTaskCompare(targetId: string, baseTaskId: string): Promise<TaskCompareResponse>;
   /** Stream live session activity frames for a task via SSE. */
   streamSessionEvents(id: string, onFrame: SessionActivityFrameCallback, options?: StreamSessionEventsOptions): Promise<SessionEventsStream>;
   /** Respond to a pending permission ask on a task. */
@@ -391,6 +427,8 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     listComments: (id) => requestJson<TaskComment[]>(resolved, buildTaskPath.comments(id), { method: "GET" }),
     listTaskEvents: (id) => requestJson<TaskEvent[]>(resolved, buildTaskPath.taskEvents(id), { method: "GET" }),
     getTaskDiff: (id) => requestJson<DiffResponse>(resolved, buildTaskPath.diff(id), { method: "GET" }),
+    getTaskCompare: (targetId, baseTaskId) =>
+      requestJson<TaskCompareResponse>(resolved, buildTaskPath.compare(targetId, baseTaskId), { method: "GET" }),
     streamSessionEvents: (id, onFrame, options) => streamSessionEvents(resolved, id, onFrame, options),
     respondPermission: (id, input) =>
       postJson<RespondPermissionOutcome>(resolved, buildTaskPath.permissionReply(id), input),
@@ -476,6 +514,20 @@ export function parseModelRef(model: string): ModelRef {
 }
 
 export function toTaskSummary(task: Task): TaskSummary {
+  const blocked = task.completion?.outcome === "blocked"
+    ? {
+        reportedAt: task.completion.reportedAt,
+        question: blockedQuestion(task.completion),
+        summary: task.completion.summary,
+        residualRisk: task.completion.residualRisk,
+        source: task.completionSource ?? null,
+        ...(task.completion.needsInput?.trim() ? { hasExplicitQuestion: true } : {}),
+      }
+    : null;
+
+  const hasParentIds = Boolean(task.parentIds && task.parentIds.length > 0);
+  const hasCompletion = task.completion !== null && task.completion !== undefined;
+
   return {
     id: task.id,
     type: task.type ?? "agent",
@@ -491,6 +543,9 @@ export function toTaskSummary(task: Task): TaskSummary {
     ...(task.acpOptions != null ? { acpOptions: task.acpOptions } : {}),
     ...(task.assignedTo != null ? { assignedTo: task.assignedTo } : {}),
     ...(task.model != null ? { model: task.model } : {}),
+    ...(task.fallbackModel != null ? { fallbackModel: task.fallbackModel } : {}),
+    ...(task.activeModel != null ? { activeModel: task.activeModel } : {}),
+    ...(task.autoRetries != null ? { autoRetries: task.autoRetries } : {}),
     ...(task.isolation != null ? { isolation: task.isolation } : {}),
     ...(task.autoRun !== undefined ? { autoRun: task.autoRun } : {}),
     ...(task.sessionId !== undefined ? { sessionId: task.sessionId } : {}),
@@ -505,6 +560,10 @@ export function toTaskSummary(task: Task): TaskSummary {
     ...(task.parentIds !== undefined ? { parentIds: task.parentIds } : {}),
     ...(task.completionLocation !== undefined ? { completionLocation: task.completionLocation } : {}),
     ...(task.completedBy !== undefined ? { completedBy: task.completedBy } : {}),
+    ...(blocked !== null ? { blocked } : {}),
+    pendingPermissions: task.pendingPermissions ?? [],
+    ...(hasParentIds ? { hasParentIds: true } : {}),
+    ...(hasCompletion ? { hasCompletion: true } : {}),
   };
 }
 

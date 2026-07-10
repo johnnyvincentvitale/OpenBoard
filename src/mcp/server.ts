@@ -15,18 +15,24 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   AddTasksInputSchema,
+  AnswerBlockedTaskInputSchema,
   CommentTaskInputSchema,
   CompleteTaskInputSchema,
   CreateTaskInputSchema,
   IntegrateTaskInputSchema,
   LinkTasksInputSchema,
   MoveTaskInputSchema,
+  RespondPermissionInputSchema,
   RetryTaskInputSchema,
   SelectInstanceInputSchema,
+  TailSessionInputSchema,
+  TaskContextInputSchema,
+  TaskCompareInputSchema,
   TaskIdInputSchema,
   abortTask,
   addNote,
   addTasks,
+  answerBlockedTask,
   blockTask,
   commentTask,
   completeTask,
@@ -39,10 +45,14 @@ import {
   listTasks,
   moveTask,
   openboardStatus,
+  respondPermission,
   retryTask,
   runTask,
   selectInstance,
   syncTask,
+  tailSession,
+  taskContext,
+  taskCompare,
   taskDiff,
   taskEvents,
   unlinkTasks,
@@ -217,6 +227,56 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
       inputSchema: IntegrateTaskInputSchema,
     },
     async (args) => toToolResult(await integrateTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "answer_blocked_task",
+    {
+      title: "Answer blocked OpenBoard task",
+      description: "Submit an operator answer to a blocked task's question through POST /api/tasks/:id/retry with blockedAnswer context. The answer text is carried as bounded retry feedback. Blocks on duplicate in-flight answers.",
+      inputSchema: AnswerBlockedTaskInputSchema,
+    },
+    async (args) => toToolResult(await answerBlockedTask(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "respond_permission",
+    {
+      title: "Respond to permission ask",
+      description: "Respond to a pending permission ask for a task. Actions: allow_once (grant this request, permission returns to ask on next matching call), deny (block this request, permission returns to ask). answeredBy is required for audit trail.",
+      inputSchema: RespondPermissionInputSchema,
+    },
+    async (args) => toToolResult(await respondPermission(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "tail_session",
+    {
+      title: "Tail session activity",
+      description: "Fetch a bounded tail snapshot of a task's session activity events, plus run identity, transport/gap truth, and terminal signal. Uses client.streamSessionEvents with a snapshot-first collector. Not for continuous streaming — use the SSE endpoint directly for unbounded reads. Default limit 50, max 200.",
+      inputSchema: TailSessionInputSchema,
+    },
+    async (args) => toToolResult(await tailSession(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "task_context",
+    {
+      title: "Get task lineage context",
+      description: "Retrieve the full resolved task lineage: target handoff, direct-parent handoffs, inherited-ancestor metadata, and code-evidence candidates. No raw transcripts.",
+      inputSchema: TaskContextInputSchema,
+    },
+    async (args) => toToolResult(await taskContext(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "task_compare",
+    {
+      title: "Compare task evidence",
+      description: "Fetch the git delta from base task output to target task output via GET /api/tasks/:targetId/compare?baseTaskId=:baseTaskId. Returns the real server comparison: a single DiffResponse from base→target with source refs and an honest no-git reason when Git evidence is unavailable.",
+      inputSchema: TaskCompareInputSchema,
+    },
+    async (args) => toToolResult(await taskCompare(args, toolOptions)),
   );
 
   server.registerTool(

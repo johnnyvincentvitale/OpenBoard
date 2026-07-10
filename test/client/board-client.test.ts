@@ -187,6 +187,7 @@ describe("board client", () => {
         runState: "idle",
         agent: "build",
         sessionId: "session-1",
+        pendingPermissions: [],
       },
     ]);
     await expect(client.listAgents()).resolves.toEqual(agents);

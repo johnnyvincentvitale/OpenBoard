@@ -47,6 +47,26 @@ export type DiffResponse =
   | { kind: "diff"; files: DiffFile[]; capped: boolean; root?: string }
   | { kind: "no-git"; reason: string };
 
+export type TaskCompareResponse =
+  | {
+      kind: "diff";
+      baseTaskId: string;
+      targetTaskId: string;
+      baseRef: string;
+      targetRef: string | null;
+      files: DiffFile[];
+      capped: boolean;
+      root?: string;
+    }
+  | {
+      kind: "no-git";
+      baseTaskId: string;
+      targetTaskId: string;
+      baseRef: string | null;
+      targetRef: string | null;
+      reason: string;
+    };
+
 /**
  * The live execution state of a task, derived from its linked OpenCode session.
  * - unstarted: no session yet (a spec in To Do)

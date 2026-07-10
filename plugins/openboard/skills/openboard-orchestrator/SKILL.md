@@ -165,6 +165,77 @@ merged into directly, so a conflict cannot dirty it. Over MCP:
 `integrate_task` with `confirmReviewed: true` (optional `targetBranch`); there
 is no force/keep option.
 
+### Blocked-Answer Retry And Evidence Comparison
+
+When a card blocks (completion `outcome: "blocked"`), the operator answers its
+question through `answer_blocked_task`, which submits the answer as bounded
+retry feedback with the blocking context. The board enforces:
+
+- **Current-block-only.** The `blockedReportedAt` must match the card's most
+  recent block timestamp — stale answers are rejected.
+- **Duplicate guarding.** Only one in-flight answer per blocked card at a time.
+- **Answer lifecycle.** On admission the board emits `task_blocked_answered`
+  (blocked context, question, answer-has-been-provided flag) and a separate
+  `task_retried` event (answeredBlock flag), preserving evidence but never
+  storing raw answer text in events. If the retry fails before admission, a
+  `task_blocked_retry_failed` event is recorded instead.
+- **Session reuse.** When the blocking session is still live (`idle`/`busy`),
+  the same session is reused so it sees its own partial work and baseline;
+  otherwise a fresh session starts in the same cwd with the blocked context
+  injected. ACP harnesses always use fresh sessions.
+- **Done acceptance.** Moving a blocked card to Done without an answer is
+  rejected; the operator must either answer+retry or pass explicit
+  `blockedAcceptance` (acceptIncomplete=true, matching blockedReportedAt).
+
+Use `task_compare` to get the git delta from a base task's output to a target
+task's output — the server produces a real `DiffResponse` (or honest `no-git` reason)
+with source refs. It's a directional comparison: "what did the target change
+relative to the base's branch/commit?" Useful for confirming that a fix card
+actually covered the files an auditor flagged, or that a downstream build
+inherited upstream changes cleanly. Independent diffs (file-disjoint) are safe
+to integrate in parallel; overlapping files need serial integration order.
+
+### Worker-Side Tools And Permissions
+
+A dispatched worker that receives the `openboard` MCP server is limited to
+inspection tools and completion reporting. The contract (injected at Run/Retry)
+states:
+
+- **Available:** `task_diff` (inspect parent/sibling diffs), `task_context`
+  (retrieve full ancestor handoffs), `task_compare` (compare evidence between
+  any two task worktrees), `complete_task`, `block_task`.
+- **Forbidden:** `run_task`, `retry_task`, `abort_task`, `move_task`, all
+  card-lifecycle tools. Workers report results; they never advance cards.
+- **Board tools:** The worker's completion guidance names exactly the tools
+  they may call; any board tool not in that list is out of scope.
+
+`respond_permission` is for the orchestrator cockpit, not workers. When a
+permission ask appears on a task (visible in `taskSummary.pendingPermissionCount`
+and `list_tasks` projection), the orchestrator responds through
+`respond_permission` with `action: "allow_once"` (grant this request, permission
+returns to ask on the next matching call) or `"deny"` (block this request), each
+with an explicit `answeredBy` attribution for the audit trail. `allow_once` is
+not `allow` — it does not persist; the permission layer re-asks on the next
+matching tool call. There is no timeout on the ask; the 45s stall detector is
+the backstop, not an ask deadline.
+
+### Session Diagnostics
+
+`tail_session` fetches a bounded tail snapshot of a task's session activity
+events (text, tool, status, permission, warning) plus the run identity,
+transport state (`live`, `reconnecting`, `static`), any gap truth, and the
+terminal signal (complete, error, aborted). It uses the same SSE stream the
+TUI consumes but resolves after collecting the bounded window. Default limit is
+50 events, max 200, with a configurable timeout (default 3s). Use it for
+orchestrator diagnostics — did the worker actually produce output? is a
+provider death leaving the session in `reconnecting`? — not for continuous
+monitoring; unbounded streaming requires the SSE endpoint directly.
+
+`task_context` retrieves the full resolved task lineage without raw
+transcripts: the target handoff, direct-parent handoffs, inherited-ancestor
+metadata, and code-evidence candidates. Use it before creating downstream cards
+to confirm what a parent actually changed and whether its verification passed.
+
 Before Integrate: the worktree has the expected diff, build/tests pass in it,
 and `pending` is unset. Do not move cards to Done to hide uncertainty.
 

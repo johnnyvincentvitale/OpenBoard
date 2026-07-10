@@ -137,10 +137,33 @@ Cross-provider defaults and mid-run recovery:
 - **Per-card model override is the mid-run escape hatch.** When a profile or
   provider breaks mid-run, re-lane via `agent=<working-profile> +
   model=<working-model>` instead of editing profiles (profile edits need a
-  restart, which kills board state). Reserve profile edits for run boundaries.
+  restart, which kills board state). The `fallbackModel` field on the task
+  records the designated recovery model; the `activeModel` field tracks which
+  model the current run actually uses, so inspection of these fields
+  distinguishes planned fallback from provider-death recovery.
 - **WIP salvage**: when a worker dies with uncommitted work, commit it on the
   `board/*` branch and have the takeover card merge it, stating "treat merged
   WIP as unreviewed input" in the takeover prompt.
+- **Blocked-answer planning**: declare up front whether blocked workers get
+  fresh answers or are re-dispatched with a revised prompt. The board gates
+  blocked cards on explicit `blockedAcceptance` before Done acceptance, so
+  decide per-wave whether the orchestrator answers blocked questions
+  (`answer_blocked_task`) or accepts the block as terminal and moves on — a
+  plan that produces blocked audit/fix cards is not a failure, but an
+  unacknowledged block is.
+- **Evidence comparison**: use `task_compare` to get a real git delta from a
+  base task's output to a target task's output (source refs, patched files,
+  honest no-git reason). File-disjoint results from concurrent fan-out cards
+  are safe to integrate in parallel; overlapping files need serial integration
+  order. Not a synthetic verdict — the server computes one real diff.
+- **Permission policy**: every permission ask carries a `deadline`; declare
+  who responds to permission asks (the orchestrator cockpit via
+  `respond_permission`) and the timeout-after-crash recovery posture. An ask
+  that times out with no response is treated as a denial; do not hand-nudge
+  before the threshold — the 45s auto-nudge is the backstop, not an
+  intervention signal. OpenCode history in-memory is lost on session restart;
+  ACP harnesses may also restart without prior permissions preserved, so
+  plan permission responses to land before the watchdog fires.
 
 OpenCode profile hygiene:
 

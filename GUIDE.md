@@ -196,8 +196,27 @@ This injects the board URL and auth token automatically and exposes the full
 control surface as tools: create/list/link tasks, run/retry/abort/move,
 structured complete/block reports, worktree sync/integrate, comments, and
 event streams. Guardrails are built in — moving a card to Done requires
-`completedBy`, and integrating a worktree requires `confirmReviewed: true` —
-so a cockpit can't silently accept or merge anything.
+`completedBy`, integrating a worktree requires `confirmReviewed: true`, and
+accepting blocked work into Done requires explicit `blockedAcceptance` — so a
+cockpit can't silently accept or merge anything.
+
+**Diagnostic and inspection tools.** Beyond card lifecycle tools, the MCP
+surface exposes read-only inspection tools for orchestrator diagnostics:
+
+- `tail_session` — bounded tail snapshot of session activity events (text,
+  tool, status, permission) with run identity, transport state, gap truth, and
+  terminal signal. Default 50 events, configurable timeout.
+- `task_context` — full resolved task lineage (target handoff, direct-parent
+  handoffs, inherited-ancestor metadata, code-evidence candidates) without raw
+  transcripts.
+- `task_compare` — git delta from a base task's branch/commit to a target
+  task's output (real diff with source refs, or honest no-git reason).
+- `respond_permission` — respond to a pending permission ask with
+  `allow_once`/`deny` and explicit `answeredBy` attribution.
+- `answer_blocked_task` — submit an operator answer to a blocked card's
+  question with blocked context; the board gates admission on current-block
+  matching and duplicate in-flight guarding.
+- `task_events` — durable events recorded for one task (not run history).
 
 **Dependencies and handoffs.** Cards can declare parent tasks. A child with
 unmet parents refuses to run, and once its parents complete, their summaries,

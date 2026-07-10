@@ -14,7 +14,7 @@
  *
  * The response mirrors DiffResponse with added task/source metadata.
  */
-import type { DiffFile, DiffResponse, Task } from "../shared";
+import type { DiffFile, DiffResponse, Task, TaskCompareResponse } from "../shared";
 import {
   computeDiffBetweenRefs,
   computeDiffAgainstWorkingTree,
@@ -25,30 +25,7 @@ import {
   execGit,
 } from "./diff-engine";
 
-export type TaskCompareResponse =
-  | {
-      kind: "diff";
-      baseTaskId: string;
-      targetTaskId: string;
-      /** Durable ref that represents the base task's output. */
-      baseRef: string;
-      /** Durable ref for the target, or null when the target is a live worktree. */
-      targetRef: string | null;
-      files: DiffFile[];
-      capped: boolean;
-      /** The tree the diff was computed against (target live path when applicable). */
-      root?: string;
-    }
-  | {
-      kind: "no-git";
-      baseTaskId: string;
-      targetTaskId: string;
-      baseRef: string | null;
-      targetRef: string | null;
-      reason: string;
-    };
-
-type ResolvedRefSource = {
+export type ResolvedRefSource = {
   kind: "ref";
   repoRoot: string;
   gitCommonDir: string;

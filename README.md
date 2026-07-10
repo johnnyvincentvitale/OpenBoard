@@ -293,9 +293,10 @@ The MCP server's tools are an orchestrator control surface for the existing task
 `openboard_status`, `current_instance`, `list_instances`, `select_instance`, `create_task`,
 `add_tasks`, `list_tasks`, `list_agents`,
 `link_tasks`, `unlink_tasks`, `run_task`, `retry_task`, `abort_task`, `move_task`,
-`complete_task`, `block_task`, `sync_task`, `integrate_task`, `comment_task`, `add_note`, and
-`task_events` / `task_diff`. `move_task` requires `completedBy` when moving to Done, and `integrate_task`
-requires `confirmReviewed: true`.
+`complete_task`, `block_task`, `sync_task`, `integrate_task`, `comment_task`, `add_note`,
+`task_events`, `task_diff`, `answer_blocked_task`, `respond_permission`,
+`tail_session`, `task_context`, and `task_compare`. `move_task` requires `completedBy`
+when moving to Done, and `integrate_task` requires `confirmReviewed: true`.
 
 Review and Done cards expose `GET /api/tasks/:id/diff`, also available to MCP
 clients as `task_diff`; keeping it available after acceptance lets dependent
@@ -304,6 +305,71 @@ for the `v` full-screen diff view; Done-card views are historical and block edit
 or commit actions. To Do and In Progress cards return
 409, unknown tasks return 404, and missing or removed git evidence returns a
 readable no-git response instead of crashing.
+
+### Permission model (FR08)
+
+In worktree isolation, OpenCode's `external_directory` permission is set to `ask`.
+A live auto-responder classifies each ask: known read-class requests (read, glob,
+grep) resolve policy-immediate with `allow_once`; non-read asks (bash writes, edit)
+are raised to the operator through `pendingPermissions` on the task summary.
+`allow_once` grants the single request only — the permission returns to ask on the
+next matching tool call. Permission asks carry a `deadline`; an unanswered ask
+after the deadline is treated as a denial. The 45s stall-detector auto-nudge is the
+backstop, not an intervention signal — never hand-nudge before the threshold.
+Pending permission asks are in-memory only; ACP harnesses lose pending asks on
+restart and cannot recover them.
+
+### Session diagnostics (FR09)
+
+`tail_session` returns a bounded tail snapshot from a task's session-activity SSE
+stream — run identity, transport state (`live`/`reconnecting`/`static`), finite event
+window (default 50, max 200), gap truth, and terminal signal (complete/error/aborted).
+It resolves from the first snapshot and closes the underlying controller
+deterministically. It is for orchestrator inspection, not continuous monitoring.
+
+### Watchdog and retry (FR10)
+
+`OPENBOARD_WATCHDOG_MS` (default 600000 = 10 min) controls the automatic retry
+watchdog. Set to `0` to disable. On a crashed/abandoned session the watchdog sweeps
+every 30s: it allows at most two automatic fresh-session same-worktree retries
+total, preserves the original task baseline and partial worktree files, and
+supports cross-provider fallback via per-card `fallbackModel`. The watchdog is
+event-stream blindness-guarded — it reads OpenCode's REST status, not the `/event`
+stream, to avoid false-positive restarts.
+
+### Task evidence and lineage (FR11)
+
+`task_context` retrieves the full resolved lineage (target handoff, direct-parent
+handoffs, inherited-ancestor metadata, code-evidence candidates) without raw
+transcripts. `task_diff` fetches the diff for a single card. `task_compare`
+produces a real git delta from a base task's branch/commit to a target task's
+output (typically Build→Fix: what did the fixer change relative to the build
+output?), with source refs and an honest no-git reason when evidence is
+unavailable. Together these three tools support evidence-aware lineage: audit
+cards inspect parent diffs with `task_diff` (audit findings are context, not a
+code ref), downstream cards retrieve full ancestor context with `task_context`,
+and fix cards compare their branch against the build output with `task_compare`.
+
+### Blocked cards and answer retry (FR12)
+
+A card blocking on environment/permissions (completion `outcome: "blocked"`,
+`runState: "error"`) is distinct from a generic error or a card asking for user
+input. The operator answers through `answer_blocked_task`, which carries the
+answer as bounded retry feedback with the blocking context: the `blockedReportedAt`
+must match the current block timestamp, and only one answer may be in flight
+at a time. On admission the board emits typed events without raw answer text
+and preserves the blocked evidence/baseline until the admission succeeds.
+Live-status-gated same-session resume is preferred (the blocked session sees
+its own partial work); when the blocking session is gone (watchdog, missing
+session, ACP path), a fresh session starts in the same cwd with blocked context
+injected. A plain `retry_task` (without `blockedAnswer`) clears the block and
+follows generic retry semantics.
+
+Moving a blocked card to Done or integrating it requires explicit
+`blockedAcceptance` (`acceptIncomplete: true` plus the current
+`blockedReportedAt`). Archived blocked cards cannot be answered; discard
+cleans up the worktree at Review without accepting the work. This is the
+server-enforced blocked Done acceptance policy.
 
 ## BoardV3 task lifecycle
 Beyond Run/Retry/Stop, a Task carries an explicit completion contract, optional

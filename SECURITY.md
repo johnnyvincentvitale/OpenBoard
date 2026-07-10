@@ -119,7 +119,26 @@ Custom scripts that bypass the wrapper can still set `OPENBOARD_API_TOKEN` and
   restart. Any external scripts, MCP harnesses, or copied clients that relied on
   the old token must be updated.
 
-## Workspace Scoping
+## Worktree Approval Security
+
+Integrating a worktree requires `confirmReviewed: true` — the caller must
+explicitly attest they reviewed the card's diff. The endpoint enforces this
+structurally; omitting it produces a validation error rather than proceeding.
+
+Blocked cards (completion `outcome: "blocked"`) cannot be moved to Done or
+integrated without explicit `blockedAcceptance`:
+
+- `acceptIncomplete: true` — the acceptor acknowledges the work is incomplete
+  and accepts it anyway.
+- `blockedReportedAt` — must match the current blocked report's timestamp;
+  stale acceptance is rejected at the server.
+
+Answering a blocked card (retry with `blockedAnswer`) is admission-gated: the
+answer must match the current block, only one answer may be in flight at a
+time, and the answer is carried as bounded retry feedback without persisting
+raw answer text in server events. Permission responses (`allow_once`/`deny`)
+require an explicit `answeredBy` attribution for the audit trail and are
+treated as one-shot — `allow_once` does not persist across tool calls.
 
 Every task's working directory and every terminal session's current working
 directory is canonicalized (symlinks are resolved via `realpath`) and checked

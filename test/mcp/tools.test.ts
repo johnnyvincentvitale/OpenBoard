@@ -4,6 +4,7 @@ import {
   DEFAULT_BOARD_URL,
   abortTask,
   addTasks,
+  answerBlockedTask,
   blockTask,
   commentTask,
   completeTask,
@@ -15,16 +16,20 @@ import {
   moveTask,
   currentInstance,
   openboardStatus,
+  respondPermission,
   resolveBoardUrl,
   retryTask,
   runTask,
   syncTask,
+  taskCompare,
   taskDiff,
   taskEvents,
   unlinkTasks,
 } from "../../src/mcp/tools";
+import type { CompactBlockedProjection, TaskSummary } from "../../src/client/board-client";
 import type { McpToolOptions } from "../../src/mcp/tools";
-import type { DiffResponse, RosterAgent, Task } from "../../src/shared";
+import type { DiffResponse, PendingPermissionAsk, RosterAgent, Task } from "../../src/shared";
+import { toTaskSummary } from "../../src/client/board-client";
 
 const CWD = "/tmp/openboard-project";
 const NO_AUTH_ENV = { OPENBOARD_API_TOKEN: "" };
@@ -175,6 +180,7 @@ describe("MCP add_tasks", () => {
           agent: "build",
           model: { providerID: "opencode", id: "north-mini-code-free" },
           isolation: "worktree",
+          pendingPermissions: [],
         },
       ],
     });
@@ -708,6 +714,7 @@ describe("MCP list tools", () => {
           agent: "build",
           isolation: "worktree",
           sessionId: "session-1",
+          pendingPermissions: [],
         },
       ],
     });
@@ -771,5 +778,382 @@ describe("MCP list tools", () => {
     expect(resolveBoardUrl({ env: { OPENCODE_BOARD_URL: "http://localhost:5000/" } })).toBe(
       "http://localhost:5000",
     );
+  });
+});
+
+describe("TaskSummary projection", () => {
+  it("includes blocked projection for blocked tasks", () => {
+    const now = Date.now();
+    const task: Task = {
+      id: "t1",
+      title: "Blocked task",
+      description: "",
+      directory: CWD,
+      column: "review",
+      position: 0,
+      runState: "idle",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      completion: {
+        outcome: "blocked",
+        summary: "Stuck on permissions",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "Need API access",
+        needsInput: "Can you grant me access to the staging API?",
+        reportedAt: now,
+      },
+      completionSource: "reported",
+    };
+
+    const summary = toTaskSummary(task);
+
+    expect(summary.blocked).toEqual({
+      reportedAt: now,
+      question: "Can you grant me access to the staging API?",
+      summary: "Stuck on permissions",
+      residualRisk: "Need API access",
+      source: "reported",
+      hasExplicitQuestion: true,
+    });
+  });
+
+  it("uses residualRisk as question when no needsInput", () => {
+    const now = Date.now();
+    const task: Task = {
+      id: "t2",
+      title: "Blocked without explicit question",
+      description: "",
+      directory: CWD,
+      column: "review",
+      position: 0,
+      runState: "idle",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      completion: {
+        outcome: "blocked",
+        summary: "Blocked",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "Need more data",
+        reportedAt: now,
+      },
+    };
+
+    const summary = toTaskSummary(task);
+
+    expect(summary.blocked?.question).toBe("Need more data");
+    expect(summary.blocked?.hasExplicitQuestion).toBeUndefined();
+  });
+
+  it("includes pendingPermissions when present", () => {
+    const now = Date.now();
+    const ask: PendingPermissionAsk = {
+      id: "ask_1",
+      harness: "opencode",
+      source: "worktree-fence",
+      permission: "external_directory",
+      tool: "Bash",
+      summary: "bash outside worktree",
+      patterns: ["/etc/*"],
+      raisedAt: now,
+      deadline: now + 30000,
+    };
+    const task: Task = {
+      id: "t3",
+      title: "Permission blocked",
+      description: "",
+      directory: CWD,
+      column: "review",
+      position: 0,
+      runState: "idle",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      pendingPermissions: [ask],
+      completion: {
+        outcome: "blocked",
+        summary: "Need permission",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "Permission ask pending",
+        reportedAt: now,
+      },
+    };
+
+    const summary = toTaskSummary(task);
+
+    expect(summary.pendingPermissions).toEqual([ask]);
+  });
+
+  it("includes activeModel, fallbackModel, and autoRetries", () => {
+    const task: Task = {
+      id: "t4",
+      title: "Model tracking",
+      description: "",
+      directory: CWD,
+      column: "in_progress",
+      position: 0,
+      runState: "running",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      model: { providerID: "opencode", id: "north-mini-code-free" },
+      fallbackModel: { providerID: "opencode", id: "north-free" },
+      activeModel: { providerID: "openrouter", id: "sonnet" },
+      autoRetries: 2,
+    };
+
+    const summary = toTaskSummary(task);
+
+    expect(summary.model).toEqual({ providerID: "opencode", id: "north-mini-code-free" });
+    expect(summary.fallbackModel).toEqual({ providerID: "opencode", id: "north-free" });
+    expect(summary.activeModel).toEqual({ providerID: "openrouter", id: "sonnet" });
+    expect(summary.autoRetries).toBe(2);
+  });
+
+  it("includes lineage/evidence booleans when metadata is present", () => {
+    const now = Date.now();
+    const task: Task = {
+      id: "t5",
+      title: "With lineage",
+      description: "",
+      directory: CWD,
+      column: "review",
+      position: 0,
+      runState: "idle",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      parentIds: ["p1", "p2"],
+      completion: {
+        outcome: "complete",
+        summary: "Done",
+        changedFiles: ["src/a.ts"],
+        verification: [],
+        residualRisk: "none",
+        reportedAt: now,
+      },
+    };
+
+    const summary = toTaskSummary(task);
+
+    expect(summary.hasParentIds).toBe(true);
+    expect(summary.hasCompletion).toBe(true);
+  });
+});
+
+describe("MCP answer_blocked_task", () => {
+  it("sends answer and blockedAnswer context through retry endpoint", async () => {
+    const task: Task = {
+      id: "task-1",
+      title: "Blocked",
+      description: "",
+      directory: CWD,
+      column: "review",
+      position: 0,
+      runState: "idle",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      completion: {
+        outcome: "blocked",
+        summary: "Blocked",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "Need input",
+        reportedAt: 1700000000,
+      },
+    };
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(task));
+    const options = makeOptions([CWD], fetchMock);
+
+    const result = await answerBlockedTask(
+      {
+        taskId: "task-1",
+        answer: "Here is the access key: abc123",
+        answeredBy: "orchestrator",
+        blockedReportedAt: 1700000000,
+      },
+      options,
+    );
+
+    expect(result).toMatchObject({
+      boardUrl: DEFAULT_BOARD_URL,
+      taskId: "task-1",
+      answeredBy: "orchestrator",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      feedback: "Here is the access key: abc123",
+      blockedAnswer: {
+        blockedReportedAt: 1700000000,
+        answeredBy: "orchestrator",
+      },
+    });
+  });
+});
+
+describe("MCP respond_permission", () => {
+  it("sends askId, action, and answeredBy through task permission endpoint", async () => {
+    const outcome = { ok: true, askId: "ask_1", decision: "allow_once" as const };
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(outcome));
+    const options = makeOptions([CWD], fetchMock);
+
+    const result = await respondPermission(
+      {
+        taskId: "task-1",
+        askId: "ask_1",
+        action: "allow_once",
+        answeredBy: "orchestrator",
+      },
+      options,
+    );
+
+    expect(result.outcome).toEqual(outcome);
+    expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BOARD_URL}/api/tasks/task-1/permission`);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      askId: "ask_1",
+      action: "allow_once",
+      answeredBy: "orchestrator",
+    });
+  });
+});
+
+describe("MCP task_compare", () => {
+  it("calls GET /api/tasks/:targetTaskId/compare?baseTaskId=... endpoint", async () => {
+    const compareResponse = {
+      kind: "diff" as const,
+      baseTaskId: "task-base",
+      targetTaskId: "task-target",
+      baseRef: "refs/heads/task-base",
+      targetRef: "refs/heads/board/task-target",
+      files: [{ file: "src/a.ts", additions: 3, deletions: 1, status: "modified" as const }],
+      capped: false,
+    };
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(compareResponse));
+    const options = makeOptions([CWD], fetchMock);
+
+    const result = await taskCompare(
+      { targetTaskId: "task-target", baseTaskId: "task-base" },
+      options,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${DEFAULT_BOARD_URL}/api/tasks/task-target/compare?baseTaskId=task-base`,
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(result.comparison).toEqual(compareResponse);
+    expect(result.targetTaskId).toBe("task-target");
+    expect(result.baseTaskId).toBe("task-base");
+  });
+
+  it("rejects when baseTaskId equals targetTaskId", async () => {
+    const options = makeOptions([CWD]);
+
+    await expect(
+      taskCompare({ targetTaskId: "same-task", baseTaskId: "same-task" }, options),
+    ).rejects.toThrow("baseTaskId cannot be the same as targetTaskId");
+    expect(options.fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("MCP move_task with blockedAcceptance", () => {
+  it("passes blockedAcceptance when moving blocked task to done", async () => {
+    const task: Task = {
+      id: "task-1",
+      title: "Blocked task",
+      description: "",
+      directory: CWD,
+      column: "review",
+      position: 0,
+      runState: "idle",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      completion: {
+        outcome: "blocked",
+        summary: "Blocked",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "Need input",
+        reportedAt: 1700000000,
+      },
+    };
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse([task]));
+    const options = makeOptions([CWD], fetchMock);
+
+    await moveTask(
+      {
+        taskId: "task-1",
+        column: "done",
+        position: 0,
+        completedBy: "orchestrator",
+        blockedAcceptance: {
+          blockedReportedAt: 1700000000,
+          acceptIncomplete: true,
+        },
+      },
+      options,
+    );
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      column: "done",
+      position: 0,
+      completedBy: "orchestrator",
+      blockedAcceptance: {
+        blockedReportedAt: 1700000000,
+        acceptIncomplete: true,
+      },
+    });
+  });
+});
+
+describe("MCP integrate_task with blockedAcceptance", () => {
+  it("passes blockedAcceptance to integrate endpoint", async () => {
+    const task: Task = {
+      id: "task-1",
+      title: "Blocked task",
+      description: "",
+      directory: CWD,
+      column: "review",
+      position: 0,
+      runState: "idle",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 1,
+      worktreePath: `${CWD}/worktrees/task-1`,
+    };
+    const outcome = { task, ok: true, conflict: false, message: "integrated" };
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(outcome));
+    const options = makeOptions([CWD], fetchMock);
+
+    await integrateTask(
+      {
+        taskId: "task-1",
+        confirmReviewed: true,
+        blockedAcceptance: {
+          blockedReportedAt: 1700000000,
+          acceptIncomplete: true,
+        },
+      },
+      options,
+    );
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      blockedAcceptance: {
+        blockedReportedAt: 1700000000,
+        acceptIncomplete: true,
+      },
+    });
   });
 });
