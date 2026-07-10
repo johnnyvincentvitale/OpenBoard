@@ -170,6 +170,13 @@ const DENIAL_RECENCY_WINDOW_MS = 2 * 60 * 1000;
 const LINEAGE_PROMPT_MAX_CHARS = 24_000;
 const SESSION_TREE_MAX_DEPTH = 16;
 const SESSION_TREE_MAX_SESSIONS = 256;
+/**
+ * Consecutive reconnect cycles with zero visibility into a run's root
+ * session (no status(), no confirmable session tree) before the watchdog is
+ * resumed on pure liveness-timeout as a bounded fallback. Below this bound we
+ * stay honestly silent rather than false-orphaning or false-tripping.
+ */
+const BLIND_RECONNECT_BOUND = 3;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -570,6 +577,12 @@ interface OpenCodeRunRecord {
    * runs.
    */
   watchdogRetrySuppressed?: boolean;
+  /**
+   * Consecutive reconnect cycles with no visibility into this run's root
+   * session. Reset to 0 the moment either the session tree or status() gives
+   * any signal about the root; see BLIND_RECONNECT_BOUND.
+   */
+  blindReconnectAttempts?: number;
 }
 
 export class TaskDispatcher implements Dispatcher {
@@ -594,6 +607,8 @@ export class TaskDispatcher implements Dispatcher {
   /** Bumped on every stop()/restart so a stale consume loop knows to exit. */
   private generation = 0;
   private consumeLoopPromise: Promise<void> | null = null;
+  /** Aborts the in-flight upstream event.subscribe() fetch/stream, if any — see shutdown(). */
+  private upstreamAbort: AbortController | null = null;
   private readonly completionWatchers = new Map<string, { cancelled: boolean }>();
   private readonly outputCandidates = new Map<string, string>();
   private readonly openCodeRunsByTask = new Map<string, OpenCodeRunRecord>();
@@ -721,6 +736,7 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
     this.assertNotArchived(task, "run");
+    this.assertNotAlreadyRunning(task);
     this.assertParentsSatisfied(task);
     this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
 
@@ -1561,6 +1577,24 @@ export class TaskDispatcher implements Dispatcher {
     if (task.archived) throw new ArchivedTaskActionError(action);
   }
 
+  /**
+   * run() dispatches a brand-new session (OpenCode session.create or a fresh
+   * ACP launch) — calling it again while a live session already exists would
+   * start a second writer against the same worktree without ever aborting
+   * the first. Gated on an actual session id, not bare `runState` — the
+   * chain-advancer synchronously claims `runState: "running"` on a child
+   * *before* it has a session, purely to prevent a second near-simultaneous
+   * advance from double-dispatching (see chain-advancer.ts), and that claim
+   * must still be able to call through to run(). retry()/
+   * startFreshOpenCodeAttempt() are the sanctioned ways to replace an
+   * already-live run and are not gated by this check.
+   */
+  private assertNotAlreadyRunning(task: Task): void {
+    if (task.runState === "running" && (task.sessionId || task.harnessSessionId || task.harnessSessionName)) {
+      throw AdapterError.validation(`Task is already running; use retry to restart an active run: ${task.id}`);
+    }
+  }
+
   private assertParentsSatisfied(task: Task): void {
     const parentIds = task.parentIds ?? this.store.getParentIds(task.id);
     if (parentIds.length === 0) return;
@@ -1644,6 +1678,12 @@ export class TaskDispatcher implements Dispatcher {
   shutdown(): void {
     this.running = false;
     this.generation++;
+    // Cancels the in-flight subscribe() fetch/stream so the old consume loop
+    // exits promptly instead of blocking on `for await` for an event that
+    // may never arrive — without this, the old subscription lingers and a
+    // later start() opens a second, redundant one.
+    this.upstreamAbort?.abort();
+    this.upstreamAbort = null;
     for (const watcher of this.completionWatchers.values()) {
       watcher.cancelled = true;
     }
@@ -1757,29 +1797,54 @@ export class TaskDispatcher implements Dispatcher {
   private markRunsReconnecting(): void {
     for (const run of this.openCodeRunsByTask.values()) {
       run.transportLive = false;
+      run.watchdog.suspend({ taskId: run.taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt });
       this.activity.setTransport(run.taskId, run.runStartedAt, "reconnecting");
     }
   }
 
   private async rebuildRunsBeforeLive(): Promise<void> {
     const statusMap = await this.fetchSessionStatusMap();
-    if (!statusMap) return;
     for (const run of [...this.openCodeRunsByTask.values()]) {
       const task = this.store.get(run.taskId);
       if (!task || task.sessionId !== run.rootSessionId || task.runStartedAt !== run.runStartedAt) continue;
+      const identity: WatchdogRunIdentity = { taskId: run.taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt };
       const rebuilt = await this.rebuildSessionTree(run);
-      if (rebuilt === "blind") continue;
-      const rootStatus = statusMap.get(run.rootSessionId);
-      if (rebuilt === "missing" || !rootStatus) {
+      if (rebuilt === "missing") {
+        // Confirmed by a 404 on the root itself while walking the session
+        // tree — a real, decisive loss signal independent of status().
         this.store.update(task.id, { runState: "error", error: "OpenCode root session missing after reconnect; observation is no longer reliable" });
         this.store.addEvent({ taskId: task.id, type: "task_watchdog_orphan", body: { sessionId: run.rootSessionId, runStartedAt: run.runStartedAt } });
         this.endOpenCodeRun(task.id, run.runStartedAt, "error");
         continue;
       }
+      const rootStatus = statusMap?.get(run.rootSessionId);
+      if (rebuilt === "blind" && !rootStatus) {
+        // Neither signal (session tree, status()) confirmed anything about
+        // the root this cycle — genuinely no visibility. Bounded honest
+        // recovery: stay suspended (not orphaned, not falsely tripped) for a
+        // bounded number of cycles, then fall back to pure liveness-timeout
+        // detection so a truly stuck session is still eventually caught.
+        run.blindReconnectAttempts = (run.blindReconnectAttempts ?? 0) + 1;
+        if (run.blindReconnectAttempts < BLIND_RECONNECT_BOUND) continue;
+        this.store.addEvent({
+          taskId: run.taskId,
+          type: "task_watchdog_blind_recovery",
+          body: { sessionId: run.rootSessionId, runStartedAt: run.runStartedAt, attempts: run.blindReconnectAttempts },
+        });
+        run.watchdog.resume(identity);
+        continue;
+      }
+      // Either the tree confirmed the root exists ("live"), or status()
+      // reported *something* for it even though the tree couldn't be
+      // rebuilt — either signal proves the root is not missing, so an
+      // unrecognized/forward-compat status string must not be treated as
+      // orphaned.
+      run.blindReconnectAttempts = 0;
       run.transportLive = true;
+      run.watchdog.resume(identity);
       this.activity.setTransport(run.taskId, run.runStartedAt, "live");
       if (rootStatus === "busy" || rootStatus === "retry") {
-        run.watchdog.recordActivity({ run: { taskId: run.taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
+        run.watchdog.recordActivity({ run: identity });
         if (task.runState !== "running") this.store.update(task.id, { runState: "running", error: undefined });
         continue;
       }
@@ -2533,8 +2598,10 @@ export class TaskDispatcher implements Dispatcher {
     let attempt = 0;
 
     while (this.running && this.generation === generation) {
+      const controller = new AbortController();
+      this.upstreamAbort = controller;
       try {
-        const result = await this.client.event.subscribe();
+        const result = await this.client.event.subscribe({}, { signal: controller.signal });
         attempt = 0; // reset backoff once a connection succeeds
         if ([...this.openCodeRunsByTask.values()].some((run) => !run.transportLive)) {
           await this.rebuildRunsBeforeLive();
@@ -2550,7 +2617,11 @@ export class TaskDispatcher implements Dispatcher {
         }
         // Stream ended normally (server closed it) — fall through to reconnect.
       } catch {
-        // Stream errored — fall through to reconnect.
+        // Stream errored or was aborted by shutdown()/supersede — fall
+        // through to reconnect (the running/generation check below exits
+        // cleanly for the abort case).
+      } finally {
+        if (this.upstreamAbort === controller) this.upstreamAbort = null;
       }
       this.markRunsReconnecting();
 

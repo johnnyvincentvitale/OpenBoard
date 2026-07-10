@@ -136,6 +136,72 @@ describe("RunWatchdog", () => {
     expect(terminations).toHaveLength(0);
   });
 
+  it("suspend() pauses the timer so a long observation gap alone never trips termination (P2-1 regression)", async () => {
+    const terminations: unknown[] = [];
+    const watchdog = new RunWatchdog(baseConfig, { onTerminate: (event) => terminations.push(event) }, clock());
+
+    watchdog.startRun(run0, 0);
+    watchdog.suspend(run0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Far past timeoutMs + sweepIntervalMs — would have tripped long ago if
+    // the timer were still running.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(terminations).toHaveLength(0);
+    expect(watchdog.snapshot()).toMatchObject({ stage: "healthy", suspended: true });
+  });
+
+  it("resume() rebases the liveness clock so the suspended gap is never counted against the session", async () => {
+    const nudges: unknown[] = [];
+    const watchdog = new RunWatchdog(baseConfig, { onNudge: (event) => nudges.push(event) }, clock());
+
+    watchdog.startRun(run0, 0);
+    await vi.advanceTimersByTimeAsync(80);
+    watchdog.suspend(run0);
+    await vi.advanceTimersByTimeAsync(10_000); // long transport gap
+    watchdog.resume(run0, 10_080);
+
+    expect(watchdog.snapshot()).toMatchObject({ stage: "healthy", suspended: false, lastActivityAt: 10_080 });
+    // A fresh full timeout from the resume point, not from the pre-suspend baseline.
+    await vi.advanceTimersByTimeAsync(99);
+    expect(nudges).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(nudges).toHaveLength(1);
+  });
+
+  it("resume() clears a suspected/stalled stage reached before the gap, so reconnecting doesn't retroactively terminate", async () => {
+    const terminations: unknown[] = [];
+    const watchdog = new RunWatchdog(baseConfig, { onTerminate: (event) => terminations.push(event) }, clock());
+
+    watchdog.startRun(run0, 0);
+    await vi.advanceTimersByTimeAsync(100); // reaches "stalled" via the sweep window
+    expect(watchdog.snapshot().stage).toBe("stalled");
+    watchdog.suspend(run0);
+    await vi.advanceTimersByTimeAsync(10_000); // well past the diagnostic deadline
+    expect(terminations).toHaveLength(0); // suspend froze it before the deadline could fire
+
+    watchdog.resume(run0, 10_100);
+    expect(watchdog.snapshot()).toMatchObject({ stage: "healthy", reason: null });
+    // Immediately after resume it must not retroactively terminate for the
+    // pre-suspend stall; a fresh full timeout is required before it can trip again.
+    await vi.advanceTimersByTimeAsync(99);
+    expect(terminations).toHaveLength(0);
+  });
+
+  it("suspend()/resume() are no-ops outside a matching, non-terminal run", async () => {
+    const watchdog = new RunWatchdog(baseConfig, {}, clock());
+    watchdog.startRun(run0, 0);
+    watchdog.abort(run0);
+    watchdog.suspend(run0); // already terminal (idle) — no-op
+    expect(watchdog.snapshot().suspended).toBe(false);
+
+    watchdog.startRun(run1, 100);
+    watchdog.suspend(run0); // wrong identity — no-op
+    expect(watchdog.snapshot().suspended).toBe(false);
+    watchdog.resume(run1, 100); // never suspended — no-op
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
   it("permits exactly two automatic retries before exhaustion with the default budget", async () => {
     const decisions: WatchdogRetryDecision[] = [];
     const watchdog = new RunWatchdog({ ...baseConfig, sweepIntervalMs: 0 }, {

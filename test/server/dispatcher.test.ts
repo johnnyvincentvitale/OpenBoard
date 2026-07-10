@@ -110,6 +110,9 @@ class FakeOpencodeClient {
 
   private scripts: OpencodeEvent[][] = [];
   subscribeCallCount = 0;
+  /** When true, subscribe() never yields/completes on its own — only the abort signal ends it. */
+  hangSubscribe = false;
+  lastSubscribeSignal: AbortSignal | null = null;
 
   queueScript(events: OpencodeEvent[]): void {
     this.scripts.push(events);
@@ -169,9 +172,24 @@ class FakeOpencodeClient {
   };
 
   event = {
-    subscribe: async () => {
-      const script = this.scripts[this.subscribeCallCount] ?? [];
+    subscribe: async (_params?: unknown, options?: { signal?: AbortSignal }) => {
+      this.lastSubscribeSignal = options?.signal ?? null;
       this.subscribeCallCount += 1;
+      if (this.hangSubscribe) {
+        const signal = options?.signal;
+        return {
+          stream: (async function* (): AsyncGenerator<OpencodeEvent> {
+            await new Promise<never>((_resolve, reject) => {
+              if (signal?.aborted) {
+                reject(new Error("aborted"));
+                return;
+              }
+              signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+            });
+          })(),
+        };
+      }
+      const script = this.scripts[this.subscribeCallCount - 1] ?? [];
       return { stream: makeAsyncGenerator(script) };
     },
   };
@@ -297,6 +315,58 @@ describe("TaskDispatcher", () => {
       await expect(dispatcher.run(task.id)).rejects.toMatchObject({
         code: "opencode_unreachable",
       });
+    });
+
+    it("refuses to start a second writer session on a task that is already running (P3-11 regression)", async () => {
+      const task = createTask();
+      client.nextSessionId = "ses_first_writer";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+      expect(store.get(task.id)?.runState).toBe("running");
+      expect(client.createCalls).toHaveLength(1);
+
+      client.nextSessionId = "ses_second_writer";
+      await expect(dispatcher.run(task.id)).rejects.toMatchObject({ code: "validation", status: 400 });
+
+      // No second OpenCode session was created, and the original session/run
+      // record is untouched — the guard fires before any dispatch work.
+      expect(client.createCalls).toHaveLength(1);
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_first_writer", runState: "running" });
+    });
+
+    it("allows run() again once the prior run has left the running state (abort-then-run)", async () => {
+      const task = createTask();
+      client.nextSessionId = "ses_before_abort";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+      await dispatcher.abort(task.id);
+      expect(store.get(task.id)?.runState).toBe("idle");
+
+      client.nextSessionId = "ses_after_abort";
+      await dispatcher.run(task.id);
+
+      expect(client.createCalls).toHaveLength(2);
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_after_abort", runState: "running" });
+    });
+
+    it("does not treat the chain-advancer's pre-dispatch runState claim (no session yet) as a second writer (P3-11 regression)", async () => {
+      // chain-advancer.ts synchronously sets runState: "running" on a child
+      // *before* calling run(), purely to claim the slot against a second
+      // near-simultaneous advance — no session exists yet at that point. The
+      // second-writer guard must key off an actual live session, not bare
+      // runState, or it would break every auto-dispatched child.
+      const task = createTask();
+      store.update(task.id, { runState: "running" });
+      expect(store.get(task.id)?.sessionId).toBeFalsy();
+
+      client.nextSessionId = "ses_claimed_dispatch";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      expect(client.createCalls).toHaveLength(1);
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_claimed_dispatch", runState: "running" });
     });
 
     it("creates a session in task.directory, prompts with task.description, links + moves to in_progress", async () => {
@@ -1039,6 +1109,101 @@ describe("TaskDispatcher", () => {
       await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
       expect(frames.at(-1)).toMatchObject({ kind: "heartbeat", transport: "reconnecting" });
       expect(frames.filter((frame) => frame.kind === "heartbeat" && frame.transport === "live")).toHaveLength(liveCountBeforeBlind);
+    });
+
+    it("suspends the run's watchdog on reconnect and resumes it once transport is confirmed live (P2-1 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_watchdog_suspend";
+      dispatcher = new TaskDispatcher({ client: client as never, store, watchdogConfig: { enabled: true, timeoutMs: 60_000, sweepIntervalMs: 30_000, maxAutomaticRetries: 2 } });
+      await dispatcher.run(task.id);
+
+      const runs = (dispatcher as unknown as { openCodeRunsByTask: Map<string, { watchdog: { snapshot(): { suspended?: boolean; stage: string } } }> }).openCodeRunsByTask;
+      expect(runs.get(task.id)!.watchdog.snapshot().suspended).toBe(false);
+
+      (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting();
+      expect(runs.get(task.id)!.watchdog.snapshot()).toMatchObject({ suspended: true, stage: "healthy" });
+
+      client.sessionStatus = { ses_watchdog_suspend: "busy" };
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+
+      expect(runs.get(task.id)!.watchdog.snapshot()).toMatchObject({ suspended: false, stage: "healthy" });
+    });
+
+    it("does not orphan or trip on a genuinely blind observation gap until the bounded recovery threshold, then resumes honestly (P2-1 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_bounded_blind";
+      dispatcher = new TaskDispatcher({ client: client as never, store, watchdogConfig: { enabled: true, timeoutMs: 60_000, sweepIntervalMs: 30_000, maxAutomaticRetries: 2 } });
+      await dispatcher.run(task.id);
+
+      // Zero visibility: children() errors (non-404) and status() errors too.
+      client.childrenShouldError = { error: { message: "transport blind" } };
+      client.statusShouldError = { error: { message: "status unavailable" } };
+
+      const runs = (dispatcher as unknown as { openCodeRunsByTask: Map<string, { watchdog: { snapshot(): { suspended?: boolean } }; blindReconnectAttempts?: number; transportLive: boolean }> }).openCodeRunsByTask;
+      const rebuild = (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive.bind(dispatcher);
+      const markReconnecting = (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting.bind(dispatcher);
+
+      // BLIND_RECONNECT_BOUND is 3 — the first two blind cycles must stay
+      // honestly silent: no orphan, no forced resume.
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        markReconnecting();
+        await rebuild();
+        expect(store.get(task.id)?.runState).toBe("running");
+        expect(store.listEvents(task.id).map((e) => e.type)).not.toContain("task_watchdog_orphan");
+        expect(runs.get(task.id)!.watchdog.snapshot().suspended).toBe(true);
+        expect(runs.get(task.id)!.transportLive).toBe(false);
+      }
+
+      // Third consecutive blind cycle crosses the bound: fall back to pure
+      // liveness-timeout detection instead of staying blind forever.
+      markReconnecting();
+      await rebuild();
+
+      expect(store.get(task.id)).toMatchObject({ runState: "running" });
+      const events = store.listEvents(task.id).map((e) => e.type);
+      expect(events).not.toContain("task_watchdog_orphan");
+      expect(events).toContain("task_watchdog_blind_recovery");
+      expect(runs.get(task.id)!.watchdog.snapshot().suspended).toBe(false);
+    });
+
+    it("does not false-orphan a root on an unrecognized/forward-compat status string when the session tree confirms it exists (P3-10 regression)", async () => {
+      const activity = new SessionActivityCollector();
+      const frames: SessionActivityFrame[] = [];
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_unknown_status";
+      dispatcher = new TaskDispatcher({ client: client as never, store, activity });
+      await dispatcher.run(task.id);
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+
+      (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting();
+      // children() succeeds (root confirmed to exist), but status() reports a
+      // forward-compat status string this build doesn't recognize.
+      client.childrenResponses.set("ses_unknown_status", []);
+      client.sessionStatus = { ses_unknown_status: "quantum-flux" };
+
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+
+      expect(store.listEvents(task.id).map((e) => e.type)).not.toContain("task_watchdog_orphan");
+      expect(store.get(task.id)?.runState).not.toBe("error");
+      expect(frames.some((frame) => frame.kind === "heartbeat" && frame.transport === "live")).toBe(true);
+    });
+
+    it("does not false-orphan a root when status() fails but the session tree independently confirms it exists (P3-10 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_status_down";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      (dispatcher as unknown as { markRunsReconnecting(): void }).markRunsReconnecting();
+      client.childrenResponses.set("ses_status_down", []);
+      client.statusShouldError = { error: { message: "status endpoint down" } };
+
+      await (dispatcher as unknown as { rebuildRunsBeforeLive(): Promise<void> }).rebuildRunsBeforeLive();
+
+      expect(store.listEvents(task.id).map((e) => e.type)).not.toContain("task_watchdog_orphan");
+      expect(store.get(task.id)?.runState).not.toBe("error");
+      const runs = (dispatcher as unknown as { openCodeRunsByTask: Map<string, { transportLive: boolean }> }).openCodeRunsByTask;
+      expect(runs.get(task.id)!.transportLive).toBe(true);
     });
 
     it("reconciles a root that became idle during a blind reconnect gap without a new event", async () => {
@@ -2541,6 +2706,33 @@ describe("TaskDispatcher", () => {
       expect(client.subscribeCallCount).toBeGreaterThanOrEqual(2);
       expect(store.get(task.id)?.column).toBe("review");
       vi.useRealTimers();
+    });
+
+    it("aborts an idle upstream subscription on shutdown instead of leaving it to linger (P3-9 regression)", async () => {
+      const task = createTask();
+      client.nextSessionId = "ses_abort_upstream";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+
+      // Never yields or completes on its own — only shutdown()'s abort can end it.
+      client.hangSubscribe = true;
+      dispatcher.start();
+      await waitFor(() => client.subscribeCallCount > 0);
+      expect(client.lastSubscribeSignal?.aborted).toBe(false);
+
+      const loopPromise = (dispatcher as unknown as { consumeLoopPromise: Promise<void> | null }).consumeLoopPromise;
+      expect(loopPromise).not.toBeNull();
+      dispatcher.shutdown();
+
+      expect(client.lastSubscribeSignal?.aborted).toBe(true);
+      // The old consume loop must actually exit (not hang forever holding the
+      // upstream stream open) once shutdown() aborts it.
+      await expect(
+        Promise.race([
+          loopPromise,
+          new Promise((_resolve, reject) => setTimeout(() => reject(new Error("consume loop did not exit after shutdown")), 500)),
+        ]),
+      ).resolves.toBeUndefined();
     });
 
     it("persists the latest useful text-ended event as finalSessionOutput", async () => {

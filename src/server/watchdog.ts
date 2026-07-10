@@ -51,6 +51,12 @@ export interface WatchdogSnapshot {
   reason: WatchdogReason | null;
   lastActivityAt: number | null;
   diagnosticDeadlineAt: number | null;
+  /**
+   * True while the timer is paused for a known observation gap (transport
+   * reconnecting, session tree unrebuildable). Absent on older snapshots,
+   * which are treated as not suspended.
+   */
+  suspended?: boolean;
 }
 
 export interface WatchdogActivityInput {
@@ -81,6 +87,7 @@ export class RunWatchdog {
   private reason: WatchdogReason | null = null;
   private lastActivityAt: number | null = null;
   private diagnosticDeadlineAt: number | null = null;
+  private suspended = false;
 
   constructor(
     private readonly config: WatchdogConfig,
@@ -98,12 +105,43 @@ export class RunWatchdog {
     this.reason = null;
     this.lastActivityAt = startedAt;
     this.diagnosticDeadlineAt = null;
+    this.suspended = false;
     this.scheduleNext();
     return this.snapshot();
   }
 
+  /**
+   * Pause the timer for a known observation gap (transport reconnecting, an
+   * unrebuildable session tree) without treating the gap itself as a stall.
+   * A no-op outside a matching, non-terminal run.
+   */
+  suspend(run: WatchdogRunIdentity): void {
+    if (!sameRun(this.run, run) || this.isTerminal() || this.suspended) return;
+    this.suspended = true;
+    this.clearTimer();
+  }
+
+  /**
+   * Resume after `suspend()`. The elapsed suspension is never counted against
+   * the session — `lastActivityAt` is rebased to `resumedAt` and any
+   * suspected/stalled stage reached before suspension is cleared, so a long
+   * transport gap can't retroactively trip the watchdog the instant it
+   * reconnects. A no-op outside a matching, non-terminal, suspended run.
+   */
+  resume(run: WatchdogRunIdentity, resumedAt = this.clock.now()): void {
+    if (!sameRun(this.run, run) || this.isTerminal() || !this.suspended) return;
+    this.suspended = false;
+    this.lastActivityAt = resumedAt;
+    if (this.stage === "suspected" || this.stage === "stalled") {
+      this.stage = "healthy";
+      this.reason = null;
+      this.diagnosticDeadlineAt = null;
+    }
+    this.scheduleNext();
+  }
+
   recordActivity(input: WatchdogActivityInput): boolean {
-    if (!sameRun(this.run, input.run) || this.isTerminal()) return false;
+    if (!sameRun(this.run, input.run) || this.isTerminal() || this.suspended) return false;
     if (input.noise) return true;
     const occurredAt = input.occurredAt ?? this.clock.now();
     if (occurredAt < (this.lastActivityAt ?? 0)) return false;
@@ -136,6 +174,7 @@ export class RunWatchdog {
       reason: this.reason,
       lastActivityAt: this.lastActivityAt,
       diagnosticDeadlineAt: this.diagnosticDeadlineAt,
+      suspended: this.suspended,
     };
   }
 
@@ -146,7 +185,8 @@ export class RunWatchdog {
     this.reason = snapshot.reason;
     this.lastActivityAt = snapshot.lastActivityAt;
     this.diagnosticDeadlineAt = snapshot.diagnosticDeadlineAt;
-    this.scheduleNext();
+    this.suspended = snapshot.suspended ?? false;
+    if (!this.suspended) this.scheduleNext();
   }
 
   dispose(): void {
@@ -154,7 +194,7 @@ export class RunWatchdog {
   }
 
   private evaluate(): void {
-    if (!this.config.enabled || !this.run || this.isTerminal()) return;
+    if (!this.config.enabled || !this.run || this.isTerminal() || this.suspended) return;
     const now = this.clock.now();
 
     if (this.stage === "suspected" || this.stage === "stalled") {
@@ -198,7 +238,7 @@ export class RunWatchdog {
 
   private scheduleNext(): void {
     this.clearTimer();
-    if (!this.config.enabled || !this.run || this.isTerminal() || this.lastActivityAt === null) return;
+    if (!this.config.enabled || !this.run || this.isTerminal() || this.suspended || this.lastActivityAt === null) return;
     const due = this.diagnosticDeadlineAt ?? this.lastActivityAt + this.config.timeoutMs;
     const delay = Math.max(0, due - this.clock.now());
     const tokenRun = this.run;
@@ -218,6 +258,7 @@ export class RunWatchdog {
     this.reason = null;
     this.lastActivityAt = null;
     this.diagnosticDeadlineAt = null;
+    this.suspended = false;
   }
 
   private clearTimer(): void {
