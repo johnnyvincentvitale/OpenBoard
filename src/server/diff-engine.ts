@@ -19,8 +19,8 @@ import type { DiffFile, DiffResponse, Task } from "../shared";
 
 const execFileAsync = promisify(execFile);
 
-const DIFF_CONTEXT_LINES = 12;
-const MAX_TOTAL_PATCH_BYTES = 2 * 1024 * 1024; // 2 MB
+export const DIFF_CONTEXT_LINES = 12;
+export const MAX_TOTAL_PATCH_BYTES = 2 * 1024 * 1024; // 2 MB
 // Per-file guard for untracked files, applied before any content is read
 // into memory. Keeps a single huge or binary untracked file from spiking
 // memory or producing a garbage text patch ahead of the total byte cap.
@@ -29,7 +29,7 @@ const MAX_UNTRACKED_FILE_BYTES = 1 * 1024 * 1024; // 1 MB
 // (mirrors git's own NUL-byte heuristic).
 const BINARY_SNIFF_BYTES = 8000;
 
-interface GitResult {
+export interface GitResult {
   code: number;
   stdout: string;
   stderr: string;
@@ -61,12 +61,42 @@ async function git(cwd: string, args: string[]): Promise<GitResult> {
   }
 }
 
+/** Shared low-level git runner used by comparison and diff engines. */
+export async function execGit(cwd: string, args: string[]): Promise<GitResult> {
+  return git(cwd, args);
+}
+
+/**
+ * Compute a diff between two arbitrary git refs from the same repo.
+ * Returns the same DiffResponse shape as computeDiff so callers can
+ * treat branch-to-branch, worktree-to-branch, and working-tree diffs uniformly.
+ */
+export async function computeDiffBetweenRefs(
+  cwd: string,
+  leftRef: string,
+  rightRef: string,
+  options: { contextLines?: number; maxBytes?: number } = {},
+): Promise<DiffResponse> {
+  const contextLines = options.contextLines ?? DIFF_CONTEXT_LINES;
+  const result = await git(cwd, ["diff", `--unified=${contextLines}`, leftRef, rightRef]);
+  if (result.code !== 0) {
+    return {
+      kind: "no-git",
+      reason: `Diff between refs failed: ${(result.stderr || result.stdout).trim() || "unknown git error"}`,
+    };
+  }
+  const files = parseUnifiedDiff(result.stdout);
+  const maxBytes = options.maxBytes ?? MAX_TOTAL_PATCH_BYTES;
+  const capped = capBytes(files, maxBytes);
+  return { kind: "diff", files: capped.files, capped: capped.capped };
+}
+
 /**
  * Parse a unified diff string into per-file DiffFile[] entries.
  * Handles binary, rename, and mode-change edges gracefully —
  * missing patches become undefined on the DiffFile.
  */
-function parseUnifiedDiff(raw: string): DiffFile[] {
+export function parseUnifiedDiff(raw: string): DiffFile[] {
   const files: DiffFile[] = [];
   const chunks = splitByFile(raw);
   for (const chunk of chunks) {
@@ -219,7 +249,7 @@ async function untrackedFileDiff(
  * string; files that fit keep their patch intact. Sets `capped` on the
  * response when any truncation occurred.
  */
-function capBytes(files: DiffFile[], maxBytes: number): { files: DiffFile[]; capped: boolean } {
+export function capBytes(files: DiffFile[], maxBytes: number): { files: DiffFile[]; capped: boolean } {
   let totalBytes = 0;
   const kept: DiffFile[] = [];
   let capped = false;

@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { computeDiff } from "../../src/server/diff-engine";
-import type { Task } from "../../src/shared";
+import { computeDiff, execGit, computeDiffBetweenRefs, parseUnifiedDiff, capBytes } from "../../src/server/diff-engine";
+import type { DiffFile, Task } from "../../src/shared";
 
 function runGit(cwd: string, args: string[]): string {
   const env = Object.fromEntries(
@@ -448,6 +448,121 @@ describe("computeDiff", () => {
       expect(result.kind).toBe("no-git");
       if (result.kind === "no-git") {
         expect(result.reason).toContain("No git evidence");
+      }
+    });
+  });
+});
+
+describe("diff-engine exported primitives", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ocb-diff-prim-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  describe("execGit", () => {
+    it("returns stdout and zero exit code on success", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      const result = await execGit(repoDir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+      expect(result.code).toBe(0);
+      expect(result.stdout.trim()).toBe("main");
+    });
+
+    it("returns non-zero code on invalid ref without throwing", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      const result = await execGit(repoDir, ["rev-parse", "nonexistent"])
+      expect(result.code).not.toBe(0);
+      expect(result.stderr || result.stdout).toBeTruthy();
+    });
+  });
+
+  describe("parseUnifiedDiff", () => {
+    it("parses added, deleted, and modified files", () => {
+      const raw = `diff --git a/add.ts b/add.ts
+new file mode 100644
+--- /dev/null
++++ b/add.ts
+@@ -0,0 +1 @@
++hello
+diff --git a/del.ts b/del.ts
+deleted file mode 100644
+--- a/del.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-hello
+diff --git a/mod.ts b/mod.ts
+--- a/mod.ts
++++ b/mod.ts
+@@ -1 +1 @@
+-old
++new
+`;
+      const files = parseUnifiedDiff(raw);
+      expect(files).toHaveLength(3);
+      expect(files[0].file).toBe("add.ts");
+      expect(files[0].status).toBe("added");
+      expect(files[1].file).toBe("del.ts");
+      expect(files[1].status).toBe("deleted");
+      expect(files[2].file).toBe("mod.ts");
+      expect(files[2].status).toBe("modified");
+    });
+
+    it("returns empty array for empty or whitespace input", () => {
+      expect(parseUnifiedDiff("")).toEqual([]);
+      expect(parseUnifiedDiff("   \n")).toEqual([]);
+    });
+  });
+
+  describe("capBytes", () => {
+    it("keeps patches that fit and drops the rest", () => {
+      const files: DiffFile[] = [
+        { file: "a.ts", patch: "a".repeat(10), additions: 0, deletions: 0, status: "modified" },
+        { file: "b.ts", patch: "b".repeat(10), additions: 0, deletions: 0, status: "modified" },
+      ];
+      const result = capBytes(files, 15);
+      expect(result.capped).toBe(true);
+      expect(result.files[0].patch).toBeDefined();
+      expect(result.files[1].patch).toBeUndefined();
+    });
+
+    it("leaves files unchanged when all patches fit", () => {
+      const files: DiffFile[] = [
+        { file: "a.ts", patch: "a".repeat(5), additions: 0, deletions: 0, status: "modified" },
+      ];
+      const result = capBytes(files, 100);
+      expect(result.capped).toBe(false);
+      expect(result.files[0].patch).toBe(files[0].patch);
+    });
+  });
+
+  describe("computeDiffBetweenRefs", () => {
+    it("returns a no-git sentinel when one or both refs do not exist", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      const result = await computeDiffBetweenRefs(repoDir, "missing", "also-missing");
+      expect(result.kind).toBe("no-git");
+    });
+
+    it("returns the diff between two branches", async () => {
+      const repoDir = join(tmpDir, "repo");
+      initRepo(repoDir);
+      runGit(repoDir, ["checkout", "-b", "feature"]);
+      writeFileSync(join(repoDir, "feat.ts"), "export const feat = true;\n");
+      runGit(repoDir, ["add", "feat.ts"]);
+      runGit(repoDir, ["commit", "-m", "feature"]);
+      runGit(repoDir, ["checkout", "main"]);
+
+      const result = await computeDiffBetweenRefs(repoDir, "main", "feature");
+      expect(result.kind).toBe("diff");
+      if (result.kind === "diff") {
+        expect(result.files.map((f) => f.file)).toEqual(["feat.ts"]);
+        expect(result.files[0].status).toBe("added");
       }
     });
   });
