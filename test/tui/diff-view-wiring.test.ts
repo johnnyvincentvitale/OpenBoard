@@ -109,11 +109,25 @@ function actions(overrides: Record<string, unknown> = {}) {
 describe("TUI diff view entry (v)", () => {
   it("disables background board polling while the diff renderer owns scroll state", () => {
     expect(shouldAutoRefresh({ view: "diff", previousView: "board" })).toBe(false);
+    expect(shouldAutoRefresh({ view: "follow", previousView: "board" })).toBe(false);
     expect(shouldAutoRefresh({ view: "archive", previousView: "board" })).toBe(false);
     expect(shouldAutoRefresh({ view: "launch", previousView: "board" })).toBe(false);
     expect(shouldAutoRefresh({ view: "workspaceGate", previousView: "launch" })).toBe(false);
     expect(shouldAutoRefresh({ view: "board", previousView: "launch" })).toBe(true);
     expect(shouldAutoRefresh({ view: "switcher", previousView: "board" })).toBe(true);
+  });
+
+  it("q in FollowView returns to the board and closes the stream without quitting", async () => {
+    const close = vi.fn();
+    const s = state({ viewState: { view: "follow", previousView: "board" }, followView: { taskId: "task-1", events: [], connection: "LIVE", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 }, followStream: { close } });
+    const a = actions();
+
+    await handleKeypress({ name: "q", sequence: "q" } as any, s, a as any);
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(a.shutdown).not.toHaveBeenCalled();
+    expect(s.viewState.view).toBe("board");
+    expect(a.refresh).toHaveBeenCalledWith(true);
   });
 
   it("opens the full-screen diff view for a selected Review card and fetches its diff", async () => {
@@ -132,6 +146,28 @@ describe("TUI diff view entry (v)", () => {
     expect(s.diffView?.loading).toBe(false);
     expect(getTaskDiff).toHaveBeenCalledWith("review-1");
     expect(s.diffView?.files).toHaveLength(1);
+  });
+
+  it("cycles Done diff evidence from inherited context codeAncestors and compares against Build", async () => {
+    const fixTask = task("fix", "done", { taskKind: "fix", parentIds: ["audit"] });
+    const s = state({ tasks: [fixTask], selectedTaskId: "fix" });
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: [], capped: false }));
+    const getTaskCompare = vi.fn(async () => ({ kind: "diff" as const, files: [], capped: true }));
+    const getTaskContext = vi.fn(async () => ({
+      task: { taskId: "fix", title: "Fix", description: "", taskKind: "fix", column: "done", completion: null, changedFiles: [], verification: [], residualRisk: "", hasStructuredHandoff: false },
+      directParents: [{ kind: "direct-parent", parentId: "audit", taskId: "audit", title: "Audit", description: "", taskKind: "audit", column: "done", completion: null, changedFiles: [], verification: [], residualRisk: "", hasStructuredHandoff: false }],
+      inheritedParents: [{ kind: "inherited-parent", taskId: "build", title: "Build", taskKind: "build", column: "done", depth: 2, viaParentIds: ["audit"], summary: "built", hasStructuredHandoff: true }],
+      codeAncestors: [{ taskId: "build", title: "Build", taskKind: "build", column: "done", branch: "board/build", changedFiles: ["src/a.ts"], hasStructuredHandoff: true }],
+    }));
+
+    await handleKeypress({ name: "v", sequence: "v" } as any, s, actions({ client: { getTaskDiff, getTaskCompare, getTaskContext } }) as any);
+    expect(getTaskDiff).toHaveBeenCalledWith("fix");
+    expect(s.diffLineage.codeAncestors.map((ancestor: any) => ancestor.taskId)).toEqual(["build"]);
+
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, actions({ client: { getTaskDiff, getTaskCompare, getTaskContext } }) as any);
+    expect(getTaskCompare).toHaveBeenCalledWith("fix", "build");
+    expect(s.diffView.sourceLabel).toContain("compare Build (build) · depth 2 via audit");
+    expect(s.diffView.sourceLabel).toContain("capped");
   });
 
   it("opens a Done card's historical diff and blocks edit and commit actions", async () => {

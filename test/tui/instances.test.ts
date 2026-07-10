@@ -454,6 +454,23 @@ describe("TUI label cleanup", () => {
     expect(text).toContain("D discard");
   });
 
+  it("selected-card action hints hide ordinary Integrate for blocked Review cards", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{
+        ...task("review-card", "review"),
+        completionSource: "reported",
+        completion: { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "blocked", reportedAt: 123 },
+      }],
+      selectedTaskId: "review-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("v diff · R retry");
+    expect(text).toContain("x done");
+    expect(text).not.toContain("i integrate");
+  });
+
   it("selected-card action hints are contextual for manual Review cards", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -1009,6 +1026,49 @@ describe("TUI archive detail cleanup", () => {
     expect(text).toContain("board/task-1");
     expect(text).toContain("main");
     expect(text).toContain("task-1");
+  });
+
+  it("selected-card model diagnostics use MODEL as active truth and explicit fallback none", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{
+        ...task("running-card", "in_progress"),
+        runState: "running",
+        model: { providerID: "openai", id: "primary" },
+        activeModel: { providerID: "anthropic", id: "active" },
+        autoRetries: 1,
+      }],
+      selectedTaskId: "running-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("MODEL");
+    expect(text).toContain("anthropic/active");
+    expect(text).toContain("PRIMARY");
+    expect(text).toContain("openai/primary");
+    expect(text).toContain("FALLBACK");
+    expect(text).toContain("none");
+    expect(text).toContain("AUTO-RETRY");
+    expect(text).toContain("1/2");
+  });
+
+  it("blocked-answer composer predicts resume/restart before submit", () => {
+    const blocked = {
+      ...task("blocked-card", "review"),
+      harness: "opencode" as const,
+      sessionId: "ses_1",
+      completionSource: "reported" as const,
+      completion: { outcome: "blocked" as const, summary: "Need choice", changedFiles: [], verification: [], residualRisk: "Pick one", reportedAt: 44 },
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [blocked],
+      selectedTaskId: "blocked-card",
+      blockedAnswer: { taskId: "blocked-card", blockedReportedAt: 44, text: "", submitting: false },
+    }));
+
+    expect(textOf(app)).toContain("will try to resume same session");
+    expect(textOf(app)).not.toContain("decided after submit");
   });
 
   it("output tab renders archived final session output", () => {

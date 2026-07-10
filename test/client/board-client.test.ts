@@ -86,8 +86,9 @@ describe("board client", () => {
         description: "Shared client first",
 	        directory: "app",
 	        taskKind: "build",
-	        agent: " build ",
+        agent: " build ",
         model: "opencode/north-mini-code-free",
+        fallbackModel: "anthropic/claude-sonnet-5",
         isolation: "worktree",
       },
       { title: "List cards", directory: "packages/api" },
@@ -106,6 +107,7 @@ describe("board client", () => {
       directory: `${CWD}/app`,
       agent: "build",
       model: { providerID: "opencode", id: "north-mini-code-free" },
+      fallbackModel: { providerID: "anthropic", id: "claude-sonnet-5" },
       isolation: "worktree",
     });
   });
@@ -223,6 +225,8 @@ describe("board client", () => {
     await client.addComment("task-1", "me", "note");
     await client.listComments("task-1");
     await client.listTaskEvents("task-1");
+    await client.getTaskCompare("task-1", "task-0");
+    await client.getTaskContext("task-1");
     await client.resolveOrphanWorktree("/repo/.opencode-board-worktrees/task_dirty");
     await client.deleteTask("task-1");
 
@@ -244,6 +248,8 @@ describe("board client", () => {
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/comments`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/comments`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/events`, "GET"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/compare?baseTaskId=task-0`, "GET"],
+      [`${DEFAULT_BOARD_URL}/api/tasks/task-1/context`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/worktrees/orphans/resolve`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1`, "DELETE"],
     ]);

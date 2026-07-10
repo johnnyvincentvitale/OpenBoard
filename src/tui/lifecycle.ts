@@ -1,5 +1,6 @@
 import type { Task } from "../shared";
 import { formatElapsed, taskStatus } from "./model";
+import { permissionAskDetailRows, permissionAskSummary } from "./permission-surface";
 
 /**
  * Canonical lifecycle phases the TUI distinguishes beyond raw run/column state.
@@ -9,6 +10,7 @@ import { formatElapsed, taskStatus } from "./model";
 export type TaskLifecyclePhase =
   | "running"
   | "running-no-elapsed"
+  | "needs-user-input"
   | "queued"
   | "idle"
   | "blocked"
@@ -19,6 +21,7 @@ export type TaskLifecyclePhase =
   | "review-error"
   | "review-no-agent-report"
   | "review-manual"
+  | "done-accepted-blocked"
   | "done-user"
   | "done";
 
@@ -52,6 +55,7 @@ export interface LifecycleDetailRow {
 export type TaskLifecycleInput = Pick<
   Task,
   "type" | "runState" | "column" | "pending" | "escapeDetectedPaths" | "rebaseConflictPaths" | "runStartedAt" | "completion" | "completionSource" | "completedBy" | "error" | "sessionId"
+  | "pendingPermissions"
 >;
 
 function normalizeOutcome(outcome: string | undefined): string {
@@ -71,6 +75,25 @@ function normalizeDetail(value: string | undefined): string {
 export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()): TaskLifecycleStatus {
   const status = taskStatus(task);
   const base = { glyph: status.glyph, label: status.label };
+
+  const permissionSummary = permissionAskSummary(task, now);
+  if (permissionSummary) {
+    return {
+      phase: "needs-user-input",
+      glyph: "◆",
+      label: "NEEDS USER INPUT",
+      detail: `${permissionSummary.count} ${permissionSummary.count === 1 ? "ask" : "asks"} · ${formatElapsed(permissionSummary.countdownMs ?? 0)} left`,
+    };
+  }
+
+  if (task.column === "review" && task.completion?.outcome === "blocked") {
+    return { phase: "review-blocked", glyph: "▲", label: "REVIEW", detail: "BLOCKED" };
+  }
+
+  if (task.column === "done" && task.completion?.outcome === "blocked") {
+    const by = task.completedBy ?? "";
+    return { phase: "done-accepted-blocked", glyph: "○", label: "DONE", detail: by ? `accepted blocked · ${by}` : "accepted blocked" };
+  }
 
   if (task.runState === "running") {
     const elapsed = task.runStartedAt ? formatElapsed(now - task.runStartedAt) : "";
@@ -164,6 +187,10 @@ export function taskLifecycleDetailRows(task: TaskLifecycleInput, now = Date.now
     { label: "STATE", value: `${status.glyph} ${status.label}`, role: "state" },
   ];
 
+  for (const row of permissionAskDetailRows(task, now)) {
+    rows.push({ ...row, role: "pending" });
+  }
+
   if (task.runState === "running" && status.detail) {
     rows.push({ label: "ELAPSED", value: status.detail, role: "elapsed" });
   }
@@ -191,7 +218,12 @@ export function taskLifecycleDetailRows(task: TaskLifecycleInput, now = Date.now
     rows.push({ label: "ACCEPTED BY", value: task.completedBy, role: "acceptedBy" });
   }
 
-  if (task.runState === "error" && task.error) {
+  if (task.column === "done" && task.completion?.outcome === "blocked") {
+    rows.push({ label: "OUTCOME", value: "ACCEPTED BLOCKED", role: "outcome" });
+    rows.push({ label: "SOURCE", value: task.completionSource ?? "reported", role: "source" });
+  }
+
+  if (task.runState === "error" && task.error && status.phase !== "review-blocked") {
     rows.push({ label: "ERROR", value: task.error, role: "error" });
   }
 

@@ -26,6 +26,7 @@ import type {
   RosterProvider,
   SessionActivityFrame,
   Task,
+  TaskContext,
   TaskHarness,
   TaskKind,
   TaskComment,
@@ -153,6 +154,7 @@ export interface CreateBoardTaskInput {
   acpOptions?: AcpOptions;
   assignedTo?: string;
   model?: string | ModelRef;
+  fallbackModel?: string | ModelRef;
   isolation?: string;
   /** Only valid on worktree-isolated agent tasks. */
   autoRun?: boolean;
@@ -163,7 +165,7 @@ export interface CreateBoardTaskInput {
 
 export type UpdateBoardTaskInput = Omit<
   Partial<CreateBoardTaskInput>,
-  "taskKind" | "agent" | "permissionMode" | "claudePermissionMode" | "acpOptions" | "assignedTo" | "model" | "isolation" | "permissionOverrides" | "parentIds"
+  "taskKind" | "agent" | "permissionMode" | "claudePermissionMode" | "acpOptions" | "assignedTo" | "model" | "fallbackModel" | "isolation" | "permissionOverrides" | "parentIds"
 > & {
   taskKind?: TaskKind | null;
   agent?: string | null;
@@ -172,6 +174,7 @@ export type UpdateBoardTaskInput = Omit<
   acpOptions?: AcpOptions | null;
   assignedTo?: string | null;
   model?: string | ModelRef | null;
+  fallbackModel?: string | ModelRef | null;
   isolation?: string | null;
   permissionOverrides?: PermissionOverrides | null;
   parentIds?: string[] | null;
@@ -243,6 +246,7 @@ export interface BoardClient {
   getTaskDiff(id: string): Promise<DiffResponse>;
   /** Compare two cards' durable code evidence via GET /api/tasks/:targetId/compare?baseTaskId=:baseTaskId. */
   getTaskCompare(targetId: string, baseTaskId: string): Promise<TaskCompareResponse>;
+  getTaskContext(id: string): Promise<TaskContext>;
   /** Stream live session activity frames for a task via SSE. */
   streamSessionEvents(id: string, onFrame: SessionActivityFrameCallback, options?: StreamSessionEventsOptions): Promise<SessionEventsStream>;
   /** Respond to a pending permission ask on a task. */
@@ -429,6 +433,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     getTaskDiff: (id) => requestJson<DiffResponse>(resolved, buildTaskPath.diff(id), { method: "GET" }),
     getTaskCompare: (targetId, baseTaskId) =>
       requestJson<TaskCompareResponse>(resolved, buildTaskPath.compare(targetId, baseTaskId), { method: "GET" }),
+    getTaskContext: (id) => requestJson<TaskContext>(resolved, buildTaskPath.context(id), { method: "GET" }),
     streamSessionEvents: (id, onFrame, options) => streamSessionEvents(resolved, id, onFrame, options),
     respondPermission: (id, input) =>
       postJson<RespondPermissionOutcome>(resolved, buildTaskPath.permissionReply(id), input),
@@ -475,6 +480,7 @@ function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): Upda
     payload.acpOptions = task.acpOptions === null ? null : normalizeAcpOptions(task.acpOptions);
   }
   if (task.model !== undefined) payload.model = task.model === null ? null : typeof task.model === "string" ? parseModelRef(task.model) : task.model;
+  if (task.fallbackModel !== undefined) payload.fallbackModel = task.fallbackModel === null ? null : typeof task.fallbackModel === "string" ? parseModelRef(task.fallbackModel) : task.fallbackModel;
   if (task.isolation !== undefined) {
     if (task.isolation !== null && !VALID_ISOLATION.has(task.isolation as TaskIsolationMode)) throw new Error("isolation must be 'worktree' or 'in-place'");
     payload.isolation = task.isolation as TaskIsolationMode | null;
@@ -651,6 +657,11 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
       throw new Error(`${payload.harness} task model must use "${expectedProvider}/model-id"`);
     }
     payload.model = model;
+  }
+
+  if (payload.type === "agent" && task.fallbackModel !== undefined) {
+    const fallbackModel = typeof task.fallbackModel === "string" ? parseModelRef(task.fallbackModel) : task.fallbackModel;
+    payload.fallbackModel = fallbackModel;
   }
 
   if (payload.type === "agent" && task.isolation !== undefined) {

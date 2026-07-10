@@ -21,6 +21,21 @@ function baseTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe("task lifecycle helpers", () => {
+  it("prioritizes permission asks above blocked reports and runtime errors", () => {
+    const task = baseTask({
+      column: "review",
+      runState: "error",
+      error: "boom",
+      pendingPermissions: [{ id: "ask", harness: "opencode", source: "worktree-fence", permission: "edit", summary: "Edit file", raisedAt: 1, deadline: 6_000 }],
+      completion: { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "blocked", reportedAt: 1 },
+      completionSource: "reported",
+    });
+    const status = taskLifecycleStatus(task, 1_000);
+    expect(status.phase).toBe("needs-user-input");
+    expect(status.label).toBe("NEEDS USER INPUT");
+    expect(status.detail).toBe("1 ask · 5s left");
+  });
+
   describe("running with elapsed", () => {
     const now = 1_000_000;
     const task = baseTask({
@@ -135,6 +150,29 @@ describe("task lifecycle helpers", () => {
     });
   });
 
+  it("renders agent-reported blocked Review as BLOCKED even when runState is error", () => {
+    const task = baseTask({
+      column: "review",
+      runState: "error",
+      error: "blocked on operator",
+      completion: { outcome: "blocked", summary: "Need decision", changedFiles: [], verification: [], residualRisk: "pick one", reportedAt: 22 },
+      completionSource: "reported",
+    });
+    expect(taskLifecycleStatus(task).phase).toBe("review-blocked");
+    expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · BLOCKED");
+    expect(taskLifecycleDetailRows(task)).toEqual([
+      { label: "STATE", value: "▲ REVIEW", role: "state" },
+      { label: "OUTCOME", value: "BLOCKED", role: "outcome" },
+      { label: "SOURCE", value: "reported", role: "source" },
+    ]);
+  });
+
+  it("keeps runtime Review errors as ERROR when there is no blocked completion", () => {
+    const task = baseTask({ column: "review", runState: "error", error: "runner crashed" });
+    expect(taskLifecycleStatus(task).phase).toBe("review-error");
+    expect(compactTaskBoardLabel(task)).toBe("! ERROR · RUNNER CRASHED");
+  });
+
   describe("review error", () => {
     const task = baseTask({
       column: "review",
@@ -222,6 +260,24 @@ describe("task lifecycle helpers", () => {
         { label: "ACCEPTED BY", value: "User", role: "acceptedBy" },
       ]);
     });
+  });
+
+  it("renders Done accepted blocked distinctly with attribution", () => {
+    const task = baseTask({
+      column: "done",
+      runState: "error",
+      completedBy: "User",
+      completion: { outcome: "blocked", summary: "Need secret", changedFiles: [], verification: [], residualRisk: "not finished", reportedAt: 33 },
+      completionSource: "reported",
+    });
+    expect(taskLifecycleStatus(task).phase).toBe("done-accepted-blocked");
+    expect(compactTaskBoardLabel(task)).toBe("○ DONE · accepted blocked · User");
+    expect(taskLifecycleDetailRows(task)).toEqual([
+      { label: "STATE", value: "○ DONE", role: "state" },
+      { label: "ACCEPTED BY", value: "User", role: "acceptedBy" },
+      { label: "OUTCOME", value: "ACCEPTED BLOCKED", role: "outcome" },
+      { label: "SOURCE", value: "reported", role: "source" },
+    ]);
   });
 
   describe("done without attribution", () => {

@@ -216,6 +216,21 @@ export function buildConfirmationCopy(
       ];
       break;
     case "move-to-done":
+      if (task.completion?.outcome === "blocked" && task.completionSource === "reported") {
+        const verification = task.completion.verification.length
+          ? task.completion.verification.map((item) => `${item.command} ${item.result}`).join(", ")
+          : "none reported";
+        body = [
+          "BLOCKED-INCOMPLETE ACCEPTANCE REQUIRED.",
+          `Question: ${task.completion.needsInput || task.completion.residualRisk || task.completion.summary}`,
+          `Summary: ${task.completion.summary}`,
+          `Verification: ${verification}`,
+          `Risk: ${task.completion.residualRisk || "none reported"}`,
+          `Source: agent-reported blocked at ${task.completion.reportedAt}`,
+          "Confirming accepts incomplete blocked work and moves the card to Done.",
+        ];
+        break;
+      }
       if (task.completion && task.completionSource === "reported") {
         const verification = task.completion.verification.length
           ? task.completion.verification.map((item) => `${item.command} ${item.result}`).join(", ")

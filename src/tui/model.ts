@@ -243,7 +243,7 @@ export function instanceStatusLabel(status: InstanceStatus): string {
 
 // ── View state machine ───────────────────────────────────────────────────────────
 
-export type TuiView = "launch" | "board" | "switcher" | "archive" | "workspaceGate" | "diff" | "settings";
+export type TuiView = "launch" | "board" | "switcher" | "archive" | "workspaceGate" | "diff" | "follow" | "settings";
 
 export interface ViewState {
   view: TuiView;

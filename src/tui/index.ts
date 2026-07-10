@@ -91,6 +91,11 @@ import {
   type PendingConfirmation,
 } from "./confirmations";
 import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
+import { firstPendingPermissionAsk, permissionInFlightKey } from "./permission-surface";
+import { applyFollowFrame, createFollowViewState, descendantSessionLabel, followVisibleEvents, markFollowRendered, scrollFollow, shouldRenderFollowFrame, tailFollow, type FollowViewState } from "./follow-view";
+import { backspaceBlockedAnswerDraft, blockedAnswerDraftKey, blockedAnswerSubmitLabel, createBlockedAnswerDraft, editBlockedAnswerDraft, lineDeleteBlockedAnswerDraft, staleBlockedAnswerDraft, type BlockedAnswerDraft } from "./blocked-answer";
+import { createDiffLineageState, diffLineageHeader, fetchSelectedDiffEvidence, moveAncestorSelection, type DiffLineageState } from "./diff-lineage";
+import { fallbackModelOptions, modelRetryLabel, predictedBlockedAnswerResumeMode } from "./model-fallback";
 import { createRootLifecycle } from "./root-lifecycle";
 import { buildWordmarkRows } from "./wordmark";
 import { RGBA, type KeyEvent, type MouseEvent, type PasteEvent, type VChild } from "@opentui/core";
@@ -123,7 +128,7 @@ const ARCHIVE_READER_MAX_BUFFER = 16 * 1024 * 1024;
 const DETAIL_SCROLL_STEP_ROWS = 3;
 
 export function shouldAutoRefresh(viewState: ViewState): boolean {
-  return !["archive", "diff", "launch", "workspaceGate", "settings"].includes(viewState.view);
+  return !["archive", "diff", "follow", "launch", "workspaceGate", "settings"].includes(viewState.view);
 }
 
 export function boardApiFetchInit(init: RequestInit = {}, boardToken = process.env.OPENBOARD_API_TOKEN): RequestInit {
@@ -305,7 +310,7 @@ type WizardStep = "identity" | "harness" | "agentProfile" | "isolation" | "depen
 
 const IDENTITY_FIELDS_AGENT = ["type", "title", "description", "directory"] as const;
 const IDENTITY_FIELDS_MANUAL = ["type", "title", "description", "assignedTo", "directory"] as const;
-const HARNESS_FIELDS_OPENCODE = ["taskKind", "harness", "provider", "model"] as const;
+const HARNESS_FIELDS_OPENCODE = ["taskKind", "harness", "provider", "model", "fallbackModel"] as const;
 /** MODEL is locked out while PROVIDER is "Use Agent Profile Default" (draft.providerId === "") — nothing to pick. */
 const HARNESS_FIELDS_OPENCODE_LOCKED = ["taskKind", "harness", "provider"] as const;
 const HARNESS_FIELDS_CLAUDE = ["taskKind", "harness", "model"] as const;
@@ -501,8 +506,10 @@ interface NewTaskDraft {
   acpOptions: AcpOptions;
   assignedTo: string;
   model?: ModelRef;
+  fallbackModel?: ModelRef;
   /** Type-to-filter query for the MODEL field, active only while it's focused — reset whenever focus leaves it. */
   modelQuery?: string;
+  fallbackModelQuery?: string;
   isolation: TaskIsolationMode;
   /** Opt-in auto-dispatch toggle. Only ever submitted for worktree-isolated tasks; resets to false whenever isolation leaves "worktree". */
   autoRun: boolean;
@@ -670,6 +677,12 @@ interface TuiState {
   // as authoritative (applies it to the diff renderable) instead of capturing the live
   // renderable's scrollY. Mouse-wheel scroll leaves it false so that scroll is captured.
   diffScrollIntent?: boolean;
+  permissionAnswersInFlight?: Set<string>;
+  followView?: FollowViewState;
+  followStream?: { close(): void };
+  blockedAnswer?: BlockedAnswerDraft;
+  blockedAnswerDrafts?: Record<string, BlockedAnswerDraft>;
+  diffLineage?: DiffLineageState;
 }
 
 /** Result of running a terminal (foreground) editor to completion. */
@@ -842,6 +855,8 @@ export async function runOpenBoardTui(
     instanceActionState: {},
     workspaceGateInput: "",
     workspaceGateSubmitting: false,
+    permissionAnswersInFlight: new Set(),
+    blockedAnswerDrafts: {},
   };
 
   let refreshTimer: NodeJS.Timeout | undefined;
@@ -918,6 +933,8 @@ export async function runOpenBoardTui(
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    state.followStream?.close();
+    state.followStream = undefined;
     removeFatalHandlers();
     destroyRenderer();
     process.exit(0);
@@ -1026,6 +1043,9 @@ export async function runOpenBoardTui(
 
   const attachInstance = async (item: InstanceListItem) => {
     state.status = `attaching to ${item.definition.name}...`;
+    state.followStream?.close();
+    state.followStream = undefined;
+    state.followView = undefined;
     render();
 
     try {
@@ -1475,6 +1495,8 @@ export function renderApp(ui: OpenTui, state: TuiState) {
           ? renderArchiveView(ui, state)
           : state.viewState.view === "diff"
             ? renderDiffViewMain(ui, state)
+            : state.viewState.view === "follow"
+              ? renderFollowViewMain(ui, state)
             : state.viewState.view === "settings"
               ? renderSettingsView(ui, state)
             : renderMain(ui, state);
@@ -1753,6 +1775,40 @@ function renderDiffViewMain(ui: OpenTui, state: TuiState) {
     state.diffView,
     diffPatchPaneWidth(state.terminalCols),
     diffFileListVisibleRows(state.terminalRows),
+  );
+}
+
+function renderFollowViewMain(ui: OpenTui, state: TuiState) {
+  const follow = state.followView;
+  const windowSize = Math.max(1, state.terminalRows - 10);
+  const rows = follow ? followVisibleEvents(follow, windowSize) : [];
+  return ui.Box(
+    {
+      flexGrow: 1,
+      width: "100%",
+      flexDirection: "column",
+      border: true,
+      borderStyle: "single",
+      borderColor: COLORS.border,
+      padding: 1,
+      gap: 0,
+      ...boxBg(COLORS.panel),
+    },
+    ui.Text({
+      content: `Follow ${follow?.taskId ?? "task"} · ${follow?.connection ?? "STATIC"}${follow?.gapReason ? ` · GAP: ${follow.gapReason}` : ""}${follow?.autoFollow ? " · tail" : " · manual"}`,
+      fg: follow?.connection === "LIVE" ? COLORS.accentBright : follow?.connection === "GAP" ? COLORS.bright : COLORS.muted,
+      height: 1,
+      truncate: true,
+    }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...(rows.length
+      ? rows.map((event) => ui.Text({
+          content: `${event.seq} ${descendantSessionLabel(event)} ${event.kind} ${event.text ?? event.tool?.name ?? ""}`,
+          fg: event.kind === "warning" || event.tool?.status === "error" ? COLORS.bright : COLORS.text,
+          height: 1,
+          truncate: true,
+        }))
+      : [ui.Text({ content: "Waiting for session activity...", fg: COLORS.muted, height: 1, truncate: true })]),
   );
 }
 
@@ -2876,6 +2932,8 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
         ? renderInstanceSwitcherPanel(ui, state)
         : state.newTask
           ? renderInlineNewTask(ui, state)
+          : state.blockedAnswer
+            ? renderBlockedAnswerComposer(ui, state)
           : task
             ? renderTaskDetails(ui, state, task)
             : renderEmptyDetails(ui),
@@ -2919,7 +2977,10 @@ function selectedDetailRows(state: TuiState, task: Task): MetaRow[] {
                 ...(task.completionLocation ? [{ label: "RESULT", value: resultLocationLabel(task.completionLocation), color: COLORS.text }] : []),
               ]
             : []),
-          { label: "MODEL", value: modelLabel(task.model ?? undefined), color: COLORS.text },
+          { label: "MODEL", value: modelLabel(task.activeModel ?? task.model ?? undefined), color: task.activeModel ? COLORS.accentBright : COLORS.text },
+          ...(task.model ? [{ label: "PRIMARY", value: modelLabel(task.model), color: COLORS.text }] : []),
+          { label: "FALLBACK", value: task.fallbackModel ? modelLabel(task.fallbackModel) : "none", color: task.fallbackModel ? COLORS.text : COLORS.muted },
+          ...(task.autoRetries !== undefined ? [{ label: "AUTO-RETRY", value: modelRetryLabel(task.autoRetries).replace("AUTO-RETRY ", ""), color: task.autoRetries > 0 ? COLORS.bright : COLORS.muted }] : []),
           { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
           { label: "ISO", value: task.isolation ?? "in-place", color: COLORS.text },
           ...(task.isolation === "worktree"
@@ -2956,7 +3017,7 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   // to single-line card-meta rows instead of letting labels and values collide.
   // Error cards represent the failure as normal metadata here; the red error
   // notice is reserved for the inline Prompt/Handoff detail view.
-  const modeRows = rows.filter((row) => row.label !== "DIFF").length;
+  const modeRows = rows.filter((row) => row.label !== "DIFF" && row.label !== "FALLBACK").length;
   const mode = sidebarDetailMode(laneInnerHeight(state.terminalRows), modeRows, false);
   return mode === "expanded"
     ? renderExpandedDetails(ui, task, rows)
@@ -3612,8 +3673,8 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
 
   if (task.column === "review") {
     const actions: SelectedCardAction[] = ["view-diff"];
-    if (task.pending === "rebase-conflict") actions.push("retry");
-    actions.push("integrate");
+    if (task.pending === "rebase-conflict" || task.completion?.outcome === "blocked") actions.push("retry");
+    if (task.completion?.outcome !== "blocked") actions.push("integrate");
     if (task.worktreePath) actions.push("discard-worktree");
     actions.push("done", "delete", "move", "details");
     return shortcutList(...actions);
@@ -3811,6 +3872,30 @@ function renderInstanceSwitcherPanel(ui: OpenTui, state: TuiState) {
   );
 }
 
+function renderBlockedAnswerComposer(ui: OpenTui, state: TuiState) {
+  const draft = state.blockedAnswer;
+  const task = selectedTask(state);
+  if (!draft || !task?.completion) return renderEmptyDetails(ui);
+  const predicted = predictedBlockedAnswerResumeMode(task);
+  const mode = draft.resumeMode
+    ? (draft.resumeMode === "resume" ? "resumed same session" : "restarted fresh session")
+    : predicted === "resume"
+      ? "will try to resume same session"
+      : "will restart fresh session";
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
+    ui.Text({ content: "Answer Blocked Task", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
+    ui.Text({ content: task.completion.needsInput || task.completion.residualRisk || task.completion.summary, fg: COLORS.bright, height: 2, wrapMode: "word" }),
+    ui.Text({ content: `Reported: ${task.completion.reportedAt} · ${mode}`, fg: COLORS.muted, height: 1, truncate: true }),
+    ui.Box(
+      { width: "100%", height: Math.max(5, Math.min(12, state.terminalRows - 18)), border: true, borderStyle: "single", borderColor: COLORS.borderHot, padding: 1, ...boxBg(COLORS.bg) },
+      ui.Text({ content: draft.text || "Type answer. Empty Enter falls back to plain retry confirmation.", fg: draft.text ? COLORS.text : COLORS.dim, height: "100%", wrapMode: "word" }),
+    ),
+    ...(draft.error ? [ui.Text({ content: draft.error, fg: COLORS.bright, height: 1, truncate: true })] : []),
+    ui.Text({ content: "enter submit · esc cancel · ctrl+u clear line · paste supported", fg: COLORS.dim, height: 1, truncate: true }),
+  );
+}
+
 function renderDetail(ui: OpenTui, label: string, value: string, valueColor: TuiColor = COLORS.text, valueParts?: MetaValuePart[]) {
   return ui.Box(
     { width: "100%", flexDirection: "column", gap: 0 },
@@ -3825,7 +3910,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
     ? state.detailTab === "comments"
       ? "↑/↓ comments · ←/→ tabs · ↵ close details · c comment · r reply · esc close · q quit"
       : "↑/↓ scroll detail · ←/→ tabs · ↵ close details · m move · esc close · q quit"
-    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · f filter · p settings · u refresh · ? help · q quit · A global archive";
+    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · y/N permission · w follow · f filter · p settings · u refresh · ? help · q quit · A global archive";
 
   return ui.Box(
     {
@@ -3864,6 +3949,8 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
             : state.viewState.view === "diff"
             ? diffViewKeyHints(state.diffView)
+            : state.viewState.view === "follow"
+            ? "↑/↓ manual scroll · f tail · b/esc/q return · u quiet refresh"
             : state.viewState.view === "settings"
             ? state.settingsDirtyWorktrees
               ? "↑/↓ dirty worktrees · d delete · u refresh · b/esc back · q quit"
@@ -3910,6 +3997,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["f", "filter selected lane (again to clear)"],
     ["r", "run selected task"],
     ["R", "retry failed run"],
+    ["y / N", "answer permission allow-once / deny"],
     ["a", "archive task"],
     ["A", "global archive browser"],
     ["d", "delete selected card"],
@@ -3921,10 +4009,16 @@ function renderHelpOverlay(ui: OpenTui) {
     ["n", "new task"],
     ["p", "settings"],
     ["v", "view diff (Review or Done cards)"],
+    ["w", "follow live session activity"],
     ["u", "refresh board"],
     ["b", "switch instances"],
     ["esc", "detach / close overlay"],
     ["q", "quit"],
+    ["", ""],
+    ["FOLLOW VIEW", ""],
+    ["↑/↓", "manual scroll"],
+    ["f", "jump to tail / auto-follow"],
+    ["b / esc / q", "back to board (does not quit)"],
     ["", ""],
     ["ARCHIVE", ""],
     ["↑/↓", "navigate records / scroll focused detail"],
@@ -4116,6 +4210,7 @@ function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
       ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
       : []),
     renderModelField(ui, draft, state.agents, state.providers, state.acpConfig),
+    ...(draft.harness === "opencode" && draft.providerId ? [renderFallbackModelField(ui, draft, state.providers)] : []),
     renderDraftErrorRow(ui, draft),
   );
 }
@@ -4151,6 +4246,33 @@ function renderModelField(ui: OpenTui, draft: NewTaskDraft, agents: RosterAgent[
   return renderFieldShell(
     ui,
     "MODEL",
+    true,
+    4,
+    ui.Box(
+      { flexDirection: "column", height: 2, gap: 0 },
+      ui.Box(
+        { flexDirection: "row", height: 1 },
+        ui.Text({ content: `⌕ ${query}▍`, fg: COLORS.accentBright, flexGrow: 1, height: 1, truncate: true }),
+        ui.Text({ content: `${matches.length} match${matches.length === 1 ? "" : "es"}`, fg: COLORS.dim, height: 1, truncate: true }),
+      ),
+      ui.Text({ content: selectedLabel, fg: matches.length ? COLORS.text : COLORS.dim, height: 1, truncate: true }),
+    ),
+  );
+}
+
+function renderFallbackModelField(ui: OpenTui, draft: NewTaskDraft, providers: RosterProvider[]) {
+  const focused = draft.field === "fallbackModel";
+  if (!focused) return renderSelectField(ui, "FALLBACK", currentFallbackModelLabel(draft), false);
+  const query = draft.fallbackModelQuery ?? "";
+  const matches = filteredFallbackModelOptions(draft, providers);
+  const selectedLabel = matches.length === 0
+    ? "no fallback matches"
+    : draft.fallbackModel
+      ? modelLabel(draft.fallbackModel)
+      : "no fallback";
+  return renderFieldShell(
+    ui,
+    "FALLBACK",
     true,
     4,
     ui.Box(
@@ -4695,6 +4817,11 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.viewState.view === "follow") {
+    await handleFollowViewKey(key, state, actions);
+    return;
+  }
+
   if (state.viewState.view === "archive") {
     await handleArchiveViewKey(key, state, actions);
     return;
@@ -4722,6 +4849,11 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
 
   if (state.instanceSwitcher) {
     await handleInstanceSwitcherKey(key, state, actions);
+    return;
+  }
+
+  if (state.blockedAnswer) {
+    await handleBlockedAnswerKey(key, state, actions);
     return;
   }
 
@@ -4869,8 +5001,18 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       if (!canUseSelectedCardAction(state, actions, "run")) return;
       await handleConfirmableCardAction("run", state, actions, (task) => actions.client.runTask(task.id), "run");
       return;
+    case "y":
+      await answerSelectedPermission(state, actions, "allow_once");
+      return;
+    case "N":
+      await answerSelectedPermission(state, actions, "deny");
+      return;
     case "R":
       if (!canUseSelectedCardAction(state, actions, "retry")) return;
+      if (selectedTask(state)?.completion?.outcome === "blocked") {
+        openBlockedAnswerComposer(state, actions);
+        return;
+      }
       await handleConfirmableCardAction("retry", state, actions, (task) => actions.client.retryTask(task.id), "retry");
       return;
     case "a":
@@ -4903,6 +5045,9 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       return;
     case "v":
       await openDiffViewForSelection(state, actions);
+      return;
+    case "w":
+      await openFollowViewForSelection(state, actions);
       return;
     case "k":
       if (!canUseSelectedCardAction(state, actions, "abort")) return;
@@ -5088,6 +5233,14 @@ export function handlePaste(event: PasteEvent, state: TuiState, actions: Pick<Tu
     return;
   }
 
+  if (state.blockedAnswer && state.viewState.view === "board") {
+    state.blockedAnswer = editBlockedAnswerDraft(state.blockedAnswer, normalizePastedText(text, "description"));
+    rememberBlockedAnswerDraft(state, state.blockedAnswer);
+    event.preventDefault();
+    actions.render();
+    return;
+  }
+
   if (state.viewState.view === "workspaceGate" && !state.workspaceGateSubmitting) {
     state.workspaceGateInput += normalizeSingleLinePaste(text);
     state.workspaceGateError = undefined;
@@ -5180,6 +5333,14 @@ async function handleIntegrateRequested(state: TuiState, actions: TuiActions): P
     return;
   }
 
+  if (task.completion?.outcome === "blocked") {
+    state.status = "blocked cards cannot be integrated; use x or m->Done to accept incomplete work";
+    state.error = undefined;
+    clearPendingConfirmation(state);
+    actions.render();
+    return;
+  }
+
   state.status = "checking worktree files...";
   state.error = undefined;
   actions.render();
@@ -5208,7 +5369,153 @@ async function handleIntegrateRequested(state: TuiState, actions: TuiActions): P
 
 function moveTaskToDone(state: TuiState, actions: TuiActions, task: Task): Promise<unknown> {
   const endOfDone = state.tasks.filter((item) => item.column === "done" && item.id !== task.id).length;
-  return actions.client.moveTask(task.id, "done", endOfDone, "User");
+  const blockedAcceptance = task.completion?.outcome === "blocked"
+    ? { acceptIncomplete: true as const, blockedReportedAt: task.completion.reportedAt }
+    : undefined;
+  return blockedAcceptance
+    ? actions.client.moveTask(task.id, "done", endOfDone, "User", blockedAcceptance)
+    : actions.client.moveTask(task.id, "done", endOfDone, "User");
+}
+
+async function answerSelectedPermission(state: TuiState, actions: TuiActions, action: "allow_once" | "deny"): Promise<void> {
+  clearPendingConfirmation(state);
+  const task = selectedTask(state);
+  const ask = firstPendingPermissionAsk(task);
+  if (!task || !ask) {
+    state.status = "no pending permission ask on selected card";
+    actions.render();
+    return;
+  }
+  const key = permissionInFlightKey(task.id, ask.id);
+  const inFlight = state.permissionAnswersInFlight ?? (state.permissionAnswersInFlight = new Set());
+  if (inFlight.has(key)) {
+    state.status = "permission answer already in flight";
+    actions.render();
+    return;
+  }
+  inFlight.add(key);
+  state.status = action === "allow_once" ? "allowing permission once..." : "denying permission...";
+  state.error = undefined;
+  actions.render();
+  try {
+    const outcome = await actions.client.respondPermission(task.id, { askId: ask.id, action, answeredBy: "User" });
+    if (!outcome.ok && outcome.conflict === "not-found") {
+      state.status = "permission ask is stale; refreshing...";
+      await actions.refresh(true);
+      return;
+    }
+    state.status = outcome.ok ? `permission ${outcome.decision === "allow_once" ? "allowed once" : "denied"}` : `permission reply failed: ${outcome.error ?? outcome.conflict}`;
+    await actions.refresh(true);
+  } catch (error) {
+    const message = errorMessage(error);
+    if (message.includes("409")) {
+      state.status = "permission ask changed; refreshing...";
+      await actions.refresh(true);
+    } else {
+      state.error = message;
+      state.status = "permission answer failed";
+    }
+  } finally {
+    inFlight.delete(key);
+    actions.render();
+  }
+}
+
+function openBlockedAnswerComposer(state: TuiState, actions: Pick<TuiActions, "render">): void {
+  clearPendingConfirmation(state);
+  const task = selectedTask(state);
+  const key = task?.completion?.outcome === "blocked" ? blockedAnswerDraftKey(task.id, task.completion.reportedAt) : undefined;
+  const draft = task ? createBlockedAnswerDraft(task, key ? state.blockedAnswerDrafts?.[key] ?? state.blockedAnswer : state.blockedAnswer) : undefined;
+  if (!draft) {
+    state.status = "selected task is not waiting on a blocked answer";
+    actions.render();
+    return;
+  }
+  state.blockedAnswer = draft;
+  rememberBlockedAnswerDraft(state, draft);
+  state.detailTab = undefined;
+  state.moveTargetColumn = undefined;
+  state.error = undefined;
+  actions.render();
+}
+
+function rememberBlockedAnswerDraft(state: TuiState, draft: BlockedAnswerDraft): void {
+  const drafts = state.blockedAnswerDrafts ?? (state.blockedAnswerDrafts = {});
+  drafts[blockedAnswerDraftKey(draft.taskId, draft.blockedReportedAt)] = draft;
+}
+
+async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const draft = state.blockedAnswer;
+  const task = selectedTask(state);
+  if (!draft || !task) {
+    state.blockedAnswer = undefined;
+    actions.render();
+    return;
+  }
+  if (isEscapeKey(key)) {
+    state.blockedAnswer = undefined;
+    state.status = "blocked answer cancelled";
+    actions.render();
+    return;
+  }
+  if (key.ctrl && (key.name || key.sequence) === "u") {
+    state.blockedAnswer = lineDeleteBlockedAnswerDraft(draft);
+    rememberBlockedAnswerDraft(state, state.blockedAnswer);
+    actions.render();
+    return;
+  }
+  if ((key.name || key.sequence) === "backspace" || key.sequence === "\u007f") {
+    state.blockedAnswer = backspaceBlockedAnswerDraft(draft);
+    rememberBlockedAnswerDraft(state, state.blockedAnswer);
+    actions.render();
+    return;
+  }
+  if (isEnterKey(key)) {
+    if (blockedAnswerSubmitLabel(draft) === "plain-retry") {
+      state.blockedAnswer = undefined;
+      await handleConfirmableCardAction("retry", state, actions, (item) => actions.client.retryTask(item.id), "retry");
+      return;
+    }
+    if (staleBlockedAnswerDraft(task, draft)) {
+      state.blockedAnswer = { ...draft, error: "blocked question changed; refresh kept your draft" };
+      rememberBlockedAnswerDraft(state, state.blockedAnswer);
+      await actions.refresh(true);
+      actions.render();
+      return;
+    }
+    if (draft.submitting) {
+      state.status = "blocked answer already submitting";
+      actions.render();
+      return;
+    }
+    state.blockedAnswer = { ...draft, submitting: true, error: undefined };
+    rememberBlockedAnswerDraft(state, state.blockedAnswer);
+    state.status = "submitting blocked answer...";
+    actions.render();
+    const oldSession = task.sessionId ?? task.harnessSessionId;
+    try {
+      const updated = await actions.client.answerBlockedTask(task.id, draft.text.trim(), { blockedReportedAt: draft.blockedReportedAt, answeredBy: "User" });
+      const newSession = updated.sessionId ?? updated.harnessSessionId;
+      const resumeMode = oldSession && newSession === oldSession ? "resume" : "restart";
+      state.blockedAnswer = undefined;
+      delete state.blockedAnswerDrafts?.[blockedAnswerDraftKey(draft.taskId, draft.blockedReportedAt)];
+      state.status = resumeMode === "resume" ? "blocked answer submitted; resumed session" : "blocked answer submitted; restarted session";
+      await actions.refresh(true);
+    } catch (error) {
+      const message = errorMessage(error);
+      state.blockedAnswer = { ...draft, submitting: false, error: message.includes("409") ? "blocked question changed; refreshed and kept draft" : message };
+      rememberBlockedAnswerDraft(state, state.blockedAnswer);
+      if (message.includes("409")) await actions.refresh(true);
+      else state.status = "blocked answer failed";
+    }
+    actions.render();
+    return;
+  }
+  if (!key.ctrl && !key.meta && key.sequence.length === 1 && key.sequence >= " ") {
+    state.blockedAnswer = editBlockedAnswerDraft(draft, key.sequence);
+    rememberBlockedAnswerDraft(state, state.blockedAnswer);
+    actions.render();
+  }
 }
 
 async function openDiffViewForSelection(state: TuiState, actions: TuiActions): Promise<void> {
@@ -5224,11 +5531,20 @@ async function openDiffViewForSelection(state: TuiState, actions: TuiActions): P
   state.moveTargetColumn = undefined;
   state.viewState = openDiffView(state.viewState);
   state.diffView = createLoadingDiffViewState(task!);
+  state.diffLineage = undefined;
   actions.render();
 
   try {
-    const response = await actions.client.getTaskDiff(task!.id);
-    if (state.diffView?.taskId === task!.id) state.diffView = applyDiffResponse(state.diffView, response);
+    const context = typeof actions.client.getTaskContext === "function"
+      ? await actions.client.getTaskContext(task!.id).catch(() => undefined)
+      : undefined;
+    if (context) state.diffLineage = createDiffLineageState(context);
+    const response = state.diffLineage
+      ? await fetchSelectedDiffEvidence(state.diffLineage, actions.client)
+      : await actions.client.getTaskDiff(task!.id);
+    if (state.diffView?.taskId === task!.id) {
+      state.diffView = applyDiffResponse({ ...state.diffView, sourceLabel: state.diffLineage ? diffLineageHeader(state.diffLineage, response) : state.diffView.sourceLabel }, response);
+    }
     await refreshDiffViewCommitStatus(state, actions);
   } catch (error) {
     if (state.diffView?.taskId === task!.id) state.diffView = applyDiffError(state.diffView, errorMessage(error));
@@ -5245,6 +5561,7 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
   if (isEscapeKey(key) || key.sequence === "b") {
     state.viewState = closeDiffView(state.viewState);
     state.diffView = undefined;
+    state.diffLineage = undefined;
     actions.render();
     return;
   }
@@ -5330,9 +5647,91 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
     await refreshDiffViewAfterEditor(state, actions);
     return;
   }
+  if (key.sequence === "a") {
+    await cycleDiffEvidenceSource(state, actions);
+    return;
+  }
   if (key.sequence === "?") {
     state.overlay = "help";
     actions.render();
+    return;
+  }
+}
+
+async function cycleDiffEvidenceSource(state: TuiState, actions: TuiActions): Promise<void> {
+  if (!state.diffView || !state.diffLineage) {
+    state.status = "no lineage context for this diff";
+    actions.render();
+    return;
+  }
+  state.diffLineage = moveAncestorSelection(state.diffLineage, 1);
+  state.diffView = { ...state.diffView, loading: true, sourceLabel: diffLineageHeader(state.diffLineage, undefined) };
+  actions.render();
+  try {
+    const response = await fetchSelectedDiffEvidence(state.diffLineage, actions.client);
+    if (!state.diffView) return;
+    state.diffView = applyDiffResponse({ ...state.diffView, sourceLabel: diffLineageHeader(state.diffLineage, response) }, response);
+  } catch (error) {
+    if (state.diffView) state.diffView = applyDiffError(state.diffView, errorMessage(error));
+  }
+  actions.render();
+}
+
+async function openFollowViewForSelection(state: TuiState, actions: TuiActions): Promise<void> {
+  clearPendingConfirmation(state);
+  const task = selectedTask(state);
+  if (!task || (!task.sessionId && !task.harnessSessionId)) {
+    state.status = "follow view needs a task with a session";
+    actions.render();
+    return;
+  }
+  closeInlineDetail(state);
+  state.moveTargetColumn = undefined;
+  state.followStream?.close();
+  state.followView = createFollowViewState(task.id);
+  state.viewState = transitionView(state.viewState, "follow");
+  actions.render();
+  try {
+    state.followStream = await actions.client.streamSessionEvents(task.id, (frame) => {
+      if (!state.followView || state.followView.taskId !== task.id) return;
+      state.followView = applyFollowFrame(state.followView, frame);
+      if (shouldRenderFollowFrame(state.followView)) {
+        state.followView = markFollowRendered(state.followView);
+        actions.render();
+      }
+    });
+  } catch (error) {
+    if (state.followView?.taskId === task.id) {
+      state.followView = { ...state.followView, connection: "STATIC", gapReason: errorMessage(error) };
+      state.status = "follow stream unavailable; showing static buffer";
+    }
+    actions.render();
+  }
+}
+
+async function handleFollowViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const keyName = key.name || key.sequence;
+  if (key.sequence === "q" || key.sequence === "b" || isEscapeKey(key)) {
+    state.followStream?.close();
+    state.followStream = undefined;
+    state.followView = undefined;
+    state.viewState = transitionView(state.viewState, "board");
+    await actions.refresh(true);
+    actions.render();
+    return;
+  }
+  if (key.sequence === "f" && state.followView) {
+    state.followView = tailFollow(state.followView);
+    actions.render();
+    return;
+  }
+  if ((keyName === "down" || keyName === "up") && state.followView) {
+    state.followView = scrollFollow(state.followView, keyName === "down" ? 1 : -1, Math.max(1, state.terminalRows - 10));
+    actions.render();
+    return;
+  }
+  if (key.sequence === "u") {
+    await actions.refresh(true);
     return;
   }
 }
@@ -5534,10 +5933,12 @@ async function refreshDiffViewAfterEditor(state: TuiState, actions: TuiActions):
   const wasLocked = diffView.fileSelectionLocked;
 
   try {
-    const response = await actions.client.getTaskDiff(diffView.taskId);
+    const response = state.diffLineage
+      ? await fetchSelectedDiffEvidence(state.diffLineage, actions.client)
+      : await actions.client.getTaskDiff(diffView.taskId);
     if (state.diffView?.taskId !== diffView.taskId) return;
 
-    let next = applyDiffResponse(state.diffView, response);
+    let next = applyDiffResponse({ ...state.diffView, sourceLabel: state.diffLineage ? diffLineageHeader(state.diffLineage, response) : state.diffView.sourceLabel }, response);
     if (selectedFile) {
       const restoredIndex = next.files.findIndex((file) => file.file === selectedFile.file);
       next = {
@@ -5644,6 +6045,7 @@ function createEditTaskDraft(task: Task, state: TuiState): NewTaskDraft {
     acpOptions: reconcileAcpOptions(state.acpConfig, task.harness ?? "opencode", task.acpOptions),
     assignedTo: task.assignedTo ?? "",
     model: task.model ?? undefined,
+    fallbackModel: task.fallbackModel ?? undefined,
     isolation: task.isolation ?? "worktree",
     autoRun: task.autoRun ?? false,
     permissionOverrides: {
@@ -5934,6 +6336,12 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
     return;
   }
 
+  if (handleFallbackModelQueryKey(draft, key)) {
+    draft.error = undefined;
+    actions.render();
+    return;
+  }
+
   if (isWizardBackKey(key, draft)) {
     advanceWizardStep(state, draft, -1);
     actions.render();
@@ -5970,6 +6378,7 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
 function isWizardBackKey(key: KeyEvent, draft: NewTaskDraft): boolean {
   if (isTextInputField(draft.field)) return false;
   if (draft.field === "model") return false;
+  if (draft.field === "fallbackModel") return false;
   return key.sequence === "b" || key.sequence === "B";
 }
 
@@ -6012,6 +6421,17 @@ function handleModelQueryKey(draft: NewTaskDraft, key: KeyEvent): boolean {
   return true;
 }
 
+function handleFallbackModelQueryKey(draft: NewTaskDraft, key: KeyEvent): boolean {
+  if (draft.field !== "fallbackModel") return false;
+  if (key.name === "backspace" || key.sequence === "" || key.sequence === "\b") {
+    draft.fallbackModelQuery = (draft.fallbackModelQuery ?? "").slice(0, -1) || undefined;
+    return true;
+  }
+  if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
+  draft.fallbackModelQuery = (draft.fallbackModelQuery ?? "") + key.sequence;
+  return true;
+}
+
 /**
  * Only OpenCode's in-place (non-worktree) tasks may carry a permission
  * override — worktree tasks always get the automatic write-fenced ruleset
@@ -6038,6 +6458,12 @@ function draftAcpOptionsPayload(state: TuiState, draft: NewTaskDraft): AcpOption
 function draftModelPayload(draft: NewTaskDraft): ModelRef | undefined {
   if (isAcpHarness(draft.harness) && draft.model?.id === "") return undefined;
   return draft.model;
+}
+
+function draftFallbackModelPayload(draft: NewTaskDraft): ModelRef | undefined {
+  if (draft.harness !== "opencode") return undefined;
+  if (draft.model && draft.fallbackModel?.providerID === draft.model.providerID) return undefined;
+  return draft.fallbackModel;
 }
 
 async function createDraftTask(state: TuiState, actions: TuiActions): Promise<void> {
@@ -6068,6 +6494,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
     const hasAcpModes = (acpConfigForHarness(state.acpConfig, draft.harness)?.modes.length ?? 0) > 0;
     const acpOptions = draftAcpOptionsPayload(state, draft);
     const model = draftModelPayload(draft);
+    const fallbackModel = draftFallbackModelPayload(draft);
     const task = isEditing
       ? await actions.client.updateTask(draft.editingTaskId as string, draft.type === "manual" ? {
           type: "manual",
@@ -6089,6 +6516,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           claudePermissionMode: isClaudeHarness(draft.harness) && hasAcpModes ? permissionMode : null,
           acpOptions: acpOptions ?? null,
           model: model ?? null,
+          fallbackModel: fallbackModel ?? null,
           isolation: draft.isolation,
           autoRun: draft.autoRun,
           permissionOverrides: draftPermissionOverridesPayload(draft) ?? null,
@@ -6114,6 +6542,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
           ...(isClaudeHarness(draft.harness) && hasAcpModes ? { claudePermissionMode: permissionMode } : {}),
           ...(acpOptions ? { acpOptions } : {}),
           model,
+          fallbackModel,
           isolation: draft.isolation,
           autoRun: draft.autoRun,
           permissionOverrides: draftPermissionOverridesPayload(draft),
@@ -6152,6 +6581,7 @@ function createNewTaskDraft(state: TuiState): NewTaskDraft {
     acpOptions: {},
     assignedTo: "",
     model: undefined,
+    fallbackModel: undefined,
     isolation: "worktree",
     autoRun: false,
     permissionOverrides: { edit: "allow", bash: "allow", webfetch: "allow" },
@@ -6172,6 +6602,7 @@ function moveDraftField(state: TuiState, draft: NewTaskDraft, delta: number): vo
   const index = order.indexOf(current);
   draft.field = order[(index + delta + order.length) % order.length];
   if (current === "model" && draft.field !== "model") draft.modelQuery = undefined;
+  if (current === "fallbackModel" && draft.field !== "fallbackModel") draft.fallbackModelQuery = undefined;
 }
 
 function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number): boolean {
@@ -6191,14 +6622,17 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       }
       if (isAcpHarness(draft.harness)) {
         draft.model = undefined;
+        draft.fallbackModel = undefined;
         draft.permissionMode = defaultAcpPermissionMode(state.acpConfig, draft.harness);
         draft.acpOptions = defaultAcpOptions(state.acpConfig, draft.harness);
       } else {
         draft.providerId = "";
         draft.model = undefined;
+        draft.fallbackModel = undefined;
         draft.acpOptions = {};
       }
       draft.modelQuery = undefined;
+      draft.fallbackModelQuery = undefined;
       if (!stepFieldOrder(state, draft).includes(draft.field)) draft.field = stepFieldOrder(state, draft)[0] ?? draft.field;
       return true;
     case "provider":
@@ -6217,6 +6651,9 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       return true;
     case "model":
       cycleModel(draft, state.agents, state.providers, state.acpConfig, delta);
+      return true;
+    case "fallbackModel":
+      cycleFallbackModel(draft, state.providers, delta);
       return true;
     case "isolation":
       draft.isolation = draft.isolation === "worktree" ? "in-place" : "worktree";
@@ -6326,7 +6763,9 @@ function cycleProvider(draft: NewTaskDraft, providers: RosterProvider[], delta: 
   draft.providerId = ids[(current + delta + ids.length) % ids.length] ?? "";
   const provider = providers.find((item) => item.id === draft.providerId);
   draft.model = provider ? modelRefFromProvider(provider) : undefined;
+  if (draft.model && draft.fallbackModel?.providerID === draft.model.providerID) draft.fallbackModel = undefined;
   draft.modelQuery = undefined; // a new provider means a new candidate list — any stale filter no longer applies
+  draft.fallbackModelQuery = undefined;
 }
 
 function cycleTaskKind(draft: NewTaskDraft, delta: number): void {
@@ -6387,6 +6826,17 @@ function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], providers: Roste
     options.findIndex((model) => sameModel(model, draft.model)),
   );
   draft.model = options[(current + delta + options.length) % options.length];
+  if (draft.model && draft.fallbackModel?.providerID === draft.model.providerID) draft.fallbackModel = undefined;
+}
+
+function cycleFallbackModel(draft: NewTaskDraft, providers: RosterProvider[], delta: number): void {
+  const options = filteredFallbackModelOptions(draft, providers);
+  if (options.length === 0) {
+    draft.fallbackModel = undefined;
+    return;
+  }
+  const current = Math.max(0, options.findIndex((model) => sameModel(model, draft.fallbackModel)));
+  draft.fallbackModel = options[(current + delta + options.length) % options.length];
 }
 
 function handleDraftTextKey(draft: NewTaskDraft, key: KeyEvent): boolean {
@@ -7041,11 +7491,16 @@ async function handleInlineMoveKey(key: KeyEvent, state: TuiState, actions: TuiA
     }
     const targetLane = state.tasks.filter((item) => item.column === target && item.id !== task.id).length;
     const completedBy = target === "done" ? "User" : null;
+    const blockedAcceptance = target === "done" && task.completion?.outcome === "blocked"
+      ? { acceptIncomplete: true as const, blockedReportedAt: task.completion.reportedAt }
+      : undefined;
     state.moveTargetColumn = undefined;
     try {
       state.status = `moving ${task.title} to ${TUI_COLUMN_LABELS[target]}...`;
       actions.render();
-      const freshTasks = await actions.client.moveTask(task.id, target, targetLane, completedBy);
+      const freshTasks = blockedAcceptance
+        ? await actions.client.moveTask(task.id, target, targetLane, completedBy, blockedAcceptance)
+        : await actions.client.moveTask(task.id, target, targetLane, completedBy);
       state.tasks = freshTasks;
       state.status = `moved ${task.title} to ${TUI_COLUMN_LABELS[target]}`;
       state.selectedTaskId = task.id;
@@ -7271,6 +7726,10 @@ function currentModelLabel(draft: NewTaskDraft): string {
   return draft.model ? modelLabel(draft.model) : AGENT_PROFILE_DEFAULT_LABEL;
 }
 
+export function currentFallbackModelLabel(draft: Pick<NewTaskDraft, "fallbackModel">): string {
+  return draft.fallbackModel ? modelLabel(draft.fallbackModel) : "No fallback";
+}
+
 function defaultAgentId(agents: RosterAgent[]): string {
   return agents.find((agent) => agent.id === "build")?.id ?? agents[0]?.id ?? "";
 }
@@ -7305,6 +7764,16 @@ function filteredModelOptions(draft: NewTaskDraft, agents: RosterAgent[], provid
   const query = (draft.modelQuery ?? "").trim().toLowerCase();
   if (!query) return options;
   return options.filter((model): model is ModelRef => model !== undefined && modelLabel(model).toLowerCase().includes(query));
+}
+
+export function filteredFallbackModelOptions(
+  draft: Pick<NewTaskDraft, "model" | "fallbackModel" | "fallbackModelQuery">,
+  providers: RosterProvider[],
+): ModelRef[] {
+  const options = fallbackModelOptions(providers, draft.model);
+  const query = (draft.fallbackModelQuery ?? "").trim().toLowerCase();
+  if (!query) return options;
+  return options.filter((model) => modelLabel(model).toLowerCase().includes(query));
 }
 
 function sameModel(left: ModelRef | undefined, right: ModelRef | undefined): boolean {
@@ -7504,6 +7973,7 @@ async function safeResponseText(response: Response): Promise<string> {
 }
 
 function laneColor(task: Task): TuiColor {
+  if (task.pendingPermissions?.length) return COLORS.accentBright;
   if (task.runState === "error") return COLORS.laneError;
   switch (task.column) {
     case "todo":
@@ -7520,6 +7990,7 @@ function laneColor(task: Task): TuiColor {
 // Status brightness coding (never hue): error is loud white, a live run glows teal,
 // and unstarted/done work recedes to dim. Mirrors `taskStatus`'s lane awareness.
 function taskStatusColor(task: Task): TuiColor {
+  if (task.pendingPermissions?.length) return COLORS.accentBright;
   if (task.runState === "error") return COLORS.bright;
   if (task.pending === "git-init") return COLORS.muted;
   if (task.pending === "base-checkout-escape") return COLORS.muted;
