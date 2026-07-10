@@ -332,4 +332,185 @@ describe("createPermissionResponderPool", () => {
 
     expect(pool.getLastDenial("ses_1")).toBeNull();
   });
+
+  it("with interactiveTimeoutMs > 0, holds a non-read ask open (via the broker) until the timeout elapses", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [
+      [{ id: "req_9", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      interactiveTimeoutMs: 80,
+    });
+    pool.register("ses_1", "/wt");
+
+    await new Promise((r) => setTimeout(r, 30));
+    expect(client.replyCalls).toHaveLength(0); // still within the interactive window — the default reject hasn't fired yet.
+
+    await waitFor(() => client.replyCalls.length === 1);
+    pool.stop();
+
+    expect(client.replyCalls[0]).toMatchObject({ requestID: "req_9", reply: "reject" });
+  });
+
+  it("surfaces a broker provider-reply failure through onError under the 'reply' context", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [
+      [{ id: "req_10", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+    client.replyShouldThrowCount = 1;
+    const errors: Array<{ sessionID: string; context: string }> = [];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      onError: (sessionID, context) => errors.push({ sessionID, context }),
+    });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => errors.length === 1);
+    pool.stop();
+
+    expect(errors[0]).toEqual({ sessionID: "ses_1", context: "reply" });
+  });
+
+  it("retries and succeeds after a read-class provider reply fails once", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "read")];
+    client.listResponses = [
+      [{ id: "req_retry_read", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+    client.replyShouldThrowCount = 1;
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_1", "/wt");
+
+    // First attempt throws and must not permanently suppress the request.
+    await waitFor(() => client.replyCalls.length >= 1);
+    // A later poll retries the same still-native-pending request and succeeds.
+    await waitFor(() => client.replyCalls.length === 2);
+    pool.stop();
+
+    expect(client.replyCalls.every((call) => call.requestID === "req_retry_read")).toBe(true);
+    expect(client.replyCalls[1]).toMatchObject({ requestID: "req_retry_read", reply: "once" });
+  });
+
+  it("re-raises the same native request as a fresh board ask after a broker provider-reply failure", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [
+      [{ id: "req_retry_broker", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+    client.replyShouldThrowCount = 1;
+    const errors: Array<{ sessionID: string; context: string }> = [];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      interactiveTimeoutMs: 20,
+      onError: (sessionID, context) => errors.push({ sessionID, context }),
+    });
+    pool.register("ses_1", "/wt");
+
+    // First interactive-timeout deny attempt fails at the provider.
+    await waitFor(() => errors.length === 1);
+    // The request was released back to pending, so it must show up again as
+    // a fresh board ask instead of being silently suppressed forever.
+    await waitFor(() => pool.listPending("ses_1").length === 1);
+    // And its second (retried) provider reply attempt succeeds.
+    await waitFor(() => client.replyCalls.filter((c) => c.requestID === "req_retry_broker").length === 2);
+    pool.stop();
+
+    expect(errors).toEqual([{ sessionID: "ses_1", context: "reply" }]);
+    expect(client.replyCalls[client.replyCalls.length - 1]).toMatchObject({
+      requestID: "req_retry_broker",
+      reply: "reject",
+    });
+  });
+
+  it("lists and responds to a broker ask through the pool's own listPending/respond surface", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [
+      [{ id: "req_surface", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      interactiveTimeoutMs: 10_000, // long enough that only an operator reply resolves it in this test.
+    });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => pool.listPending("ses_1").length === 1);
+    const [ask] = pool.listPending("ses_1");
+    expect(ask.tool).toBe("apply_patch");
+
+    const outcome = await pool.respond({ askId: ask.id, action: "allow_once", answeredBy: "reviewer" });
+    pool.stop();
+
+    expect(outcome).toMatchObject({ ok: true, decision: "allow_once" });
+    expect(client.replyCalls[0]).toMatchObject({ requestID: "req_surface", reply: "once" });
+    expect(pool.listPending("ses_1")).toHaveLength(0);
+  });
+
+  it("classifies asks by register()'s source and projects the SDK permission/patterns fields through the broker", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [
+      [
+        {
+          id: "req_classified",
+          sessionID: "ses_1",
+          permission: "bash",
+          patterns: ["/repo/**"],
+          tool: { messageID: "msg_1", callID: "call_1" },
+          metadata: { command: "rm -rf /" }, // must never survive into the public projection.
+        },
+      ],
+    ];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      interactiveTimeoutMs: 10_000,
+    });
+    pool.register("ses_1", "/wt", { source: "in-place-override" });
+
+    await waitFor(() => pool.listPending("ses_1").length === 1);
+    const [ask] = pool.listPending("ses_1");
+    pool.stop();
+
+    expect(ask.source).toBe("in-place-override");
+    expect(ask.permission).toBe("bash");
+    expect(ask.patterns).toEqual(["/repo/**"]);
+    expect(JSON.stringify(ask)).not.toContain("rm -rf");
+  });
+
+  it("register() discards a still-pending broker ask from a prior registration of the same sessionID, so its late timeout never replies", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [
+      [{ id: "req_11", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } }],
+    ];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      interactiveTimeoutMs: 1000, // long enough that it's still pending when we unregister/re-register.
+    });
+    pool.register("ses_1", "/wt");
+
+    await waitFor(() => client.listCallCount >= 1);
+    pool.unregister("ses_1");
+
+    // Re-register the same sessionID (e.g. a retried task reusing the OpenCode
+    // session id) against a target that now reports nothing pending.
+    client.listResponses = [[]];
+    pool.register("ses_1", "/wt");
+
+    // Give the original ask's 1000ms broker timeout no chance to matter —
+    // just prove no reply is ever recorded for it during a normal test window.
+    await new Promise((r) => setTimeout(r, 60));
+    pool.stop();
+
+    expect(client.replyCalls).toHaveLength(0);
+  });
 });
