@@ -33,6 +33,7 @@ import { createApp } from "../../../src/server/app";
 import { registerTerminalRoutes } from "../../../src/server/routes/terminals";
 import { requireBoardToken } from "../../../src/server/auth";
 import { PtyManager, type PtyProcess } from "../../../src/server/terminal/pty-manager";
+import type { RespondPermissionOutcome } from "../../../src/shared";
 import { setupTestWorkspace, cleanupTestWorkspace } from "../test-workspace";
 
 const TEST_TOKEN = "test-token-64_______________________________________________";
@@ -156,6 +157,8 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
       worktreePath,
     })),
     start: vi.fn(),
+    listPendingPermissions: vi.fn(() => []),
+    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
     shutdown: vi.fn(),
   } as unknown as Parameters<typeof createApp>[0]["dispatcher"];
   return {

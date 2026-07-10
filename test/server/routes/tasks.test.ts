@@ -6,7 +6,7 @@ import { registerTaskRoutes } from "../../../src/server/routes/tasks";
 import { registerCompletionRoutes } from "../../../src/server/routes/completion";
 import { TaskDispatcher } from "../../../src/server/dispatcher";
 import { SqliteTaskStore } from "../../../src/db/task-store";
-import type { Dispatcher, RosterAgent, Task } from "../../../src/shared";
+import type { Dispatcher, RosterAgent, RespondPermissionOutcome, Task } from "../../../src/shared";
 import { USER_COMPLETED_BY } from "../../../src/shared";
 import { AdapterError } from "../../../src/shared/errors";
 import type { WorktreeManager } from "../../../src/server/worktree";
@@ -93,7 +93,8 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
     resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
-    start: vi.fn(),
+    listPendingPermissions: vi.fn(() => []),
+    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),    start: vi.fn(),
     shutdown: vi.fn(),
   };
 }

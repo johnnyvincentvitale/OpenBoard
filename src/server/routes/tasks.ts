@@ -31,6 +31,7 @@ import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
 import { computeDiff } from "../diff-engine";
 import { fireChainAdvance, type ChainAdvancer } from "../chain-advancer";
+import { projectPendingPermissions } from "../dto";
 
 function isReachableViaChildren(store: TaskStore, fromId: string, targetId: string): boolean {
   const visited = new Set<string>();
@@ -348,7 +349,8 @@ export function registerTaskRoutes(
       const tasks = store.list({
         archived: archived === "true" ? "only" : archived === "all" ? "all" : "exclude",
       });
-      return c.json(tasks, 200);
+      const projected = projectPendingPermissions(tasks, dispatcher);
+      return c.json(projected, 200);
     } catch (err) {
       return respondWithError(c, err);
     }

@@ -8,7 +8,7 @@ import { createBoardClient } from "../../src/client/board-client";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { registerTaskRoutes } from "../../src/server/routes/tasks";
 import { applyDiffResponse, createLoadingDiffViewState, diffViewHeaderLabel } from "../../src/tui/diff-view";
-import type { Dispatcher, RosterAgent, Task } from "../../src/shared";
+import type { Dispatcher, RespondPermissionOutcome, RosterAgent, Task } from "../../src/shared";
 
 let tmpDir: string | undefined;
 
@@ -51,6 +51,8 @@ function makeDispatcher(store: SqliteTaskStore): Dispatcher {
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
     resolveOrphanWorktree: vi.fn(async (worktreePath) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
+    listPendingPermissions: vi.fn(() => []),
+    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
     start: vi.fn(),
     shutdown: vi.fn(),
   };

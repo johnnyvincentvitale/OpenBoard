@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp, type TaskDetailTab } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
-import type { BoardDiagnostics, Column, Task } from "../../src/shared";
+import type { BoardDiagnostics, Column, RespondPermissionOutcome, Task } from "../../src/shared";
 
 function fakeUi() {
   return {
@@ -4391,6 +4391,8 @@ function actions(overrides: Record<string, unknown> = {}) {
   return {
     refresh: vi.fn(async () => undefined),
     render: vi.fn(),
+    listPendingPermissions: vi.fn(() => []),
+    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
     shutdown: vi.fn(),
     runAction: vi.fn(async () => undefined),
     client: {

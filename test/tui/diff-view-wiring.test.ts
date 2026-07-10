@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyDiffScrollTop, captureDiffScrollTop, handleKeypress, renderApp, shouldAutoRefresh } from "../../src/tui/index";
 import { createMockInstanceProvider, openDiffView } from "../../src/tui/model";
-import type { Column, Task } from "../../src/shared";
+import type { Column, RespondPermissionOutcome, Task } from "../../src/shared";
 
 function fakeUi() {
   return {
@@ -75,6 +75,8 @@ function actions(overrides: Record<string, unknown> = {}) {
   return {
     refresh: vi.fn(async () => undefined),
     render: vi.fn(),
+    listPendingPermissions: vi.fn(() => []),
+    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
     shutdown: vi.fn(),
     runAction: vi.fn(async () => undefined),
     client: {

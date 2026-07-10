@@ -196,6 +196,10 @@ export interface RespondPermissionInput {
   answeredBy: string;
 }
 
+export type RespondPermissionOutcome =
+  | { ok: true; askId: string; decision: "allow_once" | "deny" }
+  | { ok: false; askId: string; conflict: "not-found" | "already-resolved" | "reply-failed"; error?: string };
+
 export interface InstanceConfig {
   port: number;
   dbPath: string;
@@ -618,6 +622,10 @@ export interface Dispatcher {
   sweepOrphanedWorktrees(): Promise<WorktreeCleanupOutcome[]>;
   /** Delete a dirty orphan worktree surfaced by the startup sweep. */
   resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome>;
+  /** List pending permission asks for a task. */
+  listPendingPermissions(taskId: string): PendingPermissionAsk[];
+  /** Respond to a pending permission ask for a task. */
+  respondPermission(taskId: string, input: RespondPermissionInput): Promise<RespondPermissionOutcome>;
   /** Begin event-driven auto-transitions (running → review on idle, → error on failure). */
   start(): void;
   shutdown(): void;

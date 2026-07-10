@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleKeypress, renderApp } from "../../src/tui/index";
 import { createMockInstanceProvider } from "../../src/tui/model";
-import type { Task } from "../../src/shared";
+import type { RespondPermissionOutcome, Task } from "../../src/shared";
 
 function task(id: string, title = id): Task {
   return {
@@ -104,6 +104,8 @@ function actions(overrides: Record<string, unknown> = {}) {
   return {
     refresh: vi.fn(async () => undefined),
     render: vi.fn(),
+    listPendingPermissions: vi.fn(() => []),
+    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
     shutdown: vi.fn(),
     runAction: vi.fn(async () => undefined),
     client: {

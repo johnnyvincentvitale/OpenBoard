@@ -16,8 +16,11 @@ import type {
   PermissionOverrideAction,
   PermissionOverrideCategory,
   PermissionOverrides,
+  RespondPermissionInput,
+  RespondPermissionOutcome,
   RosterAgent,
   RosterProvider,
+  SessionActivityFrame,
   Task,
   TaskHarness,
   TaskKind,
@@ -141,6 +144,34 @@ export type UpdateBoardTaskInput = Omit<
 export type CompletionInput = Omit<CompletionReport, "outcome" | "reportedAt">;
 export type CompletionWithOutputInput = CompletionInput & { finalSessionOutput?: string | null };
 
+/** Options for streaming session-activity events via SSE. */
+export interface StreamSessionEventsOptions {
+  /** Maximum buffered events for backfill (default 200, max 1000). */
+  limit?: number;
+  /** Resume cursor (the last received event seq) for Last-Event-ID. */
+  cursor?: number;
+  /** AbortSignal to cancel the stream. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Callback for session activity frames streamed from the board's SSE endpoint.
+ * `gap` frames signal ring-buffer eviction; the client must request historical
+ * events or accept data loss. `terminal` frames signal run completion.
+ */
+export type SessionActivityFrameCallback = (frame: SessionActivityFrame) => void;
+
+/**
+ * Result of connecting to the session-events SSE stream.
+ * `close()` tears down the connection and the SSE parser.
+ */
+export interface SessionEventsStream {
+  /** Active until close() is called or the stream aborts on its own. */
+  readonly active: boolean;
+  /** Abort the underlying fetch and close the stream. Idempotent. */
+  close(): void;
+}
+
 export interface BoardClient {
   readonly boardUrl: string;
   readonly cwd: string;
@@ -173,6 +204,10 @@ export interface BoardClient {
   listComments(id: string): Promise<TaskComment[]>;
   listTaskEvents(id: string): Promise<TaskEvent[]>;
   getTaskDiff(id: string): Promise<DiffResponse>;
+  /** Stream live session activity frames for a task via SSE. */
+  streamSessionEvents(id: string, onFrame: SessionActivityFrameCallback, options?: StreamSessionEventsOptions): Promise<SessionEventsStream>;
+  /** Respond to a pending permission ask on a task. */
+  respondPermission(id: string, input: RespondPermissionInput): Promise<RespondPermissionOutcome>;
   getHealth(): Promise<BoardHealth>;
   getDiagnostics(): Promise<BoardDiagnostics>;
 }
@@ -349,6 +384,9 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     listComments: (id) => requestJson<TaskComment[]>(resolved, buildTaskPath.comments(id), { method: "GET" }),
     listTaskEvents: (id) => requestJson<TaskEvent[]>(resolved, buildTaskPath.taskEvents(id), { method: "GET" }),
     getTaskDiff: (id) => requestJson<DiffResponse>(resolved, buildTaskPath.diff(id), { method: "GET" }),
+    streamSessionEvents: (id, onFrame, options) => streamSessionEvents(resolved, id, onFrame, options),
+    respondPermission: (id, input) =>
+      postJson<RespondPermissionOutcome>(resolved, buildTaskPath.permissionReply(id), input),
     getHealth: () => requestJson<BoardHealth>(resolved, "/api/health", { method: "GET" }),
     getDiagnostics: () => requestJson<BoardDiagnostics>(resolved, "/api/diagnostics", { method: "GET" }),
   };
@@ -662,4 +700,182 @@ async function safeResponseText(response: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * Connect to the board's session-events SSE endpoint and stream parsed
+ * SessionActivityFrame objects to `onFrame`.
+ *
+ * Handles arbitrary chunk boundaries, UTF-8 decoding, CRLF/LF line endings,
+ * multi-line data fields, resume via Last-Event-ID, and abort via the
+ * provided AbortSignal.
+ */
+async function streamSessionEvents(
+  resolved: ResolvedOptions,
+  taskId: string,
+  onFrame: SessionActivityFrameCallback,
+  options?: StreamSessionEventsOptions,
+): Promise<SessionEventsStream> {
+  const limit = Math.min(Math.max(options?.limit ?? 200, 1), 1000);
+  const cursor = options?.cursor ?? 0;
+
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (resolved.boardToken) {
+    params.set("board_token", resolved.boardToken);
+  }
+
+  const url = `${resolved.boardUrl}${buildTaskPath.sessionEvents(taskId)}?${params.toString()}`;
+
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+  };
+  if (cursor > 0) {
+    headers["Last-Event-ID"] = String(cursor);
+  }
+  // Also send auth via Authorization header for non-query-param setups.
+  if (resolved.boardToken) {
+    headers["Authorization"] = `Bearer ${resolved.boardToken}`;
+  }
+
+  const signal = options?.signal;
+
+  let response: Response;
+  try {
+    response = await resolved.fetch(url, {
+      method: "GET",
+      headers,
+      signal,
+    });
+  } catch (err) {
+    if (signal?.aborted) {
+      throw new Error("Session events stream aborted before connecting");
+    }
+    throw new Error(BOARD_UNAVAILABLE_MESSAGE);
+  }
+
+  if (!response.ok) {
+    const detail = await safeResponseText(response);
+    const suffix = detail ? `: ${detail}` : "";
+    throw new Error(`Session events stream request failed (${response.status})${suffix}`);
+  }
+
+  const body = response.body;
+  if (!body) {
+    throw new Error("Session events stream response has no readable body");
+  }
+
+  let active = true;
+  let closed = false;
+  const decoder = new TextDecoder("utf-8");
+
+  // SSE line-buffer: accumulated partial line bytes across chunk boundaries.
+  let lineBuffer = "";
+  // SSE data buffer: accumulated data lines for the current event.
+  const dataLines: string[] = [];
+  let eventType = "";
+
+  function emitEvent(): void {
+    if (dataLines.length === 0) return;
+    const data = dataLines.join("\n");
+    dataLines.length = 0;
+
+    try {
+      const frame = JSON.parse(data) as SessionActivityFrame;
+      if (!closed) {
+        onFrame(frame);
+      }
+    } catch {
+      // Malformed frame — skip without breaking the stream.
+    }
+    eventType = "";
+  }
+
+  const reader = body.getReader();
+
+  // Start the read loop in the background.
+  void (async () => {
+    try {
+      while (active) {
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await reader.read();
+        } catch {
+          break; // Stream cancelled/errored — reader rejects.
+        }
+
+        if (result.done) break;
+
+        const chunk = decoder.decode(result.value, { stream: true });
+        lineBuffer += chunk;
+
+        // Split on any CRLF or LF boundary, handling both.
+        const lines = lineBuffer.split(/\r?\n/);
+        // The last element is a partial line — keep it in the buffer.
+        lineBuffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!active) break;
+
+          if (line.startsWith(":")) {
+            // SSE comment — ignore.
+            continue;
+          }
+
+          if (line.startsWith("event:")) {
+            eventType = line.slice(6).trim();
+            continue;
+          }
+
+          if (line.startsWith("data:")) {
+            // Leading single space after "data:" is optional per SSE spec.
+            let data = line.slice(5);
+            if (data.startsWith(" ")) data = data.slice(1);
+            dataLines.push(data);
+            continue;
+          }
+
+          // Empty line signals end of event.
+          if (line.trim() === "") {
+            emitEvent();
+          }
+        }
+      }
+
+      // Flush any remaining partial data after the stream ends.
+      if (lineBuffer.trim()) {
+        dataLines.push(lineBuffer);
+        lineBuffer = "";
+      }
+      emitEvent();
+
+      closed = true;
+      active = false;
+    } catch {
+      // Stream aborted or errored — clean up silently.
+      active = false;
+      closed = true;
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // Reader may already be released.
+      }
+    }
+  })();
+
+  return {
+    get active() {
+      return active;
+    },
+    close() {
+      active = false;
+      closed = true;
+      try {
+        reader.cancel();
+      } catch {
+        // Reader may already be closed.
+      }
+    },
+  };
 }

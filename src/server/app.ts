@@ -20,7 +20,11 @@ import { registerArchiveRoutes } from "./routes/archive";
 import { registerTaskLinkRoutes } from "./routes/links";
 import { registerTaskCommentRoutes } from "./routes/comments";
 import { registerWorktreeRoutes } from "./routes/worktrees";
+import { registerTaskCompareRoutes } from "./routes/task-compare";
+import { registerPermissionRoutes } from "./routes/permission";
+import { registerSessionEventsRoutes } from "./routes/session-events";
 import type { ChainAdvancer } from "./chain-advancer";
+import type { SessionActivityCollector } from "./session-activity";
 
 export interface AppDeps {
   client: OpencodeHandle["client"];
@@ -40,6 +44,8 @@ export interface AppDeps {
    * chains simply never fire without it.
    */
   chainAdvancer?: ChainAdvancer;
+  /** Session activity collector for live-session event streaming. */
+  activity?: SessionActivityCollector;
 }
 
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
@@ -98,7 +104,10 @@ export function createApp(deps: AppDeps): Hono {
     globalArchiveStore: deps.globalArchiveStore,
     sourceInstance: deps.sourceInstance,
   });
-  registerTaskEventsRoutes(app, { store: deps.taskStore });
+  registerTaskEventsRoutes(app, { store: deps.taskStore, dispatcher: deps.dispatcher });
+  registerTaskCompareRoutes(app, { store: deps.taskStore });
+  registerPermissionRoutes(app, { store: deps.taskStore, dispatcher: deps.dispatcher });
+  registerSessionEventsRoutes(app, { store: deps.taskStore, client: deps.client, activity: deps.activity });
 
   // Safety net — route modules already translate their own AdapterErrors, this catches escapes.
   app.onError((err, c) => {
