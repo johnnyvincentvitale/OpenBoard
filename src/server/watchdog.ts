@@ -208,7 +208,7 @@ export class RunWatchdog {
   }
 
   private isTerminal(): boolean {
-    return this.stage === "exhausted" || this.stage === "idle";
+    return this.stage === "terminated" || this.stage === "exhausted" || this.stage === "idle";
   }
 
   private stop(): void {

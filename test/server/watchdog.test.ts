@@ -183,4 +183,35 @@ describe("RunWatchdog", () => {
     expect(after.snapshot().stage).toBe("terminated");
     expect(decisions).toEqual([expect.objectContaining({ outcome: "retry" })]);
   });
+
+  it("restores a terminated retry-decision state without timers or duplicate callbacks", async () => {
+    const originalDecisions: WatchdogRetryDecision[] = [];
+    const before = new RunWatchdog({ ...baseConfig, sweepIntervalMs: 0 }, {
+      onRetryDecision: (event) => originalDecisions.push(event),
+    }, clock());
+
+    before.startRun(run0, 0);
+    await vi.advanceTimersByTimeAsync(100);
+    const snapshot = before.snapshot();
+    expect(snapshot.stage).toBe("terminated");
+    expect(originalDecisions).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    const duplicateDecisions: WatchdogRetryDecision[] = [];
+    const duplicateTerminations: unknown[] = [];
+    const after = new RunWatchdog(baseConfig, {
+      onTerminate: (event) => duplicateTerminations.push(event),
+      onRetryDecision: (event) => duplicateDecisions.push(event),
+    }, clock(), snapshot);
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(duplicateTerminations).toHaveLength(0);
+    expect(duplicateDecisions).toHaveLength(0);
+
+    after.startRun(run1, 10_100);
+    expect(after.snapshot().stage).toBe("healthy");
+    expect(vi.getTimerCount()).toBe(1);
+  });
 });
