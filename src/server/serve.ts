@@ -1,17 +1,76 @@
 import { fileURLToPath } from "node:url";
+import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { WebSocketServer } from "ws";
 import { GlobalArchiveStore, resolveGlobalArchivePath, type SourceInstanceInfo } from "../db/global-archive-store";
 import { SqliteTaskStore } from "../db/task-store";
+import type { TaskStore } from "../shared/index";
 import { assertPortFree, deriveStorePaths, resolveAdapterConfig, resolveInstanceConfig } from "./config";
-import { startOrConnect } from "./opencode";
+import { startOrConnect, type OpencodeHandle } from "./opencode";
 import { TaskDispatcher } from "./dispatcher";
-import { createChainAdvancer } from "./chain-advancer";
+import { createChainAdvancer, type ChainAdvancer } from "./chain-advancer";
 import { createApp } from "./app";
 import { SessionActivityCollector } from "./session-activity";
 import { resolveBoardToken } from "./auth";
 import { registerTerminalRoutes } from "./routes/terminals";
 import { PtyManager } from "./terminal/pty-manager";
+
+export interface ServerCompositionDeps {
+  client: OpencodeHandle["client"];
+  taskStore: TaskStore;
+  adapterBaseUrl: string;
+  boardToken: string;
+  instanceName?: string;
+  opencodeBaseUrl: string;
+  globalArchiveStore: GlobalArchiveStore;
+  sourceInstance: SourceInstanceInfo;
+  opencodeMode: "spawn" | "connect";
+}
+
+export interface ServerComposition {
+  dispatcher: TaskDispatcher;
+  chainAdvancer: ChainAdvancer;
+  app: Hono;
+  activity: SessionActivityCollector;
+}
+
+/**
+ * Wire the dispatcher, chain advancer, and Hono app together. This is the
+ * one place that decides whether the dispatcher (writer) and the
+ * session-events route (reader, inside createApp) observe the same
+ * SessionActivityCollector — constructing two instances silently starves
+ * the route to the static no-collector heartbeat path even while the
+ * dispatcher is actively recording activity. `main()` below is the only
+ * production caller; tests import this function directly so a dropped
+ * `activity` wire on either side fails for real, not just in a hand-rolled
+ * test double.
+ */
+export function composeServer(deps: ServerCompositionDeps): ServerComposition {
+  const activity = new SessionActivityCollector();
+  const dispatcher = new TaskDispatcher({
+    client: deps.client,
+    store: deps.taskStore,
+    adapterBaseUrl: deps.adapterBaseUrl,
+    boardToken: deps.boardToken,
+    instanceName: deps.instanceName,
+    activity,
+  });
+  const chainAdvancer = createChainAdvancer({ store: deps.taskStore, runTask: (taskId) => dispatcher.run(taskId) });
+  dispatcher.setOnParentSatisfied((parentId) => chainAdvancer.advanceReadyChildren(parentId));
+  const app = createApp({
+    client: deps.client,
+    taskStore: deps.taskStore,
+    dispatcher,
+    opencodeBaseUrl: deps.opencodeBaseUrl,
+    globalArchiveStore: deps.globalArchiveStore,
+    sourceInstance: deps.sourceInstance,
+    boardToken: deps.boardToken,
+    opencodeMode: deps.opencodeMode,
+    chainAdvancer,
+    activity,
+  });
+  return { dispatcher, chainAdvancer, app, activity };
+}
 
 /** Boot the board: connect/spawn opencode, open the sidecars, start the event bridge + dispatcher, serve. */
 export async function main(): Promise<void> {
@@ -41,24 +100,26 @@ export async function main(): Promise<void> {
       instanceName,
     },
   });
-  // Single collector shared by the dispatcher (writer, via runner callbacks)
-  // and the session-events SSE route (reader, via createApp). Constructing
-  // separate instances silently starves the route to the static no-collector
-  // heartbeat path even while the dispatcher is actively recording activity.
-  const activity = new SessionActivityCollector();
-  const dispatcher = new TaskDispatcher({
+  const globalArchiveStore = new GlobalArchiveStore(resolveGlobalArchivePath());
+  const sourceInstance: SourceInstanceInfo = {
+    name: process.env.OPENBOARD_INSTANCE_NAME?.trim() || undefined,
+    port: instance.port,
+    workspace: instance.workspace,
+    dbPath: storePaths.taskDbPath,
+    opencodeBaseUrl: handle.baseUrl,
+  };
+
+  const { dispatcher, app } = composeServer({
     client: handle.client,
-    store: taskStore,
+    taskStore,
     adapterBaseUrl,
     boardToken,
     instanceName,
-    activity,
+    opencodeBaseUrl: handle.baseUrl,
+    globalArchiveStore,
+    sourceInstance,
+    opencodeMode: config.mode,
   });
-  // Chain advancer needs dispatcher.run; the dispatcher needs the advancer to
-  // notify on integrate-to-done — built in this order to avoid a circular
-  // construction, then wired together with the late-bound setter.
-  const chainAdvancer = createChainAdvancer({ store: taskStore, runTask: (taskId) => dispatcher.run(taskId) });
-  dispatcher.setOnParentSatisfied((parentId) => chainAdvancer.advanceReadyChildren(parentId));
   try {
     const outcomes = await dispatcher.sweepOrphanedWorktrees();
     const removedCleanCount = outcomes.filter((o) => o.ok && o.removed && !o.dirty).length;
@@ -82,28 +143,6 @@ export async function main(): Promise<void> {
   }
   dispatcher.start();
   const terminalManager = new PtyManager({ taskStore });
-
-  const globalArchiveStore = new GlobalArchiveStore(resolveGlobalArchivePath());
-  const sourceInstance: SourceInstanceInfo = {
-    name: process.env.OPENBOARD_INSTANCE_NAME?.trim() || undefined,
-    port: instance.port,
-    workspace: instance.workspace,
-    dbPath: storePaths.taskDbPath,
-    opencodeBaseUrl: handle.baseUrl,
-  };
-
-  const app = createApp({
-    client: handle.client,
-    taskStore,
-    dispatcher,
-    opencodeBaseUrl: handle.baseUrl,
-    globalArchiveStore,
-    sourceInstance,
-    boardToken,
-    opencodeMode: config.mode,
-    chainAdvancer,
-    activity,
-  });
   registerTerminalRoutes(app, { manager: terminalManager });
 
   const wss = new WebSocketServer({ noServer: true });
