@@ -6,7 +6,9 @@
  * run-identity ordering so late events from a replaced run are rejected.
  *
  * Never persists or exposes raw tool inputs/outputs, native provider IDs,
- * secrets, or arbitrary metadata.
+ * secrets, or arbitrary metadata. All public text and identifiers are
+ * length-bounded. Numeric metadata is clamped to safe finite ranges.
+ * Caller-owned mutable objects are cloned, not retained.
  */
 import type {
   SessionActivityEvent,
@@ -19,10 +21,17 @@ import type {
   TaskHarness,
 } from "../shared";
 
+// ── Sanitization constants ────────────────────────────────────────────────
+
+const MAX_TEXT_LENGTH = 10_000;
+const MAX_NAME_LENGTH = 256;
+const TEXT_TRUNCATION_SENTINEL = "[...truncated]";
+const SAFE_MAX_INT = Number.MAX_SAFE_INTEGER;
+
 // ── Public types ──────────────────────────────────────────────────────────
 
 export interface SessionActivityConfig {
-  /** Maximum events per-task ring buffer. Default 1000. */
+  /** Maximum events per-task ring buffer. Clamped to integer >= 1. Default 1000. */
   maxEvents?: number;
   /** Injectable clock for deterministic tests. Default Date.now. */
   clock?: () => number;
@@ -55,8 +64,9 @@ export type Unsubscribe = () => void;
 // ── Internal state ────────────────────────────────────────────────────────
 
 interface RunState {
+  /** Deep-cloned run metadata. */
   run: SessionActivityRun;
-  /** Ring buffer of events, newest at the end. */
+  /** Ring buffer of normalized events, newest at the end. */
   events: SessionActivityEvent[];
   /** The seq of the oldest event still in the buffer (0 if empty). */
   oldestSeq: number;
@@ -75,6 +85,26 @@ interface SubscriberEntry {
   callback: (frame: SessionActivityFrame) => void;
 }
 
+// ── Sanitization helpers ──────────────────────────────────────────────────
+
+function sanitizeText(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  if (raw.length <= MAX_TEXT_LENGTH) return raw;
+  return raw.slice(0, MAX_TEXT_LENGTH - TEXT_TRUNCATION_SENTINEL.length) + TEXT_TRUNCATION_SENTINEL;
+}
+
+function sanitizeName(raw: string): string {
+  if (raw.length <= MAX_NAME_LENGTH) return raw;
+  return raw.slice(0, MAX_NAME_LENGTH);
+}
+
+function sanitizeNonNegInt(raw: number | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (!Number.isFinite(raw) || raw < 0) return 0;
+  if (raw > SAFE_MAX_INT) return SAFE_MAX_INT;
+  return Math.trunc(raw);
+}
+
 // ── Collector ─────────────────────────────────────────────────────────────
 
 export class SessionActivityCollector {
@@ -86,28 +116,77 @@ export class SessionActivityCollector {
   private readonly subscribers = new Set<SubscriberEntry>();
 
   constructor(config: SessionActivityConfig = {}) {
-    this.maxEvents = config.maxEvents ?? 1000;
+    const raw = config.maxEvents ?? 1000;
+    // Clamp: must be a safe integer >= 1.
+    this.maxEvents = Number.isFinite(raw) && raw >= 1 ? Math.trunc(raw) : 1000;
     this.clock = config.clock ?? (() => Date.now());
   }
 
   // ── Run lifecycle ────────────────────────────────────────────────────
 
-  /** Start tracking a new run, discarding any previous run for the same taskId. */
+  /**
+   * Start tracking a new run. Replaces any previous run for the same taskId.
+   * Existing subscribers for this task receive a gap frame indicating the
+   * old run was replaced, followed by a snapshot of the fresh (empty) run.
+   */
   startRun(run: SessionActivityRun): void {
-    this.runs.set(run.taskId, {
-      run,
+    // Deep-clone run to avoid retaining caller-owned mutable objects.
+    const cloned: SessionActivityRun = {
+      taskId: run.taskId,
+      runStartedAt: run.runStartedAt,
+      sessionId: run.sessionId,
+      rootSessionId: run.rootSessionId,
+      parentSessionId: run.parentSessionId,
+      harness: run.harness,
+    };
+
+    const oldRun = this.runs.get(cloned.taskId);
+
+    const newState: RunState = {
+      run: cloned,
       events: [],
       oldestSeq: 0,
       nextSeq: 1,
       transport: "live",
       terminal: false,
-    });
+    };
+
+    this.runs.set(cloned.taskId, newState);
+
+    // Notify existing subscribers that the old run was replaced.
+    if (oldRun) {
+      const gapFrame: SessionActivityFrame = {
+        kind: "gap",
+        afterSeq: oldRun.nextSeq - 1,
+        reason: `Run replaced (new runStartedAt=${cloned.runStartedAt})`,
+      };
+      for (const sub of this.subscribers) {
+        if (sub.taskId === cloned.taskId) {
+          this.safeCall(sub.callback, gapFrame);
+        }
+      }
+    }
+
+    // Always emit a fresh-run snapshot to existing subscribers.
+    const snapshotFrame: SessionActivityFrame = {
+      kind: "snapshot",
+      run: cloned,
+      events: [],
+      lastEventAt: null,
+      transport: "live",
+    };
+    for (const sub of this.subscribers) {
+      if (sub.taskId === cloned.taskId) {
+        this.safeCall(sub.callback, snapshotFrame);
+      }
+    }
   }
 
   /**
    * Record a normalized event into the ring buffer for the given task+run.
    * Returns the assigned seq, or null if the run identity does not match
-   * (stale/replaced run) or the run has already been terminated.
+   * (stale/replaced run), the run has been terminated, or the input fails
+   * sanitization (impossible shape).
    */
   recordEvent(
     taskId: string,
@@ -116,30 +195,47 @@ export class SessionActivityCollector {
   ): number | null {
     const runState = this.runs.get(taskId);
     if (!runState) return null;
-    if (runState.run.runStartedAt !== runStartedAt) return null; // stale run
-    if (runState.terminal) return null; // cannot record after terminal
+    if (runState.run.runStartedAt !== runStartedAt) return null;
+    if (runState.terminal) return null;
+
+    // Validate and normalize the input shape.
+    const normalized = this.normalize(input);
+    if (!normalized) return null;
 
     const seq = runState.nextSeq++;
+
     const event: SessionActivityEvent = {
       seq,
       taskId,
       runStartedAt,
-      sessionId: input.sessionId,
-      rootSessionId: input.rootSessionId,
-      parentSessionId: input.parentSessionId,
-      harness: input.harness,
+      sessionId: normalized.sessionId,
+      rootSessionId: normalized.rootSessionId,
+      parentSessionId: normalized.parentSessionId,
+      harness: normalized.harness,
       occurredAt: this.clock(),
-      kind: input.kind,
-      role: input.role,
-      text: input.text,
-      tool: input.tool,
+      kind: normalized.kind,
+      role: normalized.role,
+      text: sanitizeText(normalized.text),
+      tool: normalized.tool
+        ? {
+            name: sanitizeName(normalized.tool.name),
+            callId: normalized.tool.callId !== undefined ? sanitizeName(normalized.tool.callId) : undefined,
+            status: normalized.tool.status,
+            durationMs: sanitizeNonNegInt(normalized.tool.durationMs),
+            outputBytes: sanitizeNonNegInt(normalized.tool.outputBytes),
+          }
+        : undefined,
     };
 
     // Ring buffer eviction: drop oldest when full.
     if (runState.events.length >= this.maxEvents) {
       runState.events.shift();
+      // After shift, if the array is empty (maxEvents=1 edge case),
+      // oldestSeq is set below after push. Otherwise use the new head.
       runState.oldestSeq = runState.events[0]?.seq ?? 0;
-    } else if (runState.events.length === 0) {
+    }
+
+    if (runState.events.length === 0) {
       runState.oldestSeq = seq;
     }
     runState.events.push(event);
@@ -157,8 +253,9 @@ export class SessionActivityCollector {
    *
    * On connect the subscriber receives:
    * 1. A gap frame if the cursor is behind the oldest buffered event.
-   * 2. A snapshot frame with all events after the cursor.
-   * 3. A heartbeat frame with the current transport state.
+   * 2. Always a snapshot frame (even if empty) for an active run.
+   * 3. A heartbeat frame with the run's latest event timestamp.
+   * 4. A terminal frame if the run has already ended.
    *
    * After connect, new events are delivered as append frames.
    * Returns an unsubscribe function.
@@ -173,9 +270,9 @@ export class SessionActivityCollector {
 
     const runState = this.runs.get(taskId);
 
-    // If no run is active, just send a heartbeat with static transport.
+    // No run active: static heartbeat only.
     if (!runState) {
-      callback({
+      this.safeCall(callback, {
         kind: "heartbeat",
         lastEventAt: null,
         transport: "static",
@@ -187,35 +284,35 @@ export class SessionActivityCollector {
 
     // Gap: cursor is behind the oldest buffered event.
     if (cursor > 0 && runState.oldestSeq > 0 && cursor < runState.oldestSeq) {
-      callback({
+      this.safeCall(callback, {
         kind: "gap",
         afterSeq: cursor,
         reason: `Events before seq ${runState.oldestSeq} have been evicted from the ring buffer`,
       });
     }
 
-    // Snapshot: all events after cursor.
-    const events = runState.events.filter((e) => e.seq > cursor);
-    if (events.length > 0) {
-      callback({
-        kind: "snapshot",
-        run: runState.run,
-        events,
-        lastEventAt: events[events.length - 1].occurredAt,
-        transport: runState.transport,
-      });
-    }
-
-    // Heartbeat with current transport.
-    callback({
-      kind: "heartbeat",
-      lastEventAt: events.length > 0 ? events[events.length - 1].occurredAt : null,
+    // Snapshot: always sent for an active run.
+    // lastEventAt reflects the run's latest buffered event, not only those after cursor.
+    const latestEvent = runState.events[runState.events.length - 1];
+    const eventsAfterCursor = runState.events.filter((e) => e.seq > cursor);
+    this.safeCall(callback, {
+      kind: "snapshot",
+      run: runState.run,
+      events: eventsAfterCursor,
+      lastEventAt: latestEvent?.occurredAt ?? null,
       transport: runState.transport,
     });
 
-    // If the run is already terminal, send the terminal frame.
+    // Heartbeat with the run's latest event timestamp.
+    this.safeCall(callback, {
+      kind: "heartbeat",
+      lastEventAt: latestEvent?.occurredAt ?? null,
+      transport: runState.transport,
+    });
+
+    // Terminal frame if already ended.
     if (runState.terminal && runState.terminalStatus) {
-      callback({
+      this.safeCall(callback, {
         kind: "terminal",
         status: runState.terminalStatus,
       });
@@ -243,15 +340,15 @@ export class SessionActivityCollector {
 
     runState.transport = transport;
 
-    const lastEvent = runState.events[runState.events.length - 1];
+    const latestEvent = runState.events[runState.events.length - 1];
     const frame: SessionActivityFrame = {
       kind: "heartbeat",
-      lastEventAt: lastEvent?.occurredAt ?? null,
+      lastEventAt: latestEvent?.occurredAt ?? null,
       transport,
     };
     for (const sub of this.subscribers) {
       if (sub.taskId === taskId) {
-        sub.callback(frame);
+        this.safeCall(sub.callback, frame);
       }
     }
   }
@@ -278,7 +375,7 @@ export class SessionActivityCollector {
     const frame: SessionActivityFrame = { kind: "terminal", status };
     for (const sub of this.subscribers) {
       if (sub.taskId === taskId) {
-        sub.callback(frame);
+        this.safeCall(sub.callback, frame);
       }
     }
   }
@@ -293,12 +390,58 @@ export class SessionActivityCollector {
 
   // ── Internal helpers ─────────────────────────────────────────────────
 
+  /**
+   * Normalize and validate the event input. Returns a deep-cloned copy
+   * (never retains caller-owned objects). Returns null for impossible
+   * shape combinations.
+   */
+  private normalize(input: SessionActivityEventInput): SessionActivityEventInput | null {
+    // Deep-clone to avoid caller-owned mutable object retention.
+    const cloned: SessionActivityEventInput = {
+      sessionId: input.sessionId,
+      rootSessionId: input.rootSessionId,
+      parentSessionId: input.parentSessionId,
+      harness: input.harness,
+      kind: input.kind,
+      role: input.role,
+      text: input.text,
+      tool: input.tool
+        ? {
+            name: input.tool.name,
+            callId: input.tool.callId,
+            status: input.tool.status,
+            durationMs: input.tool.durationMs,
+            outputBytes: input.tool.outputBytes,
+          }
+        : undefined,
+    };
+
+    // Impossible shape: tool kind without tool data, or non-tool kind with tool data.
+    if (cloned.kind === "tool" && !cloned.tool) return null;
+    if (cloned.kind !== "tool" && cloned.tool) {
+      // Drop the tool data for non-tool kinds rather than rejecting outright.
+      cloned.tool = undefined;
+    }
+
+    return cloned;
+  }
+
+  /** Fan out an append frame to task-scoped subscribers, isolating throws. */
   private fanoutAppend(taskId: string, event: SessionActivityEvent): void {
     const frame: SessionActivityFrame = { kind: "append", event };
     for (const sub of this.subscribers) {
       if (sub.taskId === taskId) {
-        sub.callback(frame);
+        this.safeCall(sub.callback, frame);
       }
+    }
+  }
+
+  /** Invoke a subscriber callback, catching and discarding any thrown error. */
+  private safeCall(callback: (frame: SessionActivityFrame) => void, frame: SessionActivityFrame): void {
+    try {
+      callback(frame);
+    } catch {
+      // Discard: one misbehaving subscriber must not break fanout.
     }
   }
 }
