@@ -1,5 +1,5 @@
 /**
- * Diff engine — computes per-file diffs for Review cards.
+ * Diff engine — computes per-file diffs for Review and Done cards.
  *
  * Supports three card types:
  *   - worktree cards: git diff base...board/<taskId> merge-base form.
@@ -245,23 +245,22 @@ function capBytes(files: DiffFile[], maxBytes: number): { files: DiffFile[]; cap
 }
 
 /**
- * Compute the diff for a Review-card task. Returns a DiffResponse:
- *  - `{ kind: "diff", files, capped, root }` with file-level patches when
- *    git evidence is available. `root` is the absolute path of the tree the
- *    diff was actually computed against — the task's worktree path for
- *    worktree/harness-worktree cards, or the task directory for in-place
- *    cards — so callers can resolve `files[].file` (repo-relative) to a
- *    real path on disk without re-deriving which tree was diffed.
+ * Compute the diff for a Review- or Done-card task. Returns a DiffResponse:
+ *  - `{ kind: "diff", files, capped, root? }` with file-level patches when
+ *    git evidence is available. For a live tree, `root` is the absolute path
+ *    the diff was computed against so callers can resolve `files[].file`.
+ *    It is omitted when a Done card is diffed from a retained branch whose
+ *    worktree has already been removed.
  *  - `{ kind: "no-git", reason }` when no git evidence can be produced
  *    (non-git dir, missing baseCommit, deleted branch, etc.).
  */
 export async function computeDiff(task: Task): Promise<DiffResponse> {
   // --- Worktree cards ---
   if (task.worktreePath && task.worktreeBranch) {
-    // Compare the live task worktree against the recorded base. Review cards
-    // usually contain uncommitted edits; integration creates the task commit
-    // later, so a branch-to-branch diff would hide the changes users need to
-    // review.
+    // Compare the live task worktree against the recorded base. Review cards,
+    // and Done cards accepted without integration, may contain uncommitted
+    // edits; integration creates the task commit later, so a branch-to-branch
+    // diff would hide the changes users need to inspect.
     const baseRef = task.baseCommit ?? task.baseBranch;
     if (!baseRef) {
       return { kind: "no-git", reason: "No base reference recorded for this worktree task" };
@@ -305,6 +304,33 @@ export async function computeDiff(task: Task): Promise<DiffResponse> {
       capped: capped.capped || forcedCapped,
       root: task.worktreePath,
     };
+  }
+
+  // --- Done worktree cards after checkout cleanup ---
+  // Integrate removes the worktree but deliberately keeps the task branch.
+  // Diff that frozen branch rather than the current base checkout, which may
+  // have accumulated unrelated later integrations. There is no live checkout
+  // whose files match this branch snapshot, so omit `root` intentionally.
+  if (task.column === "done" && task.worktreeBranch) {
+    const baseRef = task.baseCommit ?? task.baseBranch;
+    if (!baseRef) {
+      return { kind: "no-git", reason: "No base reference recorded for this completed worktree task" };
+    }
+    const result = await git(task.directory, [
+      "diff",
+      `--unified=${DIFF_CONTEXT_LINES}`,
+      baseRef,
+      task.worktreeBranch,
+    ]);
+    if (result.code !== 0) {
+      return {
+        kind: "no-git",
+        reason: `Completed branch diff failed: ${result.stderr || result.stdout}`.trim(),
+      };
+    }
+    const files = parseUnifiedDiff(result.stdout);
+    const capped = capBytes(files, MAX_TOTAL_PATCH_BYTES);
+    return { kind: "diff", files: capped.files, capped: capped.capped };
   }
 
   // --- ACP harness cards with harness worktree metadata ---

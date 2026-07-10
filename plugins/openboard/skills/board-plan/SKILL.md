@@ -226,6 +226,11 @@ Every worktree branches from a verified-green commit:
 3. For audit/synthesis cards that need parent evidence, rely on the injected
    `task_diff`-first parent inspection guidance; prefer read/grep/list tools
    over shell commands for anything beyond parent diffs.
+4. A read-only audit can inspect a parent diff but cannot prove the parent tree
+   builds from its own base-only worktree. Do not plan ad hoc diff application
+   as an audit mechanism. Assign executable parent-build verification to the
+   orchestrator in the code-bearing worktree or to a downstream integration
+   candidate, and name that command and owner in the run plan.
 
 ## Choose Task Kinds And Dependencies
 

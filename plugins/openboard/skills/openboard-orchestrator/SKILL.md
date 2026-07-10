@@ -199,6 +199,14 @@ condition passes), you mediate every hop — workers never create cards:
    regression tests fail with the fix reverted; the auditor revert-tests its
    own hollow-test suspicions before reporting them.
 
+Read-only audits inspect parent changes with `task_diff`; their clean, base-only
+worktrees do not execute the parent tree. Treat an audit GO as static evidence,
+not parent-build proof. Before acceptance or integration, run the required
+build/test in the code-bearing parent worktree or in the downstream integration
+candidate that applied the parent diff, and record that result as orchestrator
+verification. Do not reconstruct parent trees through ad hoc audit-side patch
+application.
+
 Task kinds are composable roles, not a fixed pipeline. Useful mappings:
 research fan-out → one `synthesis` child; research → `build` directly when the
 direction is already set; `build` parents → one `audit` child; `audit` plus

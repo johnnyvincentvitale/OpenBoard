@@ -1071,7 +1071,7 @@ export class TaskDispatcher implements Dispatcher {
       "---",
       "PARENT CONTEXT",
       "To inspect a parent's code changes, first call the openboard MCP tool task_diff with that parent's task id (listed below).",
-      "If task_diff is unavailable or errors (for example the parent has left Review), fall back to the parent worktree with read/grep/glob/list tools only.",
+      "If task_diff is unavailable, errors, or returns no-git evidence, fall back to the parent worktree with read/grep/glob/list tools only.",
       "Parent task worktrees are read-only. Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.",
       "Do all implementation and verification shell commands from your own cwd.",
       "Board tools are limited to task_diff for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).",

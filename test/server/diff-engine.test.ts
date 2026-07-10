@@ -95,6 +95,40 @@ describe("computeDiff", () => {
         expect(result.root).toBe(worktreePath);
       }
     });
+
+    it("uses the retained branch for a Done card after its worktree is removed", async () => {
+      const repoDir = join(tmpDir, "repo");
+      const baseCommit = initRepo(repoDir);
+      const worktreePath = join(tmpDir, "wt");
+      runGit(repoDir, ["worktree", "add", "-b", "board/task_test", worktreePath, "HEAD"]);
+
+      writeFileSync(join(worktreePath, "task.ts"), "export const task = true;\n");
+      runGit(worktreePath, ["add", "task.ts"]);
+      runGit(worktreePath, ["commit", "-m", "task change"]);
+      runGit(repoDir, ["worktree", "remove", worktreePath]);
+
+      // Advance main independently after the task branch was frozen. A Done
+      // task diff must not absorb this later, unrelated base-branch change.
+      writeFileSync(join(repoDir, "later.ts"), "export const later = true;\n");
+      runGit(repoDir, ["add", "later.ts"]);
+      runGit(repoDir, ["commit", "-m", "later main change"]);
+
+      const task = makeBaseTask({
+        column: "done",
+        directory: repoDir,
+        worktreeBranch: "board/task_test",
+        baseBranch: "main",
+        baseCommit,
+      });
+
+      const result = await computeDiff(task);
+      expect(result.kind).toBe("diff");
+      if (result.kind === "diff") {
+        expect(result.files.map((file) => file.file)).toEqual(["task.ts"]);
+        expect(result.files.some((file) => file.file === "later.ts")).toBe(false);
+        expect(result.root).toBeUndefined();
+      }
+    });
   });
 
   describe("in-place cards", () => {

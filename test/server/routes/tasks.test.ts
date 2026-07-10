@@ -1942,18 +1942,31 @@ describe("GET /api/tasks/:id/diff", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns 409 for a non-Review card", async () => {
+  it("returns 409 outside Review and Done", async () => {
     const task = store.create({ title: "To Do", description: "", directory: repoDir });
     const app = buildApp(store, dispatcher);
     const res = await app.request(`/api/tasks/${task.id}/diff`);
     expect(res.status).toBe(409);
     const body = await res.json();
-    expect(body.error.message).toContain("only available for Review cards");
+    expect(body.error.message).toContain("only available for Review or Done cards");
   });
 
   it("returns a no-git response for a Review card without git evidence", async () => {
     const task = store.create({ title: "Review", description: "", directory: repoDir });
     store.move(task.id, "review", 0);
+    store.update(task.id, { baseCommit: null, dirtyAtDispatch: false });
+
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/diff`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe("no-git");
+    expect(body.reason).toBeDefined();
+  });
+
+  it("returns a no-git response for a Done card without git evidence", async () => {
+    const task = store.create({ title: "Done", description: "", directory: repoDir });
+    store.move(task.id, "done", 0);
     store.update(task.id, { baseCommit: null, dirtyAtDispatch: false });
 
     const app = buildApp(store, dispatcher);

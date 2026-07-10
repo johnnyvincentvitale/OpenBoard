@@ -34,9 +34,10 @@ export interface FileCommitOutcome {
  *   absolute filesystem path of the tree the diff was computed against —
  *   the task worktree for worktree-isolated cards, or the task directory
  *   for in-place cards — so consumers (e.g. the editor-open feature) know
- *   where on disk `files[].file` (repo-relative) actually resolves. The
- *   live diff-engine/route always populates it; it is typed optional only
- *   so older hand-built fixtures/mocks in tests don't need updating.
+ *   where on disk `files[].file` (repo-relative) actually resolves. Done
+ *   worktree cards whose checkout was removed are diffed from their retained
+ *   branch and omit `root` because no matching live tree exists. It remains
+ *   typed optional for that case and for older test fixtures.
  * - `kind: "no-git"` is a non-crash sentinel for when git evidence is
  *   missing (non-git dir, deleted branch, etc.). The reason string is a
  *   human-readable message destined for the TUI header/detail pane.

@@ -297,10 +297,12 @@ The MCP server's tools are an orchestrator control surface for the existing task
 `task_events` / `task_diff`. `move_task` requires `completedBy` when moving to Done, and `integrate_task`
 requires `confirmReviewed: true`.
 
-Review cards expose `GET /api/tasks/:id/diff`, also available to MCP clients as
-`task_diff`, which the TUI uses for the `v`
-full-screen diff view. Non-Review cards return 409, unknown tasks return 404,
-and missing git evidence returns a readable no-git response instead of crashing.
+Review and Done cards expose `GET /api/tasks/:id/diff`, also available to MCP
+clients as `task_diff`; keeping it available after acceptance lets dependent
+cards inspect a non-integrated parent's changes. The TUI uses the same endpoint
+for the Review-only `v` full-screen diff view. To Do and In Progress cards return
+409, unknown tasks return 404, and missing or removed git evidence returns a
+readable no-git response instead of crashing.
 
 ## BoardV3 task lifecycle
 Beyond Run/Retry/Stop, a Task carries an explicit completion contract, optional

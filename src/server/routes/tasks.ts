@@ -45,13 +45,13 @@ function isReachableViaChildren(store: TaskStore, fromId: string, targetId: stri
   return false;
 }
 
-/** Guard error: GET /api/tasks/:id/diff is only valid for Review cards. */
-class NonReviewDiffError extends Error {
+/** Guard error: GET /api/tasks/:id/diff is only valid for Review or Done cards. */
+class NonDiffableColumnError extends Error {
   readonly status = 409;
 
   constructor() {
-    super("Diff is only available for Review cards");
-    this.name = "NonReviewDiffError";
+    super("Diff is only available for Review or Done cards");
+    this.name = "NonDiffableColumnError";
   }
 }
 
@@ -857,14 +857,14 @@ export function registerTaskRoutes(
     }
   });
 
-  // Diff view (Review cards only) — token-authenticated like all /api/* routes.
+  // Diff inspection (Review and Done cards) — token-authenticated like all /api/* routes.
   app.get(TASK_ROUTE_PATTERNS.diff, async (c) => {
     const id = c.req.param("id");
     try {
       const task = store.get(id);
       if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
-      if (task.column !== "review") {
-        throw new NonReviewDiffError();
+      if (task.column !== "review" && task.column !== "done") {
+        throw new NonDiffableColumnError();
       }
       const diff = await computeDiff(task);
       return c.json(diff, 200);
@@ -915,7 +915,7 @@ function respondWithError(c: Context, err: unknown): Response {
       err.status as ContentfulStatusCode,
     );
   }
-  if (err instanceof NonReviewDiffError) {
+  if (err instanceof NonDiffableColumnError) {
     return c.json(
       { error: { code: "validation", message: err.message } },
       err.status as ContentfulStatusCode,

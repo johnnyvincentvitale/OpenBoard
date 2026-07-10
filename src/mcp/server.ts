@@ -253,7 +253,7 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
     "task_diff",
     {
       title: "Get OpenBoard task diff",
-      description: "Fetch the structured Review-card diff through GET /api/tasks/:id/diff.",
+      description: "Fetch the structured Review- or Done-card diff through GET /api/tasks/:id/diff.",
       inputSchema: TaskIdInputSchema,
     },
     async (args) => toToolResult(await taskDiff(args, toolOptions)),
