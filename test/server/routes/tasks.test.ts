@@ -934,7 +934,7 @@ describe("POST /api/tasks", () => {
     expect(store.list()).toHaveLength(0);
   });
 
-  it("rejects an agent that has no configured model", async () => {
+  it("rejects an agent that has no configured model with targeted recovery steps", async () => {
     const app = buildApp(store, dispatcher, [BUILD_AGENT, NO_MODEL_AGENT]);
 
     const res = await app.request("/api/tasks", {
@@ -951,7 +951,10 @@ describe("POST /api/tasks", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error.code).toBe("validation");
-    expect(body.error.message).toContain("has no configured model");
+    expect(body.error.message).toContain('Agent profile "bare" does not have a usable default model');
+    expect(body.error.message).toContain("select a provider/model in the task wizard");
+    expect(body.error.message).toContain("configure a default model for that OpenCode agent profile");
+    expect(body.error.message).not.toContain("has no configured model");
     expect(store.list()).toHaveLength(0);
   });
 
@@ -1848,6 +1851,42 @@ describe("POST /api/tasks/:id/move", () => {
       residualRisk: "Need choice",
       transition: "move",
     });
+  });
+
+  it("rejects Done moves for Review worktrees with unintegrated or dirty file changes", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.move(a.id, "review", 0);
+    store.update(a.id, {
+      worktreePath: "/worktrees/a",
+      worktreeBranch: "board/a",
+      baseBranch: "main",
+      runState: "idle",
+      completion: { outcome: "complete", summary: "done", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 77 },
+      completionSource: "reported",
+    });
+    dispatcher.getWorktreeCommitStatus.mockResolvedValueOnce({
+      committedFiles: ["src/committed.ts"],
+      uncommittedFiles: ["src/dirty.ts"],
+    });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "done", position: 0, completedBy: "Reviewer" }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error.code).toBe("unintegrated_worktree_changes");
+    expect(body.error.requirement).toMatchObject({
+      transition: "move",
+      committedFiles: ["src/committed.ts"],
+      uncommittedFiles: ["src/dirty.ts"],
+    });
+    expect(body.error.message).toContain("Integrate");
+    expect(dispatcher.getWorktreeCommitStatus).toHaveBeenCalledWith(a.id, undefined);
+    expect(store.get(a.id)?.column).toBe("review");
   });
 
   it("rejects stray blocked acceptance on nonblocked Done moves", async () => {

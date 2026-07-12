@@ -297,6 +297,26 @@ describe("TUI new-task AUTO-RUN toggle", () => {
       expect(createTask).toHaveBeenCalledWith(expect.objectContaining({ isolation: "worktree", autoRun: true }));
     });
 
+    it("prevents agent-profile-default submission when the selected OpenCode agent has no usable model", async () => {
+      const createTask = vi.fn(async (payload: unknown) => ({ ...task("created", "No model"), ...(payload as object) }));
+      const s = state({ agents: [{ id: "bare", mode: "subagent" }] });
+      s.newTask = newTaskDraft({
+        step: "confirm",
+        title: "No model",
+        description: "Do work",
+        providerId: "",
+        agentId: "bare",
+        model: undefined,
+      });
+
+      await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { createTask } }));
+
+      expect(createTask).not.toHaveBeenCalled();
+      expect(s.newTask?.error).toContain('Agent profile "bare" does not have a usable default model');
+      expect(s.newTask?.error).toContain("select a provider/model");
+      expect(s.status).toBe("create task needs model configuration");
+    });
+
     it("carries autoRun on task update (edit)", async () => {
       const updateTask = vi.fn(async (_id: string, payload: unknown) => ({ ...task("todo-card", "Chain child"), ...(payload as object) }));
       const s = state();

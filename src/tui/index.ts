@@ -5292,8 +5292,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       await handleIntegrateRequested(state, actions);
       return;
     case "g":
-      clearPendingConfirmation(state);
-      await actions.runAction("init git and run", (task) => actions.client.initGitAndRun(task.id));
+      await handleConfirmableCardAction("git-init", state, actions, (task) => actions.client.initGitAndRun(task.id), "init git and run");
       return;
     case "x":
       if (!canUseSelectedCardAction(state, actions, "done")) return;
@@ -6965,6 +6964,18 @@ function draftFallbackModelPayload(draft: NewTaskDraft, agents: readonly RosterA
   return draft.fallbackModel;
 }
 
+function missingAgentModelRecoveryMessage(agentId: string): string {
+  return `Agent profile "${agentId}" does not have a usable default model; select a provider/model in the task wizard, or configure a default model for that OpenCode agent profile, then try again.`;
+}
+
+function draftModelRecoveryError(draft: NewTaskDraft, agents: readonly RosterAgent[]): string | undefined {
+  if (draft.type !== "agent" || draft.harness !== "opencode") return undefined;
+  if (draft.providerId || draft.model || !draft.agentId) return undefined;
+  const agent = agents.find((candidate) => candidate.id === draft.agentId);
+  if (!agent || agent.model) return undefined;
+  return missingAgentModelRecoveryMessage(draft.agentId);
+}
+
 async function createDraftTask(state: TuiState, actions: TuiActions): Promise<void> {
   const draft = state.newTask;
   if (!draft || draft.submitting) return;
@@ -6983,6 +6994,14 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
   }
 
   const isEditing = Boolean(draft.editingTaskId);
+  const modelRecoveryError = draftModelRecoveryError(draft, state.agents);
+  if (modelRecoveryError) {
+    draft.error = modelRecoveryError;
+    state.status = isEditing ? "save task needs model configuration" : "create task needs model configuration";
+    actions.render();
+    return;
+  }
+
   draft.submitting = true;
   draft.error = undefined;
   state.status = isEditing ? `saving task: ${title}` : `creating task: ${title}`;

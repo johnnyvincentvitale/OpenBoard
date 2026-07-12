@@ -220,7 +220,7 @@ export function registerTaskRoutes(
       throw AdapterError.validation(`Unknown agent: ${agent}`);
     }
     if (!matched.model) {
-      throw AdapterError.validation(`Agent ${agent} has no configured model`);
+      throw AdapterError.validation(missingAgentModelRecoveryMessage(agent));
     }
     return matched.model;
   }
@@ -628,6 +628,7 @@ export function registerTaskRoutes(
             : null;
 
       if (column === "done") {
+        await assertWorktreeDoneMoveResolved(dispatcher, task);
         const policy = evaluateDonePolicy({
           task,
           targetColumn: column,
@@ -1084,6 +1085,10 @@ function validateExplicitModel(value: unknown): ModelRef {
   return validateModelRef(value, "model");
 }
 
+function missingAgentModelRecoveryMessage(agent: string): string {
+  return `Agent profile "${agent}" does not have a usable default model; select a provider/model in the task wizard, or configure a default model for that OpenCode agent profile, then try again.`;
+}
+
 function resolveFallbackModel(
   taskType: CreateTaskInput["type"] | UpdateTaskInput["type"],
   harness: TaskHarness,
@@ -1139,6 +1144,28 @@ function cleanBounded(value: unknown, field: string, max: number, code: string):
   const trimmed = value.trim();
   if (trimmed.length < 1 || trimmed.length > max) throw new ConflictRouteError(code, `${field} must be 1..${max} characters`);
   return trimmed;
+}
+
+async function assertWorktreeDoneMoveResolved(dispatcher: Dispatcher, task: Task): Promise<void> {
+  if (task.column === "done") return;
+  if (task.column !== "review") return;
+  if (!task.worktreePath || !task.worktreeBranch) return;
+
+  const status = await dispatcher.getWorktreeCommitStatus(task.id, undefined);
+  if (status.committedFiles.length === 0 && status.uncommittedFiles.length === 0) return;
+
+  throw new ConflictRouteError(
+    "unintegrated_worktree_changes",
+    "Review worktree has unintegrated changes. Integrate the card, commit or discard remaining files, or explicitly resolve the worktree before accepting Done.",
+    {
+      requirement: {
+        transition: "move",
+        taskId: task.id,
+        committedFiles: status.committedFiles,
+        uncommittedFiles: status.uncommittedFiles,
+      },
+    },
+  );
 }
 
 function blockedPolicyConflict(code: string, message: string, task: Task, transition: "move" | "integrate"): ConflictRouteError {

@@ -128,6 +128,7 @@ describe("confirmation copy builders", () => {
     ["archive", "Archiving this card?", "Press a again to archive."],
     ["delete", "Deleting this card?", "Press d again to delete."],
     ["discard-worktree", "Discard this worktree?", "Press D again to discard worktree."],
+    ["git-init", "Initialize git and run this card?", "Press g again to initialize git and run."],
   ] as const)("builds copy for %s", (action, expectedTitle, expectedHint) => {
     const copy = buildConfirmationCopy(action, { title: "Widget work" });
 

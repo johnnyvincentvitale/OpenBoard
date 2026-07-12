@@ -3371,6 +3371,30 @@ describe("TUI manual task creation", () => {
     expect(discardWorktree).toHaveBeenCalledWith("review-card");
   });
 
+  it("g requires confirmation before init-git mutates and runs", async () => {
+    const pendingGit = { ...task("todo-card", "todo"), pending: "git-init" as const };
+    const initGitAndRun = vi.fn(async (id: string) => ({ ...pendingGit, id, pending: undefined, runState: "running" as const }));
+    const runAction = vi.fn(async (_label: string, action: (t: Task) => Promise<unknown>) => {
+      await action(pendingGit);
+    });
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [pendingGit],
+      selectedTaskId: "todo-card",
+    });
+    const a = actions({ client: { initGitAndRun }, runAction });
+
+    await handleKeypress({ name: "g", sequence: "g" } as any, s, a);
+    expect(initGitAndRun).not.toHaveBeenCalled();
+    expect(runAction).not.toHaveBeenCalled();
+    expect(s.pendingConfirmation).toEqual({ action: "git-init", taskId: "todo-card" });
+    expect(s.status).toContain("Press g again");
+
+    await handleKeypress({ name: "g", sequence: "g" } as any, s, a);
+    expect(runAction.mock.calls[0]?.[0]).toBe("init git and run");
+    expect(initGitAndRun).toHaveBeenCalledWith("todo-card");
+  });
+
   it("k aborts In Progress cards", async () => {
     const abortTask = vi.fn(async () => ({ ...task("running-card", "in_progress"), runState: "error" as const }));
     const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});

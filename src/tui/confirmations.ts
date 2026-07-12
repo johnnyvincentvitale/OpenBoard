@@ -4,7 +4,7 @@ import type { Column, PermissionOverrides, Task } from "../shared";
  * Card-level actions that require a second press to confirm before executing.
  * These are bound to single keys in board view (run/retry/abort/move-to-done/archive/delete/discard).
  */
-export type ConfirmableAction = "run" | "retry" | "abort" | "move-to-done" | "archive" | "delete" | "discard-worktree" | "integrate";
+export type ConfirmableAction = "run" | "retry" | "abort" | "move-to-done" | "archive" | "delete" | "discard-worktree" | "integrate" | "git-init";
 
 /** Canonical display order for confirmable actions. */
 export const CONFIRMABLE_ACTIONS: readonly ConfirmableAction[] = [
@@ -16,6 +16,7 @@ export const CONFIRMABLE_ACTIONS: readonly ConfirmableAction[] = [
   "delete",
   "discard-worktree",
   "integrate",
+  "git-init",
 ];
 
 /** A pending confirmation waiting for the same action/key on the same task. */
@@ -158,6 +159,8 @@ function actionKey(action: ConfirmableAction): string {
       return "D";
     case "integrate":
       return "i";
+    case "git-init":
+      return "g";
   }
 }
 
@@ -179,6 +182,8 @@ function actionVerb(action: ConfirmableAction, presentParticiple = false): strin
       return presentParticiple ? "discarding worktree" : "discard worktree";
     case "integrate":
       return presentParticiple ? "integrating" : "integrate";
+    case "git-init":
+      return presentParticiple ? "initializing git and running" : "initialize git and run";
   }
 }
 
@@ -193,7 +198,9 @@ export function buildConfirmationCopy(
     ? "Move this card to Done?"
     : action === "discard-worktree"
       ? "Discard this worktree?"
-      : `${capitalize(actionVerb(action, true))} this card?`;
+      : action === "git-init"
+        ? "Initialize git and run this card?"
+        : `${capitalize(actionVerb(action, true))} this card?`;
 
   let body: string[];
   switch (action) {
@@ -279,6 +286,12 @@ export function buildConfirmationCopy(
       body = [
         `Commit remaining worktree files for "${task.title}", then integrate the task branch.`,
         "Already committed task files stay as their own commits.",
+      ];
+      break;
+    case "git-init":
+      body = [
+        `Initialize git in the directory for "${task.title}", create the first commit, then run the card.`,
+        "This mutates repository state; confirm only when this directory should become a git repo.",
       ];
       break;
   }
