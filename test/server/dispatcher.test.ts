@@ -1634,12 +1634,43 @@ describe("TaskDispatcher", () => {
         nextAttempt: 2,
       });
 
-      const events = store.listEvents(task.id).map((event) => event.type);
+      const taskEvents = store.listEvents(task.id);
+      const events = taskEvents.map((event) => event.type);
       expect(events).toContain("task_watchdog_retry");
       expect(events).toContain("task_watchdog_fallback");
       // Exactly one of each.
       expect(events.filter((e) => e === "task_watchdog_retry")).toHaveLength(1);
       expect(events.filter((e) => e === "task_watchdog_fallback")).toHaveLength(1);
+      expect(taskEvents.find((event) => event.type === "task_watchdog_retry")?.body).toEqual(expect.objectContaining({
+        attempt: 1,
+        runStartedAt: first.runStartedAt,
+        sessionId: "ses_fallback_0",
+        previousSessionId: "ses_fallback_0",
+        model: { providerID: "primary", id: "p1" },
+        provider: "primary",
+        reason: "liveness-timeout",
+        outcome: "retry-starting",
+      }));
+      expect(taskEvents.find((event) => event.type === "task_watchdog_retry_started")?.body).toEqual(expect.objectContaining({
+        attempt: 1,
+        sessionId: "ses_fallback_1",
+        previousSessionId: "ses_fallback_0",
+        nextSessionId: "ses_fallback_1",
+        model: { providerID: "primary", id: "p1" },
+        provider: "primary",
+        reason: "liveness-timeout",
+        outcome: "retry-started",
+      }));
+      expect(taskEvents.find((event) => event.type === "task_watchdog_fallback")?.body).toEqual(expect.objectContaining({
+        attempt: 2,
+        runStartedAt: second.runStartedAt,
+        sessionId: "ses_fallback_1",
+        previousSessionId: "ses_fallback_1",
+        model: { providerID: "fallback", id: "f1" },
+        provider: "fallback",
+        reason: "liveness-timeout",
+        outcome: "fallback-starting",
+      }));
     });
 
     it("session-create failure on a watchdog retry consumes the next attempt slot and succeeds (P1 regression)", async () => {
@@ -1764,6 +1795,62 @@ describe("TaskDispatcher", () => {
       expect(events.filter((e) => e === "task_watchdog_retry_failed")).toHaveLength(2);
       expect(events).toContain("task_watchdog_exhausted");
       expect((dispatcher as never as { openCodeRunsByTask: Map<string, unknown> }).openCodeRunsByTask.has(task.id)).toBe(false);
+    });
+
+    it("same-session retry watcher cleanup cannot tear down the replacement run", async () => {
+      vi.useFakeTimers();
+      try {
+        const task = createTask({ directory: myProjectDir });
+        client.nextSessionId = "ses_same_reused";
+        client.stableMessagesResponse = [{ info: { role: "assistant" }, parts: [{ type: "tool", callID: "call1", tool: "bash", state: { status: "running" } }] }];
+        dispatcher = new TaskDispatcher({ client: client as never, store });
+
+        await dispatcher.run(task.id);
+        const firstRunStartedAt = store.get(task.id)?.runStartedAt;
+        expect(firstRunStartedAt).toBeTypeOf("number");
+        await vi.advanceTimersByTimeAsync(1);
+        await dispatcher.retry(task.id, "continue in the same session");
+        const retryRunStartedAt = store.get(task.id)?.runStartedAt;
+        expect(retryRunStartedAt).toBeGreaterThan(firstRunStartedAt!);
+
+        // Lets the cancelled first watcher wake and run its finally block.
+        await vi.advanceTimersByTimeAsync(1000);
+        await Promise.resolve();
+
+        const runs = (dispatcher as never as { openCodeRunsByTask: Map<string, { runStartedAt: number; rootSessionId: string }> }).openCodeRunsByTask;
+        expect(runs.get(task.id)).toMatchObject({ runStartedAt: retryRunStartedAt, rootSessionId: "ses_same_reused" });
+        expect(store.get(task.id)).toMatchObject({ sessionId: "ses_same_reused", runState: "running", runStartedAt: retryRunStartedAt });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("empty status map plus active tool messages re-arms before aborting with bounded budget", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_active_tool_probe";
+      client.stableMessagesResponse = [{ info: { role: "assistant" }, parts: [{ type: "tool", callID: "call1", tool: "bash", state: { status: "running" } }] }];
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      client.sessionStatus = {};
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+      const internal = dispatcher as unknown as {
+        handleWatchdogTermination(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; terminatedAt: number }): void;
+      };
+      const trip = () => internal.handleWatchdogTermination({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_active_tool_probe", attempt: 0 },
+        reason: "liveness-timeout",
+        terminatedAt: Date.now(),
+      });
+
+      trip();
+      await waitFor(() => store.listEvents(task.id).filter((event) => event.type === "task_watchdog_busy_wait").length === 1);
+      expect(client.abortCalls).toEqual([]);
+      trip();
+      await waitFor(() => store.listEvents(task.id).filter((event) => event.type === "task_watchdog_busy_wait").length === 2);
+      expect(client.abortCalls).toEqual([]);
+      trip();
+      await waitFor(() => store.listEvents(task.id).some((event) => event.type === "task_watchdog_tripped"));
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_active_tool_probe" }]);
     });
 
     it("watchdog trip on a still-busy session tree re-arms instead of aborting (long quiet tool call)", async () => {

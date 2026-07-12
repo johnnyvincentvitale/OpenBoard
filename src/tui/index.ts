@@ -5,8 +5,8 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
-import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, projectWatchdogAttempts, type WatchdogAttemptEntry } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
 import { isLocalBoardUrl } from "../shared/instances";
@@ -320,6 +320,7 @@ const IDENTITY_FIELDS_MANUAL = ["type", "title", "description", "assignedTo", "d
 const HARNESS_FIELDS_OPENCODE = ["taskKind", "harness", "provider", "model", "fallbackModel"] as const;
 /** MODEL is locked out while PROVIDER is "Use Agent Profile Default" (draft.providerId === "") — nothing to pick. */
 const HARNESS_FIELDS_OPENCODE_LOCKED = ["taskKind", "harness", "provider"] as const;
+const HARNESS_FIELDS_OPENCODE_LOCKED_WITH_FALLBACK = ["taskKind", "harness", "provider", "fallbackModel"] as const;
 const HARNESS_FIELDS_CLAUDE = ["taskKind", "harness", "model"] as const;
 /** Shared label for "no explicit provider/model — the assigned agent profile's own model wins." */
 const AGENT_PROFILE_DEFAULT_LABEL = "Use Agent Profile Default";
@@ -572,7 +573,7 @@ interface SettingsDirtyWorktreesState {
 }
 
 /** Detail tabs shown for a selected card via Enter. */
-export type TaskDetailTab = "prompt" | "handoff" | "output" | "files" | "comments";
+export type TaskDetailTab = "prompt" | "handoff" | "output" | "files" | "attempts" | "comments";
 
 /** State for the two-step global filter picker opened with f/F. */
 interface FilterModeState {
@@ -595,6 +596,13 @@ interface FilesDetailState {
   ownerId: string;
   selectedIndex: number;
   mode: "list" | "patch";
+}
+
+interface AttemptsPanelState {
+  taskId: string;
+  loading: boolean;
+  events: TaskEvent[];
+  error?: string;
 }
 
 interface IntegrateCommitReviewState {
@@ -679,6 +687,8 @@ interface TuiState {
   commentDraft?: CommentDraftState;
   // Files detail tab
   filesDetail?: FilesDetailState;
+  // Watchdog attempts detail tab
+  attempts?: AttemptsPanelState;
   // Commit-state review shown before integrating a dirty worktree.
   integrateCommitReview?: IntegrateCommitReviewState;
   // Full-screen diff view (v on a selected Review card)
@@ -2058,7 +2068,7 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
     // Tab headers
     ui.Box(
       { width: "100%", flexDirection: "row", height: 1, gap: 2 },
-      ...BOARD_DETAIL_TABS.map((candidate) =>
+      ...ARCHIVE_DETAIL_TABS.map((candidate) =>
         ui.Text({
           content: DETAIL_TAB_LABELS[candidate],
           fg: tab === candidate ? activeTabFg : inactiveTabFg,
@@ -3211,12 +3221,14 @@ function lifecycleRowColor(role: string | undefined, task: Task): TuiColor {
   return COLORS.text;
 }
 
-const BOARD_DETAIL_TABS = ["prompt", "handoff", "output", "files", "comments"] as const satisfies readonly TaskDetailTab[];
+const BOARD_DETAIL_TABS = ["prompt", "handoff", "output", "files", "attempts", "comments"] as const satisfies readonly TaskDetailTab[];
+const ARCHIVE_DETAIL_TABS = ["prompt", "handoff", "output", "files", "comments"] as const satisfies readonly TaskDetailTab[];
 const DETAIL_TAB_LABELS: Record<TaskDetailTab, string> = {
   prompt: "Prompt",
   handoff: "Handoff",
   output: "Output",
   files: "Files",
+  attempts: "Attempts",
   comments: "Comments",
 };
 
@@ -3235,6 +3247,8 @@ function boardDetailScrollId(tab: TaskDetailTab, taskId: string): string | undef
       return `board-detail-output-${taskId}`;
     case "files":
       return `board-detail-files-${taskId}`;
+    case "attempts":
+      return `board-detail-attempts-${taskId}`;
     case "comments":
       return undefined;
   }
@@ -3255,7 +3269,9 @@ function boardDetailScrollMax(state: TuiState, task: Task, tab: TaskDetailTab): 
         ? wrappedRows(task.finalSessionOutput?.trim() || "No final session output available")
         : tab === "files"
           ? filesTabScrollRows(state, task)
-          : 0;
+          : tab === "attempts"
+            ? (projectWatchdogAttempts(state.attempts?.taskId === task.id ? state.attempts.events : []).length || 1)
+            : 0;
   // Keyboard scroll happens before OpenTUI reports the real viewport/content heights.
   // Clamp to a conservative content-derived cap so held arrows cannot grow forever;
   // renderDetailViewport's mouse-wheel path still applies the exact visual clamp.
@@ -3309,7 +3325,9 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
           ? renderOutputTab(ui, state, task)
           : tab === "files"
             ? renderFilesTab(ui, state, task)
-            : renderCommentsTab(ui, state, task);
+            : tab === "attempts"
+              ? renderAttemptsTab(ui, state, task)
+              : renderCommentsTab(ui, state, task);
   const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label));
   const footer = tab === "comments"
     ? (state.commentDraft ? "enter submit · esc cancel" : "esc details · ←/→ tabs · c comment · r reply")
@@ -3354,6 +3372,35 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
     ),
     ui.Text({ content: footer, fg: COLORS.muted, height: 1, truncate: true }),
   );
+}
+
+function renderAttemptsTab(ui: OpenTui, state: TuiState, task: Task) {
+  const panel = state.attempts?.taskId === task.id ? state.attempts : undefined;
+  if (!panel || panel.loading) {
+    return renderDetailViewport(ui, state, `board-detail-attempts-${task.id}`, ui.Text({ content: "Loading watchdog attempt history...", fg: COLORS.muted, height: 1 }));
+  }
+  if (panel.error) {
+    return renderDetailViewport(ui, state, `board-detail-attempts-${task.id}`, ui.Text({ content: panel.error, fg: COLORS.bright, height: 1, truncate: true }));
+  }
+  const attempts = projectWatchdogAttempts(panel.events);
+  if (attempts.length === 0) {
+    return renderDetailViewport(ui, state, `board-detail-attempts-${task.id}`, ui.Text({ content: "No watchdog attempt history", fg: COLORS.muted, height: 1 }));
+  }
+  return renderDetailViewport(
+    ui,
+    state,
+    `board-detail-attempts-${task.id}`,
+    ...attempts.map((attempt) => ui.Text({ content: formatWatchdogAttempt(attempt), fg: attempt.outcome.includes("failed") || attempt.outcome === "exhausted" ? COLORS.bright : COLORS.text, height: 1, truncate: true })),
+  );
+}
+
+function formatWatchdogAttempt(attempt: WatchdogAttemptEntry): string {
+  const session = attempt.previousSessionId && attempt.nextSessionId
+    ? `${attempt.previousSessionId}→${attempt.nextSessionId}`
+    : attempt.nextSessionId ?? attempt.sessionId ?? "session unavailable";
+  const model = attempt.model ? modelLabel(attempt.model) : attempt.provider ?? "model unavailable";
+  const reason = attempt.reason ? ` · ${attempt.reason}` : "";
+  return `#${attempt.attempt} ${attempt.outcome} · ${model} · ${session}${reason}`;
 }
 
 function boardFilesVisibleRows(state: TuiState, inlineRowsCount: number): number {
@@ -4350,7 +4397,7 @@ function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
       ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
       : []),
     renderModelField(ui, draft, state.agents, state.providers, state.acpConfig),
-    ...(draft.harness === "opencode" && draft.providerId ? [renderFallbackModelField(ui, draft, state.providers)] : []),
+    ...(draft.harness === "opencode" && draftHasFallbackOptions(draft, state.providers, state.agents) ? [renderFallbackModelField(ui, draft, state.providers, state.agents)] : []),
     renderDraftErrorRow(ui, draft),
   );
 }
@@ -4400,11 +4447,11 @@ function renderModelField(ui: OpenTui, draft: NewTaskDraft, agents: RosterAgent[
   );
 }
 
-function renderFallbackModelField(ui: OpenTui, draft: NewTaskDraft, providers: RosterProvider[]) {
+function renderFallbackModelField(ui: OpenTui, draft: NewTaskDraft, providers: RosterProvider[], agents: RosterAgent[]) {
   const focused = draft.field === "fallbackModel";
   if (!focused) return renderSelectField(ui, "FALLBACK", currentFallbackModelLabel(draft), false);
   const query = draft.fallbackModelQuery ?? "";
-  const matches = filteredFallbackModelOptions(draft, providers);
+  const matches = filteredFallbackModelOptions(draft, providers, agents);
   const selectedLabel = matches.length === 0
     ? "no fallback matches"
     : draft.fallbackModel
@@ -5055,6 +5102,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     if ((key.name || key.sequence) === "right" || key.sequence === "\t") {
       state.detailTab = nextDetailTab(state.detailTab, 1);
       if (state.detailTab === "comments") await loadCommentsForTask(state, actions, task);
+      if (state.detailTab === "attempts") await loadAttemptsForTask(state, actions, task);
       actions.render();
       return;
     }
@@ -5096,12 +5144,14 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     if ((key.name || key.sequence) === "left") {
       state.detailTab = nextDetailTab(state.detailTab, -1);
       if (state.detailTab === "comments") await loadCommentsForTask(state, actions, selectedTask(state));
+      if (state.detailTab === "attempts") await loadAttemptsForTask(state, actions, selectedTask(state));
       actions.render();
       return;
     }
     if ((key.name || key.sequence) === "right" || key.sequence === "\t") {
       state.detailTab = nextDetailTab(state.detailTab, 1);
       if (state.detailTab === "comments") await loadCommentsForTask(state, actions, selectedTask(state));
+      if (state.detailTab === "attempts") await loadAttemptsForTask(state, actions, selectedTask(state));
       actions.render();
       return;
     }
@@ -6869,9 +6919,14 @@ function draftModelPayload(draft: NewTaskDraft): ModelRef | undefined {
   return draft.model;
 }
 
-function draftFallbackModelPayload(draft: NewTaskDraft): ModelRef | undefined {
+function draftEffectivePrimaryModel(draft: Pick<NewTaskDraft, "model" | "agentId">, agents: readonly RosterAgent[]): ModelRef | undefined {
+  return draft.model ?? agents.find((agent) => agent.id === draft.agentId)?.model;
+}
+
+function draftFallbackModelPayload(draft: NewTaskDraft, agents: readonly RosterAgent[]): ModelRef | undefined {
   if (draft.harness !== "opencode") return undefined;
-  if (draft.model && draft.fallbackModel?.providerID === draft.model.providerID) return undefined;
+  const primary = draftEffectivePrimaryModel(draft, agents);
+  if (primary && draft.fallbackModel?.providerID === primary.providerID) return undefined;
   return draft.fallbackModel;
 }
 
@@ -6903,7 +6958,7 @@ async function createDraftTask(state: TuiState, actions: TuiActions): Promise<vo
     const hasAcpModes = (acpConfigForHarness(state.acpConfig, draft.harness)?.modes.length ?? 0) > 0;
     const acpOptions = draftAcpOptionsPayload(state, draft);
     const model = draftModelPayload(draft);
-    const fallbackModel = draftFallbackModelPayload(draft);
+    const fallbackModel = draftFallbackModelPayload(draft, state.agents);
     const task = isEditing
       ? await actions.client.updateTask(draft.editingTaskId as string, draft.type === "manual" ? {
           type: "manual",
@@ -7063,7 +7118,7 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       cycleModel(draft, state.agents, state.providers, state.acpConfig, delta);
       return true;
     case "fallbackModel":
-      cycleFallbackModel(draft, state.providers, delta);
+      cycleFallbackModel(draft, state.providers, state.agents, delta);
       return true;
     case "isolation":
       draft.isolation = draft.isolation === "worktree" ? "in-place" : "worktree";
@@ -7239,8 +7294,8 @@ function cycleModel(draft: NewTaskDraft, agents: RosterAgent[], providers: Roste
   if (draft.model && draft.fallbackModel?.providerID === draft.model.providerID) draft.fallbackModel = undefined;
 }
 
-function cycleFallbackModel(draft: NewTaskDraft, providers: RosterProvider[], delta: number): void {
-  const options = filteredFallbackModelOptions(draft, providers);
+function cycleFallbackModel(draft: NewTaskDraft, providers: RosterProvider[], agents: RosterAgent[], delta: number): void {
+  const options = filteredFallbackModelOptions(draft, providers, agents);
   if (options.length === 0) {
     draft.fallbackModel = undefined;
     return;
@@ -7504,7 +7559,8 @@ function stepFieldOrder(state: TuiState, draft: NewTaskDraft): readonly NewTaskF
       return draft.type === "manual" ? IDENTITY_FIELDS_MANUAL : IDENTITY_FIELDS_AGENT;
     case "harness":
       if (isAcpHarness(draft.harness)) return HARNESS_FIELDS_CLAUDE;
-      return draft.providerId ? HARNESS_FIELDS_OPENCODE : HARNESS_FIELDS_OPENCODE_LOCKED;
+      if (draft.providerId) return HARNESS_FIELDS_OPENCODE;
+      return draftHasFallbackOptions(draft, state.providers, state.agents) ? HARNESS_FIELDS_OPENCODE_LOCKED_WITH_FALLBACK : HARNESS_FIELDS_OPENCODE_LOCKED;
     case "agentProfile":
       if (isAcpHarness(draft.harness)) {
         const fields: NewTaskField[] = [];
@@ -8013,7 +8069,7 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
         return;
       }
       if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
-        archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
+        archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1, ARCHIVE_DETAIL_TABS);
         actions.render();
         return;
       }
@@ -8029,7 +8085,7 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
         return;
       }
       if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
-        archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
+        archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1, ARCHIVE_DETAIL_TABS);
         actions.render();
         return;
       }
@@ -8038,7 +8094,7 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
   }
 
   if (keyName === "left" || keyName === "right" || key.sequence === "\t") {
-    archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1);
+    archive.detailTab = nextDetailTab(archive.detailTab, keyName === "left" ? -1 : 1, ARCHIVE_DETAIL_TABS);
     actions.render();
     return;
   }
@@ -8178,13 +8234,19 @@ function filteredModelOptions(draft: NewTaskDraft, agents: RosterAgent[], provid
 }
 
 export function filteredFallbackModelOptions(
-  draft: Pick<NewTaskDraft, "model" | "fallbackModel" | "fallbackModelQuery">,
+  draft: Pick<NewTaskDraft, "model" | "fallbackModel" | "fallbackModelQuery" | "agentId">,
   providers: RosterProvider[],
+  agents: readonly RosterAgent[] = [],
 ): ModelRef[] {
-  const options = fallbackModelOptions(providers, draft.model);
+  const primary = draftEffectivePrimaryModel(draft, agents);
+  const options = fallbackModelOptions(providers, primary);
   const query = (draft.fallbackModelQuery ?? "").trim().toLowerCase();
   if (!query) return options;
   return options.filter((model) => modelLabel(model).toLowerCase().includes(query));
+}
+
+function draftHasFallbackOptions(draft: Pick<NewTaskDraft, "model" | "fallbackModel" | "fallbackModelQuery" | "agentId">, providers: RosterProvider[], agents: readonly RosterAgent[]): boolean {
+  return filteredFallbackModelOptions(draft, providers, agents).length > 0;
 }
 
 function sameModel(left: ModelRef | undefined, right: ModelRef | undefined): boolean {
@@ -8224,6 +8286,22 @@ function resolveSelectedTaskId(tasks: Task[], selectedTaskId: string | undefined
 
 function selectedTask(state: TuiState): Task | undefined {
   return state.tasks.find((task) => task.id === state.selectedTaskId);
+}
+
+async function loadAttemptsForTask(state: TuiState, actions: TuiActions, task: Task | undefined): Promise<void> {
+  if (!task) return;
+  if (state.attempts?.taskId === task.id && !state.attempts.error) return;
+  state.attempts = { taskId: task.id, loading: true, events: [] };
+  actions.render();
+  try {
+    const events = await actions.client.listTaskEvents(task.id);
+    if (state.attempts?.taskId !== task.id) return;
+    state.attempts = { taskId: task.id, loading: false, events };
+  } catch (error) {
+    if (state.attempts?.taskId !== task.id) return;
+    state.attempts = { taskId: task.id, loading: false, events: [], error: `attempt history unavailable: ${errorMessage(error)}` };
+  }
+  actions.render();
 }
 
 function reviewDiffStatCacheKey(task: Pick<Task, "id" | "updatedAt">): Pick<ReviewDiffStatState, "taskId" | "taskUpdatedAt"> {

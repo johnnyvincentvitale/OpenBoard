@@ -471,6 +471,34 @@ describe("TUI label cleanup", () => {
     expect(text).not.toContain("i integrate");
   });
 
+  it("attempts detail tab renders projected watchdog attempt history", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("watchdog-card", "in_progress")],
+      selectedTaskId: "watchdog-card",
+      detailTab: "attempts",
+      attempts: {
+        taskId: "watchdog-card",
+        loading: false,
+        events: [
+          { id: "e1", taskId: "watchdog-card", type: "task_watchdog_tripped", body: { attempt: 0, sessionId: "ses_old", model: { providerID: "openai", id: "gpt" }, reason: "liveness-timeout", outcome: "tripped" }, createdAt: 1 },
+          { id: "e2", taskId: "watchdog-card", type: "task_watchdog_retry", body: { attempt: 1, sessionId: "ses_old", previousSessionId: "ses_old", model: { providerID: "openai", id: "gpt" }, outcome: "retry-starting" }, createdAt: 2 },
+          { id: "e3", taskId: "watchdog-card", type: "task_watchdog_retry_started", body: { attempt: 1, sessionId: "ses_retry", previousSessionId: "ses_old", nextSessionId: "ses_retry", model: { providerID: "openai", id: "gpt" }, outcome: "retry-started" }, createdAt: 3 },
+          { id: "e4", taskId: "watchdog-card", type: "task_watchdog_fallback", body: { attempt: 2, previousSessionId: "ses_retry", nextSessionId: "ses_new", model: { providerID: "anthropic", id: "sonnet" }, outcome: "fallback-starting" }, createdAt: 4 },
+          { id: "e5", taskId: "watchdog-card", type: "task_updated", body: {}, createdAt: 5 },
+        ],
+      },
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("Attempts");
+    expect(text).toContain("#0 tripped · openai/gpt · ses_old · liveness-timeout");
+    expect(text).toContain("#1 retry-started · openai/gpt · ses_old→ses_retry");
+    expect(text).toContain("#2 fallback-starting · anthropic/sonnet · ses_retry→ses_new");
+    expect(text).not.toContain("model default");
+    expect(text).not.toContain("task_updated");
+  });
+
   it("selected-card action hints are contextual for manual Review cards", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -1964,6 +1992,9 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(s.detailTab).toBe("files");
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
+    expect(s.detailTab).toBe("attempts");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
     expect(s.detailTab).toBe("comments");
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
@@ -2663,6 +2694,9 @@ describe("TUI comments tab", () => {
 
     await handleKeypress({ name: "right", sequence: "[C" } as any, s, a);
     expect(s.detailTab).toBe("files");
+
+    await handleKeypress({ name: "right", sequence: "[C" } as any, s, a);
+    expect(s.detailTab).toBe("attempts");
 
     await handleKeypress({ name: "right", sequence: "[C" } as any, s, a);
 
@@ -3450,6 +3484,36 @@ describe("TUI new-task wizard navigation", () => {
       { id: "google/gemini-3-pro", name: "Gemini 3 Pro" },
     ],
   };
+
+  it("offers fallback models when primary MODEL is locked to the selected agent default", async () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      agents: [{ id: "build", mode: "primary" as const, model: { providerID: "openai", id: "gpt" } }],
+      providers: [
+        { id: "openai", name: "OpenAI", models: [{ id: "gpt", name: "GPT" }] },
+        { id: "anthropic", name: "Anthropic", models: [{ id: "sonnet", name: "Sonnet" }] },
+      ],
+      newTask: agentDraft({
+        step: "harness",
+        field: "provider",
+        providerId: "",
+        agentId: "build",
+        model: undefined,
+      }),
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("PROVIDER");
+    expect(text).toContain("Use Agent Profile Default");
+    expect(text).toContain("FALLBACK");
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, actions());
+    expect(s.newTask.field).toBe("fallbackModel");
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
+
+    expect(s.newTask.fallbackModel).toEqual({ providerID: "anthropic", id: "sonnet" });
+  });
 
   it("typing on the MODEL field narrows modelQuery instead of navigating back or advancing", async () => {
     const s = state({
@@ -4548,6 +4612,7 @@ function actions(overrides: Record<string, unknown> = {}) {
       commitTaskFile: vi.fn(async (_id: string, file: string) => ({ task: task("review-card", "review"), ok: true, file, message: "committed" })),
       resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
       listComments: vi.fn(async () => []),
+      listTaskEvents: vi.fn(async () => []),
       addComment: vi.fn(async () => ({ id: "comment-1", taskId: "todo-card", author: "User", body: "", createdAt: 1 })),
     },
     archiveTask: vi.fn(async () => undefined),

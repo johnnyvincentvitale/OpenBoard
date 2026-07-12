@@ -738,6 +738,67 @@ describe("POST /api/tasks", () => {
     expect(persisted?.model).toEqual({ providerID: "opencode", id: "north-mini-code-free" });
   });
 
+  it("creates and persists an OpenCode task fallback model after resolving the agent default primary", async () => {
+    const app = buildApp(store, dispatcher, [BUILD_AGENT]);
+    const fallbackModel = { providerID: "anthropic", id: "claude-sonnet-5" };
+
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Fallback worker",
+        description: "Use fallback if the primary wedges",
+        directory: repoDir,
+        agent: "build",
+        fallbackModel,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Task;
+    expect(body.model).toEqual(BUILD_AGENT.model);
+    expect(body.fallbackModel).toEqual(fallbackModel);
+    expect(store.get(body.id)?.fallbackModel).toEqual(fallbackModel);
+  });
+
+  it("rejects same-provider, malformed, manual, and ACP fallback models", async () => {
+    const app = buildApp(store, dispatcher, [BUILD_AGENT]);
+
+    const sameProvider = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Same provider", directory: repoDir, agent: "build", fallbackModel: { providerID: "opencode", id: "other" } }),
+    });
+    expect(sameProvider.status).toBe(400);
+    expect((await sameProvider.json()).error.message).toContain("fallbackModel.providerID must differ from the primary model providerID");
+
+    const malformed = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Malformed fallback", directory: repoDir, agent: "build", fallbackModel: { providerID: "anthropic" } }),
+    });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json()).error.message).toContain("fallbackModel.id");
+
+    const manual = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "manual", title: "Manual fallback", directory: repoDir, fallbackModel: { providerID: "anthropic", id: "sonnet" } }),
+    });
+    expect(manual.status).toBe(400);
+    expect((await manual.json()).error.message).toContain("manual tasks cannot define fallbackModel");
+
+    const acp = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ harness: "claude-code", title: "ACP fallback", directory: repoDir, fallbackModel: { providerID: "anthropic", id: "sonnet" } }),
+    });
+    expect(acp.status).toBe(400);
+    expect((await acp.json()).error.message).toContain("fallbackModel can only be set for OpenCode agent tasks");
+
+    expect(store.list()).toHaveLength(0);
+  });
+
   it("preserves an explicit model and does not overwrite it", async () => {
     const app = buildApp(store, dispatcher, [BUILD_AGENT]);
 
@@ -937,6 +998,61 @@ describe("PATCH /api/tasks/:id", () => {
       body: JSON.stringify(body),
     });
   }
+
+  it("sets and clears fallbackModel on an OpenCode task PATCH", async () => {
+    const app = buildApp(store, dispatcher, [BUILD_AGENT]);
+    const task = store.create({ title: "T", description: "", directory: repoDir, agent: "build", model: BUILD_AGENT.model });
+    const fallbackModel = { providerID: "anthropic", id: "claude-sonnet-5" };
+
+    const setRes = await patch(app, task.id, { fallbackModel });
+
+    expect(setRes.status).toBe(200);
+    expect(((await setRes.json()) as Task).fallbackModel).toEqual(fallbackModel);
+    expect(store.get(task.id)?.fallbackModel).toEqual(fallbackModel);
+
+    const clearRes = await patch(app, task.id, { fallbackModel: null });
+
+    expect(clearRes.status).toBe(200);
+    expect(((await clearRes.json()) as Task).fallbackModel).toBeNull();
+    expect(store.get(task.id)?.fallbackModel).toBeNull();
+  });
+
+  it("rejects same-provider fallbackModel on PATCH after resolving a changed agent default", async () => {
+    const app = buildApp(store, dispatcher, [BUILD_AGENT, PLAN_AGENT]);
+    const task = store.create({ title: "T", description: "", directory: repoDir, agent: "build", model: BUILD_AGENT.model });
+
+    const res = await patch(app, task.id, { agent: "plan", fallbackModel: { providerID: "openai", id: "other" } });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toContain("fallbackModel.providerID must differ from the primary model providerID");
+    expect(store.get(task.id)?.agent).toBe("build");
+  });
+
+  it("auto-clears fallbackModel when PATCH changes the task away from OpenCode", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({
+      title: "T",
+      description: "",
+      directory: repoDir,
+      model: { providerID: "opencode", id: "north-mini-code-free" },
+      fallbackModel: { providerID: "anthropic", id: "claude-sonnet-5" },
+    });
+
+    const manualRes = await patch(app, task.id, { type: "manual" });
+    expect(manualRes.status).toBe(200);
+    expect(((await manualRes.json()) as Task).fallbackModel).toBeNull();
+
+    const agent = store.create({
+      title: "A",
+      description: "",
+      directory: repoDir,
+      model: { providerID: "opencode", id: "north-mini-code-free" },
+      fallbackModel: { providerID: "anthropic", id: "claude-sonnet-5" },
+    });
+    const acpRes = await patch(app, agent.id, { harness: "claude-code" });
+    expect(acpRes.status).toBe(200);
+    expect(((await acpRes.json()) as Task).fallbackModel).toBeNull();
+  });
 
   it("sets permissionOverrides on an in-place OpenCode agent task", async () => {
     const app = buildApp(store, dispatcher);

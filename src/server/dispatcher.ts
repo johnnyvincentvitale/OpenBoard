@@ -273,6 +273,24 @@ function hasAssistantTurnFinished(messages: unknown): boolean {
   });
 }
 
+function hasActiveToolCall(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages) {
+    if (message === null || typeof message !== "object") continue;
+    const parts = (message as { parts?: unknown }).parts;
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      if (part === null || typeof part !== "object") continue;
+      const record = part as Record<string, unknown>;
+      if (record.type !== "tool") continue;
+      const state = record.state;
+      const status = state && typeof state === "object" ? (state as Record<string, unknown>).status : undefined;
+      if (status === undefined || status === "pending" || status === "running") return true;
+    }
+  }
+  return false;
+}
+
 /**
  * True when the assistant's last step ended specifically because of a tool
  * call — the state OpenCode is supposed to auto-continue from within the
@@ -448,6 +466,24 @@ function hasAskRule(rules: Array<{ action: string }>): boolean {
 
 function sameProvider(a: ModelRef | null | undefined, b: ModelRef | null | undefined): boolean {
   return !!a && !!b && a.providerID === b.providerID;
+}
+
+function watchdogEventBody(
+  run: Pick<WatchdogRunIdentity, "runStartedAt" | "sessionId" | "attempt">,
+  body: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const model = body.model as ModelRef | null | undefined;
+  return {
+    runStartedAt: run.runStartedAt,
+    sessionId: run.sessionId,
+    attempt: run.attempt,
+    ...(model ? { provider: model.providerID } : {}),
+    ...body,
+  };
+}
+
+function watchdogModelForTask(task: Task): ModelRef | null {
+  return task.activeModel ?? task.model ?? null;
 }
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -638,7 +674,7 @@ export class TaskDispatcher implements Dispatcher {
   private consumeLoopPromise: Promise<void> | null = null;
   /** Aborts the in-flight upstream event.subscribe() fetch/stream, if any — see shutdown(). */
   private upstreamAbort: AbortController | null = null;
-  private readonly completionWatchers = new Map<string, { cancelled: boolean }>();
+  private readonly completionWatchers = new Map<string, { cancelled: boolean; taskId: string; runStartedAt?: number }>();
   private readonly outputCandidates = new Map<string, string>();
   private readonly openCodeRunsByTask = new Map<string, OpenCodeRunRecord>();
   private readonly openCodeSessionToTask = new Map<string, string>();
@@ -2062,10 +2098,11 @@ export class TaskDispatcher implements Dispatcher {
    */
   private async confirmWatchdogTerminationAfterStatusProbe(run: OpenCodeRunRecord, event: WatchdogTermination, task: Task): Promise<boolean | "busy-rearm"> {
     const statuses = await this.fetchSessionStatusMap();
-    const stillBusy = statuses !== null && [...run.sessionIds].some((sessionId) => {
+    const statusBusy = statuses !== null && [...run.sessionIds].some((sessionId) => {
       const status = statuses.get(sessionId);
       return status === "busy" || status === "retry";
     });
+    const stillBusy = statusBusy || await this.sessionTreeHasActiveTool(run);
     // Bounded patience: a session wedged in status "busy" (the original
     // dead-session incident) must still trip once the re-arm budget is
     // spent — "busy" earns extra full windows, not immunity.
@@ -2083,7 +2120,7 @@ export class TaskDispatcher implements Dispatcher {
         this.store.addEvent({
           taskId: task.id,
           type: "task_watchdog_busy_wait",
-          body: { reason: event.reason, sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt, observedAt: event.terminatedAt },
+          body: watchdogEventBody(event.run, { model: watchdogModelForTask(task), reason: event.reason, outcome: "deferred", observedAt: event.terminatedAt }),
         });
       }
       return "busy-rearm";
@@ -2091,9 +2128,22 @@ export class TaskDispatcher implements Dispatcher {
     this.store.addEvent({
       taskId: task.id,
       type: "task_watchdog_tripped",
-      body: { reason: event.reason, sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt, observedAt: event.terminatedAt },
+      body: watchdogEventBody(event.run, { model: watchdogModelForTask(task), reason: event.reason, outcome: "tripped", observedAt: event.terminatedAt }),
     });
     return this.confirmWatchdogAbort(event.run);
+  }
+
+  private async sessionTreeHasActiveTool(run: OpenCodeRunRecord): Promise<boolean> {
+    for (const sessionId of run.sessionIds) {
+      try {
+        const result = await this.client.session.messages({ sessionID: sessionId });
+        if ((result as { error?: unknown }).error) continue;
+        if (hasActiveToolCall((result as { data?: unknown }).data)) return true;
+      } catch {
+        // Message corroboration is best-effort; status/session-tree signals still decide.
+      }
+    }
+    return false;
   }
 
   private suppressWatchdogForPendingPermission(run: OpenCodeRunRecord, event: WatchdogTermination): boolean {
@@ -2105,16 +2155,17 @@ export class TaskDispatcher implements Dispatcher {
     run.watchdog.dispose();
     run.watchdog = this.createRunWatchdog();
     run.watchdog.startRun(event.run, pending.deadline);
+    const task = this.store.get(event.run.taskId);
     this.store.addEvent({
       taskId: event.run.taskId,
       type: "task_watchdog_permission_wait",
-      body: {
+      body: watchdogEventBody(event.run, {
+        model: task ? watchdogModelForTask(task) : null,
         askId: pending.id,
-        sessionId: event.run.sessionId,
-        runStartedAt: event.run.runStartedAt,
         deadline: pending.deadline,
         reason: event.reason,
-      },
+        outcome: "deferred",
+      }),
     });
     return true;
   }
@@ -2138,7 +2189,7 @@ export class TaskDispatcher implements Dispatcher {
     if (!stillExpected || stillExpected.runState !== "running" || stillExpected.runStartedAt !== event.run.runStartedAt || stillExpected.sessionId !== event.run.sessionId) return;
     if (!abortConfirmed) {
       this.store.update(task.id, { runState: "error", error: "Watchdog tripped but old OpenCode root abort was not confirmed; refusing to start a second writer" });
-      this.store.addEvent({ taskId: task.id, type: "task_watchdog_abort_unconfirmed", body: { sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt } });
+      this.store.addEvent({ taskId: task.id, type: "task_watchdog_abort_unconfirmed", body: watchdogEventBody(event.run, { model: watchdogModelForTask(task), reason: event.reason, outcome: "abort-unconfirmed" }) });
       return;
     }
     if (event.outcome === "exhausted") {
@@ -2146,13 +2197,13 @@ export class TaskDispatcher implements Dispatcher {
         task,
         event.run.runStartedAt,
         `tripped for runStartedAt ${event.run.runStartedAt}`,
-        { runStartedAt: event.run.runStartedAt },
+        watchdogEventBody(event.run, { model: watchdogModelForTask(task), reason: event.reason }),
       );
       return;
     }
 
     const nextAttempt = event.nextAttempt ?? event.run.attempt + 1;
-    await this.escalateWatchdogAttempt(task, nextAttempt);
+    await this.escalateWatchdogAttempt(task, nextAttempt, event.reason);
   }
 
   /**
@@ -2162,13 +2213,27 @@ export class TaskDispatcher implements Dispatcher {
    * attempt. Shared by normal watchdog escalation and by the
    * dispatch-failure recovery path in startFreshOpenCodeAttempt.
    */
-  private async escalateWatchdogAttempt(task: Task, nextAttempt: number): Promise<void> {
+  private async escalateWatchdogAttempt(task: Task, nextAttempt: number, reason = "liveness-timeout"): Promise<void> {
     const fallback = task.fallbackModel;
     const primary = task.model ?? null;
     const activeModel = nextAttempt === 2 && fallback && !sameProvider(primary, fallback) ? fallback : primary;
     const usedFallback = activeModel === fallback && fallback !== null;
-    this.store.addEvent({ taskId: task.id, type: usedFallback ? "task_watchdog_fallback" : "task_watchdog_retry", body: { attempt: nextAttempt, model: activeModel } });
-    await this.startFreshOpenCodeAttempt(task, nextAttempt, activeModel);
+    const previousSessionId = task.sessionId;
+    const previousRunStartedAt = task.runStartedAt;
+    this.store.addEvent({
+      taskId: task.id,
+      type: usedFallback ? "task_watchdog_fallback" : "task_watchdog_retry",
+      body: {
+        attempt: nextAttempt,
+        ...(previousRunStartedAt !== undefined ? { runStartedAt: previousRunStartedAt } : {}),
+        ...(previousSessionId ? { sessionId: previousSessionId, previousSessionId } : {}),
+        model: activeModel,
+        provider: activeModel?.providerID,
+        reason,
+        outcome: usedFallback ? "fallback-starting" : "retry-starting",
+      },
+    });
+    await this.startFreshOpenCodeAttempt(task, nextAttempt, activeModel, previousSessionId, reason);
   }
 
   /**
@@ -2196,7 +2261,7 @@ export class TaskDispatcher implements Dispatcher {
     this.store.setCompletion(task.id, report, "watchdog");
     this.store.update(task.id, { runState: "error", error: report.residualRisk, completionLocation: "task-directory" });
     this.store.move(task.id, "review", END_OF_COLUMN);
-    this.store.addEvent({ taskId: task.id, type: "task_watchdog_exhausted", body: eventBody });
+    this.store.addEvent({ taskId: task.id, type: "task_watchdog_exhausted", body: { ...eventBody, outcome: "exhausted" } });
     if (runStartedAtToClose !== undefined) this.endOpenCodeRun(task.id, runStartedAtToClose, "error");
   }
 
@@ -2214,13 +2279,13 @@ export class TaskDispatcher implements Dispatcher {
       this.store.addEvent({
         taskId: run.taskId,
         type: "task_watchdog_abort_failed",
-        body: { sessionId: run.sessionId, runStartedAt: run.runStartedAt, error: errorMessage(err, "abort failed") },
+        body: watchdogEventBody(run, { model: watchdogModelForTask(task), outcome: "abort-failed", error: errorMessage(err, "abort failed") }),
       });
       return false;
     }
   }
 
-  private async startFreshOpenCodeAttempt(task: Task, attempt: number, activeModel: ModelRef | null): Promise<void> {
+  private async startFreshOpenCodeAttempt(task: Task, attempt: number, activeModel: ModelRef | null, previousSessionId: string | undefined, reason: string): Promise<void> {
     const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
     const isolatedRun = wantsWorktree(task);
     const permissionRules = resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides);
@@ -2233,7 +2298,7 @@ export class TaskDispatcher implements Dispatcher {
     const sessionId = extractSessionId((created as { data?: unknown }).data);
     if (!sessionId || (created as { error?: unknown }).error) {
       const detail = errorMessage((created as { error?: unknown }).error, "OpenCode session create returned no id");
-      await this.handleWatchdogAttemptStartFailure(task, attempt, "session-create", detail);
+      await this.handleWatchdogAttemptStartFailure(task, attempt, "session-create", detail, activeModel, previousSessionId, sessionId, reason);
       return;
     }
     const runStartedAt = Date.now();
@@ -2261,10 +2326,15 @@ export class TaskDispatcher implements Dispatcher {
       this.stopPermissionResponder(sessionId);
       this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, error: promptError });
       this.endOpenCodeRun(task.id, runStartedAt, "error");
-      await this.handleWatchdogAttemptStartFailure(task, attempt, "prompt", promptError);
+      await this.handleWatchdogAttemptStartFailure(task, attempt, "prompt", promptError, activeModel, previousSessionId, sessionId, reason);
       return;
     }
     this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "running", error: undefined });
+    this.store.addEvent({
+      taskId: task.id,
+      type: "task_watchdog_retry_started",
+      body: watchdogEventBody({ runStartedAt, sessionId, attempt }, { previousSessionId, nextSessionId: sessionId, model: activeModel, provider: activeModel?.providerID, reason, outcome: "retry-started" }),
+    });
     this.startCompletionWatcher(task.id, sessionId);
   }
 
@@ -2282,31 +2352,64 @@ export class TaskDispatcher implements Dispatcher {
     attempt: number,
     stage: "session-create" | "prompt",
     detail: string,
+    activeModel: ModelRef | null,
+    previousSessionId: string | undefined,
+    sessionId: string | undefined,
+    reason: string,
   ): Promise<void> {
-    this.store.addEvent({ taskId: task.id, type: "task_watchdog_retry_failed", body: { attempt, stage, error: detail } });
+    const current = this.store.get(task.id) ?? task;
+    const runStartedAt = current.runStartedAt;
+    this.store.addEvent({
+      taskId: task.id,
+      type: "task_watchdog_retry_failed",
+      body: {
+        attempt,
+        ...(runStartedAt !== undefined ? { runStartedAt } : {}),
+        ...(sessionId ?? current.sessionId ? { sessionId: sessionId ?? current.sessionId } : {}),
+        ...(previousSessionId ? { previousSessionId } : {}),
+        model: activeModel,
+        provider: activeModel?.providerID,
+        reason,
+        stage,
+        error: detail,
+        outcome: "start-failed",
+      },
+    });
     if (attempt < this.watchdogConfig.maxAutomaticRetries) {
-      await this.escalateWatchdogAttempt(task, attempt + 1);
+      await this.escalateWatchdogAttempt(current, attempt + 1, reason);
       return;
     }
     const staleRun = this.openCodeRunsByTask.get(task.id);
     this.systemBlockAfterWatchdogExhaustion(
-      task,
+      current,
       staleRun?.runStartedAt,
       `attempt ${attempt} failed to start (${stage}): ${detail}`,
-      { attempt, stage, error: detail },
+      {
+        attempt,
+        ...(runStartedAt !== undefined ? { runStartedAt } : {}),
+        ...(sessionId ?? current.sessionId ? { sessionId: sessionId ?? current.sessionId } : {}),
+        ...(previousSessionId ? { previousSessionId } : {}),
+        model: activeModel,
+        provider: activeModel?.providerID,
+        reason,
+        stage,
+        error: detail,
+      },
     );
   }
 
   private startCompletionWatcher(taskId: string, sessionId: string): void {
     this.cancelCompletionWatcher(sessionId);
-    const watcher = { cancelled: false };
+    const runStartedAt = this.store.get(taskId)?.runStartedAt;
+    const watcher = { cancelled: false, taskId, runStartedAt };
     this.completionWatchers.set(sessionId, watcher);
     void this.watchCompletion(taskId, sessionId, watcher);
   }
 
   private startAcpWatcher(taskId: string, sessionName: string, harness: AcpTaskHarness): void {
     this.cancelCompletionWatcher(sessionName);
-    const watcher = { cancelled: false };
+    const runStartedAt = this.store.get(taskId)?.runStartedAt;
+    const watcher = { cancelled: false, taskId, runStartedAt };
     this.completionWatchers.set(sessionName, watcher);
     void this.watchAcpCompletion(taskId, sessionName, harness, watcher);
   }
@@ -2414,7 +2517,7 @@ export class TaskDispatcher implements Dispatcher {
   private async watchCompletion(
     taskId: string,
     sessionId: string,
-    watcher: { cancelled: boolean },
+    watcher: { cancelled: boolean; taskId: string; runStartedAt?: number },
   ): Promise<void> {
     const startedAt = Date.now();
     const stallState: StallTrackingState = {
@@ -2535,10 +2638,13 @@ export class TaskDispatcher implements Dispatcher {
       // routes flip runState directly on the store without touching the
       // dispatcher, so this finally block is the only place that reliably
       // observes every completion path for this sessionId).
-      this.stopPermissionResponder(sessionId);
       const finalTask = this.getTaskForWatcher(taskId);
-      if (finalTask?.sessionId === sessionId && finalTask.runStartedAt !== undefined) {
-        this.endOpenCodeRun(taskId, finalTask.runStartedAt, finalTask.runState === "error" ? "error" : "complete");
+      const ownsCurrentRun = finalTask?.sessionId === sessionId && finalTask.runStartedAt === watcher.runStartedAt;
+      if (ownsCurrentRun) {
+        this.stopPermissionResponder(sessionId);
+        if (watcher.runStartedAt !== undefined) {
+          this.endOpenCodeRun(taskId, watcher.runStartedAt, finalTask.runState === "error" ? "error" : "complete");
+        }
       }
     }
   }
@@ -2655,7 +2761,7 @@ export class TaskDispatcher implements Dispatcher {
     taskId: string,
     sessionName: string,
     harness: AcpTaskHarness,
-    watcher: { cancelled: boolean },
+    watcher: { cancelled: boolean; taskId: string; runStartedAt?: number },
   ): Promise<void> {
     const startedAt = Date.now();
     const runner = this.acpRunners[harness];

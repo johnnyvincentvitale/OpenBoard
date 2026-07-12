@@ -4,6 +4,7 @@ import {
   BOARD_URL_REQUIRED_MESSAGE,
   DEFAULT_BOARD_URL,
   createBoardClient,
+  parseModelRef,
   resolveBoardUrl,
 } from "../../src/client/board-client";
 import type { BoardClientOptions, BoardHealth } from "../../src/client/board-client";
@@ -69,6 +70,15 @@ function makeOptions(
     statMock,
   };
 }
+
+describe("parseModelRef", () => {
+  it("splits only on the first slash so nested provider model ids survive", () => {
+    expect(parseModelRef("openrouter/anthropic/claude-sonnet-5")).toEqual({
+      providerID: "openrouter",
+      id: "anthropic/claude-sonnet-5",
+    });
+  });
+});
 
 describe("board client", () => {
   it("creates tasks with normalized directory, model, agent, and isolation", async () => {

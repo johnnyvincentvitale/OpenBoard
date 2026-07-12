@@ -257,7 +257,7 @@ export function registerTaskRoutes(
         throw AdapterError.validation("Request body must be valid JSON");
       }
 
-      const { title, description, directory, agent, model, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides, autoRun, parentIds } = body;
+      const { title, description, directory, agent, model, fallbackModel, isolation, assignedTo, permissionMode, claudePermissionMode, acpOptions, permissionOverrides, autoRun, parentIds } = body;
       const taskType = body.type ?? "agent";
       const taskKind = body.taskKind ?? "none";
       const harness = body.harness ?? "opencode";
@@ -286,6 +286,9 @@ export function registerTaskRoutes(
       }
       if (taskType === "manual" && (agent !== undefined || model !== undefined)) {
         throw AdapterError.validation("manual tasks cannot define agent or model");
+      }
+      if (taskType === "manual" && fallbackModel !== undefined) {
+        throw AdapterError.validation("manual tasks cannot define fallbackModel");
       }
       if (taskType === "manual" && harness !== "opencode") {
         throw AdapterError.validation("manual tasks cannot define harness");
@@ -362,6 +365,7 @@ export function registerTaskRoutes(
           ? await resolveModel(agent, model)
           : resolveAcpModel(harness, model)
         : undefined;
+      const resolvedFallbackModel = resolveFallbackModel(taskType, harness, fallbackModel, resolvedModel);
 
       const task = store.create({
         type: taskType,
@@ -376,6 +380,7 @@ export function registerTaskRoutes(
         ...(taskType === "agent" && isAcpHarness(harness) && isAcpOptions(acpOptions) ? { acpOptions } : {}),
         ...(taskType === "manual" && typeof assignedTo === "string" && assignedTo.trim() ? { assignedTo: assignedTo.trim() } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
+        ...(resolvedFallbackModel ? { fallbackModel: resolvedFallbackModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
         ...(autoRunAccepted ? { autoRun: true } : {}),
         ...(taskType === "agent" && harness === "opencode" && isolation === "in-place" && isPermissionOverrides(permissionOverrides) ? { permissionOverrides } : {}),
@@ -672,6 +677,7 @@ export function registerTaskRoutes(
       "directory",
       "agent",
       "model",
+      "fallbackModel",
       "type",
       "taskKind",
       "assignedTo",
@@ -805,6 +811,7 @@ export function registerTaskRoutes(
     if (nextType === "manual") {
       if (body.agent !== undefined && body.agent !== null) throw AdapterError.validation("manual tasks cannot define agent");
       if (body.model !== undefined && body.model !== null) throw AdapterError.validation("manual tasks cannot define model");
+      if (body.fallbackModel !== undefined && body.fallbackModel !== null) throw AdapterError.validation("manual tasks cannot define fallbackModel");
       if (nextHarness !== "opencode") throw AdapterError.validation("manual tasks cannot define harness");
       if (body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
@@ -820,6 +827,7 @@ export function registerTaskRoutes(
       }
       patch.agent = null;
       patch.model = null;
+      patch.fallbackModel = null;
       patch.permissionMode = null;
       patch.claudePermissionMode = null;
       patch.acpOptions = null;
@@ -841,6 +849,9 @@ export function registerTaskRoutes(
       if (body.permissionOverrides !== undefined && body.permissionOverrides !== null) {
         throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
       }
+      if (body.fallbackModel !== undefined && body.fallbackModel !== null) {
+        throw AdapterError.validation("fallbackModel can only be set for OpenCode agent tasks");
+      }
       if (patch.harness !== "claude-code" && body.claudePermissionMode !== undefined && body.claudePermissionMode !== null) {
         throw AdapterError.validation("claudePermissionMode can only be set for claude-code agent tasks");
       }
@@ -857,6 +868,7 @@ export function registerTaskRoutes(
         patch.claudePermissionMode = null;
       }
       patch.permissionOverrides = null;
+      patch.fallbackModel = null;
     } else {
       if (body.acpOptions !== undefined && body.acpOptions !== null) {
         throw AdapterError.validation("acpOptions can only be set for ACP agent tasks");
@@ -891,6 +903,13 @@ export function registerTaskRoutes(
         patch.permissionOverrides = null;
       } else if (body.permissionOverrides !== undefined) {
         patch.permissionOverrides = body.permissionOverrides === null ? null : (body.permissionOverrides as PermissionOverrides);
+      }
+
+      const effectivePrimary = patch.model !== undefined ? patch.model : existing.model;
+      if (body.fallbackModel !== undefined) {
+        patch.fallbackModel = body.fallbackModel === null ? null : resolveFallbackModel("agent", "opencode", body.fallbackModel, effectivePrimary);
+      } else if (existing.fallbackModel && effectivePrimary?.providerID === existing.fallbackModel.providerID) {
+        patch.fallbackModel = null;
       }
     }
     return patch;
@@ -1030,23 +1049,48 @@ export function registerTaskRoutes(
 
 }
 
-function validateExplicitModel(value: unknown): ModelRef {
+function validateModelRef(value: unknown, field: "model" | "fallbackModel"): ModelRef {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw AdapterError.validation("model must be an object with providerID and id strings");
+    throw AdapterError.validation(`${field} must be an object with providerID and id strings`);
   }
 
   const candidate = value as { providerID?: unknown; id?: unknown; variant?: unknown };
   if (typeof candidate.providerID !== "string" || candidate.providerID.trim().length === 0) {
-    throw AdapterError.validation("model.providerID must be a non-empty string");
+    throw AdapterError.validation(`${field}.providerID must be a non-empty string`);
   }
   if (typeof candidate.id !== "string" || candidate.id.trim().length === 0) {
-    throw AdapterError.validation("model.id must be a non-empty string");
+    throw AdapterError.validation(`${field}.id must be a non-empty string`);
   }
   if (candidate.variant !== undefined && typeof candidate.variant !== "string") {
-    throw AdapterError.validation("model.variant must be a string when provided");
+    throw AdapterError.validation(`${field}.variant must be a string when provided`);
   }
 
-  return value as ModelRef;
+  return {
+    providerID: candidate.providerID.trim(),
+    id: candidate.id.trim(),
+    ...(candidate.variant !== undefined ? { variant: candidate.variant } : {}),
+  };
+}
+
+function validateExplicitModel(value: unknown): ModelRef {
+  return validateModelRef(value, "model");
+}
+
+function resolveFallbackModel(
+  taskType: CreateTaskInput["type"] | UpdateTaskInput["type"],
+  harness: TaskHarness,
+  value: unknown,
+  primaryModel: ModelRef | null | undefined,
+): ModelRef | undefined {
+  if (value === undefined) return undefined;
+  if (taskType === "manual") throw AdapterError.validation("manual tasks cannot define fallbackModel");
+  if (harness !== "opencode") throw AdapterError.validation("fallbackModel can only be set for OpenCode agent tasks");
+  const fallback = validateModelRef(value, "fallbackModel");
+  if (!primaryModel) throw AdapterError.validation("fallbackModel requires a primary model");
+  if (fallback.providerID === primaryModel.providerID) {
+    throw AdapterError.validation("fallbackModel.providerID must differ from the primary model providerID");
+  }
+  return fallback;
 }
 
 function assertRunnableActiveTask(store: TaskStore, id: string, action: "run" | "retry"): void {

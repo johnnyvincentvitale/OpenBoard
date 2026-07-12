@@ -538,13 +538,13 @@ export function resolveBoardUrl(options: BoardClientOptions = {}): string {
 
 export function parseModelRef(model: string): ModelRef {
   const trimmed = model.trim();
-  const parts = trimmed.split("/");
+  const slash = trimmed.indexOf("/");
 
-  if (parts.length !== 2 || parts[0].trim().length === 0 || parts[1].trim().length === 0) {
+  if (slash <= 0 || slash === trimmed.length - 1) {
     throw new Error('model must use "provider/model-id"');
   }
 
-  return { providerID: parts[0].trim(), id: parts[1].trim() };
+  return { providerID: trimmed.slice(0, slash).trim(), id: trimmed.slice(slash + 1).trim() };
 }
 
 export function toTaskSummary(task: Task): TaskSummary {
