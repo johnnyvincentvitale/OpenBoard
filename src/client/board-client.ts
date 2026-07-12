@@ -41,6 +41,7 @@ import type {
   WorktreeCleanupOutcome,
   BoardHealth,
   TaskCompareResponse,
+  ErrorCode,
 } from "../shared";
 import {
   AUTO_RUN_REQUIREMENT,
@@ -67,6 +68,18 @@ export type { BoardDiagnostics } from "../shared/diagnostics";
 
 export const DEFAULT_BOARD_URL = "http://127.0.0.1:4097";
 export const BOARD_UNAVAILABLE_MESSAGE = "Open OpenBoard first or set OPENCODE_BOARD_URL.";
+
+export class BoardClientError extends Error {
+  readonly status: number;
+  readonly code?: ErrorCode;
+
+  constructor(status: number, message: string, code?: ErrorCode) {
+    super(message);
+    this.name = "BoardClientError";
+    this.status = status;
+    this.code = code;
+  }
+}
 export const BOARD_URL_REQUIRED_MESSAGE =
   "Select an OpenBoard instance and set OPENCODE_BOARD_URL before using the OpenBoard MCP tools.";
 
@@ -271,8 +284,7 @@ export interface BoardClient {
    * Respond to a pending permission ask on a task. POST /api/tasks/:id/permission
    * returns the shared projected Task on success (see server/routes/permission.ts) —
    * not a RespondPermissionOutcome (that's the dispatcher's internal outcome shape).
-   * Non-2xx responses throw via requestJson; callers should catch and inspect the
-   * error message for a "(409)" status to detect a stale/already-resolved ask.
+   * Non-2xx responses throw BoardClientError with typed status/code fields.
    */
   respondPermission(id: string, input: RespondPermissionInput): Promise<Task>;
   /** Send operator-authored chat input to the card's existing harness session. */
@@ -703,10 +715,12 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
   }
 
   if (task.permissionOverrides !== undefined) {
-    if (payload.type !== "agent" || (payload.harness !== undefined && payload.harness !== "opencode") || payload.isolation !== "in-place") {
-      throw new Error("permissionOverrides can only be set for in-place OpenCode agent tasks");
+    const normalized = normalizePermissionOverrides(task.permissionOverrides);
+    const validWorktree = payload.isolation === "worktree" && Object.entries(normalized).every(([category, action]) => category === "bash" && (action === "ask" || action === "deny"));
+    if (payload.type !== "agent" || (payload.harness !== undefined && payload.harness !== "opencode") || (payload.isolation !== "in-place" && !validWorktree)) {
+      throw new Error("permissionOverrides require an in-place OpenCode task, or a worktree OpenCode task with only bash: ask|deny");
     }
-    payload.permissionOverrides = normalizePermissionOverrides(task.permissionOverrides);
+    payload.permissionOverrides = normalized;
   }
 
   // Evaluated after permissionOverrides lands on the payload — the fenced
@@ -786,8 +800,18 @@ async function requestJson<T>(options: ResolvedOptions, path: string, init: Requ
 
   if (!response.ok) {
     const detail = await safeResponseText(response);
-    const suffix = detail ? `: ${detail}` : "";
-    throw new Error(`OpenBoard request failed (${response.status})${suffix}`);
+    let code: ErrorCode | undefined;
+    let message = detail;
+    if (detail) {
+      try {
+        const envelope = JSON.parse(detail) as { error?: { code?: unknown; message?: unknown } };
+        if (typeof envelope.error?.code === "string") code = envelope.error.code as ErrorCode;
+        if (typeof envelope.error?.message === "string") message = envelope.error.message;
+      } catch {
+        // Preserve non-JSON response text below.
+      }
+    }
+    throw new BoardClientError(response.status, message || `OpenBoard request failed (${response.status})`, code);
   }
 
   try {

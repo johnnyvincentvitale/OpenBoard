@@ -317,6 +317,9 @@ export interface RespondPermissionResult {
   boardUrl: string;
   task: TaskSummary;
   taskId: string;
+  askId: string;
+  action: "allow_once" | "deny";
+  resolution: "operator";
   answeredBy: string;
 }
 
@@ -540,6 +543,9 @@ export async function respondPermission(input: unknown, options: McpToolOptions 
     boardUrl: client.boardUrl,
     task: toTaskSummary(updated),
     taskId: parsed.taskId,
+    askId: parsed.askId,
+    action: parsed.action,
+    resolution: "operator",
     answeredBy: parsed.answeredBy,
   };
 }

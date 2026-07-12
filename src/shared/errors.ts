@@ -5,6 +5,11 @@ export const ERROR_CODES = [
   "validation",
   "internal",
   "unauthorized",
+  "permission_ask_not_found",
+  "permission_ask_stale",
+  "permission_already_claimed",
+  "permission_action_unsupported",
+  "permission_reply_failed",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -22,6 +27,11 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   validation: 400,
   internal: 500,
   unauthorized: 401,
+  permission_ask_not_found: 404,
+  permission_ask_stale: 409,
+  permission_already_claimed: 409,
+  permission_action_unsupported: 422,
+  permission_reply_failed: 502,
 };
 
 /** Typed adapter error carrying a canonical code -> HTTP status + JSON envelope. */

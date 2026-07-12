@@ -298,10 +298,10 @@ describe("board client", () => {
       "claudePermissionMode must be a supported Claude Code permission mode",
     );
     await expect(client.createTask({ title: "Bad override", permissionOverrides: { edit: "ask" } })).rejects.toThrow(
-      "permissionOverrides can only be set for in-place OpenCode agent tasks",
+      "permissionOverrides require an in-place OpenCode task, or a worktree OpenCode task with only bash: ask|deny",
     );
     await expect(client.createTask({ title: "Bad override", harness: "claude-code", isolation: "in-place", permissionOverrides: { edit: "ask" } })).rejects.toThrow(
-      "permissionOverrides can only be set for in-place OpenCode agent tasks",
+      "permissionOverrides require an in-place OpenCode task, or a worktree OpenCode task with only bash: ask|deny",
     );
     await expect(
       client.createTask({ title: "Bad override shape", isolation: "in-place", permissionOverrides: { edit: "sometimes" as never } }),
@@ -642,15 +642,17 @@ describe("board client", () => {
     );
   });
 
-  it("respondPermission rejects (throws) on a non-2xx response instead of returning a conflict outcome", async () => {
+  it("respondPermission throws a typed BoardClientError on a non-2xx response", async () => {
     const fetchMock = vi.fn(async () =>
-      jsonResponse({ error: { code: "validation", message: "Permission ask already resolved: ask-1" } }, 409),
+      jsonResponse({ error: { code: "permission_already_claimed", message: "Permission ask already resolved: ask-1" } }, 409),
     );
     const client = createBoardClient(makeOptions([CWD], fetchMock));
 
-    await expect(
-      client.respondPermission("task-1", { askId: "ask-1", action: "deny", answeredBy: "User" }),
-    ).rejects.toThrow(/409/);
+    await expect(client.respondPermission("task-1", { askId: "ask-1", action: "deny", answeredBy: "User" })).rejects.toMatchObject({
+      name: "BoardClientError",
+      status: 409,
+      code: "permission_already_claimed",
+    });
   });
 
   it("sendSessionMessage POSTs chat input to the task session route", async () => {

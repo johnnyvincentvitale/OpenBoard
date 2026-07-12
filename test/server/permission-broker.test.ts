@@ -54,6 +54,24 @@ function baseAsk(overrides: Partial<Parameters<ReturnType<typeof createPermissio
 }
 
 describe("createPermissionBroker", () => {
+  it("uses globally unique opaque ids even across independent broker instances", () => {
+    const first = createPermissionBroker();
+    const second = createPermissionBroker();
+    const firstId = first.submitAsk(baseAsk({ deadline: Date.now() + 1000 }));
+    const secondId = second.submitAsk(baseAsk({ deadline: Date.now() + 1000 }));
+    expect(firstId).not.toBe(secondId);
+    expect(firstId).toMatch(/^ask_[0-9a-f-]{36}$/);
+    expect(secondId).toMatch(/^ask_[0-9a-f-]{36}$/);
+    first.stop();
+    second.stop();
+  });
+
+  it("projects explicit task, attempt, and provider-session ownership", () => {
+    const broker = createPermissionBroker();
+    broker.submitAsk(baseAsk({ taskId: "task_1", runStartedAt: 123, providerSessionId: "child_1", deadline: Date.now() + 1000 }));
+    expect(broker.listPending()[0]).toMatchObject({ taskId: "task_1", runStartedAt: 123, providerSessionId: "child_1" });
+    broker.stop();
+  });
   it("mints a board ask id distinct from the native id, and never exposes the native id publicly", () => {
     const { clock } = createFakeClock();
     const events: PermissionAskEvent[] = [];
@@ -76,7 +94,7 @@ describe("createPermissionBroker", () => {
 
     const [ask] = broker.listPending();
     expect(Object.keys(ask).sort()).toEqual(
-      ["deadline", "harness", "id", "patterns", "permission", "raisedAt", "source", "summary", "tool"].sort(),
+      ["deadline", "harness", "id", "patterns", "permission", "providerSessionId", "raisedAt", "source", "summary", "tool"].sort(),
     );
   });
 
@@ -101,6 +119,15 @@ describe("createPermissionBroker", () => {
     const b = broker.submitAsk(baseAsk({ runId: "run_b" }));
 
     expect(a).not.toBe(b);
+    expect(broker.listPending()).toHaveLength(2);
+  });
+
+  it("treats overlapping native ids from root and child provider sessions as distinct asks", () => {
+    const { clock } = createFakeClock();
+    const broker = createPermissionBroker({ clock });
+    const root = broker.submitAsk(baseAsk({ nativeId: "req_1", providerSessionId: "root" }));
+    const child = broker.submitAsk(baseAsk({ nativeId: "req_1", providerSessionId: "child" }));
+    expect(child).not.toBe(root);
     expect(broker.listPending()).toHaveLength(2);
   });
 
@@ -245,6 +272,25 @@ describe("createPermissionBroker", () => {
     });
   });
 
+  it("caps reopened provider reply failures and terminates visibly after three attempts", async () => {
+    const { clock } = createFakeClock();
+    const events: PermissionAskEvent[] = [];
+    const replyToProvider = vi.fn().mockRejectedValue(new Error("provider down"));
+    const broker = createPermissionBroker({ clock, onEvent: (event) => events.push(event) });
+    const askId = broker.submitAsk(baseAsk({ reopenOnReplyFailure: true, replyToProvider }));
+
+    await expect(broker.respond({ askId, action: "deny", answeredBy: "operator" })).resolves.toMatchObject({ conflict: "reply-failed" });
+    expect(broker.listPending()).toHaveLength(1);
+    await broker.respond({ askId, action: "deny", answeredBy: "operator" });
+    expect(broker.listPending()).toHaveLength(1);
+    await broker.respond({ askId, action: "deny", answeredBy: "operator" });
+
+    expect(replyToProvider).toHaveBeenCalledTimes(3);
+    expect(broker.listPending()).toEqual([]);
+    expect(events.filter((event) => event.type === "permission_reply_failed")).toHaveLength(3);
+    expect(events.at(-1)).toMatchObject({ pendingAfterFailure: false, delivery: "failed" });
+  });
+
   it("truncates a reply-failure error message in the emitted event", async () => {
     const { clock } = createFakeClock();
     const events: PermissionAskEvent[] = [];
@@ -278,6 +324,40 @@ describe("createPermissionBroker", () => {
     expect(replyA).not.toHaveBeenCalled();
     // run_b was untouched and still resolves normally via its own timeout.
     expect(replyB).toHaveBeenCalledWith("deny");
+  });
+
+  it("emits one terminal cancellation with unknown delivery when a run is cleared", () => {
+    const { clock } = createFakeClock();
+    const events: PermissionAskEvent[] = [];
+    const broker = createPermissionBroker({ clock, onEvent: (event) => events.push(event) });
+    const askId = broker.submitAsk(baseAsk());
+
+    broker.clearRun("run_1", "opencode", "run-replaced");
+
+    expect(broker.listPending()).toEqual([]);
+    expect(events.filter((event) => event.askId === askId).map((event) => event.type)).toEqual([
+      "permission_asked",
+      "permission_cancelled",
+    ]);
+    expect(events.at(-1)).toMatchObject({ cancellationReason: "run-replaced", delivery: "unknown" });
+  });
+
+  it("does not emit answered after a claimed provider write races run cancellation", async () => {
+    const { clock } = createFakeClock();
+    const events: PermissionAskEvent[] = [];
+    let release!: () => void;
+    const replyToProvider = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const broker = createPermissionBroker({ clock, onEvent: (event) => events.push(event) });
+    const askId = broker.submitAsk(baseAsk({ replyToProvider }));
+    const response = broker.respond({ askId, action: "allow_once", answeredBy: "operator" });
+    await Promise.resolve();
+
+    broker.clearRun("run_1", "opencode", "shutdown");
+    release();
+
+    await expect(response).resolves.toMatchObject({ ok: false, conflict: "already-resolved" });
+    expect(events.map((event) => event.type)).toEqual(["permission_asked", "permission_cancelled"]);
+    expect(events.at(-1)).toMatchObject({ delivery: "unknown" });
   });
 
   it("protects a replacement run reusing the same runId from a late timer callback", async () => {

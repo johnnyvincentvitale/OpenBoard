@@ -4,7 +4,7 @@ import { SqliteTaskStore } from "../../../src/db/task-store";
 import { registerPermissionRoutes } from "../../../src/server/routes/permission";
 import type { Dispatcher, Task } from "../../../src/shared";
 
-function makeFakeDispatcher(askId: string, outcome: { ok: true; askId: string; decision: "allow_once" | "deny" } | { ok: false; askId: string; conflict: "not-found" | "already-resolved" | "reply-failed"; error?: string }) {
+function makeFakeDispatcher(askId: string, outcome: { ok: true; askId: string; decision: "allow_once" | "deny" } | { ok: false; askId: string; conflict: "not-found" | "stale" | "already-resolved" | "unsupported-action" | "reply-failed"; error?: string }) {
   return {
     listPendingPermissions: vi.fn(() => []),
     respondPermission: vi.fn(async () => outcome),
@@ -45,7 +45,7 @@ describe("permission route", () => {
     });
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body.error.code).toBe("session_not_found");
+    expect(body.error.code).toBe("permission_ask_not_found");
   });
 
   it("returns 400 when body is missing required fields", async () => {
@@ -106,7 +106,7 @@ describe("permission route", () => {
     expect(body.error.message).toContain("already resolved");
   });
 
-  it("returns 409 when ask is not found (stale/wrong-task)", async () => {
+  it("returns typed 404 when ask is not found (stale/wrong-task)", async () => {
     const task = makeTask(store);
     const dispatcher = makeFakeDispatcher("ask_1", { ok: false, askId: "ask_1", conflict: "not-found" });
     const app = appFor(store, dispatcher);
@@ -116,7 +116,35 @@ describe("permission route", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ askId: "ask_1", action: "deny", answeredBy: "operator" }),
     });
+    expect(res.status).toBe(404);
+    expect((await res.json()).error.code).toBe("permission_ask_not_found");
+  });
+
+  it("returns typed 409 when a formerly owned ask is stale", async () => {
+    const task = makeTask(store);
+    const dispatcher = makeFakeDispatcher("ask_1", { ok: false, askId: "ask_1", conflict: "stale" });
+    const app = appFor(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}/permission`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ askId: "ask_1", action: "deny", answeredBy: "operator" }),
+    });
     expect(res.status).toBe(409);
+    expect((await res.json()).error.code).toBe("permission_ask_stale");
+  });
+
+  it("returns typed 422 when the provider does not offer the requested action", async () => {
+    const task = makeTask(store);
+    const dispatcher = makeFakeDispatcher("ask_1", { ok: false, askId: "ask_1", conflict: "unsupported-action", error: "allow once unavailable" });
+    const app = appFor(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/permission`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ askId: "ask_1", action: "allow_once", answeredBy: "operator" }),
+    });
+    expect(res.status).toBe(422);
+    expect((await res.json()).error.code).toBe("permission_action_unsupported");
   });
 
   it("returns 502 when provider reply failed", async () => {

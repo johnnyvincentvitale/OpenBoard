@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { DEFAULT_ACP_PERMISSION_MODE, type AcpPermissionMode } from "../shared";
 import type { AcpConfigOption, AcpConfigValueOption, AcpHarnessConfig, AcpModelOption, AcpOptionValue, AcpTaskHarness, PendingPermissionAsk, RespondPermissionInput, SessionActivityToolStatus } from "../shared";
 import type {
@@ -11,7 +11,7 @@ import type {
   ClaudeCodeStatus,
 } from "./claude-code-runner";
 import { completionHandoffGuidance } from "./completion-contract";
-import { createPermissionBroker, type PermissionAskEvent, type PermissionBroker, type PermissionBrokerClock, type RespondOutcome } from "./permission-broker";
+import { createPermissionBroker, PermissionActionUnsupportedError, type PermissionAskEvent, type PermissionBroker, type PermissionBrokerClock, type RespondOutcome } from "./permission-broker";
 import type { SessionActivityEventInput } from "./session-activity";
 
 type Spawn = typeof nodeSpawn;
@@ -77,6 +77,8 @@ export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
   mcpCommand?: string;
   permissionGraceMs?: number;
   permissionClock?: PermissionBrokerClock;
+  /** Board-wide broker. When omitted, this runner owns a private broker. */
+  permissionBroker?: PermissionBroker;
   onPermissionEvent?: (event: PermissionAskEvent) => void;
   onActivity?: (taskId: string, runStartedAt: number, input: SessionActivityEventInput) => void;
   onRunTerminal?: (taskId: string, runStartedAt: number, status: "complete" | "error" | "aborted") => void;
@@ -192,12 +194,6 @@ function normalizeMode(mode: AcpPermissionMode): string {
   return mode === "manual" ? "default" : mode;
 }
 
-function isPathUnder(candidate: string, root: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedCandidate = resolve(root, candidate);
-  return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(`${resolvedRoot}/`);
-}
-
 function valuesFromInput(value: unknown, keys: Set<string>, output: string[] = []): string[] {
   if (value === null || value === undefined) return output;
   if (typeof value !== "object") return output;
@@ -212,18 +208,6 @@ function valuesFromInput(value: unknown, keys: Set<string>, output: string[] = [
   return output;
 }
 
-function absolutePathsInCommand(command: string): string[] {
-  const matches = command.match(/(?<![\w.-])\/(?:[^\s'"`;$|&<>\\]|\\.)+/g);
-  return matches ?? [];
-}
-
-function commandLooksOutsideFence(command: string, cwd: string): boolean {
-  for (const absolutePath of absolutePathsInCommand(command)) {
-    if (!isPathUnder(absolutePath, cwd)) return true;
-  }
-  return false;
-}
-
 function toolName(toolCall: AcpToolCall): string | undefined {
   const raw = toolCall.rawInput;
   if (raw !== null && typeof raw === "object") {
@@ -236,6 +220,10 @@ function toolName(toolCall: AcpToolCall): string | undefined {
       if (typeof name === "string" && name) return name;
     }
   }
+  // Some ACP adapters put the fully-qualified MCP tool name only in title.
+  // Trust that surface solely for the two exact OpenBoard report tools; never
+  // treat an arbitrary human-readable title as a privileged tool identity.
+  if (typeof toolCall.title === "string" && OPENBOARD_REPORT_TOOLS.has(toolCall.title)) return toolCall.title;
   return undefined;
 }
 
@@ -251,7 +239,7 @@ export function decideClaudeAcpPermission(
   params: AcpPermissionParams,
   cwd: string,
   permissionMode: AcpPermissionMode,
-): "allow" | "reject" {
+): "allow" | "ask" | "deny" {
   if (permissionMode === "bypassPermissions") return "allow";
 
   const call = params.toolCall;
@@ -261,22 +249,14 @@ export function decideClaudeAcpPermission(
   const kind = call.kind;
   if (kind === "read" || kind === "search" || kind === "fetch" || kind === "think") return "allow";
 
-  if (name === "Bash" || kind === "execute") {
-    const command = valuesFromInput(call.rawInput, new Set(["command"]))[0];
-    if (!command) return "reject";
-    return commandLooksOutsideFence(command, cwd) ? "reject" : "allow";
-  }
-
-  if (kind === "edit" || kind === "delete" || kind === "move" || name === "Write" || name === "Edit" || name === "MultiEdit") {
-    const paths = [
-      ...valuesFromInput(call.rawInput, new Set(["file_path", "path", "notebook_path"])),
-      ...(call.locations ?? []).flatMap((location) => (typeof location.path === "string" ? [location.path] : [])),
-    ];
-    if (paths.length === 0) return "reject";
-    return paths.every((path) => isPathUnder(path, cwd)) ? "allow" : "reject";
-  }
-
-  return "reject";
+  // Command strings and lexical paths are not containment boundaries:
+  // redirects, interpreters, expansion, traversal, and symlinks can escape
+  // them. Autonomous modes remain explicit compatibility choices. Manual is
+  // interactive-strict; dontAsk/plan fail closed for every mutating or unknown
+  // operation.
+  if (permissionMode === "acceptEdits" || permissionMode === "auto") return "allow";
+  if (permissionMode === "dontAsk" || permissionMode === "plan") return "deny";
+  return "ask";
 }
 
 function truncate(value: string, max = SUMMARY_MAX): string {
@@ -292,7 +272,6 @@ function chooseOption(options: AcpPermissionParams["options"], decision: "allow"
     const match = options.find((option) => option.optionId === id || option.kind === id);
     if (match) return match.optionId;
   }
-  if (decision === "reject") return options.find((option) => option.kind === "reject" || option.optionId === "reject")?.optionId ?? "reject";
   return undefined;
 }
 
@@ -509,6 +488,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   private readonly permissionNow: () => number;
   private readonly service: AcpRunnerServiceConfig;
   private readonly broker: PermissionBroker;
+  private readonly ownsBroker: boolean;
   private readonly onActivity?: (taskId: string, runStartedAt: number, input: SessionActivityEventInput) => void;
   private readonly onRunTerminal?: (taskId: string, runStartedAt: number, status: "complete" | "error" | "aborted") => void;
   private readonly sessions = new Map<string, AcpSessionState>();
@@ -528,7 +508,8 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     this.permissionMode = (deps.permissionMode as AcpPermissionMode | undefined) ?? (envPermissionMode as AcpPermissionMode | undefined) ?? DEFAULT_ACP_PERMISSION_MODE;
     this.permissionGraceMs = deps.permissionGraceMs ?? ACP_PERMISSION_GRACE_MS;
     this.permissionNow = deps.permissionClock?.now ?? (() => Date.now());
-    this.broker = createPermissionBroker({ clock: deps.permissionClock, onEvent: deps.onPermissionEvent });
+    this.ownsBroker = deps.permissionBroker === undefined;
+    this.broker = deps.permissionBroker ?? createPermissionBroker({ clock: deps.permissionClock, onEvent: deps.onPermissionEvent });
     this.onActivity = deps.onActivity;
     this.onRunTerminal = deps.onRunTerminal;
   }
@@ -539,6 +520,14 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
 
   retry(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult> {
     return this.start(input);
+  }
+
+  runPrepared(input: ClaudeCodeRunInput, onReady: (result: ClaudeCodeRunResult) => void | Promise<void>): Promise<ClaudeCodeRunResult> {
+    return this.start(input, onReady);
+  }
+
+  retryPrepared(input: ClaudeCodeRunInput, onReady: (result: ClaudeCodeRunResult) => void | Promise<void>): Promise<ClaudeCodeRunResult> {
+    return this.start(input, onReady);
   }
 
   async poll(sessionName: string): Promise<ClaudeCodeStatus | undefined> {
@@ -589,27 +578,30 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     for (const session of this.sessions.values()) {
       if (session.activePrompt) this.sendNotification(session, "session/cancel", { sessionId: session.sessionId });
       session.terminal = true;
-      this.broker.clearRun(session.sessionId);
+      this.broker.clearRun(session.sessionId, session.harness, "shutdown");
       session.child.kill();
     }
     this.sessions.clear();
-    this.broker.stop();
+    if (this.ownsBroker) this.broker.stop();
   }
 
   listPendingPermissions(sessionName: string): PendingPermissionAsk[] {
     const session = this.sessions.get(sessionName);
-    return session ? this.broker.listPending(session.sessionId) : [];
+    return session ? this.broker.listPending(session.sessionId, session.harness) : [];
   }
 
   respondPermission(sessionName: string, input: RespondPermissionInput): Promise<RespondOutcome> {
     const session = this.sessions.get(sessionName);
-    if (!session || !this.broker.listPending(session.sessionId).some((ask) => ask.id === input.askId)) {
+    if (!session || !this.broker.listPending(session.sessionId, session.harness).some((ask) => ask.id === input.askId)) {
       return Promise.resolve({ ok: false, askId: input.askId, conflict: "not-found" });
     }
     return this.broker.respond(input);
   }
 
-  private async start(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult> {
+  private async start(
+    input: ClaudeCodeRunInput,
+    onReady?: (result: ClaudeCodeRunResult) => void | Promise<void>,
+  ): Promise<ClaudeCodeRunResult> {
     const sessionName = `openboard-${input.task.id}-${input.runStartedAt}`;
     const permissionMode = input.task.permissionMode ?? input.task.claudePermissionMode ?? this.permissionMode;
     const child = this.spawn(this.command, this.commandArgs, {
@@ -657,9 +649,13 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     await this.trySetMode(state, permissionMode);
 
     state.status = "running";
+    const result = { sessionId, sessionName, status: "running" };
+    // The dispatcher uses this two-stage hook to persist task/run/session
+    // ownership before session/prompt can produce an immediate permission ask.
+    await onReady?.(result);
     this.beginPrompt(state, this.withWorkerContract(input));
 
-    return { sessionId, sessionName, status: "running" };
+    return result;
   }
 
   private beginPrompt(state: AcpSessionState, text: string): void {
@@ -756,18 +752,37 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
 
   private request(state: AcpSessionState, method: string, params: Record<string, unknown>): Promise<unknown> {
     const id = state.nextId++;
-    this.write(state, { jsonrpc: "2.0", id, method, params });
-    return new Promise((resolve, reject) => {
+    const response = new Promise((resolve, reject) => {
       state.pending.set(id, { resolve, reject });
     });
+    // Register before writing so an adapter that responds synchronously cannot
+    // beat the pending-map insertion and orphan its response.
+    void this.write(state, { jsonrpc: "2.0", id, method, params }).catch((error) => {
+      const pending = state.pending.get(id);
+      if (!pending) return;
+      state.pending.delete(id);
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+    });
+    return response;
   }
 
   private sendNotification(state: AcpSessionState, method: string, params: Record<string, unknown>): void {
-    this.write(state, { jsonrpc: "2.0", method, params });
+    void this.write(state, { jsonrpc: "2.0", method, params }).catch((error) => {
+      this.failSession(state, error instanceof Error ? error : new Error(String(error)));
+    });
   }
 
-  private write(state: AcpSessionState, message: Record<string, unknown>): void {
-    state.child.stdin?.write(`${JSON.stringify(message)}\n`);
+  private write(state: AcpSessionState, message: Record<string, unknown>): Promise<void> {
+    const stdin = state.child.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) {
+      return Promise.reject(new Error(`${this.service.displayName} stdin is not writable`));
+    }
+    return new Promise((resolveWrite, rejectWrite) => {
+      stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+        if (error) rejectWrite(error);
+        else resolveWrite();
+      });
+    });
   }
 
   private attachProcessHandlers(state: AcpSessionState): void {
@@ -811,7 +826,17 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       return;
     }
     if (typeof message.method === "string" && id !== undefined) {
-      void this.handleRequest(state, id, message.method, message.params);
+      void this.handleRequest(state, id, message.method, message.params).catch(async (error) => {
+        try {
+          await this.write(state, {
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32001, message: error instanceof Error ? error.message : String(error) },
+          });
+        } catch {
+          this.failSession(state, error instanceof Error ? error : new Error(String(error)));
+        }
+      });
       return;
     }
     if (typeof message.method === "string" && id === undefined) {
@@ -826,20 +851,20 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     params: unknown,
   ): Promise<void> {
     if (method !== "session/request_permission") {
-      this.write(state, { jsonrpc: "2.0", id, error: { code: -32601, message: `Unsupported client method: ${method}` } });
+      await this.write(state, { jsonrpc: "2.0", id, error: { code: -32601, message: `Unsupported client method: ${method}` } });
       return;
     }
     const permission = normalizePermissionParams(params);
     if (!permission) {
-      this.write(state, { jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid ACP permission request" } });
+      await this.write(state, { jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid ACP permission request" } });
       return;
     }
     if (permission.sessionId !== state.sessionId) {
-      this.write(state, { jsonrpc: "2.0", id, error: { code: -32000, message: "Stale ACP permission request" } });
+      await this.write(state, { jsonrpc: "2.0", id, error: { code: -32000, message: "Stale ACP permission request" } });
       return;
     }
     if (state.permissionMode === "bypassPermissions") {
-      this.writePermissionResponse(state, id, permission, "allow_once");
+      await this.writePermissionResponse(state, id, permission, "allow_once");
       return;
     }
     const policy = decideClaudeAcpPermission(permission, state.cwd, state.permissionMode);
@@ -848,12 +873,19 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       // immediately, matching pre-FR08 base behavior. Only requests the write-fence policy
       // would otherwise reject are held for the operator broker below, so a normal in-cwd
       // session is not stalled 60s per tool call waiting on an ask nobody needs to answer.
-      this.writePermissionResponse(state, id, permission, "allow_once");
+      await this.writePermissionResponse(state, id, permission, "allow_once");
+      return;
+    }
+    if (policy === "deny") {
+      await this.writePermissionResponse(state, id, permission, "deny");
       return;
     }
     const nativeId = String(id);
     this.broker.submitAsk({
       runId: state.sessionId,
+      taskId: state.taskId,
+      runStartedAt: state.runStartedAt,
+      providerSessionId: permission.sessionId,
       nativeId,
       harness: state.harness,
       source: "acp",
@@ -868,11 +900,11 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     });
   }
 
-  private writePermissionResponse(state: AcpSessionState, id: JsonRpcId, permission: AcpPermissionParams, decision: RespondPermissionInput["action"]): void {
+  private async writePermissionResponse(state: AcpSessionState, id: JsonRpcId, permission: AcpPermissionParams, decision: RespondPermissionInput["action"]): Promise<void> {
     const rpcDecision = decision === "allow_once" ? "allow" : "reject";
     let optionId = chooseOption(permission.options ?? [], rpcDecision);
-    if (!optionId) throw new Error("ACP permission request does not offer a supported option");
-    this.write(state, {
+    if (!optionId) throw new PermissionActionUnsupportedError("ACP permission request does not offer a supported option");
+    await this.write(state, {
       jsonrpc: "2.0",
       id,
       result: {
@@ -899,7 +931,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   }
 
   private clearRun(state: AcpSessionState, status: "complete" | "error" | "aborted"): void {
-    this.broker.clearRun(state.sessionId);
+    this.broker.clearRun(state.sessionId, state.harness, "run-cleared");
     this.onRunTerminal?.(state.taskId, state.runStartedAt, status);
   }
 

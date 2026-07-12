@@ -33,10 +33,15 @@ describe("permission TUI surface", () => {
     expect(firstPendingPermissionAsk(selected)?.id).toBe("ask-1");
     expect(permissionAskBoardLabel(selected, now)).toBe("◆ NEEDS USER INPUT · 2 asks");
     expect(permissionAskDetailRows(selected, now)).toEqual([
-      { label: "INPUT", value: "2 pending permission asks" },
-      { label: "OLDEST ASK", value: "Edit file" },
+      { label: "INPUT", value: "1 of 2 pending permission asks" },
+      { label: "HARNESS", value: "opencode" },
+      { label: "SOURCE", value: "worktree-fence" },
+      { label: "TOOL", value: "edit" },
+      { label: "REQUEST", value: "Edit file" },
+      { label: "WARNING", value: "request is outside the task worktree" },
       { label: "COUNTDOWN", value: "5s" },
-      { label: "ANSWER", value: "y allow once · uppercase N deny" },
+      { label: "TIMEOUT", value: "deny" },
+      { label: "ANSWER", value: "y allow once · ! deny" },
     ]);
   });
 

@@ -14,7 +14,7 @@
  */
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskEvent, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -30,7 +30,7 @@ import { loadPermissionConfig, loadWatchdogConfig, type WatchdogConfig } from ".
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
 import { SessionActivityCollector, type SessionActivityEventInput } from "./session-activity";
 import { directParentPromptBlock, taskExecutionContext } from "./task-context";
-import type { PermissionAskEvent, RespondOutcome } from "./permission-broker";
+import { createPermissionBroker, type PermissionAskEvent, type PermissionBroker, type RespondOutcome } from "./permission-broker";
 import { resolveTaskLineage } from "./task-lineage";
 import { RunWatchdog, type WatchdogClock, type WatchdogRetryDecision, type WatchdogRunIdentity, type WatchdogTermination } from "./watchdog";
 import { evaluateDonePolicy } from "./done-policy";
@@ -679,7 +679,11 @@ export class TaskDispatcher implements Dispatcher {
   private readonly openCodeRunsByTask = new Map<string, OpenCodeRunRecord>();
   private readonly openCodeSessionToTask = new Map<string, string>();
   private readonly permissionResponderPool: PermissionResponderPool;
+  /** One board-wide broker shared by OpenCode and every ACP harness. */
+  private readonly permissionBroker: PermissionBroker;
   private readonly permissionAskMeta = new Map<string, Pick<PendingPermissionAsk, "raisedAt" | "deadline" | "patterns">>();
+  /** Bounded ownership tombstones distinguish stale asks from unknown IDs. */
+  private readonly permissionAskOwners = new Map<string, string>();
 
   constructor(deps: TaskDispatcherDeps) {
     this.client = deps.client;
@@ -688,11 +692,13 @@ export class TaskDispatcher implements Dispatcher {
     // session — see permission-responder.ts. onError surfaces a persistent
     // list/reply failure as a task_warning event instead of retrying forever
     // in silence.
+    const permissionGraceMs = deps.permissionGraceMs ?? loadPermissionConfig().graceMs;
+    this.permissionBroker = createPermissionBroker({ onEvent: (event) => this.handlePermissionEvent(event) });
     this.permissionResponderPool = createPermissionResponderPool({
       client: this.client,
-      interactiveTimeoutMs: deps.permissionGraceMs ?? loadPermissionConfig().graceMs,
+      broker: this.permissionBroker,
+      interactiveTimeoutMs: permissionGraceMs,
       onError: (sessionId, context, err) => this.handlePermissionResponderError(sessionId, context, err),
-      onPermissionEvent: (event) => this.handlePermissionEvent(event),
     });
     this.worktrees = deps.worktrees ?? new GitWorktreeManager();
     this.adapterBaseUrl = deps.adapterBaseUrl ?? "http://127.0.0.1:0";
@@ -704,8 +710,8 @@ export class TaskDispatcher implements Dispatcher {
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
-        permissionGraceMs: deps.permissionGraceMs,
-        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        permissionGraceMs,
+        permissionBroker: this.permissionBroker,
         onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
         onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
@@ -713,8 +719,8 @@ export class TaskDispatcher implements Dispatcher {
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
-        permissionGraceMs: deps.permissionGraceMs,
-        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        permissionGraceMs,
+        permissionBroker: this.permissionBroker,
         onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
         onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
@@ -722,8 +728,8 @@ export class TaskDispatcher implements Dispatcher {
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
-        permissionGraceMs: deps.permissionGraceMs,
-        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        permissionGraceMs,
+        permissionBroker: this.permissionBroker,
         onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
         onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
@@ -731,8 +737,8 @@ export class TaskDispatcher implements Dispatcher {
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
-        permissionGraceMs: deps.permissionGraceMs,
-        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        permissionGraceMs,
+        permissionBroker: this.permissionBroker,
         onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
         onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
@@ -740,8 +746,8 @@ export class TaskDispatcher implements Dispatcher {
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
-        permissionGraceMs: deps.permissionGraceMs,
-        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        permissionGraceMs,
+        permissionBroker: this.permissionBroker,
         onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
         onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
@@ -749,8 +755,8 @@ export class TaskDispatcher implements Dispatcher {
         adapterBaseUrl: this.adapterBaseUrl,
         boardToken: this.boardToken,
         instanceName,
-        permissionGraceMs: deps.permissionGraceMs,
-        onPermissionEvent: (event) => this.handlePermissionEvent(event),
+        permissionGraceMs,
+        permissionBroker: this.permissionBroker,
         onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
         onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
       }),
@@ -783,6 +789,7 @@ export class TaskDispatcher implements Dispatcher {
     this.watchdogClock = deps.watchdogClock;
     this.blockedResumeProbeTimeoutMs = deps.blockedResumeProbeTimeoutMs ?? BLOCKED_RESUME_PROBE_TIMEOUT_MS;
     this.onParentSatisfied = deps.onParentSatisfied;
+    this.reconcileInterruptedPermissionAsks();
   }
 
   /**
@@ -866,7 +873,7 @@ export class TaskDispatcher implements Dispatcher {
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
     this.store.update(taskId, { sessionId, activeModel, autoRetries: 0, runStartedAt });
     if (hasAskRule(permissionRules)) {
-      this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override");
+      this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override", task.id, runStartedAt);
     }
     const taskPrompt = isolatedRun
       ? this.withWorktreeIsolationPreamble(execDirectory, baseRepoDirectory, task.description)
@@ -930,40 +937,51 @@ export class TaskDispatcher implements Dispatcher {
     try {
       const contextPrompt = this.withTaskContext(task, prompt);
       const parentPrompt = this.withParentHandoffs(task, contextPrompt);
-      const launched = await runner[action]({
+      let ownershipRegistered = false;
+      const registerOwnership = (launched: Awaited<ReturnType<ClaudeCodeRunnerLike["run"]>>): void => {
+        if (ownershipRegistered) return;
+        ownershipRegistered = true;
+        this.store.update(task.id, {
+          sessionId: undefined,
+          ...(action === "retry" ? { completion: null, completionSource: null, finalSessionOutput: null } : {}),
+          harnessSessionId: launched.sessionId,
+          harnessSessionName: launched.sessionName,
+          harnessStatus: launched.status,
+          harnessCwd: execDirectory,
+          harnessBranch: gitInfo.branch,
+          harnessCommit: gitInfo.commit,
+          harnessWarning: warning,
+          runState: "running",
+          runStartedAt,
+          error: undefined,
+          pending: undefined,
+          completionLocation: undefined,
+        });
+        this.activity.startRun({
+          taskId: task.id,
+          runStartedAt,
+          sessionId: launched.sessionId,
+          rootSessionId: launched.sessionId,
+          harness,
+        });
+        if (warning) {
+          this.store.addEvent({ taskId: task.id, type: "task_warning", body: { warning } });
+        }
+        this.store.move(task.id, "in_progress", END_OF_COLUMN);
+        this.startAcpWatcher(task.id, launched.sessionName, harness);
+      };
+      const launchInput = {
         task,
         directory: execDirectory,
         prompt: this.withAcpPreflightContext(parentPrompt, warning, label),
         runStartedAt,
-      });
-      this.store.update(task.id, {
-        sessionId: undefined,
-        ...(action === "retry" ? { completion: null, completionSource: null, finalSessionOutput: null } : {}),
-        harnessSessionId: launched.sessionId,
-        harnessSessionName: launched.sessionName,
-        harnessStatus: launched.status,
-        harnessCwd: execDirectory,
-        harnessBranch: gitInfo.branch,
-        harnessCommit: gitInfo.commit,
-        harnessWarning: warning,
-        runState: "running",
-        runStartedAt,
-        error: undefined,
-        pending: undefined,
-        completionLocation: undefined,
-      });
-      this.activity.startRun({
-        taskId: task.id,
-        runStartedAt,
-        sessionId: launched.sessionId,
-        rootSessionId: launched.sessionId,
-        harness,
-      });
-      if (warning) {
-        this.store.addEvent({ taskId: task.id, type: "task_warning", body: { warning } });
-      }
-      this.store.move(task.id, "in_progress", END_OF_COLUMN);
-      this.startAcpWatcher(task.id, launched.sessionName, harness);
+      };
+      const preparedLaunch = action === "run" ? runner.runPrepared : runner.retryPrepared;
+      const launched = preparedLaunch
+        ? await preparedLaunch.call(runner, launchInput, registerOwnership)
+        : await runner[action](launchInput);
+      // Compatibility path for injected/legacy runners without the two-stage hook.
+      registerOwnership(launched);
     } catch (err) {
       const updated = this.store.update(task.id, {
         runState: "error",
@@ -1527,7 +1545,7 @@ export class TaskDispatcher implements Dispatcher {
     const runStartedAt = Date.now();
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
     this.store.update(taskId, { sessionId, activeModel, autoRetries: 0, runStartedAt });
-    if (hasAskRule(permissionRules)) this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override");
+    if (hasAskRule(permissionRules)) this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override", task.id, runStartedAt);
     const retryPrompt = isolatedRun ? this.withWorktreeIsolationPreamble(execDirectory, this.resolveDirectory(task.directory), prompt) : prompt;
     const fullPrompt = this.withCompletionContract(task, this.withParentHandoffs(task, this.withTaskContext(task, retryPrompt)), runStartedAt);
     const promptError = await this.prompt(sessionId, fullPrompt, task.agent ?? undefined, task.model ?? undefined);
@@ -1594,7 +1612,7 @@ export class TaskDispatcher implements Dispatcher {
     // "AUTO-RETRY 2/2" and the fallback model for a primary-model run.
     this.store.update(taskId, { runStartedAt, autoRetries: 0, activeModel: task.model ?? null });
     if (hasAskRule(permissionRules)) {
-      this.startPermissionResponder(sessionId, retryDirectory, isolatedRetry ? "worktree-fence" : "in-place-override");
+      this.startPermissionResponder(sessionId, retryDirectory, isolatedRetry ? "worktree-fence" : "in-place-override", task.id, runStartedAt);
     } else {
       this.stopPermissionResponder(sessionId);
     }
@@ -1775,7 +1793,7 @@ export class TaskDispatcher implements Dispatcher {
     }
     this.completionWatchers.clear();
     this.outputCandidates.clear();
-      this.permissionAskMeta.clear();
+    this.permissionAskMeta.clear();
     for (const [taskId, run] of this.openCodeRunsByTask) {
       this.activity.endRun(taskId, run.runStartedAt, "aborted");
       run.watchdog.dispose();
@@ -1784,6 +1802,7 @@ export class TaskDispatcher implements Dispatcher {
     this.openCodeSessionToTask.clear();
     this.permissionResponderPool.stop();
     for (const runner of new Set(Object.values(this.acpRunners))) runner.shutdown?.();
+    this.permissionBroker.stop();
   }
 
   listPendingPermissions(taskId: string): PendingPermissionAsk[] {
@@ -1796,7 +1815,11 @@ export class TaskDispatcher implements Dispatcher {
     const task = this.store.get(taskId);
     if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
     const owned = this.pendingPermissionsForTask(task).some((ask) => ask.id === input.askId);
-    if (!owned) return { ok: false, askId: input.askId, conflict: "not-found" };
+    if (!owned) {
+      return this.permissionAskOwners.get(input.askId) === taskId
+        ? { ok: false, askId: input.askId, conflict: "stale" }
+        : { ok: false, askId: input.askId, conflict: "not-found" };
+    }
     if (isAcpHarness(task.harness) && task.harnessSessionName) {
       const runner = this.acpRunners[task.harness] as ClaudeCodeRunnerLike & { respondPermission?: (sessionName: string, input: RespondPermissionInput) => Promise<RespondOutcome> };
       return runner.respondPermission?.(task.harnessSessionName, input) ?? { ok: false, askId: input.askId, conflict: "not-found" };
@@ -2337,7 +2360,7 @@ export class TaskDispatcher implements Dispatcher {
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt });
     this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt });
     if (hasAskRule(permissionRules)) {
-      this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override");
+      this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override", task.id, runStartedAt);
     }
     const basePrompt = isolatedRun
       ? this.withWorktreeIsolationPreamble(execDirectory, this.resolveDirectory(task.directory), task.description)
@@ -2455,11 +2478,18 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   /** Start (or restart) the ask auto-responder for a session with effective ask rules. */
-  private startPermissionResponder(sessionId: string, directory: string, source: PendingPermissionAsk["source"]): void {
+  private startPermissionResponder(
+    sessionId: string,
+    directory: string,
+    source: PendingPermissionAsk["source"],
+    taskId: string,
+    runStartedAt: number,
+  ): void {
     for (const ask of this.permissionResponderPool.listPending(sessionId)) {
       this.permissionAskMeta.delete(ask.id);
     }
-    this.permissionResponderPool.register(sessionId, directory, { source });
+    const interactiveBash = source === "worktree-fence" && this.store.get(taskId)?.permissionOverrides?.bash === "ask";
+    this.permissionResponderPool.register(sessionId, directory, { source, taskId, runStartedAt, interactiveBash });
   }
 
   private stopPermissionResponder(sessionId: string): void {
@@ -2479,9 +2509,11 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   private handlePermissionEvent(event: PermissionAskEvent): void {
-    const task = this.listTasksForWatcher().find((candidate) => candidate.sessionId === event.runId || candidate.harnessSessionId === event.runId);
+    const task = event.taskId
+      ? this.store.get(event.taskId)
+      : this.listTasksForWatcher().find((candidate) => candidate.sessionId === event.runId || candidate.harnessSessionId === event.runId);
     if (!task) return;
-    const runStartedAt = this.openCodeRunsByTask.get(task.id)?.runStartedAt ?? task.runStartedAt ?? event.occurredAt;
+    const runStartedAt = event.runStartedAt ?? this.openCodeRunsByTask.get(task.id)?.runStartedAt ?? task.runStartedAt ?? event.occurredAt;
     const pending = event.type === "permission_asked"
       ? this.pendingPermissionsForTask(task).find((ask) => ask.id === event.askId)
       : undefined;
@@ -2491,9 +2523,25 @@ export class TaskDispatcher implements Dispatcher {
         deadline: pending.deadline,
         patterns: pending.patterns,
       });
+    } else if (event.type === "permission_asked") {
+      this.permissionAskMeta.set(event.askId, {
+        raisedAt: event.raisedAt,
+        deadline: event.deadline,
+        patterns: event.patterns,
+      });
+    }
+    if (event.type === "permission_asked") {
+      this.permissionAskOwners.set(event.askId, task.id);
+      while (this.permissionAskOwners.size > 2_000) {
+        const oldest = this.permissionAskOwners.keys().next().value;
+        if (!oldest) break;
+        this.permissionAskOwners.delete(oldest);
+      }
     }
     const meta = this.permissionAskMeta.get(event.askId);
-    const resolution = event.reason === "operator"
+    const resolution = event.type === "permission_cancelled"
+      ? "cancelled"
+      : event.reason === "operator"
       ? "operator"
       : event.reason === "policy-timeout" && meta && meta.deadline <= meta.raisedAt
         ? "policy-immediate"
@@ -2507,19 +2555,43 @@ export class TaskDispatcher implements Dispatcher {
       permission: event.permission,
       summary: event.summary,
       ...(event.tool ? { tool: event.tool } : {}),
-      ...(pending ? { raisedAt: pending.raisedAt, deadline: pending.deadline } : {}),
-      ...(pending?.patterns ? { patterns: pending.patterns } : {}),
+      raisedAt: pending?.raisedAt ?? event.raisedAt,
+      deadline: pending?.deadline ?? event.deadline,
+      ...((pending?.patterns ?? event.patterns) ? { patterns: pending?.patterns ?? event.patterns } : {}),
+      ...(event.providerSessionId ? { providerSessionId: event.providerSessionId } : {}),
+      ...(event.runStartedAt !== undefined ? { runStartedAt: event.runStartedAt } : {}),
       ...(event.type !== "permission_asked" ? { resolution } : {}),
       ...(event.decision ? { action: event.decision } : {}),
       ...(event.answeredBy ? { answeredBy: event.answeredBy } : {}),
       ...(event.error ? { error: event.error } : {}),
+      ...(event.cancellationReason ? { cancellationReason: event.cancellationReason } : {}),
+      ...(event.delivery ? { delivery: event.delivery } : {}),
+      ...(event.pendingAfterFailure !== undefined ? { pendingAfterFailure: event.pendingAfterFailure } : {}),
       ...(event.type !== "permission_asked" && meta ? { latencyMs: Math.max(0, event.occurredAt - meta.raisedAt) } : {}),
     };
-    this.store.addEvent({
-      taskId: task.id,
-      type: event.type === "permission_asked" ? "task_permission_asked" : event.type === "permission_answered" ? "task_permission_answered" : "task_permission_reply_failed",
-      body,
-    });
+    try {
+      this.store.addEvent({
+        taskId: task.id,
+        type: event.type === "permission_asked"
+          ? "task_permission_asked"
+          : event.type === "permission_answered"
+            ? "task_permission_answered"
+            : event.type === "permission_cancelled"
+              ? "task_permission_cancelled"
+              : "task_permission_reply_failed",
+        body,
+      });
+    } catch (error) {
+      const message = `Permission event persistence failed: ${errorMessage(error, "unknown error")}`;
+      try {
+        this.store.update(task.id, { error: message });
+      } catch {
+        // The store itself may be unavailable; stderr remains the final surface.
+      }
+      // eslint-disable-next-line no-console
+      console.error(message);
+      return;
+    }
     this.activity.recordEvent(task.id, runStartedAt, {
       sessionId: event.runId,
       rootSessionId: event.runId,
@@ -2531,6 +2603,55 @@ export class TaskDispatcher implements Dispatcher {
       this.permissionAskMeta.delete(event.askId);
       const run = this.openCodeRunsByTask.get(task.id);
       if (run) run.watchdog.recordActivity({ run: { taskId: task.id, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
+    }
+  }
+
+  /**
+   * A process crash cannot emit broker cancellation. On the next startup,
+   * close every durable asked event that has no terminal answer/cancellation.
+   * Delivery is explicitly unknown: the prior process may have died before,
+   * during, or just after writing the provider reply.
+   */
+  private reconcileInterruptedPermissionAsks(): void {
+    for (const task of this.store.list()) {
+      let events: TaskEvent[];
+      try {
+        events = this.store.listEvents(task.id);
+      } catch {
+        continue;
+      }
+      const asked = new Map<string, TaskEvent>();
+      const terminal = new Set<string>();
+      for (const event of events) {
+        const askId = typeof event.body.askId === "string" ? event.body.askId : undefined;
+        if (!askId) continue;
+        if (event.type === "task_permission_asked") {
+          asked.set(askId, event);
+          this.permissionAskOwners.set(askId, task.id);
+        }
+        if (event.type === "task_permission_answered" || event.type === "task_permission_cancelled") terminal.add(askId);
+        if (event.type === "task_permission_reply_failed" && event.body.pendingAfterFailure !== true) terminal.add(askId);
+      }
+      for (const [askId, askEvent] of asked) {
+        if (terminal.has(askId)) continue;
+        this.store.addEvent({
+          taskId: task.id,
+          type: "task_permission_cancelled",
+          body: {
+            ...askEvent.body,
+            askId,
+            resolution: "cancelled",
+            cancellationReason: "restart-reconciliation",
+            delivery: "unknown",
+            reconciledAt: Date.now(),
+          },
+        });
+      }
+    }
+    while (this.permissionAskOwners.size > 2_000) {
+      const oldest = this.permissionAskOwners.keys().next().value;
+      if (!oldest) break;
+      this.permissionAskOwners.delete(oldest);
     }
   }
 

@@ -477,7 +477,23 @@ describe("POST /api/tasks", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+    expect(body.error.message).toContain("permissionOverrides require an in-place OpenCode task");
+  });
+
+  it("accepts the explicit interactive-strict bash ask on worktree OpenCode tasks", async () => {
+    const app = buildApp(store, dispatcher);
+    const res = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Strict worktree",
+        directory: repoDir,
+        isolation: "worktree",
+        permissionOverrides: { bash: "ask" },
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect((await res.json()).permissionOverrides).toEqual({ bash: "ask" });
   });
 
   it("rejects permissionOverrides when isolation is unset", async () => {
@@ -495,7 +511,7 @@ describe("POST /api/tasks", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+    expect(body.error.message).toContain("permissionOverrides require an in-place OpenCode task");
   });
 
   it("rejects permissionOverrides on claude-code tasks", async () => {
@@ -515,7 +531,7 @@ describe("POST /api/tasks", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+    expect(body.error.message).toContain("permissionOverrides require an in-place OpenCode task");
   });
 
   it("rejects permissionOverrides with an unknown category or action", async () => {
@@ -1077,7 +1093,15 @@ describe("PATCH /api/tasks/:id", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain("permissionOverrides can only be set for in-place OpenCode agent tasks");
+    expect(body.error.message).toContain("permissionOverrides require an in-place OpenCode task");
+  });
+
+  it("sets bash ask on a worktree task without weakening its external-directory fence", async () => {
+    const app = buildApp(store, dispatcher);
+    const task = store.create({ title: "T", description: "", directory: repoDir, isolation: "worktree" });
+    const res = await patch(app, task.id, { permissionOverrides: { bash: "ask" } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).permissionOverrides).toEqual({ bash: "ask" });
   });
 
   it("rejects an invalid permissionOverrides shape", async () => {

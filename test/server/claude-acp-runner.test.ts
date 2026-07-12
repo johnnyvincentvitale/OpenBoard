@@ -151,6 +151,46 @@ async function launchRunner(harness = makeAcpHarness(), runTask: Task = task, de
 }
 
 describe("ClaudeAcpRunner", () => {
+  it("pauses a prepared launch until task/session ownership is registered", async () => {
+    const harness = makeAcpHarness();
+    const runner = new ClaudeAcpRunner({
+      adapterBaseUrl: "http://127.0.0.1:4097",
+      command: "claude-acp",
+      commandArgs: ["--stdio"],
+      spawn: harness.spawn as never,
+      env: {},
+    });
+    let releaseReady!: () => void;
+    const readyReleased = new Promise<void>((resolve) => { releaseReady = resolve; });
+    let markReady!: () => void;
+    const readyEntered = new Promise<void>((resolve) => { markReady = resolve; });
+
+    const runPromise = runner.runPrepared({
+      task,
+      directory: "/repo",
+      prompt: "Do the work",
+      runStartedAt: 123,
+    }, async (result) => {
+      expect(result).toMatchObject({ sessionId: "acp-session-1", status: "running" });
+      markReady();
+      await readyReleased;
+    });
+
+    const initialize = await harness.nextMessage("initialize");
+    harness.respond(initialize, { protocolVersion: 1 });
+    const sessionNew = await harness.nextMessage("session/new");
+    harness.respond(sessionNew, { sessionId: "acp-session-1" });
+    const setMode = await harness.nextMessage("session/set_mode");
+    harness.respond(setMode, {});
+
+    await readyEntered;
+    await expectNoMessage(harness);
+    releaseReady();
+    await harness.nextMessage("session/prompt");
+    await expect(runPromise).resolves.toMatchObject({ sessionId: "acp-session-1" });
+    runner.shutdown();
+  });
+
   it("starts a Claude ACP session with OpenBoard MCP and bypass mode", async () => {
     const { harness, prompt, result, sessionNew, setMode } = await launchRunner();
 
@@ -319,7 +359,7 @@ describe("ClaudeAcpRunner", () => {
       options: [{ optionId: "allow_always", kind: "allow_always" }, { optionId: "reject", kind: "reject" }],
     });
     const askId = runner.listPendingPermissions("openboard-task_1-123")[0].id;
-    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "reply-failed" });
+    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "unsupported-action" });
     await expectNoMessage(harness);
     expect(runner.listPendingPermissions("openboard-task_1-123").map((ask) => ask.id)).toEqual([askId]);
     expect(events.at(-1)).toMatchObject({ type: "permission_reply_failed", decision: "allow_once" });
@@ -328,7 +368,7 @@ describe("ClaudeAcpRunner", () => {
     expect(await harness.nextMessage()).toMatchObject({ result: { outcome: { optionId: "reject" } } });
   });
 
-  it("replies immediately to policy-allowed ACP permission requests without holding for the operator", async () => {
+  it("holds mutating manual-mode ACP requests for the operator", async () => {
     const harness = makeAcpHarness();
     const events: PermissionAskEvent[] = [];
     const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" }, { onPermissionEvent: (event) => events.push(event) });
@@ -339,13 +379,9 @@ describe("ClaudeAcpRunner", () => {
       options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }],
     });
 
-    expect(await harness.nextMessage()).toEqual({
-      jsonrpc: "2.0",
-      id: 99,
-      result: { outcome: { outcome: "selected", optionId: "allow_once" } },
-    });
-    expect(runner.listPendingPermissions("openboard-task_1-123")).toEqual([]);
-    expect(events).toEqual([]);
+    await expectNoMessage(harness);
+    expect(runner.listPendingPermissions("openboard-task_1-123")).toHaveLength(1);
+    expect(events).toHaveLength(1);
   });
 
   it("uses the existing permission policy on timeout", async () => {
@@ -374,7 +410,7 @@ describe("ClaudeAcpRunner", () => {
     });
     const askId = runner.listPendingPermissions("openboard-task_1-123")[0].id;
 
-    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "reply-failed" });
+    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "unsupported-action" });
     expect(events.filter((event) => event.type === "permission_reply_failed")).toHaveLength(1);
     expect(events.at(-1)).toMatchObject({ type: "permission_reply_failed", reason: "operator", decision: "allow_once" });
     expect(runner.listPendingPermissions("openboard-task_1-123").map((ask) => ask.id)).toEqual([askId]);
@@ -392,7 +428,7 @@ describe("ClaudeAcpRunner", () => {
     const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" }, { onPermissionEvent: (event) => events.push(event) });
     harness.requestPermission({ sessionId: "acp-session-1", toolCall: { kind: "edit", rawInput: { file_path: "/outside/file.ts" } }, options: [{ optionId: "allow_always", kind: "allow_always" }] });
     const askId = runner.listPendingPermissions("openboard-task_1-123")[0].id;
-    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "reply-failed" });
+    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "unsupported-action" });
     expect(events.at(-1)).toMatchObject({ type: "permission_reply_failed", decision: "allow_once" });
     expect(runner.listPendingPermissions("openboard-task_1-123").map((ask) => ask.id)).toEqual([askId]);
   });
@@ -465,19 +501,53 @@ describe("ClaudeAcpRunner", () => {
     ]);
   });
 
-  it("keeps default/manual permission decisions inside the task directory", () => {
+  it("defines strict and autonomous ACP permission modes explicitly", () => {
     const permission = (toolCall: Record<string, unknown>) => ({
       sessionId: "s1",
       toolCall,
       options: [{ optionId: "allow", kind: "allow" }, { optionId: "reject", kind: "reject" }],
     });
 
-    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/repo/src/file.ts" } }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "/repo", "manual")).toBe("reject");
-    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "npm test" } }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "cat /tmp/secret" } }), "/repo", "manual")).toBe("reject");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/repo/src/file.ts" } }), "/repo", "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "/repo", "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "npm test" } }), "/repo", "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "cat /tmp/secret" } }), "/repo", "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "acceptEdits")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "auto")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "dontAsk")).toBe("deny");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "plan")).toBe("deny");
     expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "mcp__openboard__complete_task" } }, rawInput: {} }), "/repo", "manual")).toBe("allow");
     expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "/repo", "bypassPermissions")).toBe("allow");
+  });
+
+  it.each([
+    ["traversal redirect", { kind: "execute", rawInput: { command: "echo x > ../escaped.txt" } }],
+    ["directory traversal", { kind: "execute", rawInput: { command: "cd .. && touch escaped.txt" } }],
+    ["interpreter write", { kind: "execute", rawInput: { command: "python -c 'open(\"../escaped.txt\",\"w\").write(\"x\")'" } }],
+    ["environment expansion", { kind: "execute", rawInput: { command: "echo x > $HOME/escaped.txt" } }],
+    ["command substitution", { kind: "execute", rawInput: { command: "touch $(cat /tmp/path)" } }],
+    ["missing path", { kind: "edit", rawInput: { file_path: "/repo/missing/../file.ts" } }],
+    ["symlink-shaped path", { kind: "edit", rawInput: { file_path: "/repo/link/outside.ts" } }],
+  ])("never auto-allows %s in manual mode", (_label, toolCall) => {
+    const request = { sessionId: "s1", toolCall, options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }] };
+    expect(decideClaudeAcpPermission(request, "/repo", "manual")).toBe("ask");
+  });
+
+  it("reports a provider reply failure when ACP stdin is closed", async () => {
+    const harness = makeAcpHarness();
+    const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" });
+    harness.requestPermission({
+      sessionId: "acp-session-1",
+      toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } },
+      options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }],
+    });
+    const askId = runner.listPendingPermissions("openboard-task_1-123")[0].id;
+    harness.child.stdin.destroy();
+    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({
+      ok: false,
+      conflict: "reply-failed",
+      error: expect.stringContaining("stdin is not writable"),
+    });
   });
 });
 
@@ -541,7 +611,8 @@ describe("CodexAcpRunner", () => {
 
     expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "complete_task" } }), "/repo", "manual")).toBe("allow");
     expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "openboard.block_task" } }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "other.complete_task" } }), "/repo", "manual")).toBe("reject");
+    expect(decideClaudeAcpPermission(request({ title: "mcp__openboard__block_task" }), "/repo", "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "other.complete_task" } }), "/repo", "manual")).toBe("ask");
   });
 
   it("inherits brokered permissions and notification activity in ACP subclasses", async () => {

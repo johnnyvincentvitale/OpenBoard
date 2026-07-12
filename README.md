@@ -313,12 +313,25 @@ In worktree isolation, OpenCode's `external_directory` permission is set to `ask
 A live auto-responder classifies each ask: known read-class requests (read, glob,
 grep) resolve policy-immediate with `allow_once`; non-read asks (bash writes, edit)
 are raised to the operator through `pendingPermissions` on the task summary.
+The worktree wizard exposes an explicit BASH policy: `allow` is unattended
+compatibility (the worktree and post-run escape detector still apply, but shell
+containment is not claimed), `ask` is interactive-strict, and `deny` disables
+bash. Interactive-strict asks time out to deny and cannot be auto-run.
 `allow_once` grants the single request only — the permission returns to ask on the
 next matching tool call. Permission asks carry a `deadline`; an unanswered ask
-after the deadline is treated as a denial. The 45s stall-detector auto-nudge is the
+after the deadline is treated as a denial. The TUI shows harness, source, tool,
+resource patterns, outside-worktree warning, exact countdown, and `1 of N`; press
+`y` to allow once or `!` to deny. The 45s stall-detector auto-nudge is the
 backstop, not an intervention signal — never hand-nudge before the threshold.
-Pending permission asks are in-memory only; ACP harnesses lose pending asks on
-restart and cannot recover them.
+Pending permission asks are in-memory only. Restart cancels them; they are never
+resurrected or reported as delivered after provider state is lost.
+
+ACP modes are explicit: `manual` gates every mutating or unknown operation;
+`dontAsk` and `plan` deny those operations; `acceptEdits` and `auto` preserve
+autonomous compatibility; `bypassPermissions` allows all. Only intrinsic reads
+and the narrow OpenBoard completion/block reporting tools are auto-allowed in
+strict modes. OpenBoard does not use shell-string or lexical-path inspection as
+a containment boundary.
 
 ### Session diagnostics (FR09)
 

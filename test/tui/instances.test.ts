@@ -1906,6 +1906,44 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(text.indexOf("STATE")).toBeLessThan(text.indexOf("INSTANCE"));
   });
 
+  it("Selected column shows the permission request and answer controls on an in-progress card", () => {
+    const permissionTask = {
+      ...task("permission-card", "in_progress"),
+      runState: "running" as const,
+      pendingPermissions: [{
+        id: "ask-1",
+        harness: "opencode" as const,
+        source: "interactive-strict" as const,
+        permission: "bash",
+        tool: "bash",
+        summary: 'Tool "bash" requested permission category "bash".',
+        patterns: ["npm test"],
+        raisedAt: Date.now(),
+        deadline: Date.now() + 60_000,
+      }],
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 56,
+      tasks: [permissionTask],
+      selectedTaskId: permissionTask.id,
+    }));
+
+    const request = nodesByType(app, "Box").find((candidate) =>
+      candidate.props?.height === 2 &&
+      candidate.props?.flexDirection === "row" &&
+      candidate.children?.[0]?.props?.content === "REQUEST" &&
+      candidate.children?.[0]?.props?.width === 13
+    );
+    const answer = metaRowByLabel(app, "ANSWER");
+    expect(request).toBeTruthy();
+    expect(textOf(request)).toContain('Tool "bash" requested permission category "bash".');
+    expect(request?.children[1].props.height).toBe(2);
+    expect(request?.children[1].props.wrapMode).toBe("word");
+    expect(answer).toBeTruthy();
+    expect(textOf(answer)).toContain("y allow once · ! deny");
+  });
+
   it("Selected column shows TASK ID for normal and inline detail views", () => {
     const normal = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -4049,7 +4087,7 @@ describe("TUI new-task wizard navigation", () => {
     expect(text).not.toContain("Automatic");
   });
 
-  it("worktree isolation shows the locked permissions note, not an editable control", () => {
+  it("worktree isolation exposes only the explicit BASH policy", () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       newTask: agentDraft({ step: "isolation", field: "isolation", isolation: "worktree" }),
@@ -4057,8 +4095,10 @@ describe("TUI new-task wizard navigation", () => {
 
     const text = textOf(renderApp(fakeUi(), s));
     expect(text).toContain("PERMISSIONS");
-    expect(text).toContain("Automatic");
+    expect(text).toContain("BASH");
+    expect(text).toContain("Unattended compatibility");
     expect(text).not.toContain("EDIT");
+    expect(text).not.toContain("WEBFETCH");
   });
 
   it("labels the non-worktree isolation option 'in_place', not 'none'", () => {

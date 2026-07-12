@@ -6,8 +6,9 @@
  * `respondPermission`, and returns the shared projected Task on success.
  *
  * 400: validation (missing fields, overlong answeredBy).
- * 404: task not found, or ask not found.
+ * 404: task or ask not found.
  * 409: ask already resolved/claimed.
+ * 422: provider does not support the requested action.
  * 502: provider reply failure (the reply to OpenCode's permission.reply API failed).
  */
 import type { Context, Hono } from "hono";
@@ -38,7 +39,7 @@ export function registerPermissionRoutes(app: Hono, deps: PermissionRouteDeps): 
       const task = deps.store.get(taskId);
       if (!task) {
         return c.json(
-          { error: { code: "session_not_found", message: `Task not found: ${taskId}` } },
+          { error: { code: "permission_ask_not_found", message: `Task not found: ${taskId}` } },
           404 as ContentfulStatusCode,
         );
       }
@@ -77,15 +78,29 @@ export function registerPermissionRoutes(app: Hono, deps: PermissionRouteDeps): 
       const outcome = await deps.dispatcher.respondPermission(taskId, input);
 
       if (!outcome.ok) {
-        // not-found means the ask doesn't belong to this task (stale/wrong-task)
+        // not-found means the ask doesn't exist or doesn't belong to this task.
         if (outcome.conflict === "not-found") {
           return c.json(
             {
               error: {
-                code: "validation",
+                code: "permission_ask_not_found",
                 message: `Permission ask not found or does not belong to this task: ${outcome.askId}`,
               },
             },
+            404 as ContentfulStatusCode,
+          );
+        }
+
+        if (outcome.conflict === "unsupported-action") {
+          return c.json(
+            { error: { code: "permission_action_unsupported", message: outcome.error ?? `Permission action is unsupported: ${outcome.askId}` } },
+            422 as ContentfulStatusCode,
+          );
+        }
+
+        if (outcome.conflict === "stale") {
+          return c.json(
+            { error: { code: "permission_ask_stale", message: `Permission ask is stale: ${outcome.askId}` } },
             409 as ContentfulStatusCode,
           );
         }
@@ -94,7 +109,7 @@ export function registerPermissionRoutes(app: Hono, deps: PermissionRouteDeps): 
           return c.json(
             {
               error: {
-                code: "internal",
+                code: "permission_reply_failed",
                 message: `Permission reply failed: ${outcome.error ?? "unknown error"}`,
               },
             },
@@ -106,7 +121,7 @@ export function registerPermissionRoutes(app: Hono, deps: PermissionRouteDeps): 
         return c.json(
           {
             error: {
-              code: "validation",
+              code: "permission_already_claimed",
               message: `Permission ask already resolved: ${outcome.askId}`,
             },
           },

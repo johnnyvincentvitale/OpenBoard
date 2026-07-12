@@ -3,7 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createBoardClient } from "../client/board-client";
+import { BoardClientError, createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
 import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, projectWatchdogAttempts, type WatchdogAttemptEntry } from "../shared";
@@ -335,7 +335,7 @@ const ISOLATION_FIELDS_EDITABLE = ["isolation", "permEdit", "permBash", "permWeb
 /** In-place OpenCode with edit+bash denied is write-fenced in place, so AUTO-RUN becomes available. */
 const ISOLATION_FIELDS_EDITABLE_FENCED = ["isolation", "permEdit", "permBash", "permWebfetch", "autoRun"] as const;
 /** Worktree isolation swaps the permission note for the AUTO-RUN toggle, regardless of harness. */
-const ISOLATION_FIELDS_WORKTREE = ["isolation", "autoRun"] as const;
+const ISOLATION_FIELDS_WORKTREE = ["isolation", "permBash", "autoRun"] as const;
 const DEPENDENCY_FIELDS = ["dependency"] as const;
 const CONFIRM_FIELDS: readonly never[] = [];
 const TEXT_INPUT_COLUMNS = 56;
@@ -706,10 +706,12 @@ interface TuiState {
   // renderable's scrollY. Mouse-wheel scroll leaves it false so that scroll is captured.
   diffScrollIntent?: boolean;
   permissionAnswersInFlight?: Set<string>;
-  // The task+ask that y/N is bound to (P3-8). Rebound only on explicit
+  // The task+ask that y/! is bound to (P3-8). Rebound only on explicit
   // selection changes, never by a background refresh, so a poll-driven
-  // reselection cannot make y/N silently answer a different card's ask.
+  // reselection cannot make y/! silently answer a different card's ask.
   permissionAskBinding?: PermissionAskBinding;
+  followPermissionAskBinding?: PermissionAskBinding;
+  seenPermissionAskIds?: Set<string>;
   followView?: FollowViewState;
   followStream?: { close(): void };
   /** Pending reconnect attempt for a dropped follow stream. */
@@ -920,6 +922,7 @@ export async function runOpenBoardTui(
   };
 
   let refreshTimer: NodeJS.Timeout | undefined;
+  let permissionCountdownTimer: NodeJS.Timeout | undefined;
   let shuttingDown = false;
   let currentClient = client;
   let currentBoardToken = process.env.OPENBOARD_API_TOKEN?.trim() || undefined;
@@ -935,6 +938,10 @@ export async function runOpenBoardTui(
     if (refreshTimer) {
       clearInterval(refreshTimer);
       refreshTimer = undefined;
+    }
+    if (permissionCountdownTimer) {
+      clearInterval(permissionCountdownTimer);
+      permissionCountdownTimer = undefined;
     }
     state.archiveBoardUrl = undefined;
     destroyRoot();
@@ -1023,6 +1030,14 @@ export async function runOpenBoardTui(
           (error) => ({ ok: false as const, error }),
         ),
       ]);
+      const previousSeen = state.seenPermissionAskIds;
+      const nextSeen = new Set(tasks.flatMap((task) => (task.pendingPermissions ?? []).map((ask) => ask.id)));
+      const newUnselectedAsk = previousSeen
+        ? tasks
+            .flatMap((task) => (task.pendingPermissions ?? []).map((ask) => ({ task, ask })))
+            .find(({ task, ask }) => task.id !== state.selectedTaskId && !previousSeen.has(ask.id))
+        : undefined;
+      state.seenPermissionAskIds = nextSeen;
       state.tasks = tasks;
       state.agents = agents;
       state.providers = providers;
@@ -1042,7 +1057,14 @@ export async function runOpenBoardTui(
         state.healthError = errorMessage(healthResult.error);
       }
       state.error = undefined;
-      state.status = tasks.length === 0 ? "board is empty" : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+      if (state.followView && !state.followPermissionAskBinding) {
+        state.followPermissionAskBinding = bindPermissionAsk(tasks.find((task) => task.id === state.followView?.taskId));
+      }
+      if (newUnselectedAsk) {
+        state.status = `permission requested on ${newUnselectedAsk.task.title}`;
+      } else if (!quiet) {
+        state.status = tasks.length === 0 ? "board is empty" : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+      }
       state.lastRefresh = new Date();
       void fetchSelectedReviewDiffStat(state, currentClient, render);
       void fetchSelectedReviewCommitStatus(state, currentClient, render);
@@ -1455,6 +1477,13 @@ export async function runOpenBoardTui(
     });
   }, POLL_INTERVAL_MS);
 
+  // Countdown rendering is local-only: update once per second without an API
+  // refresh so the displayed deadline remains exact and action status is not
+  // clobbered by network polling.
+  permissionCountdownTimer = setInterval(() => {
+    if (state.tasks.some((task) => (task.pendingPermissions?.length ?? 0) > 0)) render();
+  }, 1000);
+
   await refreshInstanceList();
   if (!initialAttach && state.instanceList.length === 0) {
     state.viewState = transitionView(state.viewState, "workspaceGate");
@@ -1550,6 +1579,16 @@ function reportFatalError(error: unknown): void {
 
 export function renderApp(ui: OpenTui, state: TuiState) {
   if (isBelowMinimumSize(state)) return renderMinimumSizeApp(ui, state);
+
+  // Bind controls to the exact ask this render is showing. Refresh always
+  // renders after replacing task state, so a newly rendered replacement ask
+  // is answerable on the first deliberate keypress without ever falling back
+  // to an ask that was not on screen.
+  if (state.viewState.view === "board") {
+    state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
+  } else if (state.viewState.view === "follow" && state.followView) {
+    state.followPermissionAskBinding = bindPermissionAsk(state.tasks.find((task) => task.id === state.followView?.taskId));
+  }
 
   const mainView = state.viewState.view === "workspaceGate"
       ? renderWorkspaceGateView(ui, state)
@@ -1877,7 +1916,7 @@ function renderFollowViewMain(ui: OpenTui, state: TuiState) {
     }),
     ...(pendingAsk
       ? [ui.Text({
-          content: `⚠ NEEDS USER INPUT${pendingCount > 1 ? ` (${pendingCount})` : ""}: ${pendingAsk.summary ?? pendingAsk.id} · y allow once · N deny`,
+          content: `⚠ NEEDS USER INPUT · 1 of ${pendingCount}: ${pendingAsk.tool ?? pendingAsk.permission} · ${pendingAsk.summary ?? pendingAsk.id} · ${Math.ceil(Math.max(0, pendingAsk.deadline - Date.now()) / 1000)}s · y allow once · ! deny`,
           fg: COLORS.bright,
           ...textBg(COLORS.accent),
           height: 1,
@@ -1945,7 +1984,7 @@ function renderFollowViewMain(ui: OpenTui, state: TuiState) {
     ui.Text({
       content: chatDraft
         ? chatDraft.error ?? (chatDraft.submitting ? "sending..." : "enter queue/send · ctrl+enter interrupt & send · esc cancel · ctrl+u clear")
-        : `i compose · ↑/↓ history · f tail${codeBlocks.length ? " · tab select code · c copy" : ""} · y/N permission · b/esc/q return`,
+        : `i compose · ↑/↓ history · f tail${codeBlocks.length ? " · tab select code · c copy" : ""} · y/! permission · b/esc/q return`,
       fg: chatDraft?.error ? COLORS.bright : COLORS.dim,
       height: 1,
       truncate: true,
@@ -3174,7 +3213,9 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   // to single-line card-meta rows instead of letting labels and values collide.
   // Error cards represent the failure as normal metadata here; the red error
   // notice is reserved for the inline Prompt/Handoff detail view.
-  const modeRows = rows.filter((row) => row.label !== "DIFF" && row.label !== "FALLBACK").length;
+  const modeRows = rows
+    .filter((row) => row.label !== "DIFF" && row.label !== "FALLBACK")
+    .reduce((count, row) => count + (row.label === "REQUEST" ? 2 : 1), 0);
   const mode = sidebarDetailMode(laneInnerHeight(state.terminalRows), modeRows, false);
   return mode === "expanded"
     ? renderExpandedDetails(ui, task, rows)
@@ -3759,7 +3800,7 @@ function renderIntegrateCommitConfirmation(ui: OpenTui, task: Task, status: Work
 }
 
 function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
-  const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, COLORS.bright, row.valueParts));
+  const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, COLORS.bright, row.valueParts, row.label === "REQUEST"));
 
   return ui.Box(
     {
@@ -3803,10 +3844,29 @@ function renderCompactDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
     }),
     ui.Box(
       { width: "100%", flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
-      ...compactRows.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright)),
+      ...compactRows.map((row) => renderSelectedCompactRow(ui, row)),
     ),
     ui.Box({ flexGrow: 1 }),
     ...renderDetailHints(ui, task),
+  );
+}
+
+function renderSelectedCompactRow(ui: OpenTui, row: MetaRow) {
+  if (row.label !== "REQUEST") {
+    return renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.bright);
+  }
+  return ui.Box(
+    { width: "100%", height: 2, flexDirection: "row" },
+    ui.Text({ content: row.label, fg: COLORS.dim, width: SIDEBAR_META_LABEL_WIDTH, height: 1 }),
+    ui.Text({
+      content: row.value,
+      fg: COLORS.bright,
+      flexGrow: 1,
+      flexShrink: 1,
+      minWidth: 0,
+      height: 2,
+      wrapMode: "word",
+    }),
   );
 }
 
@@ -4105,11 +4165,13 @@ function renderBlockedAnswerComposer(ui: OpenTui, state: TuiState) {
   );
 }
 
-function renderDetail(ui: OpenTui, label: string, value: string, valueColor: TuiColor = COLORS.text, valueParts?: MetaValuePart[]) {
+function renderDetail(ui: OpenTui, label: string, value: string, valueColor: TuiColor = COLORS.text, valueParts?: MetaValuePart[], wrap = false) {
   return ui.Box(
     { width: "100%", flexDirection: "column", gap: 0 },
     ui.Text({ content: label, fg: COLORS.dim, height: 1 }),
-    valueParts ? renderInlineMetaValue(ui, valueParts, valueColor) : ui.Text({ content: value, fg: valueColor, height: 1, truncate: true }),
+    valueParts
+      ? renderInlineMetaValue(ui, valueParts, valueColor)
+      : ui.Text({ content: value, fg: valueColor, height: wrap ? 2 : 1, ...(wrap ? { wrapMode: "word" as const } : { truncate: true }) }),
   );
 }
 
@@ -4119,7 +4181,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
     ? state.detailTab === "comments"
       ? "↑/↓ comments · ←/→ tabs · ↵ close details · c comment · r reply · esc close · q quit"
       : "↑/↓ scroll detail · ←/→ tabs · ↵ close details · m move · esc close · q quit"
-    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · y/N permission · w chat · f filter · p settings · u refresh · ? help · q quit · A global archive";
+    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · y/! permission · w chat · f filter · p settings · u refresh · ? help · q quit · A global archive";
 
   return ui.Box(
     {
@@ -4161,7 +4223,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             : state.viewState.view === "follow"
             ? state.sessionChatDraft
               ? "type message · shift+enter newline · enter queue/send · ctrl+enter interrupt/send · esc cancel"
-              : "i message · ↑/↓ history · f tail · tab code · c copy · y/N permission · b/esc/q return · u refresh"
+              : "i message · ↑/↓ history · f tail · tab code · c copy · y/! permission · b/esc/q return · u refresh"
             : state.viewState.view === "settings"
             ? state.settingsDirtyWorktrees
               ? "↑/↓ dirty worktrees · d delete · u refresh · b/esc back · q quit"
@@ -4533,12 +4595,15 @@ function renderAgentProfileStep(ui: OpenTui, state: TuiState, draft: NewTaskDraf
 // under in-place isolation, the only mode a permission override ever applies to.
 function renderIsolationStep(ui: OpenTui, draft: NewTaskDraft) {
   const editable = draft.harness === "opencode" && draft.isolation === "in-place";
-  const autoRunAvailable = draft.isolation === "worktree" || (editable && draftInPlaceFenced(draft));
+  const interactiveStrictWorktree = draft.harness === "opencode" && draft.isolation === "worktree" && draft.permissionOverrides.bash === "ask";
+  const autoRunAvailable = (draft.isolation === "worktree" && !interactiveStrictWorktree) || (editable && draftInPlaceFenced(draft));
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
     renderIsolationField(ui, draft),
     ui.Text({ content: isolationDescription(draft.isolation), fg: COLORS.muted, wrapMode: "word", height: 2 }),
-    ...(draft.harness === "opencode" ? [editable ? renderPermissionOverrideControl(ui, draft) : renderLockedPermissionsNote(ui)] : []),
+    ...(draft.harness === "opencode"
+      ? [editable ? renderPermissionOverrideControl(ui, draft) : renderWorktreePermissionControl(ui, draft)]
+      : []),
     ...(autoRunAvailable
       ? [renderAutoRunField(ui, draft), ...(draft.autoRun ? [renderAutoRunWarning(ui)] : [])]
       : editable
@@ -4676,6 +4741,22 @@ function renderLockedPermissionsNote(ui: OpenTui) {
   );
 }
 
+function renderWorktreePermissionControl(ui: OpenTui, draft: NewTaskDraft) {
+  return ui.Box(
+    { width: "100%", flexDirection: "column", gap: 0 },
+    ui.Text({ content: "PERMISSIONS", fg: COLORS.dim, height: 1 }),
+    renderSelectField(ui, "BASH", draft.permissionOverrides.bash, draft.field === "permBash"),
+    ui.Text({
+      content: draft.permissionOverrides.bash === "ask"
+        ? "Interactive strict: every bash request waits for allow once / deny; timeout denies."
+        : "Unattended compatibility: the worktree fence and post-run escape detector apply; bash is not claimed to be contained.",
+      fg: COLORS.muted,
+      wrapMode: "word",
+      height: 2,
+    }),
+  );
+}
+
 const PERMISSION_OVERRIDE_FIELD_LABELS: Record<PermissionOverrideCategory, string> = {
   edit: "EDIT",
   bash: "BASH",
@@ -4758,7 +4839,9 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
       ? [
           {
             label: "PERMISSIONS",
-            value: draft.isolation === "worktree" ? "Automatic (worktree-fenced)" : permissionOverridesSummary(draft),
+            value: draft.isolation === "worktree"
+              ? (draft.permissionOverrides.bash === "ask" ? "Interactive strict (bash asks)" : draft.permissionOverrides.bash === "deny" ? "Worktree + bash denied" : "Unattended compatibility (worktree-fenced)")
+              : permissionOverridesSummary(draft),
             color: COLORS.text,
           },
         ]
@@ -5209,7 +5292,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       actions.render();
       return;
     }
-    // Any other key (card actions like r/d, permission y/N, etc.) falls
+    // Any other key (card actions like r/d, permission y/!, etc.) falls
     // through to the board-level switch below, matching the generic detail
     // tab's behavior — the Files tab must not swallow valid card actions (P3-6).
   }
@@ -5303,7 +5386,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     case "y":
       await answerSelectedPermission(state, actions, "allow_once");
       return;
-    case "N":
+    case "!":
       await answerSelectedPermission(state, actions, "deny");
       return;
     case "R":
@@ -5728,16 +5811,13 @@ async function answerSelectedPermission(state: TuiState, actions: TuiActions, ac
     return;
   }
 
-  // Bind to the ask/card actually shown, not whatever a background refresh
-  // may have silently reselected in the meantime (P3-8). A prior binding
-  // that no longer resolves means the selection or its ask changed since it
-  // was last bound — rebind and require an explicit follow-up press rather
-  // than answering a card the user never confirmed.
+  // Bind to the ask/card actually shown. If state changed after the last
+  // render, refresh instead of answering either the expired ask or its unseen
+  // replacement.
   const bound = resolveBoundPermissionAsk(state.permissionAskBinding, state.tasks);
   if (state.permissionAskBinding && !bound) {
-    state.permissionAskBinding = bindPermissionAsk(selected);
-    state.status = "selection changed since last view; press again to answer this card's permission ask";
-    actions.render();
+    state.status = "permission ask changed; refreshing...";
+    await actions.refresh(true);
     return;
   }
 
@@ -5767,13 +5847,19 @@ async function answerFollowedPermission(state: TuiState, actions: TuiActions, ac
     actions.render();
     return;
   }
-  const ask = firstPendingPermissionAsk(task);
+  const bound = resolveBoundPermissionAsk(state.followPermissionAskBinding, state.tasks);
+  if (state.followPermissionAskBinding && !bound) {
+    state.status = "followed permission ask changed; refreshing...";
+    await actions.refresh(true);
+    return;
+  }
+  const ask = bound?.ask ?? firstPendingPermissionAsk(task);
   if (!ask) {
     state.status = "no pending permission ask on the chat task";
     actions.render();
     return;
   }
-  await submitPermissionAnswer(state, actions, task, ask, action);
+  await submitPermissionAnswer(state, actions, bound?.task ?? task, ask, action);
 }
 
 async function submitPermissionAnswer(state: TuiState, actions: TuiActions, task: Pick<Task, "id">, ask: PendingPermissionAsk, action: "allow_once" | "deny"): Promise<void> {
@@ -5798,7 +5884,7 @@ async function submitPermissionAnswer(state: TuiState, actions: TuiActions, task
     await actions.refresh(true);
   } catch (error) {
     const message = errorMessage(error);
-    if (message.includes("409")) {
+    if (error instanceof BoardClientError && (error.code === "permission_ask_stale" || error.code === "permission_already_claimed" || error.code === "permission_ask_not_found")) {
       state.status = "permission ask changed; refreshing...";
       await actions.refresh(true);
     } else {
@@ -6082,6 +6168,7 @@ async function openFollowViewForSelection(state: TuiState, actions: TuiActions):
   state.followStream?.close();
   clearFollowReconnectTimer(state);
   state.followView = createFollowViewState(task.id);
+  state.followPermissionAskBinding = bindPermissionAsk(task);
   state.viewState = transitionView(state.viewState, "follow");
   actions.render();
   await connectFollowStream(state, actions, task.id, false);
@@ -6249,6 +6336,7 @@ async function handleFollowViewKey(key: KeyEvent, state: TuiState, actions: TuiA
     state.followStream?.close();
     state.followStream = undefined;
     state.followView = undefined;
+    state.followPermissionAskBinding = undefined;
     state.sessionChatDraft = undefined;
     state.viewState = transitionView(state.viewState, "board");
     await actions.refresh(true);
@@ -6288,7 +6376,7 @@ async function handleFollowViewKey(key: KeyEvent, state: TuiState, actions: TuiA
     actions.render();
     return;
   }
-  if (key.sequence === "y" || key.sequence === "N") {
+  if (key.sequence === "y" || key.sequence === "!") {
     await answerFollowedPermission(state, actions, key.sequence === "y" ? "allow_once" : "deny");
     return;
   }
@@ -7015,7 +7103,12 @@ function handleFallbackModelQueryKey(draft: NewTaskDraft, key: KeyEvent): boolea
  * draft so its create/update payload stays byte-identical to a plain task.
  */
 function draftPermissionOverridesPayload(draft: NewTaskDraft): PermissionOverrides | undefined {
-  if (draft.harness !== "opencode" || draft.isolation !== "in-place") return undefined;
+  if (draft.harness !== "opencode") return undefined;
+  if (draft.isolation === "worktree") {
+    const bash = draft.permissionOverrides.bash;
+    return bash === "ask" || bash === "deny" ? { bash } : undefined;
+  }
+  if (draft.isolation !== "in-place") return undefined;
   const overrides: PermissionOverrides = {};
   for (const category of PERMISSION_OVERRIDE_CATEGORIES) {
     const action = draft.permissionOverrides[category];
@@ -7265,6 +7358,10 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
       if (!stepFieldOrder(state, draft).includes(draft.field)) draft.field = stepFieldOrder(state, draft)[0] ?? draft.field;
       return true;
     case "autoRun":
+      if (draft.isolation === "worktree" && draft.permissionOverrides.bash === "ask") {
+        draft.autoRun = false;
+        return true;
+      }
       draft.autoRun = !draft.autoRun;
       return true;
     case "permEdit":
@@ -7277,6 +7374,7 @@ function cycleFocusedField(draft: NewTaskDraft, state: TuiState, delta: number):
     case "permBash":
       cyclePermissionOverride(draft, "bash", delta);
       if (draft.isolation === "in-place" && !draftInPlaceFenced(draft)) draft.autoRun = false;
+      if (draft.isolation === "worktree" && draft.permissionOverrides.bash === "ask") draft.autoRun = false;
       return true;
     case "permWebfetch":
       cyclePermissionOverride(draft, "webfetch", delta);

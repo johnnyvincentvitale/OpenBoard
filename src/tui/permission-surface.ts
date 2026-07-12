@@ -1,5 +1,4 @@
 import type { PendingPermissionAsk, Task } from "../shared";
-import { formatElapsed } from "./model";
 
 export interface PermissionAskSummary {
   count: number;
@@ -25,7 +24,7 @@ export function permissionAskSummary(task: Pick<Task, "pendingPermissions"> | un
     oldest,
     countdownMs,
     label: `NEEDS USER INPUT · ${count} ${noun}`,
-    detail: `${oldest.summary} · ${formatElapsed(countdownMs)} left · y allow once / N deny`,
+    detail: `${oldest.summary} · ${Math.ceil(countdownMs / 1000)}s left · y allow once / ! deny`,
   };
 }
 
@@ -39,10 +38,16 @@ export function permissionAskDetailRows(task: Pick<Task, "pendingPermissions"> |
   if (asks.length === 0) return [];
   const oldest = asks[0];
   return [
-    { label: "INPUT", value: `${asks.length} pending permission ${asks.length === 1 ? "ask" : "asks"}` },
-    { label: "OLDEST ASK", value: oldest.summary },
-    { label: "COUNTDOWN", value: formatElapsed(Math.max(0, oldest.deadline - now)) },
-    { label: "ANSWER", value: "y allow once · uppercase N deny" },
+    { label: "INPUT", value: `1 of ${asks.length} pending permission ${asks.length === 1 ? "ask" : "asks"}` },
+    { label: "HARNESS", value: oldest.harness },
+    { label: "SOURCE", value: oldest.source },
+    { label: "TOOL", value: oldest.tool ?? oldest.permission },
+    { label: "REQUEST", value: oldest.summary },
+    ...(oldest.patterns?.length ? [{ label: "RESOURCE", value: oldest.patterns.join(", ") }] : []),
+    ...(oldest.source === "worktree-fence" ? [{ label: "WARNING", value: "request is outside the task worktree" }] : []),
+    { label: "COUNTDOWN", value: `${Math.ceil(Math.max(0, oldest.deadline - now) / 1000)}s` },
+    { label: "TIMEOUT", value: "deny" },
+    { label: "ANSWER", value: "y allow once · ! deny" },
   ];
 }
 

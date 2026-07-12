@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleKeypress } from "../../src/tui/index";
 import { createMockInstanceProvider } from "../../src/tui/model";
+import { BoardClientError } from "../../src/client/board-client";
 import type { Column, PendingPermissionAsk, Task } from "../../src/shared";
 
 function task(id: string, column: Column, overrides: Partial<Task> = {}): Task {
@@ -156,7 +157,7 @@ describe("Filtered-out selection is reconciled before navigation/actions (P3-7)"
 });
 
 describe("Permission response is bound to the ask/card actually shown (P3-8)", () => {
-  it("refuses to silently answer a different card's ask after a background refresh reselects, and rebinds instead", async () => {
+  it("refreshes instead of swallowing a key or answering an unseen replacement ask", async () => {
     const goneTaskAsk = ask("ask-A");
     const otherTask = task("other", "in_progress", { pendingPermissions: [ask("ask-B")] });
     const s = state({
@@ -170,12 +171,8 @@ describe("Permission response is bound to the ask/card actually shown (P3-8)", (
 
     // Must NOT silently answer "other"'s ask-B just because it's now selected.
     expect(a.client.respondPermission).not.toHaveBeenCalled();
-    expect(s.status).toContain("press again");
-    // Rebinds to what's now shown, so a follow-up press acts deliberately.
-    expect(s.permissionAskBinding).toEqual({ taskId: "other", askId: "ask-B" });
-
-    await handleKeypress({ sequence: "y", name: "y" } as any, s, a);
-    expect(a.client.respondPermission).toHaveBeenCalledWith("other", { askId: "ask-B", action: "allow_once", answeredBy: "User" });
+    expect(s.status).toBe("permission ask changed; refreshing...");
+    expect(a.refresh).toHaveBeenCalledWith(true);
   });
 
   it("answers immediately when there is no prior binding (first-ever press, e.g. app bootstrap)", async () => {
@@ -219,7 +216,7 @@ describe("Permission reply status reflects the actual server response shape", ()
     const s = state({ tasks: [t], selectedTaskId: "t1" });
     const a = actions();
 
-    await handleKeypress({ sequence: "N", name: "N" } as any, s, a);
+    await handleKeypress({ sequence: "!", name: "!" } as any, s, a);
 
     expect(s.status).toBe("permission denied");
     expect(s.status).not.toContain("undefined");
@@ -229,7 +226,7 @@ describe("Permission reply status reflects the actual server response shape", ()
     const t = task("t1", "in_progress", { pendingPermissions: [ask("ask-1")] });
     const s = state({ tasks: [t], selectedTaskId: "t1" });
     const respondPermission = vi.fn(async () => {
-      throw new Error("OpenBoard request failed (409): Permission ask already resolved: ask-1");
+      throw new BoardClientError(409, "Permission ask already resolved: ask-1", "permission_already_claimed");
     });
     const a = actions({ client: { respondPermission } });
 
@@ -251,6 +248,6 @@ describe("Permission reply status reflects the actual server response shape", ()
     await handleKeypress({ sequence: "y", name: "y" } as any, s, a);
 
     expect(s.status).toBe("permission answer failed");
-    expect(s.error).toContain("502");
+    expect(s.error).toContain("Permission reply failed");
   });
 });

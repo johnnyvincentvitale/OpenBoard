@@ -6,6 +6,7 @@ import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
 import type { Task, TaskKind } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { TaskDispatcher } from "../../src/server/dispatcher";
+import type { PermissionAskEvent } from "../../src/server/permission-broker";
 import { SessionActivityCollector } from "../../src/server/session-activity";
 import type { SessionActivityFrame } from "../../src/shared";
 import type { ClaudeCodeRunnerLike } from "../../src/server/claude-code-runner";
@@ -312,6 +313,74 @@ describe("TaskDispatcher", () => {
     });
   }
 
+  it("reconciles a crash-left permission ask as cancelled with unknown delivery on startup", () => {
+    const task = createTask();
+    store.addEvent({
+      taskId: task.id,
+      type: "task_permission_asked",
+      body: {
+        askId: "ask_interrupted",
+        harness: "opencode",
+        source: "interactive-strict",
+        permission: "bash",
+        summary: "Tool bash requested permission category bash.",
+        raisedAt: 100,
+        deadline: 10_000,
+        providerSessionId: "ses_interrupted",
+        runStartedAt: 50,
+      },
+    });
+
+    dispatcher = new TaskDispatcher({ client: client as never, store });
+
+    expect(store.listEvents(task.id).at(-1)).toMatchObject({
+      type: "task_permission_cancelled",
+      body: {
+        askId: "ask_interrupted",
+        resolution: "cancelled",
+        cancellationReason: "restart-reconciliation",
+        delivery: "unknown",
+      },
+    });
+  });
+
+  it("does not re-cancel permission asks that already have a durable terminal event", () => {
+    const task = createTask();
+    store.addEvent({ taskId: task.id, type: "task_permission_asked", body: { askId: "ask_done" } });
+    store.addEvent({ taskId: task.id, type: "task_permission_answered", body: { askId: "ask_done", delivery: "confirmed" } });
+
+    dispatcher = new TaskDispatcher({ client: client as never, store });
+
+    expect(store.listEvents(task.id).filter((event) => event.type === "task_permission_cancelled")).toEqual([]);
+  });
+
+  it("surfaces permission-event persistence failure on the task and stderr", () => {
+    const task = createTask();
+    dispatcher = new TaskDispatcher({ client: client as never, store });
+    vi.spyOn(store, "addEvent").mockImplementation(() => { throw new Error("sqlite unavailable"); });
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    (dispatcher as unknown as { handlePermissionEvent(event: PermissionAskEvent): void }).handlePermissionEvent({
+      type: "permission_asked",
+      askId: "ask_persist",
+      runId: "ses_persist",
+      taskId: task.id,
+      runStartedAt: 100,
+      providerSessionId: "ses_persist",
+      harness: "opencode",
+      source: "interactive-strict",
+      permission: "bash",
+      summary: "bash permission",
+      raisedAt: 101,
+      deadline: 1000,
+      occurredAt: 101,
+    });
+
+    expect(store.get(task.id)?.error).toContain("Permission event persistence failed: sqlite unavailable");
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining("Permission event persistence failed"));
+    stderr.mockRestore();
+  });
+
   describe("run()", () => {
     it("throws AdapterError.notFound when the task doesn't exist", async () => {
       dispatcher = new TaskDispatcher({ client: client as never, store });
@@ -446,7 +515,8 @@ describe("TaskDispatcher", () => {
       await waitFor(() => (dispatcher as never as { listPendingPermissions(id: string): unknown[] }).listPendingPermissions(task.id).length === 2);
 
       const pending = (dispatcher as never as { listPendingPermissions(id: string): Array<Record<string, unknown>> }).listPendingPermissions(task.id);
-      expect(pending.map((ask) => ask.id)).toEqual(["ask_1", "ask_2"]);
+      expect(new Set(pending.map((ask) => ask.id)).size).toBe(2);
+      expect(pending.every((ask) => typeof ask.id === "string" && ask.id.startsWith("ask_") && ask.id !== "native_newer" && ask.id !== "native_second")).toBe(true);
       expect(pending[0]).toMatchObject({ harness: "opencode", source: "in-place-override", permission: "bash", tool: "bash" });
       expect(pending[0]).not.toHaveProperty("nativeId");
       expect(pending[0]).not.toHaveProperty("requestID");
@@ -478,25 +548,26 @@ describe("TaskDispatcher", () => {
       expect(events.map((event) => event.type)).toContain("task_permission_asked");
       expect(events.map((event) => event.type)).toContain("task_permission_answered");
       const asked = events.find((event) => event.type === "task_permission_asked")!;
-      expect(asked.body).toEqual({
+      expect(asked.body).toMatchObject({
         askId,
         harness: "opencode",
         source: "in-place-override",
         permission: "bash",
-        summary: 'Tool "bash" requested a permission this worktree fence denies by default.',
+        summary: 'Tool "bash" requested permission category "bash".',
         tool: "bash",
         raisedAt: expect.any(Number),
         deadline: expect.any(Number),
         patterns: ["**"],
       });
+      expect(asked.body).toMatchObject({ providerSessionId: "ses_answer", runStartedAt: expect.any(Number) });
       expect(asked.body).not.toHaveProperty("resolution");
       const answered = events.find((event) => event.type === "task_permission_answered")!;
-      expect(answered.body).toEqual({
+      expect(answered.body).toMatchObject({
         askId,
         harness: "opencode",
         source: "in-place-override",
         permission: "bash",
-        summary: 'Tool "bash" requested a permission this worktree fence denies by default.',
+        summary: 'Tool "bash" requested permission category "bash".',
         resolution: "operator",
         tool: "bash",
         action: "allow_once",
@@ -535,12 +606,12 @@ describe("TaskDispatcher", () => {
 
       expect(outcome).toMatchObject({ ok: false, conflict: "reply-failed" });
       const failed = store.listEvents(task.id).find((event) => event.type === "task_permission_reply_failed")!;
-      expect(failed.body).toEqual({
+      expect(failed.body).toMatchObject({
         askId,
         harness: "opencode",
         source: "in-place-override",
         permission: "bash",
-        summary: 'Tool "bash" requested a permission this worktree fence denies by default.',
+        summary: 'Tool "bash" requested permission category "bash".',
         resolution: "operator",
         tool: "bash",
         action: "deny",
@@ -570,7 +641,7 @@ describe("TaskDispatcher", () => {
       await dispatcher.retry(task.id, "try again");
 
       const outcome = await (dispatcher as never as { respondPermission(id: string, input: unknown): Promise<unknown> }).respondPermission(task.id, { askId: staleAskId, action: "deny", answeredBy: "Operator" });
-      expect(outcome).toEqual({ ok: false, askId: staleAskId, conflict: "not-found" });
+      expect(outcome).toEqual({ ok: false, askId: staleAskId, conflict: "stale" });
       expect(client.permissionReplyCalls).toEqual([]);
       expect((dispatcher as unknown as { permissionAskMeta: Map<string, unknown> }).permissionAskMeta.has(staleAskId)).toBe(false);
     });

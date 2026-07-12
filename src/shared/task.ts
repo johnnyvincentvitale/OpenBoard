@@ -214,8 +214,13 @@ export type CompletionSource = "reported" | "idle-fallback" | "watchdog";
 
 export interface PendingPermissionAsk {
   id: string;
+  /** Owning board task and attempt. Present for asks raised by current runtimes. */
+  taskId?: string;
+  runStartedAt?: number;
+  /** Provider session that raised the ask (root or descendant). */
+  providerSessionId?: string;
   harness: TaskHarness;
-  source: "worktree-fence" | "in-place-override" | "acp";
+  source: "worktree-fence" | "interactive-strict" | "in-place-override" | "acp";
   permission: string;
   tool?: string;
   summary: string;
@@ -258,7 +263,7 @@ export interface SessionMessageReceipt {
 
 export type RespondPermissionOutcome =
   | { ok: true; askId: string; decision: "allow_once" | "deny" }
-  | { ok: false; askId: string; conflict: "not-found" | "already-resolved" | "reply-failed"; error?: string };
+  | { ok: false; askId: string; conflict: "not-found" | "stale" | "already-resolved" | "unsupported-action" | "reply-failed"; error?: string };
 
 export interface InstanceConfig {
   port: number;
@@ -562,12 +567,11 @@ export interface OpenCodePermissionRule {
 
 /**
  * The single choke point for what permission ruleset a dispatched OpenCode
- * session runs with. Worktree-isolated runs ALWAYS get
- * `WRITE_FENCED_PERMISSION` unchanged — `overrides` is not read at all in
- * that branch — because the worktree safety stack (write-fencing, escape
- * detection, worktree-cwd prompt hygiene) must never be
- * weakened by a per-task override, regardless of how such data ended up on
- * the row. Only in-place tasks may layer category overrides, and only after
+ * session runs with. Worktree-isolated runs always retain
+ * `WRITE_FENCED_PERMISSION`; their only accepted override is `bash: ask|deny`,
+ * appended after the fence. `bash: ask` is interactive-strict, while no
+ * override preserves unattended compatibility. In-place tasks may layer
+ * category overrides after
  * the base allow-all rule, since OpenCode 1.17.13 lets whichever rule is
  * last in the array win (see `WRITE_FENCED_PERMISSION`'s doc comment above).
  */
@@ -575,7 +579,12 @@ export function resolveOpenCodePermissionRules(
   isolatedRun: boolean,
   overrides?: PermissionOverrides | null,
 ): OpenCodePermissionRule[] {
-  if (isolatedRun) return WRITE_FENCED_PERMISSION.map((rule) => ({ ...rule }));
+  if (isolatedRun) {
+    const rules: OpenCodePermissionRule[] = WRITE_FENCED_PERMISSION.map((rule) => ({ ...rule }));
+    const bash = overrides?.bash;
+    if (bash === "ask" || bash === "deny") rules.push({ permission: "bash", pattern: "**", action: bash });
+    return rules;
+  }
   const rules: OpenCodePermissionRule[] = UNATTENDED_PERMISSION.map((rule) => ({ ...rule }));
   if (overrides) {
     for (const category of PERMISSION_OVERRIDE_CATEGORIES) {
@@ -608,7 +617,7 @@ export function canAutoRun(task: {
   permissionOverrides?: PermissionOverrides | null;
 }): boolean {
   if ((task.type ?? "agent") !== "agent") return false;
-  if (task.isolation === "worktree") return true;
+  if (task.isolation === "worktree") return task.permissionOverrides?.bash !== "ask";
   const opencode = task.harness === undefined || task.harness === "opencode";
   return (
     opencode &&

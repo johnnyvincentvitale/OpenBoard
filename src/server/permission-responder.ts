@@ -68,6 +68,15 @@ const DEFAULT_INTERACTIVE_TIMEOUT_MS = 0;
 /** Back-compat default for a pending request that (in tests, or an older SDK) carries no `permission` field of its own. */
 const DEFAULT_PERMISSION_TYPE = "external_directory";
 
+/** Bounded display context must not leak common command-line credentials. */
+function redactPermissionPattern(value: string): string {
+  return value
+    .replace(/(bearer\s+)[^\s'";]+/gi, "$1[REDACTED]")
+    .replace(/((?:authorization|api[_-]?key|token|password|secret)\s*[=:]\s*)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(--(?:api-key|token|password|secret)\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[REDACTED]@");
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -128,6 +137,8 @@ export type PermissionResponderErrorContext = "list" | "reply";
 
 export interface PermissionResponderPoolOptions {
   client: { permission: PermissionClient; session: SessionClient };
+  /** Board-wide broker. When omitted, the pool owns a private broker (tests/standalone use). */
+  broker?: PermissionBroker;
   /** Default 250ms — proven reliable in the Phase 0 live probe. */
   pollIntervalMs?: number;
   /**
@@ -172,7 +183,7 @@ export interface PermissionResponderPool {
    * for a downstream dispatcher that distinguishes worktree-fenced runs from
    * in-place overrides; it does not change polling/reply behavior.
    */
-  register(sessionID: string, directory: string, options?: { source?: PermissionAskSource }): void;
+  register(sessionID: string, directory: string, options?: { source?: PermissionAskSource; taskId?: string; runStartedAt?: number; interactiveBash?: boolean }): void;
   /**
    * Attach a descendant session (an OpenCode subagent spawned inside the
    * run) to a registered root target. Requests raised by the child share the
@@ -196,8 +207,12 @@ export interface PermissionResponderPool {
 
 interface TargetState {
   directory: string;
+  taskId?: string;
+  runStartedAt?: number;
   /** requestIDs already handled (approved or submitted to the broker), scoped to this target so it's freed on unregister(). */
   replied: Set<string>;
+  /** Original deadline per native request; rediscovery never resets grace. */
+  nativeDeadlines: Map<string, number>;
   /** Whether the most recent list attempt for this target failed — gates onError de-dup for list failures. */
   failingList: boolean;
   /** Whether the most recent reply attempt for this target failed — gates onError de-dup for reply failures independently of list failures. */
@@ -206,6 +221,7 @@ interface TargetState {
   lastDenial: DenialInfo | null;
   /** Source classification applied to every broker ask raised for this session. */
   source: PermissionAskSource;
+  interactiveBash: boolean;
   /** Descendant sessions whose requests this target also answers (see addChildSession). */
   childSessionIds: Set<string>;
   /**
@@ -220,6 +236,10 @@ interface TargetState {
   pendingAskNativeIds: Map<string, string>;
 }
 
+function nativeRequestKey(sessionID: string, requestID: string): string {
+  return JSON.stringify([sessionID, requestID]);
+}
+
 /** Create a pool that polls `client.permission.list` once per tick for every registered session. */
 export function createPermissionResponderPool(options: PermissionResponderPoolOptions): PermissionResponderPool {
   const { client, onError, onPermissionEvent } = options;
@@ -228,13 +248,14 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
   const targets = new Map<string, TargetState>();
   let stopped = false;
 
-  const broker: PermissionBroker = createPermissionBroker({
-    onEvent: (event) => handleBrokerEvent(event),
-  });
+  const ownsBroker = options.broker === undefined;
+  const broker: PermissionBroker = options.broker ?? createPermissionBroker();
+  const unsubscribeBroker = broker.subscribe((event) => handleBrokerEvent(event));
 
   void runLoop();
 
   function handleBrokerEvent(event: PermissionAskEvent): void {
+    if (event.harness !== "opencode") return;
     if (onPermissionEvent) {
       try {
         onPermissionEvent(event);
@@ -260,6 +281,8 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
       // the suppression permanently hiding it.
       if (nativeId !== undefined) state.replied.delete(nativeId);
       reportFailure(event.runId, "reply", state, new Error(event.error ?? "reply failed"));
+    } else if (event.type === "permission_cancelled") {
+      state.pendingAskNativeIds.delete(event.askId);
     }
   }
 
@@ -291,13 +314,26 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
     }
     reportRecovery(state, "list");
 
+    const visibleNativeIds = new Set(
+      pending
+        .filter((request) => request.sessionID === sessionID || state.childSessionIds.has(request.sessionID))
+        .map((request) => nativeRequestKey(request.sessionID, request.id)),
+    );
+    for (const requestId of state.replied) {
+      if (!visibleNativeIds.has(requestId)) state.replied.delete(requestId);
+    }
+    for (const requestId of state.nativeDeadlines.keys()) {
+      if (!visibleNativeIds.has(requestId)) state.nativeDeadlines.delete(requestId);
+    }
+
     for (const request of pending) {
       if (stopped || !targets.has(sessionID)) return;
       // Accept the root session's own requests and those of its attached
       // descendant sessions — a fenced subagent's ask otherwise matches no
       // target and hangs the run until the watchdog trips.
       if (request.sessionID !== sessionID && !state.childSessionIds.has(request.sessionID)) continue;
-      if (state.replied.has(request.id)) continue;
+      const requestKey = nativeRequestKey(request.sessionID, request.id);
+      if (state.replied.has(requestKey)) continue;
 
       // Tool identity lives in the session that raised the request — for a
       // child ask that's the child session's messages, not the root's.
@@ -307,7 +343,7 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
       // Mark handled before any reply/broker submission so a slow reply — or
       // a still-pending broker ask — can't race a subsequent poll into
       // double-processing the same request.
-      state.replied.add(request.id);
+      state.replied.add(requestKey);
 
       if (isReadClass) {
         try {
@@ -321,24 +357,32 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
         } catch (err) {
           // Never actually replied: release the suppression so a later poll
           // sees this request again instead of permanently ignoring it.
-          state.replied.delete(request.id);
+          state.replied.delete(requestKey);
           reportFailure(sessionID, "reply", state, err);
         }
         continue;
       }
 
+      const deadline = state.nativeDeadlines.get(requestKey) ?? (Date.now() + interactiveTimeoutMs);
+      state.nativeDeadlines.set(requestKey, deadline);
+      const askSource: PermissionAskSource = request.permission === "bash" && state.interactiveBash
+        ? "interactive-strict"
+        : state.source;
       const askId = broker.submitAsk({
         runId: sessionID,
+        taskId: state.taskId,
+        runStartedAt: state.runStartedAt,
+        providerSessionId: request.sessionID,
         nativeId: request.id,
         harness: "opencode",
-        source: state.source,
+        source: askSource,
         permission: request.permission ?? DEFAULT_PERMISSION_TYPE,
         tool: toolName,
-        patterns: request.patterns,
+        patterns: request.patterns?.map(redactPermissionPattern),
         summary: toolName
-          ? `Tool "${toolName}" requested a permission this worktree fence denies by default.`
+          ? `Tool "${toolName}" requested ${askSource === "worktree-fence" ? "permission outside the task worktree" : `permission category "${request.permission ?? DEFAULT_PERMISSION_TYPE}"`}.`
           : "Permission request with unresolved tool identity.",
-        deadline: Date.now() + interactiveTimeoutMs,
+        deadline,
         replyToProvider: async (decision) => {
           const result = await client.permission.reply({
             requestID: request.id,
@@ -348,7 +392,7 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
           if ((result as { error?: unknown }).error) throw (result as { error?: unknown }).error;
         },
       });
-      state.pendingAskNativeIds.set(askId, request.id);
+      state.pendingAskNativeIds.set(askId, requestKey);
     }
   }
 
@@ -383,15 +427,19 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
   }
 
   return {
-    register(sessionID: string, directory: string, registerOptions?: { source?: PermissionAskSource }): void {
-      broker.clearRun(sessionID);
+    register(sessionID: string, directory: string, registerOptions?: { source?: PermissionAskSource; taskId?: string; runStartedAt?: number; interactiveBash?: boolean }): void {
+      broker.clearRun(sessionID, "opencode", "run-replaced");
       targets.set(sessionID, {
         directory,
+        taskId: registerOptions?.taskId,
+        runStartedAt: registerOptions?.runStartedAt,
         replied: new Set(),
+        nativeDeadlines: new Map(),
         failingList: false,
         failingReply: false,
         lastDenial: null,
         source: registerOptions?.source ?? "worktree-fence",
+        interactiveBash: registerOptions?.interactiveBash ?? false,
         childSessionIds: new Set(),
         pendingAskNativeIds: new Map(),
       });
@@ -402,19 +450,20 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
       state.childSessionIds.add(childSessionID);
     },
     unregister(sessionID: string): void {
-      broker.clearRun(sessionID);
+      broker.clearRun(sessionID, "opencode", "run-cleared");
       targets.delete(sessionID);
     },
     stop(): void {
       stopped = true;
-      broker.stop();
+      if (ownsBroker) broker.stop();
+      unsubscribeBroker();
       targets.clear();
     },
     getLastDenial(sessionID: string): DenialInfo | null {
       return targets.get(sessionID)?.lastDenial ?? null;
     },
     listPending(runId?: string): PendingPermissionAsk[] {
-      return broker.listPending(runId);
+      return broker.listPending(runId, "opencode");
     },
     respond(input: RespondPermissionInput): Promise<RespondOutcome> {
       return broker.respond(input);

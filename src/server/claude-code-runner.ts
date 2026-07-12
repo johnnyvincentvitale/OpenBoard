@@ -33,6 +33,9 @@ export interface ClaudeCodeStatus {
 export interface ClaudeCodeRunnerLike {
   run(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult>;
   retry(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult>;
+  /** ACP implementations can pause after session creation so ownership is durable before the first prompt. */
+  runPrepared?(input: ClaudeCodeRunInput, onReady: (result: ClaudeCodeRunResult) => void | Promise<void>): Promise<ClaudeCodeRunResult>;
+  retryPrepared?(input: ClaudeCodeRunInput, onReady: (result: ClaudeCodeRunResult) => void | Promise<void>): Promise<ClaudeCodeRunResult>;
   poll(sessionName: string): Promise<ClaudeCodeStatus | undefined>;
   abort(sessionName: string): Promise<void>;
   /** Send another prompt turn through an existing live ACP session. */

@@ -179,7 +179,7 @@ fields (in text fields it just types `b` — see
 3. **Agent.** 
 - Pick `build`, or another general-purpose OpenCode profile from the live roster.
 4. **Isolation.** 
-- Keep the default **`worktree`** setting. It gives this run a dedicated `board/<taskId>` branch and worktree. 
+- Keep the default **`worktree`** setting. It gives this run a dedicated `board/<taskId>` branch and worktree. Worktree isolation exposes BASH as `allow` (unattended compatibility), `ask` (interactive strict), or `deny`; switch to **`in_place`** for the full EDIT/BASH/WEBFETCH control.
 - **`AUTO-RUN`** should remain off for a standalone first task.
 5. **Dependencies.** 
 - Do not select parents.
@@ -1165,21 +1165,23 @@ treat them as experimental.
   the adapter binary on your `PATH` (`codex-acp`, `gemini-agent-acp`,
   `hermes-agent-acp`, `pi-coding-agent-acp`, `cursor-agent-acp`).
 - **ACP safety depends on mode.** ACP harnesses run in the selected worktree cwd
-  with base-checkout escape detection. In bypass-style modes provider asks may
-  be auto-allowed; stricter modes use brokered permission handling. One known
-  rough edge is that persisted mode validation is still shaped around Claude's
-  modes, so a non-Claude adapter reporting a mode outside it may be rejected.
+  with base-checkout escape detection. In `manual`, mutating and unknown calls
+  wait for operator input; `dontAsk`/`plan` deny them; `acceptEdits`/`auto` are
+  autonomous compatibility modes; and `bypassPermissions` allows all. Shell
+  strings are never treated as containment. One known rough edge is that the
+  persisted mode set is still shaped around Claude's modes, so a non-Claude adapter
+  reporting a mode outside it may be rejected until validation is relaxed.
 
-**OpenCode permissions, and why worktree isolation locks them.** The wizard's
+**OpenCode permissions.** The wizard's
 isolation screen shows a `PERMISSIONS` section for OpenCode cards only.
 Worktree-isolated runs already carry a layered safety stack — write-fenced
 edit permissions, the base-checkout escape detector, worktree-cwd prompt
 hygiene, and Review/Integrate checks.
-The worktree screen does not expose per-card permission overrides; it shows the
-automatic worktree protection state. Select isolation **`in_place`** instead to
-get an editable `EDIT`/`BASH`/`WEBFETCH` control (each `allow`/`ask`/`deny`),
-which defaults to `allow` everywhere — i.e., today's behavior — until you
-actively tighten one.
+The worktree screen exposes only BASH: `allow` preserves unattended compatibility,
+`ask` makes every shell request wait for `y` allow once / `!` deny (timeout denies),
+and `deny` disables it. This does not weaken the external-directory fence.
+Select isolation **`in_place`** for the full editable `EDIT`/`BASH`/`WEBFETCH`
+control (each `allow`/`ask`/`deny`).
 "Container" isolation is a disabled placeholder in this same segmented
 control; it isn't implemented yet and has no permissions story of its own.
 

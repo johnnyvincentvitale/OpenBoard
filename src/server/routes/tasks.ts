@@ -151,6 +151,12 @@ function isPermissionOverrides(value: unknown): value is PermissionOverrides {
   );
 }
 
+function validOpenCodeOverridesForIsolation(overrides: PermissionOverrides, isolation: TaskIsolationMode | null | undefined): boolean {
+  if (isolation === "in-place") return true;
+  if (isolation !== "worktree") return false;
+  return Object.entries(overrides).every(([category, action]) => category === "bash" && (action === "ask" || action === "deny"));
+}
+
 function isAcpOptions(value: unknown): value is AcpOptions {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   return Object.entries(value as Record<string, unknown>).every(
@@ -207,6 +213,7 @@ export function registerTaskRoutes(
 ): void {
   const { store, dispatcher } = deps;
   const agentRoster = deps.agentRoster ?? { fetch: async () => [] as RosterAgent[] };
+  const projectTask = (task: Task): Task => projectPendingPermissions([task], dispatcher)[0] ?? task;
 
   async function resolveModel(agent: unknown, explicitModel: unknown): Promise<ModelRef | undefined> {
     if (explicitModel !== undefined) {
@@ -319,8 +326,8 @@ export function registerTaskRoutes(
           `permissionOverrides must be an object mapping ${PERMISSION_OVERRIDE_CATEGORIES.join("/")} to ${PERMISSION_OVERRIDE_ACTIONS.join("/")}`,
         );
       }
-      if (permissionOverrides !== undefined && (taskType !== "agent" || harness !== "opencode" || isolation !== "in-place")) {
-        throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
+      if (permissionOverrides !== undefined && (taskType !== "agent" || harness !== "opencode" || !validOpenCodeOverridesForIsolation(permissionOverrides, isolation))) {
+        throw AdapterError.validation("permissionOverrides require an in-place OpenCode task, or a worktree OpenCode task with only bash: ask|deny");
       }
       if (autoRun !== undefined && typeof autoRun !== "boolean") {
         throw AdapterError.validation("autoRun must be a boolean");
@@ -383,7 +390,7 @@ export function registerTaskRoutes(
         ...(resolvedFallbackModel ? { fallbackModel: resolvedFallbackModel } : {}),
         ...(taskType === "agent" && isIsolationMode(isolation) ? { isolation } : {}),
         ...(autoRunAccepted ? { autoRun: true } : {}),
-        ...(taskType === "agent" && harness === "opencode" && isolation === "in-place" && isPermissionOverrides(permissionOverrides) ? { permissionOverrides } : {}),
+        ...(taskType === "agent" && harness === "opencode" && isPermissionOverrides(permissionOverrides) && validOpenCodeOverridesForIsolation(permissionOverrides, isolation) ? { permissionOverrides } : {}),
       });
       store.addEvent({ taskId: task.id, type: "task_created", body: { type: task.type ?? "agent" } });
 
@@ -396,7 +403,7 @@ export function registerTaskRoutes(
       }
 
       const fresh = store.get(task.id);
-      return c.json(fresh, 201);
+      return c.json(fresh ? projectTask(fresh) : fresh, 201);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -483,7 +490,7 @@ export function registerTaskRoutes(
 
       const refreshed = store.get(id);
       if (!refreshed) throw AdapterError.notFound(`Task not found: ${id}`);
-      return c.json(refreshed, 200);
+      return c.json(projectTask(refreshed), 200);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -496,7 +503,7 @@ export function registerTaskRoutes(
       assertRunnableActiveTask(store, id, "run");
       const task = await dispatcher.run(id);
       store.addEvent({ taskId: id, type: "task_run", body: { sessionId: task.sessionId, runStartedAt: task.runStartedAt } });
-      return c.json(task, 202);
+      return c.json(projectTask(task), 202);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -549,7 +556,7 @@ export function registerTaskRoutes(
       } else {
         store.addEvent({ taskId: id, type: "task_retried", body: { sessionId: task.sessionId ?? task.harnessSessionId, runStartedAt: task.runStartedAt, feedbackProvided: feedback !== undefined } });
       }
-      return c.json(task, 202);
+      return c.json(projectTask(task), 202);
     } catch (err) {
       return respondWithError(c, err);
     } finally {
@@ -570,7 +577,7 @@ export function registerTaskRoutes(
         const oldest = sessionMessageReceipts.keys().next().value;
         if (oldest) sessionMessageReceipts.delete(oldest);
       }
-      return c.json(receipt, 202);
+      return c.json({ ...receipt, task: projectTask(receipt.task) }, 202);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -586,7 +593,7 @@ export function registerTaskRoutes(
         throw AdapterError.notFound(`Task not found: ${id}`);
       }
       store.addEvent({ taskId: id, type: "task_aborted", body: { sessionId: task.sessionId } });
-      return c.json(task, 200);
+      return c.json(projectTask(task), 200);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -655,7 +662,7 @@ export function registerTaskRoutes(
         void fireChainAdvance(deps.advancer, store, id);
       }
 
-      const tasks = store.list();
+      const tasks = projectPendingPermissions(store.list(), dispatcher);
       return c.json(tasks, 200);
     } catch (err) {
       return respondWithError(c, err);
@@ -902,13 +909,16 @@ export function registerTaskRoutes(
         patch.model = await resolveModel(patch.agent, undefined);
       }
 
-      // permissionOverrides only ever applies to in-place (non-worktree) runs — see
-      // resolveOpenCodePermissionRules. Any patch that leaves isolation at worktree
-      // (or unset) auto-clears a stale override instead of silently keeping it.
-      if (effectiveIsolation !== "in-place") {
-        if (body.permissionOverrides !== undefined && body.permissionOverrides !== null) {
-          throw AdapterError.validation("permissionOverrides can only be set for in-place OpenCode agent tasks");
+      const effectiveOverrides = body.permissionOverrides !== undefined
+        ? (body.permissionOverrides as PermissionOverrides | null)
+        : existing.permissionOverrides ?? null;
+      if (effectiveOverrides && !validOpenCodeOverridesForIsolation(effectiveOverrides, effectiveIsolation)) {
+        if (body.permissionOverrides !== undefined) {
+          throw AdapterError.validation("permissionOverrides require an in-place OpenCode task, or a worktree OpenCode task with only bash: ask|deny");
         }
+        patch.permissionOverrides = null;
+      }
+      if (effectiveIsolation !== "in-place" && effectiveIsolation !== "worktree") {
         patch.permissionOverrides = null;
       } else if (body.permissionOverrides !== undefined) {
         patch.permissionOverrides = body.permissionOverrides === null ? null : (body.permissionOverrides as PermissionOverrides);
@@ -929,7 +939,7 @@ export function registerTaskRoutes(
     const id = c.req.param("id");
     try {
       const task = await dispatcher.initGitAndRun(id);
-      return c.json(task, 202);
+      return c.json(projectTask(task), 202);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -941,7 +951,7 @@ export function registerTaskRoutes(
     try {
       const outcome = await dispatcher.syncUpstream(id);
       store.addEvent({ taskId: id, type: "task_synced", body: { ok: outcome.ok, conflict: outcome.conflict, message: outcome.message } });
-      return c.json(outcome, outcome.ok ? 200 : 409);
+      return c.json({ ...outcome, task: projectTask(outcome.task) }, outcome.ok ? 200 : 409);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -975,7 +985,7 @@ export function registerTaskRoutes(
         : undefined;
       const outcome = await dispatcher.commitFile(id, body.file, message);
       store.addEvent({ taskId: id, type: "task_file_committed", body: { ok: outcome.ok, file: outcome.file, message: outcome.message, commit: outcome.commit } });
-      return c.json(outcome, outcome.ok ? 200 : 409);
+      return c.json({ ...outcome, task: projectTask(outcome.task) }, outcome.ok ? 200 : 409);
     } catch (err) {
       return respondWithError(c, err);
     }
@@ -1016,7 +1026,7 @@ export function registerTaskRoutes(
           completedBy: outcome.task.completedBy,
         },
       });
-      return c.json(outcome, outcome.ok ? 200 : 409);
+      return c.json({ ...outcome, task: projectTask(outcome.task) }, outcome.ok ? 200 : 409);
     } catch (err) {
       return respondWithError(c, err);
     }

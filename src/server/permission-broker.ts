@@ -39,14 +39,17 @@
  *   events carry only public-projection fields plus a decision/reason/error,
  *   with summary/patterns/error text truncated to a fixed cap.
  */
+import { randomUUID } from "node:crypto";
 import type { PendingPermissionAsk, RespondPermissionInput, TaskHarness } from "../shared/task";
 
 const MAX_TEXT_LENGTH = 240;
 const MAX_PATTERNS = 8;
+const MAX_PROVIDER_REPLY_ATTEMPTS = 3;
 
 export type PermissionAskSource = PendingPermissionAsk["source"];
 export type PermissionDecision = RespondPermissionInput["action"];
 export type PermissionDecisionReason = "operator" | "policy-timeout";
+export type PermissionCancellationReason = "run-cleared" | "run-replaced" | "shutdown";
 
 export interface PermissionBrokerClock {
   now(): number;
@@ -68,24 +71,36 @@ const realClock: PermissionBrokerClock = {
 
 /** Durable, display-safe record of a broker decision — never carries the native id or reply closure. */
 export interface PermissionAskEvent {
-  type: "permission_asked" | "permission_answered" | "permission_reply_failed";
+  type: "permission_asked" | "permission_answered" | "permission_reply_failed" | "permission_cancelled";
   askId: string;
   runId: string;
+  taskId?: string;
+  runStartedAt?: number;
+  providerSessionId?: string;
   harness: TaskHarness;
   source: PermissionAskSource;
   permission: string;
   tool?: string;
   summary: string;
+  patterns?: string[];
+  raisedAt: number;
+  deadline: number;
   occurredAt: number;
   decision?: PermissionDecision;
   reason?: PermissionDecisionReason;
   answeredBy?: string;
   error?: string;
+  cancellationReason?: PermissionCancellationReason;
+  delivery?: "confirmed" | "failed" | "unknown";
+  pendingAfterFailure?: boolean;
 }
 
 export interface SubmitAskInput {
   /** Scopes dedupe + clearRun; e.g. an OpenCode sessionID or an ACP session id. */
   runId: string;
+  taskId?: string;
+  runStartedAt?: number;
+  providerSessionId?: string;
   /** The provider's own id for this ask. Kept private to this module. */
   nativeId: string;
   harness: TaskHarness;
@@ -106,7 +121,14 @@ export interface SubmitAskInput {
 
 export type RespondOutcome =
   | { ok: true; askId: string; decision: PermissionDecision }
-  | { ok: false; askId: string; conflict: "not-found" | "already-resolved" | "reply-failed"; error?: string };
+  | { ok: false; askId: string; conflict: "not-found" | "stale" | "already-resolved" | "unsupported-action" | "reply-failed"; error?: string };
+
+export class PermissionActionUnsupportedError extends Error {
+  constructor(message = "Provider did not offer an option for this permission action") {
+    super(message);
+    this.name = "PermissionActionUnsupportedError";
+  }
+}
 
 export interface PermissionBrokerOptions {
   clock?: PermissionBrokerClock;
@@ -119,11 +141,13 @@ export interface PermissionBroker {
   /** Submit a native ask; returns its board ask id (existing or newly minted). */
   submitAsk(input: SubmitAskInput): string;
   /** Oldest-first pending asks, as the public projection shape, optionally scoped to one run. */
-  listPending(runId?: string): PendingPermissionAsk[];
+  listPending(runId?: string, harness?: TaskHarness): PendingPermissionAsk[];
   /** Resolve a pending ask (operator path). */
   respond(input: RespondPermissionInput): Promise<RespondOutcome>;
   /** Cancel every timer/ask for a run; guards a same-runId replacement run against late callbacks. */
-  clearRun(runId: string): void;
+  clearRun(runId: string, harness?: TaskHarness, reason?: PermissionCancellationReason): void;
+  /** Observe lifecycle events without owning or wrapping the broker. */
+  subscribe(listener: (event: PermissionAskEvent) => void): () => void;
   /** Stop the broker entirely — clears every run. */
   stop(): void;
 }
@@ -131,6 +155,9 @@ export interface PermissionBroker {
 interface AskRecord {
   askId: string;
   runId: string;
+  taskId?: string;
+  runStartedAt?: number;
+  providerSessionId?: string;
   nativeId: string;
   harness: TaskHarness;
   source: PermissionAskSource;
@@ -144,7 +171,8 @@ interface AskRecord {
   reopenOnReplyFailure: boolean;
   generation: number;
   replyToProvider: (decision: PermissionDecision) => Promise<void>;
-  state: "pending" | "claimed";
+  state: "pending" | "claimed" | "replying" | "answered" | "reply-failed" | "expired" | "cancelled";
+  replyAttempts: number;
   timerHandle: unknown;
 }
 
@@ -161,48 +189,62 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
-function identityKey(harness: TaskHarness, runId: string, nativeId: string): string {
-  return JSON.stringify([harness, runId, nativeId]);
+function identityKey(harness: TaskHarness, runId: string, providerSessionId: string, nativeId: string): string {
+  return JSON.stringify([harness, runId, providerSessionId, nativeId]);
 }
 
 export function createPermissionBroker(options: PermissionBrokerOptions = {}): PermissionBroker {
   const clock = options.clock ?? realClock;
-  const onEvent = options.onEvent;
-  let askCounter = 0;
-  const nextAskId = options.nextAskId ?? (() => `ask_${++askCounter}`);
+  const listeners = new Set<(event: PermissionAskEvent) => void>();
+  if (options.onEvent) listeners.add(options.onEvent);
+  const nextAskId = options.nextAskId ?? (() => `ask_${randomUUID()}`);
 
   const asks = new Map<string, AskRecord>();
   const byNativeIdentity = new Map<string, string>();
   const runGenerations = new Map<string, number>();
 
-  function generationFor(runId: string): number {
-    return runGenerations.get(runId) ?? 0;
+  function runKey(harness: TaskHarness, runId: string): string {
+    return JSON.stringify([harness, runId]);
+  }
+
+  function generationFor(harness: TaskHarness, runId: string): number {
+    return runGenerations.get(runKey(harness, runId)) ?? 0;
   }
 
   function emit(type: PermissionAskEvent["type"], record: AskRecord, extra?: Partial<PermissionAskEvent>): void {
-    if (!onEvent) return;
     const event: PermissionAskEvent = {
       type,
       askId: record.askId,
       runId: record.runId,
+      ...(record.taskId ? { taskId: record.taskId } : {}),
+      ...(record.runStartedAt !== undefined ? { runStartedAt: record.runStartedAt } : {}),
+      ...(record.providerSessionId ? { providerSessionId: record.providerSessionId } : {}),
       harness: record.harness,
       source: record.source,
       permission: record.permission,
       tool: record.tool,
       summary: record.summary,
+      patterns: record.patterns,
+      raisedAt: record.raisedAt,
+      deadline: record.deadline,
       occurredAt: clock.now(),
       ...extra,
     };
-    try {
-      onEvent(event);
-    } catch {
-      // A misbehaving handler must never break the broker.
+    for (const listener of listeners) {
+      try {
+        listener(event);
+      } catch {
+        // A misbehaving handler must never break the broker.
+      }
     }
   }
 
   function toPublic(record: AskRecord): PendingPermissionAsk {
     return {
       id: record.askId,
+      ...(record.taskId ? { taskId: record.taskId } : {}),
+      ...(record.runStartedAt !== undefined ? { runStartedAt: record.runStartedAt } : {}),
+      ...(record.providerSessionId ? { providerSessionId: record.providerSessionId } : {}),
       harness: record.harness,
       source: record.source,
       permission: record.permission,
@@ -228,14 +270,14 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
 
   function forget(record: AskRecord): void {
     asks.delete(record.askId);
-    byNativeIdentity.delete(identityKey(record.harness, record.runId, record.nativeId));
+    byNativeIdentity.delete(identityKey(record.harness, record.runId, record.providerSessionId ?? record.runId, record.nativeId));
   }
 
   function onTimeout(askId: string): void {
     const record = asks.get(askId);
     if (!record) return; // already resolved/removed — a late callback is a no-op.
     if (record.state !== "pending") return;
-    if (generationFor(record.runId) !== record.generation) return; // run was cleared/replaced.
+    if (generationFor(record.harness, record.runId) !== record.generation) return; // run was cleared/replaced.
     void resolve(record, record.timeoutDecision, "policy-timeout");
   }
 
@@ -252,42 +294,73 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
     // concurrent respond()/timeout racing in the same tick always loses here.
     record.state = "claimed";
     disarmTimer(record);
+    record.state = "replying";
+    record.replyAttempts += 1;
 
     try {
       await record.replyToProvider(decision);
     } catch (err) {
+      if (asks.get(record.askId) !== record || generationFor(record.harness, record.runId) !== record.generation) {
+        return { ok: false, askId: record.askId, conflict: "already-resolved" };
+      }
       // Provider failure: drop the ask as failed rather than mark it
       // answered. A fresh native poll re-raising the same request mints a
       // new board ask (submitAsk no longer finds this identity).
-      if (record.reopenOnReplyFailure) {
+      record.state = "reply-failed";
+      const pendingAfterFailure = record.reopenOnReplyFailure && record.deadline > clock.now() && record.replyAttempts < MAX_PROVIDER_REPLY_ATTEMPTS;
+      if (pendingAfterFailure) {
         record.state = "pending";
-        if (reason === "operator" && record.deadline > clock.now()) armTimer(record);
+        armTimer(record);
       } else {
         forget(record);
       }
       const message = errorText(err);
-      emit("permission_reply_failed", record, { decision, reason, answeredBy, error: truncate(message, MAX_TEXT_LENGTH) });
-      return { ok: false, askId: record.askId, conflict: "reply-failed", error: message };
+      emit("permission_reply_failed", record, {
+        decision,
+        reason,
+        answeredBy,
+        error: truncate(message, MAX_TEXT_LENGTH),
+        delivery: "failed",
+        pendingAfterFailure,
+      });
+      return {
+        ok: false,
+        askId: record.askId,
+        conflict: err instanceof PermissionActionUnsupportedError ? "unsupported-action" : "reply-failed",
+        error: message,
+      };
     }
 
+    // The run may have been cleared while the provider write was in flight.
+    // In that case clearRun already emitted cancellation with unknown delivery;
+    // never contradict it with a later "answered" event.
+    if (asks.get(record.askId) !== record || generationFor(record.harness, record.runId) !== record.generation) {
+      return { ok: false, askId: record.askId, conflict: "already-resolved" };
+    }
+    record.state = reason === "policy-timeout" ? "expired" : "answered";
     forget(record);
-    emit("permission_answered", record, { decision, reason, answeredBy });
+    emit("permission_answered", record, { decision, reason, answeredBy, delivery: "confirmed" });
     return { ok: true, askId: record.askId, decision };
   }
 
   return {
     submitAsk(input: SubmitAskInput): string {
-      const key = identityKey(input.harness, input.runId, input.nativeId);
+      const providerSessionId = input.providerSessionId ?? input.runId;
+      const key = identityKey(input.harness, input.runId, providerSessionId, input.nativeId);
       const existingId = byNativeIdentity.get(key);
       if (existingId && asks.has(existingId)) return existingId;
 
-      const generation = generationFor(input.runId);
-      if (!runGenerations.has(input.runId)) runGenerations.set(input.runId, generation);
+      const generation = generationFor(input.harness, input.runId);
+      const keyForRun = runKey(input.harness, input.runId);
+      if (!runGenerations.has(keyForRun)) runGenerations.set(keyForRun, generation);
 
       const askId = nextAskId();
       const record: AskRecord = {
         askId,
         runId: input.runId,
+        taskId: input.taskId,
+        runStartedAt: input.runStartedAt,
+        providerSessionId,
         nativeId: input.nativeId,
         harness: input.harness,
         source: input.source,
@@ -302,6 +375,7 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
         generation,
         replyToProvider: input.replyToProvider,
         state: "pending",
+        replyAttempts: 0,
         timerHandle: undefined,
       };
       asks.set(askId, record);
@@ -311,11 +385,12 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
       return askId;
     },
 
-    listPending(runId?: string): PendingPermissionAsk[] {
+    listPending(runId?: string, harness?: TaskHarness): PendingPermissionAsk[] {
       const result: PendingPermissionAsk[] = [];
       for (const record of asks.values()) {
         if (record.state !== "pending") continue;
         if (runId !== undefined && record.runId !== runId) continue;
+        if (harness !== undefined && record.harness !== harness) continue;
         result.push(toPublic(record));
       }
       return result;
@@ -327,20 +402,41 @@ export function createPermissionBroker(options: PermissionBrokerOptions = {}): P
       return resolve(record, input.action, "operator", input.answeredBy);
     },
 
-    clearRun(runId: string): void {
-      runGenerations.set(runId, generationFor(runId) + 1);
+    clearRun(runId: string, harness?: TaskHarness, reason: PermissionCancellationReason = "run-cleared"): void {
+      const matchingHarnesses = new Set(
+        [...asks.values()]
+          .filter((record) => record.runId === runId && (harness === undefined || record.harness === harness))
+          .map((record) => record.harness),
+      );
+      if (harness) matchingHarnesses.add(harness);
+      for (const matchingHarness of matchingHarnesses) {
+        runGenerations.set(runKey(matchingHarness, runId), generationFor(matchingHarness, runId) + 1);
+      }
       for (const record of [...asks.values()]) {
         if (record.runId !== runId) continue;
+        if (harness !== undefined && record.harness !== harness) continue;
         disarmTimer(record);
+        record.state = "cancelled";
+        emit("permission_cancelled", record, {
+          cancellationReason: reason,
+          delivery: "unknown",
+        });
         forget(record);
       }
     },
 
+    subscribe(listener: (event: PermissionAskEvent) => void): () => void {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+
     stop(): void {
-      for (const record of asks.values()) {
+      for (const record of [...asks.values()]) {
         disarmTimer(record);
+        record.state = "cancelled";
+        emit("permission_cancelled", record, { cancellationReason: "shutdown", delivery: "unknown" });
+        forget(record);
       }
-      asks.clear();
       byNativeIdentity.clear();
       runGenerations.clear();
     },

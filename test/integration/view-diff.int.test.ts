@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
-import { createBoardClient } from "../../src/client/board-client";
+import { BoardClientError, createBoardClient } from "../../src/client/board-client";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { registerTaskRoutes } from "../../src/server/routes/tasks";
 import { applyDiffResponse, createLoadingViewDiffState, viewDiffHeaderLabel } from "../../src/tui/view-diff";
@@ -175,7 +175,8 @@ describe("View Diff live route/client/TUI seam", () => {
     }
 
     const todo = store.create({ title: "todo", description: "", directory: dirtyRepo.repoDir });
-    await expect(client.getTaskDiff(todo.id)).rejects.toThrow("409");
-    await expect(client.getTaskDiff("task_missing")).rejects.toThrow("404");
+    await expect(client.getTaskDiff(todo.id)).rejects.toBeInstanceOf(BoardClientError);
+    await expect(client.getTaskDiff(todo.id)).rejects.toMatchObject({ status: 409 });
+    await expect(client.getTaskDiff("task_missing")).rejects.toMatchObject({ status: 404 });
   });
 });

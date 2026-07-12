@@ -197,6 +197,24 @@ describe("createPermissionResponderPool", () => {
     expect(pool.listPending("ses_child")).toHaveLength(0);
   });
 
+  it("keeps overlapping root/child native request ids distinct", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
+    client.listResponses = [[
+      { id: "req_same", sessionID: "ses_root", permission: "edit", tool: { messageID: "msg_1", callID: "call_1" } },
+      { id: "req_same", sessionID: "ses_child", permission: "edit", tool: { messageID: "msg_1", callID: "call_1" } },
+    ]];
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5, interactiveTimeoutMs: 10_000 });
+    pool.register("ses_root", "/wt");
+    pool.addChildSession("ses_root", "ses_child");
+
+    await waitFor(() => pool.listPending("ses_root").length === 2);
+    const pending = pool.listPending("ses_root");
+    pool.stop();
+
+    expect(new Set(pending.map((ask) => ask.id)).size).toBe(2);
+    expect(new Set(pending.map((ask) => ask.providerSessionId))).toEqual(new Set(["ses_root", "ses_child"]));
+  });
+
   it("addChildSession is a no-op for an unregistered root, and children are dropped on re-register", async () => {
     client.messagesResponse = [toolMessage("msg_c", "call_c", "read")];
     client.listResponses = [
@@ -563,6 +581,47 @@ describe("createPermissionResponderPool", () => {
     expect(ask.permission).toBe("bash");
     expect(ask.patterns).toEqual(["/repo/**"]);
     expect(JSON.stringify(ask)).not.toContain("rm -rf");
+  });
+
+  it("redacts common credentials from projected permission patterns", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "bash")];
+    client.listResponses = [[{
+      id: "req_secrets",
+      sessionID: "ses_1",
+      permission: "bash",
+      patterns: [
+        "TOKEN=token-value curl --api-key key-value -H 'Bearer bearer-value' https://user:pass@example.com",
+      ],
+      tool: { messageID: "msg_1", callID: "call_1" },
+    }]];
+
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      interactiveTimeoutMs: 10_000,
+    });
+    pool.register("ses_1", "/wt", { interactiveBash: true });
+
+    await waitFor(() => pool.listPending("ses_1").length === 1);
+    const serialized = JSON.stringify(pool.listPending("ses_1")[0]);
+    pool.stop();
+
+    expect(serialized).toContain("[REDACTED]");
+    expect(serialized).not.toContain("token-value");
+    expect(serialized).not.toContain("key-value");
+    expect(serialized).not.toContain("bearer-value");
+    expect(serialized).not.toContain("user:pass");
+  });
+
+  it("labels explicit worktree bash asks as interactive-strict, not outside-worktree", async () => {
+    client.messagesResponse = [toolMessage("msg_1", "call_1", "bash")];
+    client.listResponses = [[{ id: "req_strict", sessionID: "ses_1", permission: "bash", patterns: ["pwd"], tool: { messageID: "msg_1", callID: "call_1" } }]];
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5, interactiveTimeoutMs: 10_000 });
+    pool.register("ses_1", "/wt", { source: "worktree-fence", interactiveBash: true });
+    await waitFor(() => pool.listPending("ses_1").length === 1);
+    const [ask] = pool.listPending("ses_1");
+    pool.stop();
+    expect(ask).toMatchObject({ source: "interactive-strict", permission: "bash", summary: 'Tool "bash" requested permission category "bash".' });
   });
 
   it("register() discards a still-pending broker ask from a prior registration of the same sessionID, so its late timeout never replies", async () => {

@@ -290,10 +290,15 @@ describe("FR08-FR12 shared contracts", () => {
 });
 
 describe("resolveOpenCodePermissionRules", () => {
-  it("worktree-isolated runs always get WRITE_FENCED_PERMISSION unchanged, ignoring any override", () => {
+  it("worktree runs retain the fence and accept only a stricter bash ask/deny layer", () => {
     expect(resolveOpenCodePermissionRules(true)).toEqual([...WRITE_FENCED_PERMISSION]);
     expect(resolveOpenCodePermissionRules(true, { edit: "deny", bash: "deny", webfetch: "deny" })).toEqual([
       ...WRITE_FENCED_PERMISSION,
+      { permission: "bash", pattern: "**", action: "deny" },
+    ]);
+    expect(resolveOpenCodePermissionRules(true, { bash: "ask" })).toEqual([
+      ...WRITE_FENCED_PERMISSION,
+      { permission: "bash", pattern: "**", action: "ask" },
     ]);
     expect(resolveOpenCodePermissionRules(true, null)).toEqual([...WRITE_FENCED_PERMISSION]);
   });
@@ -326,6 +331,8 @@ describe("canAutoRun", () => {
     expect(canAutoRun({ type: "agent", isolation: "worktree" })).toBe(true);
     expect(canAutoRun({ harness: "claude-code", isolation: "worktree" })).toBe(true);
     expect(canAutoRun({ isolation: "worktree", permissionOverrides: { edit: "allow", bash: "allow" } })).toBe(true);
+    expect(canAutoRun({ isolation: "worktree", permissionOverrides: { bash: "ask" } })).toBe(false);
+    expect(canAutoRun({ isolation: "worktree", permissionOverrides: { bash: "deny" } })).toBe(true);
   });
 
   it("accepts fenced in-place OpenCode tasks (edit+bash deny)", () => {
