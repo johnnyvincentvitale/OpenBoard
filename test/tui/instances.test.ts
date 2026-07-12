@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp, type TaskDetailTab } from "../../src/tui/index";
+import { applySuccessfulTaskActionResult, archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp, type TaskDetailTab } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
 import type { BoardDiagnostics, Column, RespondPermissionOutcome, Task } from "../../src/shared";
 
@@ -440,6 +440,32 @@ describe("TUI label cleanup", () => {
     expect(text).not.toContain("s sync");
     expect(text).not.toContain("r run");
     expect(text).not.toContain("R retry");
+  });
+
+  it("reconciles selected Review state immediately after a successful integrate result", () => {
+    const reviewCard = { ...task("review-card", "review"), updatedAt: 1, worktreePath: "/repo/.wt/review-card" };
+    const doneCard = { ...reviewCard, column: "done" as const, updatedAt: 2, worktreePath: undefined };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+      detailTab: "files",
+      pendingConfirmation: { action: "integrate", taskId: "review-card" },
+      integrateCommitReview: { taskId: "review-card", status: { committedFiles: ["src/a.ts"], uncommittedFiles: [] } },
+      reviewDiffStat: { taskId: "review-card", taskUpdatedAt: 1, status: "success", label: "1 file · +1 -0 ›", response: { kind: "diff", capped: false, files: [{ file: "src/a.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1 +1 @@\n-a\n+b\n" }] } },
+      reviewCommitStatus: { taskId: "review-card", taskUpdatedAt: 1, status: "success", response: { committedFiles: ["src/a.ts"], uncommittedFiles: [] } },
+    });
+
+    applySuccessfulTaskActionResult(s, { task: doneCard, ok: true, conflict: false, message: "integrated" }, "review-card");
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(s.selectedTaskId).toBe("review-card");
+    expect(s.pendingConfirmation).toBeUndefined();
+    expect(s.integrateCommitReview).toBeUndefined();
+    expect(s.reviewCommitStatus).toBeUndefined();
+    expect(text).toContain("LANE\nDone");
+    expect(text).not.toContain("i integrate");
+    expect(text).not.toContain("c commit");
   });
 
   it("selected-card action hints show discard and retry for rebase-conflict Review worktrees", () => {
@@ -4198,6 +4224,30 @@ describe("TUI inline manual move", () => {
     expect(s.overlay).toBe("none");
     expect(s.moveTargetColumn).toBeUndefined();
     expect(s.status).toContain("moved todo-card to Done");
+  });
+
+  it("move to Done clears stale Review-only commit state and actions", async () => {
+    const reviewCard = { ...task("review-card", "review"), updatedAt: 1, worktreePath: "/repo/.wt/review-card" };
+    const doneCard = { ...reviewCard, column: "done" as const, updatedAt: 2, worktreePath: undefined, completedBy: "User" };
+    const moveTask = vi.fn(async () => [doneCard]);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [reviewCard],
+      selectedTaskId: "review-card",
+      moveTargetColumn: "done",
+      detailTab: "files",
+      reviewCommitStatus: { taskId: "review-card", taskUpdatedAt: 1, status: "success", response: { committedFiles: ["src/a.ts"], uncommittedFiles: [] } },
+    });
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { moveTask } }));
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { moveTask } }));
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(s.selectedTaskId).toBe("review-card");
+    expect(s.reviewCommitStatus).toBeUndefined();
+    expect(text).toContain("LANE\nDone");
+    expect(text).not.toContain("i integrate");
+    expect(text).not.toContain("c commit");
   });
 
   it("move to non-Done calls client.moveTask with completedBy null", async () => {

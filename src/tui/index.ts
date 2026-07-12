@@ -861,7 +861,9 @@ export function applyDiffScrollTop(state: TuiState, renderer: DiffScrollRenderer
   const codes = findDiffCodeRenderables(renderer);
   if (codes.length === 0) return;
   const desired = Math.max(0, Math.trunc(state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0));
-  const clamped = Math.min(desired, codes[0].maxScrollY);
+  const rawMax = codes[0]?.maxScrollY;
+  const maxScrollY = Number.isFinite(rawMax) ? Math.max(0, Math.trunc(rawMax)) : desired;
+  const clamped = Math.min(desired, maxScrollY);
   for (const code of codes) code.scrollY = clamped;
   state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clamped;
 }
@@ -1086,7 +1088,8 @@ export async function runOpenBoardTui(
     render();
 
     try {
-      await action(task);
+      const result = await action(task);
+      applySuccessfulTaskActionResult(state, result, task.id);
       state.status = `${label} complete: ${task.title}`;
       await refresh(true);
     } catch (error) {
@@ -5002,6 +5005,53 @@ function reconcileFilteredSelection(state: TuiState): void {
   }
 }
 
+function isTaskLike(value: unknown): value is Task {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof (value as Task).id === "string" &&
+    typeof (value as Task).column === "string" &&
+    typeof (value as Task).title === "string",
+  );
+}
+
+function taskFromActionResult(result: unknown): Task | undefined {
+  if (isTaskLike(result)) return result;
+  if (result && typeof result === "object" && isTaskLike((result as { task?: unknown }).task)) {
+    return (result as { task: Task }).task;
+  }
+  return undefined;
+}
+
+/**
+ * Applies the synchronous state payload returned by successful card actions before the
+ * follow-up refresh finishes. This prevents a just-integrated or just-moved Review card
+ * from continuing to render stale Review-only hints/actions while the board catches up.
+ */
+export function applySuccessfulTaskActionResult(state: TuiState, result: unknown, preferredTaskId?: string): void {
+  if (Array.isArray(result) && result.every(isTaskLike)) {
+    state.tasks = result;
+  } else {
+    const task = taskFromActionResult(result);
+    if (task) {
+      const index = state.tasks.findIndex((candidate) => candidate.id === task.id);
+      state.tasks = index === -1
+        ? [...state.tasks, task]
+        : state.tasks.map((candidate) => candidate.id === task.id ? task : candidate);
+    }
+  }
+
+  const selectedId = resolveSelectedTaskId(state.tasks, preferredTaskId ?? state.selectedTaskId);
+  state.selectedTaskId = selectedId;
+  const selected = selectedTask(state);
+  state.permissionAskBinding = bindPermissionAsk(selected);
+  state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selected);
+  state.reviewCommitStatus = reconcileReviewCommitStatusCache(state.reviewCommitStatus, selected);
+  clearPendingConfirmation(state);
+  if (!selected || !canFetchReviewCommitStatus(selected)) state.integrateCommitReview = undefined;
+  if (state.detailTab === "files" && selected && !canOpenDiffView(selected)) closeInlineDetail(state);
+}
+
 export async function handleKeypress(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
   const keyName = key.name || key.sequence;
 
@@ -6852,7 +6902,7 @@ async function handleNewTaskKey(key: KeyEvent, state: TuiState, actions: TuiActi
     return;
   }
 
-  if ((key.name === "right" || key.name === "down" || key.sequence === " ") && cycleFocusedField(draft, state, 1)) {
+  if ((key.name === "right" || key.name === "down" || isSpaceKey(key)) && cycleFocusedField(draft, state, 1)) {
     actions.render();
     return;
   }
@@ -6886,42 +6936,44 @@ function isWizardBackKey(key: KeyEvent, draft: NewTaskDraft): boolean {
  */
 function handleModelQueryKey(draft: NewTaskDraft, key: KeyEvent): boolean {
   if (draft.field !== "model") return false;
+  const sequence = keySequence(key);
 
   if (isAcpHarness(draft.harness)) {
     const providerID = acpModelProviderForHarness(draft.harness);
     if (!providerID) return false;
     const current = draft.model?.id ?? "";
-    if (key.name === "backspace" || key.sequence === "" || key.sequence === "\b") {
+    if (key.name === "backspace" || sequence === "" || sequence === "\b") {
       const next = current.slice(0, -1);
       draft.model = next ? { providerID, id: next } : undefined;
       draft.modelQuery = next || undefined;
       return true;
     }
-    if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
+    if (key.ctrl || key.meta || sequence.length !== 1 || sequence < " ") return false;
     const base = draft.modelQuery === undefined ? "" : current;
-    const next = `${base}${key.sequence}`;
+    const next = `${base}${sequence}`;
     draft.model = { providerID, id: next };
     draft.modelQuery = next;
     return true;
   }
 
-  if (key.name === "backspace" || key.sequence === "" || key.sequence === "\b") {
+  if (key.name === "backspace" || sequence === "" || sequence === "\b") {
     draft.modelQuery = (draft.modelQuery ?? "").slice(0, -1) || undefined;
     return true;
   }
-  if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
-  draft.modelQuery = (draft.modelQuery ?? "") + key.sequence;
+  if (key.ctrl || key.meta || sequence.length !== 1 || sequence < " ") return false;
+  draft.modelQuery = (draft.modelQuery ?? "") + sequence;
   return true;
 }
 
 function handleFallbackModelQueryKey(draft: NewTaskDraft, key: KeyEvent): boolean {
   if (draft.field !== "fallbackModel") return false;
-  if (key.name === "backspace" || key.sequence === "" || key.sequence === "\b") {
+  const sequence = keySequence(key);
+  if (key.name === "backspace" || sequence === "" || sequence === "\b") {
     draft.fallbackModelQuery = (draft.fallbackModelQuery ?? "").slice(0, -1) || undefined;
     return true;
   }
-  if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
-  draft.fallbackModelQuery = (draft.fallbackModelQuery ?? "") + key.sequence;
+  if (key.ctrl || key.meta || sequence.length !== 1 || sequence < " ") return false;
+  draft.fallbackModelQuery = (draft.fallbackModelQuery ?? "") + sequence;
   return true;
 }
 
@@ -7218,7 +7270,7 @@ function handleDependencyKey(draft: NewTaskDraft, state: TuiState, key: KeyEvent
     moveDependencySelection(draft, state, -1);
     return true;
   }
-  if (key.sequence === " ") {
+  if (isSpaceKey(key)) {
     toggleSelectedDependency(draft, state);
     return true;
   }
@@ -7421,9 +7473,10 @@ function handleDraftTextKey(draft: NewTaskDraft, key: KeyEvent): boolean {
 
 function applyTextInput(draft: NewTaskDraft, key: KeyEvent): boolean {
   if (!isTextInputField(draft.field)) return false;
+  const sequence = keySequence(key);
 
-  if (key.ctrl || key.meta || key.sequence.length !== 1 || key.sequence < " ") return false;
-  replaceDraftSelection(draft, draft.field, key.sequence);
+  if (key.ctrl || key.meta || sequence.length !== 1 || sequence < " ") return false;
+  replaceDraftSelection(draft, draft.field, sequence);
   return true;
 }
 
@@ -8021,10 +8074,8 @@ async function handleInlineMoveKey(key: KeyEvent, state: TuiState, actions: TuiA
       const freshTasks = blockedAcceptance
         ? await actions.client.moveTask(task.id, target, targetLane, completedBy, blockedAcceptance)
         : await actions.client.moveTask(task.id, target, targetLane, completedBy);
-      state.tasks = freshTasks;
+      applySuccessfulTaskActionResult(state, freshTasks, task.id);
       state.status = `moved ${task.title} to ${TUI_COLUMN_LABELS[target]}`;
-      state.selectedTaskId = task.id;
-      state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
     } catch (error) {
       state.error = errorMessage(error);
       state.status = "move failed";
@@ -8308,16 +8359,25 @@ function sameModel(left: ModelRef | undefined, right: ModelRef | undefined): boo
   return left.providerID === right.providerID && left.id === right.id && left.variant === right.variant;
 }
 
+function keySequence(key: KeyEvent): string {
+  return typeof key.sequence === "string" ? key.sequence : "";
+}
+
 function isEscapeKey(key: KeyEvent): boolean {
-  return key.name === "escape" || key.name === "esc" || key.sequence === "\u001b";
+  return key.name === "escape" || key.name === "esc" || keySequence(key) === "\u001b";
 }
 
 function isTabKey(key: KeyEvent): boolean {
-  return key.name === "tab" || key.sequence === "\t";
+  return key.name === "tab" || keySequence(key) === "\t";
 }
 
 function isEnterKey(key: KeyEvent): boolean {
-  return key.name === "return" || key.name === "enter" || key.sequence === "\r" || key.sequence === "\n";
+  const sequence = keySequence(key);
+  return key.name === "return" || key.name === "enter" || sequence === "\r" || sequence === "\n";
+}
+
+function isSpaceKey(key: KeyEvent): boolean {
+  return key.name === "space" || keySequence(key) === " ";
 }
 
 function expandHomePath(path: string): string {

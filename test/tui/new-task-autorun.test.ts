@@ -203,6 +203,25 @@ describe("TUI new-task AUTO-RUN toggle", () => {
     expect(s.newTask.autoRun).toBe(true);
   });
 
+  it("toggles on when terminals report Space by name without a sequence", async () => {
+    const s = state();
+    s.newTask = newTaskDraft({ isolation: "worktree", field: "autoRun" });
+
+    await handleKeypress({ name: "space" } as any, s, actions());
+
+    expect(s.newTask.autoRun).toBe(true);
+  });
+
+  it("treats missing sequence data as recoverable while editing wizard text", async () => {
+    const s = state();
+    s.newTask = newTaskDraft({ step: "identity", field: "title" });
+
+    await expect(handleKeypress({ name: "space" } as any, s, actions())).resolves.toBeUndefined();
+
+    expect(s.newTask.title).toBe("");
+    expect(s.status).toBe("ready");
+  });
+
   it("resets to false when isolation flips away from worktree", async () => {
     const s = state();
     s.newTask = newTaskDraft({ isolation: "worktree", autoRun: true, field: "isolation" });

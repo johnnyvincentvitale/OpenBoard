@@ -121,6 +121,30 @@ describe("TUI diff view entry (v)", () => {
     expect(shouldAutoRefresh({ view: "switcher", previousView: "board" })).toBe(true);
   });
 
+  it("does not write NaN scroll positions when a diff renderable omits maxScrollY", () => {
+    const code = { scrollY: 0 };
+    const s = state({
+      detailScrollTop: { "diff-patch": 12 },
+      diffView: {
+        taskId: "review-1",
+        taskTitle: "review-1",
+        sourceLabel: "worktree diff",
+        loading: false,
+        kind: "diff",
+        files: [{ file: "src/a.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1 +1 @@\n-a\n+b\n" }],
+        capped: false,
+        selectedFileIndex: 0,
+        reviewedFiles: new Set<string>(),
+        fileSelectionLocked: true,
+      },
+    });
+
+    applyDiffScrollTop(s, { root: { findDescendantById: () => code } } as any);
+
+    expect(Number.isNaN(code.scrollY)).toBe(false);
+    expect(Number.isNaN(s.detailScrollTop["diff-patch"])).toBe(false);
+  });
+
   it("q in FollowView returns to the board and closes the stream without quitting", async () => {
     const close = vi.fn();
     const s = state({ viewState: { view: "follow", previousView: "board" }, followView: { taskId: "task-1", events: [], connection: "LIVE", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 }, followStream: { close } });
