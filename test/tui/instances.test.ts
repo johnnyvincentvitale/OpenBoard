@@ -471,6 +471,109 @@ describe("TUI label cleanup", () => {
     expect(text).not.toContain("i integrate");
   });
 
+  it("surfaces explicit blocked questions on card, selected details, and Review lane count", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{
+        ...task("review-card", "review"),
+        runState: "error",
+        completionSource: "reported" as const,
+        completion: {
+          outcome: "blocked" as const,
+          summary: "Need input",
+          changedFiles: [],
+          verification: [],
+          residualRisk: "blocked",
+          needsInput: "Which endpoint should I use?",
+          reportedAt: 123,
+        },
+      }],
+      selectedTaskId: "review-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("Review · 1 · 1 NEEDS ANSWER");
+    expect(text).toContain("▲ REVIEW · BLOCKED · NEEDS ANSWER");
+    expect(text).toContain("QUESTION");
+    expect(text).toContain("Which endpoint should I use?");
+    expect(text).not.toContain("NEEDS USER INPUT");
+  });
+
+  it("does not count blocked reports without explicit questions as NEEDS ANSWER", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{
+        ...task("review-card", "review"),
+        runState: "error",
+        completionSource: "reported" as const,
+        completion: { outcome: "blocked" as const, summary: "Need input", changedFiles: [], verification: [], residualRisk: "blocked", reportedAt: 123 },
+      }],
+      selectedTaskId: "review-card",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("▲ REVIEW · BLOCKED");
+    expect(text).not.toContain("Review · 1 · 1 NEEDS ANSWER");
+    expect(text).not.toContain("BLOCKED · NEEDS ANSWER");
+  });
+
+  it("blocked-answer composer stays bound to its draft task when selection changes", async () => {
+    const blockedA = {
+      ...task("blocked-a", "review"),
+      title: "Blocked A",
+      completionSource: "reported" as const,
+      completion: { outcome: "blocked" as const, summary: "Need A", changedFiles: [], verification: [], residualRisk: "Fallback A", needsInput: "Question A?", reportedAt: 123 },
+    };
+    const blockedB = {
+      ...task("blocked-b", "review"),
+      title: "Blocked B",
+      completionSource: "reported" as const,
+      completion: { outcome: "blocked" as const, summary: "Need B", changedFiles: [], verification: [], residualRisk: "Fallback B", needsInput: "Question B?", reportedAt: 123 },
+    };
+    const s = state({ viewState: { view: "board", previousView: "launch" }, tasks: [blockedA, blockedB], selectedTaskId: blockedA.id });
+
+    await handleKeypress({ name: "R", sequence: "R" } as any, s, actions());
+    s.selectedTaskId = blockedB.id;
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("Answer Blocked Task · Blocked A");
+    expect(text).toContain("Question A?");
+    expect(text).not.toContain("Question B?");
+  });
+
+  it("blocked-answer submit and empty retry target the draft task, not the current selection", async () => {
+    const blockedA = {
+      ...task("blocked-a", "review"),
+      sessionId: "ses-a",
+      completionSource: "reported" as const,
+      completion: { outcome: "blocked" as const, summary: "Need A", changedFiles: [], verification: [], residualRisk: "Fallback A", needsInput: "Question A?", reportedAt: 123 },
+    };
+    const blockedB = {
+      ...task("blocked-b", "review"),
+      completionSource: "reported" as const,
+      completion: { outcome: "blocked" as const, summary: "Need B", changedFiles: [], verification: [], residualRisk: "Fallback B", needsInput: "Question B?", reportedAt: 123 },
+    };
+    const answerBlockedTask = vi.fn(async (id: string) => ({ ...blockedA, id, sessionId: "ses-a", runState: "running" as const, blockedAnswerResumeDecision: { mode: "same-session" as const, evidence: "messages" as const } }));
+    const retryTask = vi.fn(async (id: string) => ({ ...blockedA, id, runState: "running" as const }));
+    const s = state({ viewState: { view: "board", previousView: "launch" }, tasks: [blockedA, blockedB], selectedTaskId: blockedA.id });
+
+    await handleKeypress({ name: "R", sequence: "R" } as any, s, actions());
+    s.blockedAnswer.text = "Use option A";
+    s.selectedTaskId = blockedB.id;
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { answerBlockedTask } }));
+
+    expect(answerBlockedTask).toHaveBeenCalledWith("blocked-a", "Use option A", { blockedReportedAt: 123, answeredBy: "User" });
+    expect(s.status).toBe("blocked answer submitted; resumed session");
+
+    s.selectedTaskId = blockedA.id;
+    await handleKeypress({ name: "R", sequence: "R" } as any, s, actions());
+    s.selectedTaskId = blockedB.id;
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { retryTask } }));
+
+    expect(s.pendingConfirmation).toMatchObject({ action: "retry", taskId: "blocked-a" });
+    expect(retryTask).not.toHaveBeenCalled();
+  });
+
   it("attempts detail tab renders projected watchdog attempt history", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -1080,7 +1183,7 @@ describe("TUI archive detail cleanup", () => {
     expect(text).toContain("1/2");
   });
 
-  it("blocked-answer composer predicts resume/restart before submit", () => {
+  it("blocked-answer composer defers resume/restart to the server decision", () => {
     const blocked = {
       ...task("blocked-card", "review"),
       harness: "opencode" as const,
@@ -1095,8 +1198,8 @@ describe("TUI archive detail cleanup", () => {
       blockedAnswer: { taskId: "blocked-card", blockedReportedAt: 44, text: "", submitting: false },
     }));
 
-    expect(textOf(app)).toContain("will try to resume same session");
-    expect(textOf(app)).not.toContain("decided after submit");
+    expect(textOf(app)).toContain("OpenBoard will verify whether the session can resume");
+    expect(textOf(app)).not.toContain("will try to resume same session");
   });
 
   it("output tab renders archived final session output", () => {

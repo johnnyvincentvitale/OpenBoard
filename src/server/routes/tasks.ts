@@ -542,8 +542,9 @@ export function registerTaskRoutes(
       }
       if (blockedAnswer) {
         const newSessionId = task.sessionId ?? task.harnessSessionId;
-        const resumeMode = oldSessionId && oldSessionId === newSessionId ? "same-session" : "fresh-session";
-        store.addEvent({ taskId: id, type: "task_blocked_answered", body: { blockedReportedAt: blockedAnswer.blockedReportedAt, answeredBy: blockedAnswer.answeredBy, question, answerProvided: true, resumeMode } });
+        const resumeMode = task.blockedAnswerResumeDecision?.mode ?? (oldSessionId && oldSessionId === newSessionId ? "same-session" : "fresh-session");
+        const resumeEvidence = task.blockedAnswerResumeDecision?.evidence;
+        store.addEvent({ taskId: id, type: "task_blocked_answered", body: { blockedReportedAt: blockedAnswer.blockedReportedAt, answeredBy: blockedAnswer.answeredBy, question, answerProvided: true, resumeMode, ...(resumeEvidence ? { resumeEvidence } : {}) } });
         store.addEvent({ taskId: id, type: "task_retried", body: { oldSessionId, oldRunStartedAt, newSessionId, runStartedAt: task.runStartedAt, feedbackProvided: true, answeredBlock: true } });
       } else {
         store.addEvent({ taskId: id, type: "task_retried", body: { sessionId: task.sessionId ?? task.harnessSessionId, runStartedAt: task.runStartedAt, feedbackProvided: feedback !== undefined } });
@@ -617,12 +618,19 @@ export function registerTaskRoutes(
       const task = store.get(id);
       if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
       const isBlockedDone = column === "done" && task.completion?.outcome === "blocked";
-      const nextCompletedBy: string | null =
-        completedBy !== undefined ? (completedBy as string | null) : column === "done" && !isBlockedDone ? USER_COMPLETED_BY : null;
+      const isDoneReorder = column === "done" && task.column === "done";
+      const nextCompletedBy: string | null = completedBy !== undefined
+        ? (completedBy as string | null)
+        : isDoneReorder
+          ? task.completedBy ?? null
+          : column === "done" && !isBlockedDone
+            ? USER_COMPLETED_BY
+            : null;
 
       if (column === "done") {
         const policy = evaluateDonePolicy({
           task,
+          targetColumn: column,
           completedBy: nextCompletedBy,
           blockedAcceptance: parseBlockedAcceptanceValue(body.blockedAcceptance),
         });

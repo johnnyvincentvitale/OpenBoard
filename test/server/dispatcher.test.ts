@@ -97,6 +97,7 @@ class FakeOpencodeClient {
   /** When set, every messages() call returns this same value (not consumed) — for simulating
    * many polling ticks observing an unchanged, stable session state (e.g. a stall). */
   stableMessagesResponse: unknown[] | null = null;
+  messagesNeverResolves = false;
 
   nextSessionId = "ses_x";
   createShouldError: { error: unknown } | null = null;
@@ -109,6 +110,7 @@ class FakeOpencodeClient {
   promptShouldErrorCount = 0;
   childrenResponses = new Map<string, unknown[]>();
   childrenShouldError: { error: unknown } | null = null;
+  childrenNeverResolves = false;
   childrenCalls: Array<{ sessionID: string }> = [];
   sessionStatus: Record<string, unknown> = {};
   statusShouldError: { error: unknown } | null = null;
@@ -169,6 +171,7 @@ class FakeOpencodeClient {
     },
     children: async (params: { sessionID: string }) => {
       this.childrenCalls.push(params);
+      if (this.childrenNeverResolves) return new Promise(() => undefined);
       if (this.childrenShouldError) return { data: undefined, error: this.childrenShouldError.error };
       return { data: this.childrenResponses.get(params.sessionID) ?? [], error: undefined };
     },
@@ -178,6 +181,7 @@ class FakeOpencodeClient {
       return { data: this.sessionStatus, error: undefined };
     },
     messages: async () => {
+      if (this.messagesNeverResolves) return new Promise(() => undefined);
       if (this.stableMessagesResponse !== null) {
         return { data: this.stableMessagesResponse, error: undefined };
       }
@@ -1939,6 +1943,50 @@ describe("TaskDispatcher", () => {
       });
     });
 
+
+    it("uses message evidence to keep blocked answers in the same OpenCode session when status is empty", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_blocked_messages";
+      client.stableMessagesResponse = [{ info: { role: "assistant" }, parts: [{ type: "step-finish", reason: "stop" }] }];
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      store.move(task.id, "review", 0);
+      store.update(task.id, {
+        runState: "idle",
+        completionSource: "reported",
+        completion: { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Pick A or B", reportedAt: 123 },
+      });
+      client.sessionStatus = {};
+
+      const result = await dispatcher.retry(task.id, "Pick A", { blockedReportedAt: 123, answeredBy: "User" });
+
+      expect(result.blockedAnswerResumeDecision).toEqual({ mode: "same-session", evidence: "messages" });
+      expect(client.createCalls).toHaveLength(1);
+      expect(client.promptCalls.at(-1)?.sessionID).toBe("ses_blocked_messages");
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_blocked_messages", runState: "running" });
+    });
+
+    it("starts a fresh session for blocked answers when the prior completion is not a reported block", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_watchdog_old";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      store.move(task.id, "review", 0);
+      store.update(task.id, {
+        runState: "idle",
+        completionSource: "watchdog",
+        completion: { outcome: "blocked", summary: "Watchdog stopped", changedFiles: [], verification: [], residualRisk: "Review partial work", reportedAt: 123 },
+      });
+      client.nextSessionId = "ses_watchdog_fresh";
+
+      const result = await dispatcher.retry(task.id, "Continue safely", { blockedReportedAt: 123, answeredBy: "User" });
+
+      expect(result.blockedAnswerResumeDecision).toEqual({ mode: "fresh-session", evidence: "not-resumable" });
+      expect(client.createCalls).toHaveLength(2);
+      expect(client.promptCalls.at(-1)?.sessionID).toBe("ses_watchdog_fresh");
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_watchdog_fresh", runState: "running" });
+    });
+
     it("watchdog fresh attempts carry a retry-context preamble naming the prior stalled attempt", async () => {
       const task = createTask({ directory: myProjectDir });
       client.nextSessionId = "ses_preamble_0";
@@ -3328,7 +3376,7 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)?.completion).toBeNull();
     });
 
-    it("answered blocked retry starts a fresh session in the same existing cwd when OpenCode status is absent", async () => {
+    it("answered blocked retry reuses the same session from message evidence when OpenCode status is absent", async () => {
       for (const [label, sessionStatus] of Object.entries({ missing: {} })) {
         store.close();
         store = new SqliteTaskStore(":memory:");
@@ -3345,10 +3393,10 @@ describe("TaskDispatcher", () => {
         const result = await dispatcher.retry(task.id, "Use option B", { blockedReportedAt: 20, answeredBy: "Reviewer" });
 
         expect(client.statusCalls).toBe(1);
-        expect(client.createCalls).toHaveLength(1);
-        expect(client.createCalls[0]?.directory).toBe(worktreePath);
-        expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: `ses_new_${label}` });
-        expect(result.sessionId).toBe(`ses_new_${label}`);
+        expect(client.createCalls).toHaveLength(0);
+        expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: "ses_old" });
+        expect(result.sessionId).toBe("ses_old");
+        expect(result.blockedAnswerResumeDecision).toEqual({ mode: "same-session", evidence: "messages" });
         expect(store.get(task.id)?.baseCommit).toBe("original-base");
         expect(store.get(task.id)?.baseCheckoutSnapshot).toBe(`original-snapshot-${label}`);
         expect(store.get(task.id)?.completion).toBeNull();
@@ -3372,6 +3420,30 @@ describe("TaskDispatcher", () => {
       expect(client.createCalls[0]?.directory).toBe(worktreePath);
       expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: "ses_watchdog_fresh" });
       expect(result.sessionId).toBe("ses_watchdog_fresh");
+    });
+
+    it("answered blocked retry falls back fresh when resume eligibility probes time out", async () => {
+      const task = createTask();
+      store.update(task.id, { sessionId: "ses_stalled", baseCommit: "original-base" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 25 }, "reported");
+      client.sessionStatus = {};
+      client.messagesNeverResolves = true;
+      client.childrenNeverResolves = true;
+      client.nextSessionId = "ses_fresh_after_probe_timeout";
+      dispatcher = new TaskDispatcher({ client: client as never, store, blockedResumeProbeTimeoutMs: 10 });
+
+      const result = await Promise.race([
+        dispatcher.retry(task.id, "Use option B", { blockedReportedAt: 25, answeredBy: "Reviewer" }),
+        new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 200)),
+      ]);
+
+      expect(result).not.toBe("timed-out");
+      expect(result).toMatchObject({
+        sessionId: "ses_fresh_after_probe_timeout",
+        blockedAnswerResumeDecision: { mode: "fresh-session", evidence: "not-resumable" },
+      });
+      expect(client.createCalls).toHaveLength(1);
+      expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: "ses_fresh_after_probe_timeout" });
     });
 
     it("answered blocked retry prompt failure retains the current block", async () => {

@@ -408,6 +408,8 @@ export interface Task {
   pending?: TaskPending;
   /** Runtime-only provider permission asks. Never persisted to SQLite. */
   pendingPermissions?: PendingPermissionAsk[];
+  /** Runtime-only evidence for how a blocked-answer retry resumed. Never persisted to SQLite. */
+  blockedAnswerResumeDecision?: BlockedAnswerResumeDecision;
   /** Base-checkout paths the escape detector found changed outside the worktree, when `pending` is "base-checkout-escape". */
   escapeDetectedPaths?: string[];
   /** Paths that stopped an integrate rebase inside the task worktree, when `pending` is "rebase-conflict". */
@@ -453,6 +455,11 @@ export interface MoveTaskBody {
 export interface BlockedAcceptance {
   blockedReportedAt: number;
   acceptIncomplete: true;
+}
+
+export interface BlockedAnswerResumeDecision {
+  mode: "same-session" | "fresh-session";
+  evidence: "status" | "messages" | "session-tree" | "not-resumable";
 }
 
 /** A decision a run is waiting on the user to resolve before it can proceed. */

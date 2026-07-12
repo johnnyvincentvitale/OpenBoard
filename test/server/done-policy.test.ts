@@ -11,8 +11,8 @@ const blockedCompletion = {
   reportedAt: 123,
 };
 
-function task(input: Partial<Task>): Pick<Task, "completion" | "completionSource"> {
-  return { completion: null, completionSource: null, ...input };
+function task(input: Partial<Task>): Pick<Task, "column" | "completion" | "completionSource"> {
+  return { column: "review", completion: null, completionSource: null, ...input };
 }
 
 describe("Done policy", () => {
@@ -51,6 +51,14 @@ describe("Done policy", () => {
     expect(evaluateDonePolicy({ task: current, blockedAcceptance: { blockedReportedAt: 123 }, completedBy: "Reviewer" })).toMatchObject({ ok: false, error: { code: "blocked_acceptance_incomplete" } });
     expect(evaluateDonePolicy({ task: current, blockedAcceptance: { blockedReportedAt: 122, acceptIncomplete: true }, completedBy: "Reviewer" })).toMatchObject({ ok: false, error: { code: "blocked_acceptance_stale" } });
     expect(evaluateDonePolicy({ task: current, blockedAcceptance: { blockedReportedAt: 123, acceptIncomplete: true }, completedBy: " " })).toMatchObject({ ok: false, error: { code: "blocked_acceptance_attribution_required" } });
+  });
+
+
+  it("does not require blocked acceptance for blocked cards already in Done", () => {
+    const current = task({ column: "done", completionSource: "reported", completion: blockedCompletion });
+
+    expect(evaluateDonePolicy({ task: current, targetColumn: "done", completedBy: "Reviewer" })).toEqual({ ok: true, acceptedBy: "Reviewer", blockedAccepted: false });
+    expect(evaluateDonePolicy({ task: current, targetColumn: "done", blockedAcceptance: { blockedReportedAt: 123, acceptIncomplete: true }, completedBy: "Reviewer" })).toMatchObject({ ok: false, error: { code: "blocked_acceptance_unexpected" } });
   });
 
   it("treats idle fallback or nonblocked reports as nonblocked", () => {

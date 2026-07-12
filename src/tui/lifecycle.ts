@@ -1,4 +1,5 @@
 import type { Task } from "../shared";
+import { blockedQuestionPresentation } from "../shared/blocked-task";
 import { dominantTaskState } from "../shared/lifecycle";
 import { formatElapsed, taskStatus } from "./model";
 import { permissionAskDetailRows, permissionAskSummary } from "./permission-surface";
@@ -49,6 +50,7 @@ export interface LifecycleDetailRow {
     | "acceptedBy"
     | "error"
     | "pending"
+    | "blockedQuestion"
     | "generic";
 }
 
@@ -94,7 +96,8 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
       };
     }
     case "blocked": {
-      return { phase: "review-blocked", glyph: "▲", label: "REVIEW", detail: "BLOCKED" };
+      const blocked = task.completion?.outcome === "blocked" ? blockedQuestionPresentation(task.completion) : undefined;
+      return { phase: "review-blocked", glyph: "▲", label: "REVIEW", detail: blocked?.needsAnswer ? "BLOCKED · NEEDS ANSWER" : "BLOCKED" };
     }
     case "accepted-blocked": {
       const by = task.completedBy ?? "";
@@ -129,7 +132,8 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
         const outcome = task.completion.outcome;
         const source = task.completionSource ?? "reported";
         if (outcome === "blocked") {
-          return { phase: "review-blocked", ...base, detail: normalizeOutcome(outcome) };
+          const blocked = blockedQuestionPresentation(task.completion);
+          return { phase: "review-blocked", ...base, detail: blocked.needsAnswer ? "BLOCKED · NEEDS ANSWER" : normalizeOutcome(outcome) };
         }
         if (source === "idle-fallback") {
           return { phase: "review-idle-fallback", ...base, detail: "UNCONFIRMED" };
@@ -190,11 +194,15 @@ export function taskLifecycleDetailRows(task: TaskLifecycleInput, now = Date.now
 
   if (task.column === "review") {
     if (task.completion) {
+      const blocked = task.completion.outcome === "blocked" ? blockedQuestionPresentation(task.completion) : undefined;
       rows.push({
         label: "OUTCOME",
-        value: normalizeOutcome(task.completion.outcome),
+        value: blocked?.needsAnswer ? "BLOCKED · NEEDS ANSWER" : normalizeOutcome(task.completion.outcome),
         role: "outcome",
       });
+      if (blocked?.needsAnswer) {
+        rows.push({ label: "QUESTION", value: blocked.question, role: "blockedQuestion" });
+      }
       rows.push({
         label: "SOURCE",
         value: task.completionSource ?? "reported",

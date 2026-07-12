@@ -14,7 +14,7 @@
  */
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -119,6 +119,8 @@ export interface TaskDispatcherDeps {
   watchdogConfig?: WatchdogConfig;
   /** Watchdog clock injection for tests. */
   watchdogClock?: WatchdogClock;
+  /** Override blocked-answer resume eligibility probe timeout (tests only). */
+  blockedResumeProbeTimeoutMs?: number;
   /**
    * Called after a task moves to "done" via integrate(), so the chain
    * advancer (src/server/chain-advancer.ts) can auto-dispatch any autoRun
@@ -167,6 +169,7 @@ const DEFAULT_STALL_THRESHOLD_MS = 45_000;
 const MAX_CONSECUTIVE_FUTILE_NUDGES = 2;
 /** A denial older than this is treated as unrelated to the current stall (avoids citing stale info). */
 const DENIAL_RECENCY_WINDOW_MS = 2 * 60 * 1000;
+const BLOCKED_RESUME_PROBE_TIMEOUT_MS = 1_500;
 const LINEAGE_PROMPT_MAX_CHARS = 24_000;
 const SESSION_TREE_MAX_DEPTH = 16;
 const SESSION_TREE_MAX_SESSIONS = 256;
@@ -665,6 +668,7 @@ export class TaskDispatcher implements Dispatcher {
   private readonly activity: SessionActivityCollector;
   private readonly watchdogConfig: WatchdogConfig;
   private readonly watchdogClock?: WatchdogClock;
+  private readonly blockedResumeProbeTimeoutMs: number;
   /** Not readonly — see setOnParentSatisfied() for why this is settable post-construction. */
   private onParentSatisfied?: (parentId: string) => Promise<void>;
 
@@ -781,6 +785,7 @@ export class TaskDispatcher implements Dispatcher {
     this.activity = deps.activity ?? new SessionActivityCollector();
     this.watchdogConfig = deps.watchdogConfig ?? loadWatchdogConfig();
     this.watchdogClock = deps.watchdogClock;
+    this.blockedResumeProbeTimeoutMs = deps.blockedResumeProbeTimeoutMs ?? BLOCKED_RESUME_PROBE_TIMEOUT_MS;
     this.onParentSatisfied = deps.onParentSatisfied;
   }
 
@@ -1413,12 +1418,58 @@ export class TaskDispatcher implements Dispatcher {
     }
   }
 
-  private async canReuseOpenCodeBlockedSession(task: Task): Promise<boolean> {
-    if (task.completionSource !== "reported") return false;
-    if (!task.sessionId) return false;
+  private async withBlockedResumeProbeTimeout<T>(probe: Promise<T>): Promise<T | undefined> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        probe,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), this.blockedResumeProbeTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async decideOpenCodeBlockedAnswerResume(task: Task): Promise<BlockedAnswerResumeDecision> {
+    if (task.completionSource !== "reported" || !task.sessionId) {
+      return { mode: "fresh-session", evidence: "not-resumable" };
+    }
     const statuses = await this.fetchSessionStatusMap();
     const status = statuses?.get(task.sessionId);
-    return status === "idle" || status === "busy" || status === "retry";
+    if (status === "idle" || status === "busy" || status === "retry") {
+      return { mode: "same-session", evidence: "status" };
+    }
+    if (statuses && statuses.has(task.sessionId)) {
+      return { mode: "fresh-session", evidence: "not-resumable" };
+    }
+
+    try {
+      const result = await this.withBlockedResumeProbeTimeout(this.client.session.messages({ sessionID: task.sessionId }));
+      if (result && !(result as { error?: unknown }).error && Array.isArray((result as { data?: unknown }).data)) {
+        return { mode: "same-session", evidence: "messages" };
+      }
+      if (result && (result as { error?: unknown }).error && isNotFoundError((result as { error?: unknown }).error)) {
+        return { mode: "fresh-session", evidence: "not-resumable" };
+      }
+    } catch {
+      // Message evidence is best-effort; fall through to session-tree evidence.
+    }
+
+    try {
+      if ("children" in this.client.session) {
+        const result = await this.withBlockedResumeProbeTimeout((this.client.session as unknown as { children(input: { sessionID: string }): Promise<unknown> }).children({ sessionID: task.sessionId }));
+        const error = (result as { error?: unknown } | undefined)?.error;
+        if (result && !error) return { mode: "same-session", evidence: "session-tree" };
+        if (error && isNotFoundError(error)) return { mode: "fresh-session", evidence: "not-resumable" };
+      }
+    } catch {
+      // Session-tree evidence is best-effort.
+    }
+
+    return { mode: "fresh-session", evidence: "not-resumable" };
   }
 
   private withBlockedAnswerPrompt(task: Task, answer: BlockedAnswerContext, feedback: string | undefined, liveSession: boolean): string {
@@ -1498,8 +1549,10 @@ export class TaskDispatcher implements Dispatcher {
     if (!blockedAnswer) this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
     if (task.sessionId) this.outputCandidates.delete(task.sessionId);
 
-    if (blockedAnswer && !(await this.canReuseOpenCodeBlockedSession(task))) {
-      return this.startFreshOpenCodeAnsweredBlock(task, this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false));
+    const blockedAnswerResumeDecision = blockedAnswer ? await this.decideOpenCodeBlockedAnswerResume(task) : undefined;
+    if (blockedAnswer && blockedAnswerResumeDecision?.mode !== "same-session") {
+      const fresh = await this.startFreshOpenCodeAnsweredBlock(task, this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false));
+      return { ...fresh, blockedAnswerResumeDecision };
     }
     const sessionId = task.sessionId;
     if (!sessionId) throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
@@ -1565,7 +1618,7 @@ export class TaskDispatcher implements Dispatcher {
     if (!fresh) {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
     }
-    return fresh;
+    return blockedAnswerResumeDecision ? { ...fresh, blockedAnswerResumeDecision } : fresh;
   }
 
   private assertNotArchived(task: Task, action: "run" | "retry"): void {

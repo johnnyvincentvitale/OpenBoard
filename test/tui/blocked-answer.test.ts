@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { backspaceBlockedAnswerDraft, blockedAnswerDraftKey, blockedAnswerSubmitLabel, createBlockedAnswerDraft, editBlockedAnswerDraft, lineDeleteBlockedAnswerDraft, staleBlockedAnswerDraft } from "../../src/tui/blocked-answer";
 import type { Task } from "../../src/shared";
 
-function blockedTask(reportedAt = 123): Task {
+function blockedTask(reportedAt = 123, id = "task-1"): Task {
   return {
-    id: "task-1",
+    id,
     title: "Blocked",
     description: "",
     directory: "/repo",
@@ -37,5 +37,6 @@ describe("blocked answer composer helpers", () => {
     const draft = createBlockedAnswerDraft(blockedTask(123))!;
     expect(staleBlockedAnswerDraft(blockedTask(456), draft)).toBe(true);
     expect(staleBlockedAnswerDraft(blockedTask(123), draft)).toBe(false);
+    expect(staleBlockedAnswerDraft(blockedTask(123, "task-2"), draft)).toBe(true);
   });
 });

@@ -19,16 +19,24 @@ export type DonePolicyResult =
   | { ok: false; error: DonePolicyError };
 
 export interface DonePolicyInput {
-  task: Pick<Task, "completion">;
+  task: Pick<Task, "column" | "completion">;
+  targetColumn?: Task["column"];
   blockedAcceptance?: Partial<BlockedAcceptance> | null;
   completedBy?: string | null;
   acceptor?: string | null;
 }
 
 export function evaluateDonePolicy(input: DonePolicyInput): DonePolicyResult {
+  if (input.targetColumn === "done" && input.task.column === "done") {
+    if (input.blockedAcceptance) {
+      return blockedError("blocked_acceptance_unexpected", "Blocked acceptance is only valid when transitioning a blocked task to Done");
+    }
+    return { ok: true, acceptedBy: normalizeAttribution(input.completedBy ?? input.acceptor), blockedAccepted: false };
+  }
+
   if (!isCurrentlyBlocked(input.task)) {
     if (input.blockedAcceptance) {
-      return blockedError("blocked_acceptance_unexpected", "Blocked acceptance is only valid for currently blocked tasks");
+      return blockedError("blocked_acceptance_unexpected", "Blocked acceptance is only valid for currently blocked tasks transitioning to Done");
     }
     return { ok: true, acceptedBy: normalizeAttribution(input.completedBy ?? input.acceptor), blockedAccepted: false };
   }

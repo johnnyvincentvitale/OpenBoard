@@ -148,6 +148,42 @@ describe("task lifecycle helpers", () => {
         { label: "SOURCE", value: "reported", role: "source" },
       ]);
     });
+
+    it("renders an explicit blocked question as NEEDS ANSWER without using the live permission label", () => {
+      const explicit = baseTask({
+        column: "review",
+        runState: "error",
+        completion: {
+          outcome: "blocked",
+          summary: "Need credentials",
+          changedFiles: [],
+          verification: [],
+          residualRisk: "blocked on secret",
+          needsInput: "Which API token should I use?",
+          reportedAt: 456,
+        },
+        completionSource: "reported",
+      });
+
+      expect(taskLifecycleStatus(explicit)).toMatchObject({
+        phase: "review-blocked",
+        label: "REVIEW",
+        detail: "BLOCKED · NEEDS ANSWER",
+      });
+      expect(compactTaskBoardLabel(explicit)).toBe("▲ REVIEW · BLOCKED · NEEDS ANSWER");
+      expect(compactTaskBoardLabel(explicit)).not.toContain("NEEDS USER INPUT");
+      expect(taskLifecycleDetailRows(explicit)).toEqual([
+        { label: "STATE", value: "▲ REVIEW", role: "state" },
+        { label: "OUTCOME", value: "BLOCKED · NEEDS ANSWER", role: "outcome" },
+        { label: "QUESTION", value: "Which API token should I use?", role: "blockedQuestion" },
+        { label: "SOURCE", value: "reported", role: "source" },
+      ]);
+    });
+
+    it("keeps blocked reports without an explicit question distinct from NEEDS ANSWER", () => {
+      expect(compactTaskBoardLabel(task)).toBe("▲ REVIEW · BLOCKED");
+      expect(taskLifecycleDetailRows(task).map((row) => row.value)).not.toContain("BLOCKED · NEEDS ANSWER");
+    });
   });
 
   it("renders agent-reported blocked Review as BLOCKED even when runState is error", () => {

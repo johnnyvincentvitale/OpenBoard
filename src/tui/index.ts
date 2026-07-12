@@ -5,8 +5,9 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, projectWatchdogAttempts, type WatchdogAttemptEntry } from "../shared";
+import { blockedQuestionPresentation } from "../shared/blocked-task";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
 import { isLocalBoardUrl } from "../shared/instances";
@@ -97,7 +98,7 @@ import { applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowView
 import { chatCodeBlocks, cycleChatCodeBlock, parseChatMarkdown, selectedChatCodeBlock } from "./chat-markdown";
 import { backspaceBlockedAnswerDraft, blockedAnswerDraftKey, blockedAnswerSubmitLabel, createBlockedAnswerDraft, editBlockedAnswerDraft, lineDeleteBlockedAnswerDraft, staleBlockedAnswerDraft, type BlockedAnswerDraft } from "./blocked-answer";
 import { createDiffLineageState, diffLineageHeader, fetchSelectedDiffEvidence, moveAncestorSelection, type DiffLineageState } from "./diff-lineage";
-import { fallbackModelOptions, modelRetryLabel, predictedBlockedAnswerResumeMode } from "./model-fallback";
+import { fallbackModelOptions, modelRetryLabel } from "./model-fallback";
 import { createRootLifecycle } from "./root-lifecycle";
 import { buildWordmarkRows } from "./wordmark";
 import { RGBA, type KeyEvent, type MouseEvent, type PasteEvent, type VChild } from "@opentui/core";
@@ -2803,6 +2804,8 @@ function renderColumn(ui: OpenTui, state: TuiState, column: Column, tasks: Task[
   // laneCapacity still budgets for both slots, so the window stays stable;
   // at the edges the spare rows fall harmlessly below the last card.
   const cards: VChild[] = [];
+  const needsAnswerCount = column === "review" ? tasks.filter(blockedTaskNeedsAnswer).length : 0;
+  if (needsAnswerCount > 0) cards.push(renderNeedsAnswerLaneIndicator(ui, tasks.length, needsAnswerCount));
   if (offset > 0) cards.push(renderLaneOverflow(ui, offset, "↑"));
   cards.push(...visible.map((task) => renderTask(ui, state, task)));
   if (hiddenBelow > 0) cards.push(renderLaneOverflow(ui, hiddenBelow, "↓"));
@@ -2839,6 +2842,15 @@ function renderColumn(ui: OpenTui, state: TuiState, column: Column, tasks: Task[
   );
 }
 
+function renderNeedsAnswerLaneIndicator(ui: OpenTui, total: number, count: number) {
+  return ui.Text({
+    content: `Review · ${total} · ${count} NEEDS ANSWER`,
+    fg: COLORS.bright,
+    height: 1,
+    truncate: true,
+  });
+}
+
 function renderLaneOverflow(ui: OpenTui, count: number, arrow: string) {
   return ui.Text({
     content: `${arrow} ${count} more`,
@@ -2846,6 +2858,10 @@ function renderLaneOverflow(ui: OpenTui, count: number, arrow: string) {
     height: 1,
     truncate: true,
   });
+}
+
+function blockedTaskNeedsAnswer(task: Task): boolean {
+  return task.completion?.outcome === "blocked" && blockedQuestionPresentation(task.completion).needsAnswer;
 }
 
 // Filter mode is global, so the picker lives in the Details panel instead of
@@ -2984,7 +3000,7 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
   const type: MetaRow = { label: "TYPE", value: task.type ?? "agent", color: COLORS.muted };
   const assigned: MetaRow = { label: "ASSIGN", value: task.assignedTo ?? "unassigned", color: COLORS.muted };
 
-  if (task.runState === "error") {
+  if (task.runState === "error" && task.completion?.outcome !== "blocked") {
     return [dir, { label: "ERR", value: task.error ?? "run failed", color: COLORS.text }];
   }
   if (task.type === "manual") {
@@ -3218,6 +3234,7 @@ function lifecycleRowColor(role: string | undefined, task: Task): TuiColor {
   if (role === "error") return COLORS.bright;
   if (role === "acceptedBy") return COLORS.accentBright;
   if (role === "pending") return COLORS.bright;
+  if (role === "blockedQuestion") return COLORS.bright;
   return COLORS.text;
 }
 
@@ -4053,18 +4070,15 @@ function renderInstanceSwitcherPanel(ui: OpenTui, state: TuiState) {
 
 function renderBlockedAnswerComposer(ui: OpenTui, state: TuiState) {
   const draft = state.blockedAnswer;
-  const task = selectedTask(state);
+  const task = taskForBlockedAnswerDraft(state, draft);
   if (!draft || !task?.completion) return renderEmptyDetails(ui);
-  const predicted = predictedBlockedAnswerResumeMode(task);
   const mode = draft.resumeMode
     ? (draft.resumeMode === "resume" ? "resumed same session" : "restarted fresh session")
-    : predicted === "resume"
-      ? "will try to resume same session"
-      : "will restart fresh session";
+    : "OpenBoard will verify whether the session can resume";
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    ui.Text({ content: "Answer Blocked Task", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
-    ui.Text({ content: task.completion.needsInput || task.completion.residualRisk || task.completion.summary, fg: COLORS.bright, height: 2, wrapMode: "word" }),
+    ui.Text({ content: `Answer Blocked Task · ${task.title}`, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
+    ui.Text({ content: blockedQuestion(task.completion), fg: COLORS.bright, height: 2, wrapMode: "word" }),
     ui.Text({ content: `Reported: ${task.completion.reportedAt} · ${mode}`, fg: COLORS.muted, height: 1, truncate: true }),
     ui.Box(
       { width: "100%", height: Math.max(5, Math.min(12, state.terminalRows - 18)), border: true, borderStyle: "single", borderColor: COLORS.borderHot, padding: 1, ...boxBg(COLORS.bg) },
@@ -5450,6 +5464,14 @@ export function handlePaste(event: PasteEvent, state: TuiState, actions: Pick<Tu
     return;
   }
 
+  if (state.blockedAnswer && !state.blockedAnswer.submitting) {
+    state.blockedAnswer = editBlockedAnswerDraft(state.blockedAnswer, normalizePastedText(text, "description"));
+    rememberBlockedAnswerDraft(state, state.blockedAnswer);
+    event.preventDefault();
+    actions.render();
+    return;
+  }
+
   if ((state.overlay === "newTask" || state.newTask) && state.viewState.view === "board") {
     const draft = state.newTask ?? createNewTaskDraft(state);
     state.newTask = draft;
@@ -5504,8 +5526,20 @@ async function handleConfirmableCardAction(
   label: string,
 ): Promise<void> {
   const task = selectedTask(state);
+  await handleConfirmableTaskAction(action, state, actions, task, execute, label, "no task selected");
+}
+
+async function handleConfirmableTaskAction(
+  action: ConfirmableAction,
+  state: TuiState,
+  actions: TuiActions,
+  task: Task | undefined,
+  execute: (task: Task) => Promise<unknown>,
+  label: string,
+  missingStatus: string,
+): Promise<void> {
   if (!task) {
-    state.status = "no task selected";
+    state.status = missingStatus;
     state.error = undefined;
     clearPendingConfirmation(state);
     actions.render();
@@ -5724,7 +5758,7 @@ function rememberBlockedAnswerDraft(state: TuiState, draft: BlockedAnswerDraft):
 
 async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
   const draft = state.blockedAnswer;
-  const task = selectedTask(state);
+  const task = taskForBlockedAnswerDraft(state, draft);
   if (!draft || !task) {
     state.blockedAnswer = undefined;
     actions.render();
@@ -5751,7 +5785,7 @@ async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: T
   if (isEnterKey(key)) {
     if (blockedAnswerSubmitLabel(draft) === "plain-retry") {
       state.blockedAnswer = undefined;
-      await handleConfirmableCardAction("retry", state, actions, (item) => actions.client.retryTask(item.id), "retry");
+      await handleConfirmableTaskAction("retry", state, actions, task, (item) => actions.client.retryTask(item.id), "retry", "blocked answer target no longer exists");
       return;
     }
     if (staleBlockedAnswerDraft(task, draft)) {
@@ -5774,7 +5808,8 @@ async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: T
     try {
       const updated = await actions.client.answerBlockedTask(task.id, draft.text.trim(), { blockedReportedAt: draft.blockedReportedAt, answeredBy: "User" });
       const newSession = updated.sessionId ?? updated.harnessSessionId;
-      const resumeMode = oldSession && newSession === oldSession ? "resume" : "restart";
+      const serverDecision = updated.blockedAnswerResumeDecision?.mode;
+      const resumeMode = serverDecision === "same-session" ? "resume" : serverDecision === "fresh-session" ? "restart" : oldSession && newSession === oldSession ? "resume" : "restart";
       state.blockedAnswer = undefined;
       delete state.blockedAnswerDrafts?.[blockedAnswerDraftKey(draft.taskId, draft.blockedReportedAt)];
       state.status = resumeMode === "resume" ? "blocked answer submitted; resumed session" : "blocked answer submitted; restarted session";
@@ -8286,6 +8321,10 @@ function resolveSelectedTaskId(tasks: Task[], selectedTaskId: string | undefined
 
 function selectedTask(state: TuiState): Task | undefined {
   return state.tasks.find((task) => task.id === state.selectedTaskId);
+}
+
+function taskForBlockedAnswerDraft(state: TuiState, draft: BlockedAnswerDraft | undefined): Task | undefined {
+  return draft ? state.tasks.find((task) => task.id === draft.taskId) : undefined;
 }
 
 async function loadAttemptsForTask(state: TuiState, actions: TuiActions, task: Task | undefined): Promise<void> {

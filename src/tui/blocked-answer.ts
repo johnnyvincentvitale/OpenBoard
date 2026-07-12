@@ -38,9 +38,9 @@ export function lineDeleteBlockedAnswerDraft(draft: BlockedAnswerDraft): Blocked
   return { ...draft, text: index === -1 ? "" : draft.text.slice(0, index + 1), error: undefined };
 }
 
-export function staleBlockedAnswerDraft(task: Pick<Task, "completion"> | undefined, draft: BlockedAnswerDraft | undefined): boolean {
+export function staleBlockedAnswerDraft(task: Pick<Task, "id" | "completion"> | undefined, draft: BlockedAnswerDraft | undefined): boolean {
   if (!draft) return false;
-  return task?.completion?.outcome !== "blocked" || task.completion.reportedAt !== draft.blockedReportedAt;
+  return task?.id !== draft.taskId || task.completion?.outcome !== "blocked" || task.completion.reportedAt !== draft.blockedReportedAt;
 }
 
 export function blockedAnswerSubmitLabel(draft: BlockedAnswerDraft): "plain-retry" | "answer-blocked" {

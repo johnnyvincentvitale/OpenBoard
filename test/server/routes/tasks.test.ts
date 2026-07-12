@@ -1534,6 +1534,11 @@ describe("POST /api/tasks/:id/retry", () => {
   it("accepts an exact blocked answer, records it, and dispatches answeredBlock retry", async () => {
     const task = store.create({ title: "A", description: "do it", directory: repoDir });
     store.setCompletion(task.id, { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "Need choice", reportedAt: 123 }, "reported");
+    dispatcher.retry.mockImplementationOnce(async (taskId: string) => {
+      const updated = store.update(taskId, { runState: "running" });
+      if (!updated) throw new Error(`unknown task ${taskId}`);
+      return { ...updated, blockedAnswerResumeDecision: { mode: "same-session" as const, evidence: "messages" as const } };
+    });
     const app = buildApp(store, dispatcher);
 
     const res = await app.request(`/api/tasks/${task.id}/retry`, {
@@ -1548,7 +1553,7 @@ describe("POST /api/tasks/:id/retry", () => {
     expect(events.map((event) => event.type).sort()).toEqual(["task_blocked_answered", "task_retried"]);
     const answered = events.find((event) => event.type === "task_blocked_answered")!;
     const retried = events.find((event) => event.type === "task_retried")!;
-    expect(answered.body).toMatchObject({ blockedReportedAt: 123, answeredBy: "Reviewer", question: "Need choice", answerProvided: true });
+    expect(answered.body).toMatchObject({ blockedReportedAt: 123, answeredBy: "Reviewer", question: "Need choice", answerProvided: true, resumeMode: "same-session", resumeEvidence: "messages" });
     expect(answered.body).not.toHaveProperty("answer");
     expect(retried.body).toMatchObject({ answeredBlock: true });
   });
@@ -1855,6 +1860,36 @@ describe("POST /api/tasks/:id/move", () => {
     });
     expect(res.status).toBe(409);
     expect(store.get(a.id)?.column).not.toBe("done");
+  });
+
+  it("preserves completedBy and move evidence on accepted blocked Done reorders without another acceptance", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.setCompletion(a.id, {
+      outcome: "blocked",
+      summary: "stuck",
+      changedFiles: [],
+      verification: [],
+      residualRisk: "Need choice",
+      reportedAt: 321,
+    }, "reported");
+    store.move(a.id, "done", 0);
+    store.update(a.id, { completedBy: "Original Reviewer" });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "done", position: 1 }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.get(a.id)?.completedBy).toBe("Original Reviewer");
+    const events = store.listEvents(a.id);
+    expect(events.filter((event) => event.type === "task_blocked_accepted")).toHaveLength(0);
+    expect(events.at(-1)).toMatchObject({
+      type: "task_moved",
+      body: { column: "done", position: 1, completedBy: "Original Reviewer" },
+    });
   });
 
   it("fires the advancer when a manual move lands the task in Done", async () => {
