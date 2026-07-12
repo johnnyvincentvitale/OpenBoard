@@ -2,7 +2,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { DEFAULT_ACP_PERMISSION_MODE, type AcpPermissionMode } from "../shared";
-import type { AcpConfigOption, AcpConfigValueOption, AcpHarnessConfig, AcpModelOption, AcpOptionValue, AcpTaskHarness, PendingPermissionAsk, RespondPermissionInput } from "../shared";
+import type { AcpConfigOption, AcpConfigValueOption, AcpHarnessConfig, AcpModelOption, AcpOptionValue, AcpTaskHarness, PendingPermissionAsk, RespondPermissionInput, SessionActivityToolStatus } from "../shared";
 import type {
   ClaudeCodeRunInput,
   ClaudeCodeRunResult,
@@ -54,6 +54,7 @@ interface AcpSessionState {
   nextId: number;
   pending: Map<JsonRpcId, PendingRequest>;
   permissionMode: AcpPermissionMode;
+  activePrompt?: Promise<unknown>;
 }
 
 interface AcpRunnerServiceConfig {
@@ -562,6 +563,39 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     session.child.kill();
   }
 
+  async sendMessage(
+    sessionName: string,
+    text: string,
+    options: { mode: "queue" | "interrupt"; runStartedAt: number },
+  ): Promise<void> {
+    const session = this.sessions.get(sessionName);
+    if (!session) throw new Error(`${this.service.displayName} session is no longer resumable`);
+
+    if (session.activePrompt) {
+      if (options.mode === "interrupt") {
+        this.sendNotification(session, "session/cancel", { sessionId: session.sessionId });
+      }
+      await session.activePrompt.catch(() => undefined);
+    }
+
+    session.runStartedAt = options.runStartedAt;
+    session.status = "running";
+    session.terminal = false;
+    session.error = undefined;
+    this.beginPrompt(session, text);
+  }
+
+  shutdown(): void {
+    for (const session of this.sessions.values()) {
+      if (session.activePrompt) this.sendNotification(session, "session/cancel", { sessionId: session.sessionId });
+      session.terminal = true;
+      this.broker.clearRun(session.sessionId);
+      session.child.kill();
+    }
+    this.sessions.clear();
+    this.broker.stop();
+  }
+
   listPendingPermissions(sessionName: string): PendingPermissionAsk[] {
     const session = this.sessions.get(sessionName);
     return session ? this.broker.listPending(session.sessionId) : [];
@@ -623,28 +657,34 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     await this.trySetMode(state, permissionMode);
 
     state.status = "running";
-    void this.request(state, "session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text: this.withWorkerContract(input) }],
-    }).then(
+    this.beginPrompt(state, this.withWorkerContract(input));
+
+    return { sessionId, sessionName, status: "running" };
+  }
+
+  private beginPrompt(state: AcpSessionState, text: string): void {
+    const prompt = this.request(state, "session/prompt", {
+      sessionId: state.sessionId,
+      prompt: [{ type: "text", text }],
+    });
+    state.activePrompt = prompt;
+    void prompt.then(
       (result) => {
         const stopReason = (result as { stopReason?: unknown })?.stopReason;
         state.status = stopReason === "cancelled" ? "cancelled" : "idle";
         state.terminal = true;
         if (stopReason === "cancelled") state.error = "cancelled";
         this.clearRun(state, stopReason === "cancelled" ? "aborted" : "complete");
-        state.child.kill();
       },
       (error) => {
         state.status = "error";
         state.terminal = true;
         state.error = error.message;
         this.clearRun(state, "error");
-        state.child.kill();
       },
-    );
-
-    return { sessionId, sessionName, status: "running" };
+    ).finally(() => {
+      if (state.activePrompt === prompt) state.activePrompt = undefined;
+    });
   }
 
   private sessionMeta(input: ClaudeCodeRunInput): Record<string, unknown> {
@@ -711,7 +751,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   }
 
   private withWorkerContract(input: ClaudeCodeRunInput): string {
-    return `${input.prompt}\n\n---\n${this.service.contractName}\nTask id: ${input.task.id}\nBoard URL: ${this.adapterBaseUrl}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this ${this.service.sessionLabel} session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk.\n\n${completionHandoffGuidance(input.task.taskKind, { hasParents: (input.task.parentIds ?? []).length > 0 })}\n\nWhen all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
+    return `${input.prompt}\n\n---\n${this.service.contractName}\nTask id: ${input.task.id}\nBoard URL: ${this.adapterBaseUrl}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this ${this.service.sessionLabel} session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk.\n\n${completionHandoffGuidance(input.task.taskKind, { hasParents: (input.task.parentIds ?? []).length > 0 })}\n\nWhen all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
   }
 
   private request(state: AcpSessionState, method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -802,8 +842,16 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       this.writePermissionResponse(state, id, permission, "allow_once");
       return;
     }
+    const policy = decideClaudeAcpPermission(permission, state.cwd, state.permissionMode);
+    if (policy === "allow") {
+      // Policy already allows this request (e.g. an edit inside the task's cwd) — reply
+      // immediately, matching pre-FR08 base behavior. Only requests the write-fence policy
+      // would otherwise reject are held for the operator broker below, so a normal in-cwd
+      // session is not stalled 60s per tool call waiting on an ask nobody needs to answer.
+      this.writePermissionResponse(state, id, permission, "allow_once");
+      return;
+    }
     const nativeId = String(id);
-    const policy = decideClaudeAcpPermission(permission, state.cwd, state.permissionMode) === "allow" ? "allow_once" : "deny";
     this.broker.submitAsk({
       runId: state.sessionId,
       nativeId,
@@ -814,7 +862,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       summary: summarizePermission(permission),
       patterns: summarizeLocations(permission),
       deadline: this.permissionNow() + Math.max(0, this.permissionGraceMs),
-      timeoutDecision: policy,
+      timeoutDecision: "deny",
       reopenOnReplyFailure: true,
       replyToProvider: async (decision) => this.writePermissionResponse(state, id, permission, decision),
     });
@@ -895,6 +943,17 @@ function normalizeAcpActivity(params: unknown): { sessionId: string; status?: st
   const record = params as Record<string, unknown>;
   const sessionId = typeof record.sessionId === "string" ? record.sessionId : typeof record.session_id === "string" ? record.session_id : "";
   if (!sessionId) return null;
+
+  // Primary path: the real ACP `session/update` envelope, `{ sessionId, update: { sessionUpdate, ... } }`.
+  // Shape confirmed against @agentclientprotocol/sdk schema/schema.json ($defs.SessionNotification /
+  // $defs.SessionUpdate) shipped with the @agentclientprotocol/claude-agent-acp dependency.
+  const update = record.update;
+  if (update !== null && typeof update === "object") {
+    const activity = activityFromSessionUpdate(update as Record<string, unknown>);
+    if (activity) return { sessionId, activity };
+  }
+
+  // Legacy/back-compat: flat notification shape used by older fixtures and non-spec harnesses.
   const status = typeof record.status === "string" ? record.status : typeof record.state === "string" ? record.state : undefined;
   const role = record.role === "assistant" || record.role === "user" || record.role === "system" ? record.role : undefined;
   const text = textValue(record.message) ?? textValue(record.content) ?? textValue(record.text);
@@ -903,6 +962,47 @@ function normalizeAcpActivity(params: unknown): { sessionId: string; status?: st
   if (tool) return { sessionId, status, activity: { kind: "tool", tool } };
   if (status) return { sessionId, status, activity: { kind: "status", text: truncate(status) } };
   return null;
+}
+
+function activityFromSessionUpdate(update: Record<string, unknown>): Omit<SessionActivityEventInput, "sessionId" | "rootSessionId" | "harness"> | null {
+  const sessionUpdate = update.sessionUpdate;
+  if (sessionUpdate === "agent_message_chunk" || sessionUpdate === "agent_thought_chunk") {
+    const text = textValue(update.content);
+    if (!text) return null;
+    return { kind: "text", role: "assistant", text: truncate(text, 10_000) };
+  }
+  if (sessionUpdate === "tool_call" || sessionUpdate === "tool_call_update") {
+    const tool = toolActivityFromToolCall(update);
+    if (!tool) return null;
+    return { kind: "tool", tool };
+  }
+  return null;
+}
+
+function toolActivityFromToolCall(update: Record<string, unknown>): SessionActivityEventInput["tool"] | null {
+  const toolCallId = typeof update.toolCallId === "string" ? update.toolCallId : undefined;
+  const name = typeof update.title === "string" ? update.title : typeof update.kind === "string" ? update.kind : undefined;
+  if (!name && !toolCallId) return null;
+  return {
+    name: truncate(name ?? "tool"),
+    callId: toolCallId ? truncate(toolCallId) : undefined,
+    status: mapToolCallStatus(update.status),
+  };
+}
+
+function mapToolCallStatus(value: unknown): SessionActivityToolStatus {
+  switch (value) {
+    case "pending":
+      return "started";
+    case "in_progress":
+      return "running";
+    case "completed":
+      return "complete";
+    case "failed":
+      return "error";
+    default:
+      return "running";
+  }
 }
 
 function textValue(value: unknown): string | undefined {

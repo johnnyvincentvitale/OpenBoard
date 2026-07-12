@@ -21,6 +21,7 @@ import { registerTaskLinkRoutes } from "./routes/links";
 import { registerTaskCommentRoutes } from "./routes/comments";
 import { registerWorktreeRoutes } from "./routes/worktrees";
 import { registerTaskCompareRoutes } from "./routes/task-compare";
+import { registerTaskContextRoutes } from "./routes/task-context";
 import { registerPermissionRoutes } from "./routes/permission";
 import { registerSessionEventsRoutes } from "./routes/session-events";
 import type { ChainAdvancer } from "./chain-advancer";
@@ -106,6 +107,7 @@ export function createApp(deps: AppDeps): Hono {
   });
   registerTaskEventsRoutes(app, { store: deps.taskStore, dispatcher: deps.dispatcher });
   registerTaskCompareRoutes(app, { store: deps.taskStore });
+  registerTaskContextRoutes(app, { store: deps.taskStore });
   registerPermissionRoutes(app, { store: deps.taskStore, dispatcher: deps.dispatcher });
   registerSessionEventsRoutes(app, { store: deps.taskStore, client: deps.client, activity: deps.activity });
 

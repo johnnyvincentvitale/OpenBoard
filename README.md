@@ -294,7 +294,7 @@ The MCP server's tools are an orchestrator control surface for the existing task
 `add_tasks`, `list_tasks`, `list_agents`,
 `link_tasks`, `unlink_tasks`, `run_task`, `retry_task`, `abort_task`, `move_task`,
 `complete_task`, `block_task`, `sync_task`, `integrate_task`, `comment_task`, `add_note`,
-`task_events`, `task_diff`, `answer_blocked_task`, `respond_permission`,
+`task_events`, `task_diff`, `answer_blocked_task`, `respond_permission`, `send_session_message`,
 `tail_session`, `task_context`, and `task_compare`. `move_task` requires `completedBy`
 when moving to Done, and `integrate_task` requires `confirmReviewed: true`.
 
@@ -328,6 +328,27 @@ The SSE route always emits snapshot before terminal, so `tail_session` waits a b
 window after the snapshot to capture the terminal frame, then resolves. If the terminal
 does not arrive within the window the session may still be live; orchestrators should
 check the task column for completion. It is for orchestrator inspection, not continuous monitoring.
+
+### Interactive session chat (FR09B)
+
+Press `w` on a card with a session to open **Session Chat**. Assistant messages are
+streamed live, tool activity stays visible as compact rows, and `i` opens the message
+composer. `Enter` sends or queues a message on the existing session; `Ctrl+Enter`
+cancels the current prompt turn and sends the replacement after cancellation. The card
+keeps its current worktree and original diff baseline. Sending from Review reopens the
+same resumable session as conversation while keeping the card and its completion evidence
+in Review. Use Retry/answer-blocked when the intent is to resume task work rather than chat.
+OpenBoard's internal completion-report tools are hidden from the conversation, and identical
+post-tool assistant echoes are collapsed into one visible reply.
+Markdown fenced code is rendered in a distinct language-labelled box. The newest block
+is selected automatically; use `Tab`/`Shift+Tab` to select another block and `c` to copy
+its complete, untruncated contents to the system clipboard.
+
+The same write path is available to orchestrators as `send_session_message`. Callers must
+provide an explicit sender, client message id, and expected session id so reconnect retries
+are idempotent and stale drafts cannot land in a replacement session. OpenCode and live
+Claude ACP sessions support same-session continuation. If an ACP process or provider session
+is gone, OpenBoard reports it as non-resumable rather than silently starting a new chat.
 
 ### Watchdog and retry (FR10)
 
@@ -366,7 +387,7 @@ at a time. On admission the board emits typed events without raw answer text
 and preserves the blocked evidence/baseline until the admission succeeds.
 Live-status-gated same-session resume is preferred (the blocked session sees
 its own partial work); when the blocking session is gone (watchdog, missing
-session, ACP path), a fresh session starts in the same cwd with blocked context
+session), a fresh session starts in the same cwd with blocked context
 injected. A plain `retry_task` (without `blockedAnswer`) clears the block and
 follows generic retry semantics.
 

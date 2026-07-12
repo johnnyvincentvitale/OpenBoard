@@ -163,6 +163,58 @@ describe("createPermissionResponderPool", () => {
     expect(client.replyCalls).toHaveLength(0);
   });
 
+  it("answers a request raised by an attached child session (subagent asks must not hang)", async () => {
+    client.messagesResponse = [toolMessage("msg_c", "call_c", "read")];
+    client.listResponses = [
+      [{ id: "req_child", sessionID: "ses_child", tool: { messageID: "msg_c", callID: "call_c" } }],
+    ];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.register("ses_root", "/wt");
+    pool.addChildSession("ses_root", "ses_child");
+
+    await waitFor(() => client.replyCalls.length === 1);
+    pool.stop();
+
+    expect(client.replyCalls[0]).toMatchObject({ requestID: "req_child", directory: "/wt", reply: "once" });
+  });
+
+  it("raises a child session's non-read ask under the ROOT session's runId (task routing unchanged)", async () => {
+    client.messagesResponse = [toolMessage("msg_c", "call_c", "apply_patch")];
+    client.listResponses = [
+      [{ id: "req_child_write", sessionID: "ses_child", tool: { messageID: "msg_c", callID: "call_c" } }],
+    ];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5, interactiveTimeoutMs: 5_000 });
+    pool.register("ses_root", "/wt");
+    pool.addChildSession("ses_root", "ses_child");
+
+    await waitFor(() => pool.listPending("ses_root").length === 1);
+    const [ask] = pool.listPending("ses_root");
+    pool.stop();
+
+    expect(ask.summary).toContain("apply_patch");
+    expect(pool.listPending("ses_child")).toHaveLength(0);
+  });
+
+  it("addChildSession is a no-op for an unregistered root, and children are dropped on re-register", async () => {
+    client.messagesResponse = [toolMessage("msg_c", "call_c", "read")];
+    client.listResponses = [
+      [{ id: "req_child2", sessionID: "ses_child", tool: { messageID: "msg_c", callID: "call_c" } }],
+    ];
+
+    const pool = createPermissionResponderPool({ client: client as never, pollIntervalMs: 5 });
+    pool.addChildSession("ses_never_registered", "ses_child");
+    pool.register("ses_root", "/wt");
+    pool.addChildSession("ses_root", "ses_child");
+    pool.register("ses_root", "/wt"); // fresh TargetState: child membership must not survive
+
+    await new Promise((r) => setTimeout(r, 60));
+    pool.stop();
+
+    expect(client.replyCalls).toHaveLength(0);
+  });
+
   it("never double-replies an already-replied requestID across multiple polls", async () => {
     client.messagesResponse = [toolMessage("msg_1", "call_1", "read")];
     // Same pending request appears on every poll (as it would if the SDK

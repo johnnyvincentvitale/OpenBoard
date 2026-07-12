@@ -906,6 +906,59 @@ describe("auth regression — route categories", () => {
     });
   });
 
+  // -- Task context (lineage) ---------------------------------------------------
+
+  describe("GET /api/tasks/:id/context", () => {
+    let ws: ReturnType<typeof setupTestWorkspace>;
+    let repoDir: string;
+
+    beforeEach(() => {
+      ws = setupTestWorkspace();
+      repoDir = ws.repoDir;
+    });
+    afterEach(() => {
+      cleanupTestWorkspace();
+    });
+
+    it("rejects with 401 when no token is provided", async () => {
+      const { app, taskStore } = makeAuthedApp();
+      const task = taskStore.create({ title: "T", description: "", directory: repoDir });
+      const res = await app.request(`/api/tasks/${task.id}/context`);
+      expect(res.status).toBe(401);
+    });
+
+    it("rejects with 401 when the token is wrong", async () => {
+      const { app, taskStore } = makeAuthedApp();
+      const task = taskStore.create({ title: "T", description: "", directory: repoDir });
+      const res = await app.request(`/api/tasks/${task.id}/context`, {
+        headers: wrongAuthHeaders(),
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("returns the resolved task lineage shape with the correct token", async () => {
+      const { app, taskStore } = makeAuthedApp();
+      const task = taskStore.create({ title: "T", description: "d", directory: repoDir });
+      const res = await app.request(`/api/tasks/${task.id}/context`, {
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.task.taskId).toBe(task.id);
+      expect(body.directParents).toEqual([]);
+      expect(body.inheritedParents).toEqual([]);
+      expect(body.codeAncestors).toEqual([]);
+    });
+
+    it("returns 404 for an unknown task id with the correct token", async () => {
+      const { app } = makeAuthedApp();
+      const res = await app.request("/api/tasks/task_nonexistent/context", {
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(404);
+    });
+  });
+
   // -- Agent roster ------------------------------------------------------------
 
   describe("GET /api/agents", () => {

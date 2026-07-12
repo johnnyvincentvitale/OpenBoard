@@ -217,6 +217,32 @@ export interface RespondPermissionInput {
   answeredBy: string;
 }
 
+export const SESSION_MESSAGE_MODES = ["queue", "interrupt"] as const;
+export type SessionMessageMode = (typeof SESSION_MESSAGE_MODES)[number];
+
+/** Operator-authored input sent to the existing harness session for a card. */
+export interface SessionMessageInput {
+  text: string;
+  mode: SessionMessageMode;
+  sentBy: string;
+  clientMessageId: string;
+  expectedSessionId: string;
+  expectedRunStartedAt?: number;
+  /** Present when the composer is answering the currently displayed blocked question. */
+  blockedReportedAt?: number;
+}
+
+export interface SessionMessageReceipt {
+  messageId: string;
+  taskId: string;
+  sessionId: string;
+  status: "queued" | "accepted";
+  mode: SessionMessageMode;
+  sentAt: number;
+  sentBy: string;
+  task: Task;
+}
+
 export type RespondPermissionOutcome =
   | { ok: true; askId: string; decision: "allow_once" | "deny" }
   | { ok: false; askId: string; conflict: "not-found" | "already-resolved" | "reply-failed"; error?: string };
@@ -647,6 +673,8 @@ export interface Dispatcher {
   listPendingPermissions(taskId: string): PendingPermissionAsk[];
   /** Respond to a pending permission ask for a task. */
   respondPermission(taskId: string, input: RespondPermissionInput): Promise<RespondPermissionOutcome>;
+  /** Send operator input to the card's existing OpenCode/ACP session. */
+  sendSessionMessage(taskId: string, input: SessionMessageInput): Promise<SessionMessageReceipt>;
   /** Begin event-driven auto-transitions (running → review on idle, → error on failure). */
   start(): void;
   shutdown(): void;
@@ -705,6 +733,7 @@ export const TASK_ROUTE_PATTERNS = {
   taskEvents: "/api/tasks/:id/events",
   permissionReply: "/api/tasks/:id/permission",
   sessionEvents: "/api/tasks/:id/session-events",
+  sessionMessages: "/api/tasks/:id/session-messages",
   context: "/api/tasks/:id/context",
   compare: "/api/tasks/:targetId/compare?baseTaskId=:baseTaskId",
 } as const;
@@ -732,6 +761,7 @@ export const buildTaskPath = {
   taskEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/events`,
   permissionReply: (id: string) => `/api/tasks/${encodeURIComponent(id)}/permission`,
   sessionEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/session-events`,
+  sessionMessages: (id: string) => `/api/tasks/${encodeURIComponent(id)}/session-messages`,
   context: (id: string) => `/api/tasks/${encodeURIComponent(id)}/context`,
   compare: (targetId: string, baseTaskId: string) =>
     `/api/tasks/${encodeURIComponent(targetId)}/compare?baseTaskId=${encodeURIComponent(baseTaskId)}`,

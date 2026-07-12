@@ -17,7 +17,6 @@ import type {
   DiffResponse,
   MergeOutcome,
   PendingPermissionAsk,
-  RespondPermissionOutcome,
   RosterAgent,
   SessionActivityEvent,
   SessionActivityRun,
@@ -26,6 +25,7 @@ import type {
   TaskEvent,
   TaskContext,
   TaskCompareResponse,
+  SessionMessageReceipt,
 } from "../shared";
 import {
   CLAUDE_CODE_PERMISSION_MODES,
@@ -52,6 +52,20 @@ const CompletionReportInputSchema = z
     changedFiles: z.array(z.string()),
     verification: z.array(z.object({ command: z.string(), result: z.string() }).strict()),
     residualRisk: z.string(),
+  })
+  .strict();
+
+// Blocked reports may carry a direct question for the operator. Mirrors the
+// /api/tasks/:id/block route's own validation (completion.ts:199-212): the
+// value is trimmed, then must be 1..2000 characters. /complete rejects this
+// field by design, so it is not part of CompletionReportInputSchema.
+const BlockReportInputSchema = z
+  .object({
+    summary: z.string(),
+    changedFiles: z.array(z.string()),
+    verification: z.array(z.object({ command: z.string(), result: z.string() }).strict()),
+    residualRisk: z.string(),
+    needsInput: z.string().trim().min(1).max(2000).optional(),
   })
   .strict();
 
@@ -145,6 +159,9 @@ export const MoveTaskInputSchema = z
 export const CompleteTaskInputSchema = z
   .object({ taskId: IdSchema, runStartedAt: z.number().finite().optional(), report: CompletionReportInputSchema })
   .strict();
+export const BlockTaskInputSchema = z
+  .object({ taskId: IdSchema, runStartedAt: z.number().finite().optional(), report: BlockReportInputSchema })
+  .strict();
 export const CommentTaskInputSchema = z.object({ taskId: IdSchema, author: z.string(), body: z.string() }).strict();
 export const IntegrateTaskInputSchema = z
   .object({
@@ -175,6 +192,18 @@ export const RespondPermissionInputSchema = z
     askId: IdSchema,
     action: z.enum(["allow_once", "deny"]),
     answeredBy: z.string().min(1).max(200),
+  })
+  .strict();
+export const SendSessionMessageInputSchema = z
+  .object({
+    taskId: IdSchema,
+    text: z.string().trim().min(1).max(12000),
+    mode: z.enum(["queue", "interrupt"]).default("queue"),
+    sentBy: z.string().trim().min(1).max(200),
+    clientMessageId: z.string().trim().min(1).max(200),
+    expectedSessionId: z.string().trim().min(1).max(500),
+    expectedRunStartedAt: z.number().finite().optional(),
+    blockedReportedAt: z.number().finite().optional(),
   })
   .strict();
 export const TailSessionInputSchema = z
@@ -286,7 +315,14 @@ export interface AnswerBlockedTaskResult {
 
 export interface RespondPermissionResult {
   boardUrl: string;
-  outcome: RespondPermissionOutcome;
+  task: TaskSummary;
+  taskId: string;
+  answeredBy: string;
+}
+
+export interface SendSessionMessageResult {
+  boardUrl: string;
+  receipt: Omit<SessionMessageReceipt, "task"> & { task: TaskSummary };
 }
 
 export interface TailSessionResult {
@@ -408,7 +444,7 @@ export async function completeTask(input: unknown, options: McpToolOptions = {})
 }
 
 export async function blockTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {
-  const parsed = CompleteTaskInputSchema.parse(input);
+  const parsed = BlockTaskInputSchema.parse(input);
   const client = await createMcpBoardClient(options);
   const task = await client.blockTask(parsed.taskId, parsed.report as CompletionInput, parsed.runStartedAt);
   return { boardUrl: client.boardUrl, task: toTaskSummary(task) };
@@ -495,12 +531,24 @@ export async function openboardStatus(options: McpToolOptions = {}): Promise<Ope
 export async function respondPermission(input: unknown, options: McpToolOptions = {}): Promise<RespondPermissionResult> {
   const parsed = RespondPermissionInputSchema.parse(input);
   const client = await createMcpBoardClient(options);
-  const outcome = await client.respondPermission(parsed.taskId, {
+  const updated = await client.respondPermission(parsed.taskId, {
     askId: parsed.askId,
     action: parsed.action,
     answeredBy: parsed.answeredBy,
   });
-  return { boardUrl: client.boardUrl, outcome };
+  return {
+    boardUrl: client.boardUrl,
+    task: toTaskSummary(updated),
+    taskId: parsed.taskId,
+    answeredBy: parsed.answeredBy,
+  };
+}
+
+export async function sendSessionMessage(input: unknown, options: McpToolOptions = {}): Promise<SendSessionMessageResult> {
+  const parsed = SendSessionMessageInputSchema.parse(input);
+  const client = await createMcpBoardClient(options);
+  const receipt = await client.sendSessionMessage(parsed.taskId, parsed);
+  return { boardUrl: client.boardUrl, receipt: { ...receipt, task: toTaskSummary(receipt.task) } };
 }
 
 /**
@@ -624,31 +672,22 @@ export async function taskContext(input: unknown, options: McpToolOptions = {}):
   const parsed = TaskContextInputSchema.parse(input);
   const client = await createMcpBoardClient(options);
 
-  const boardUrl = client.boardUrl;
-  const authToken = options.env?.OPENBOARD_API_TOKEN?.trim();
-
-  const headers: Record<string, string> = {};
-  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
-
-  const response = await fetch(`${boardUrl}/api/tasks/${encodeURIComponent(parsed.taskId)}/context`, { headers });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`task_context failed (${response.status}): ${text}`);
-  }
-  const json = await response.json();
+  const rawContext = await client.getTaskContext(parsed.taskId);
   // Validate the response matches the TaskContext contract (nested `task`
-  // key) rather than casting blindly.
+  // key) rather than trusting the client's static type blindly — the client
+  // casts the raw JSON without runtime validation.
+  const json = rawContext as unknown as Record<string, unknown>;
   if (
     typeof json !== "object" || json === null ||
-    typeof (json as Record<string, unknown>).task !== "object" || (json as Record<string, unknown>).task === null ||
-    !Array.isArray((json as Record<string, unknown>).directParents) ||
-    !Array.isArray((json as Record<string, unknown>).inheritedParents) ||
-    !Array.isArray((json as Record<string, unknown>).codeAncestors)
+    typeof json.task !== "object" || json.task === null ||
+    !Array.isArray(json.directParents) ||
+    !Array.isArray(json.inheritedParents) ||
+    !Array.isArray(json.codeAncestors)
   ) {
     throw new Error("task_context returned an unexpected response shape (missing task/directParents/inheritedParents/codeAncestors)");
   }
-  const context = json as TaskContext;
-  return { boardUrl, taskId: parsed.taskId, context };
+  const context = rawContext;
+  return { boardUrl: client.boardUrl, taskId: parsed.taskId, context };
 }
 
 export async function taskCompare(input: unknown, options: McpToolOptions = {}): Promise<TaskCompareResult> {

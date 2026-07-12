@@ -604,4 +604,120 @@ describe("board client", () => {
       expect.objectContaining({ method: "GET" }),
     );
   });
+
+  it("respondPermission POSTs to /api/tasks/:id/permission and resolves with the projected Task, not a RespondPermissionOutcome", async () => {
+    // POST /api/tasks/:id/permission returns the shared projected Task on
+    // success (src/server/routes/permission.ts), never an {ok, decision}
+    // outcome shape — the client must be typed and shaped honestly, or
+    // callers reading a nonexistent `.ok` field silently see `undefined`.
+    const projectedTask = createdTask("task-1", { title: "A", description: "", directory: CWD });
+    const fetchMock = vi.fn(async () => jsonResponse(projectedTask));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    const result = await client.respondPermission("task-1", { askId: "ask-1", action: "allow_once", answeredBy: "User" });
+
+    expect(result).toEqual(projectedTask);
+    expect("ok" in (result as object)).toBe(false);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${DEFAULT_BOARD_URL}/api/tasks/task-1/permission`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ askId: "ask-1", action: "allow_once", answeredBy: "User" }),
+      }),
+    );
+  });
+
+  it("respondPermission rejects (throws) on a non-2xx response instead of returning a conflict outcome", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ error: { code: "validation", message: "Permission ask already resolved: ask-1" } }, 409),
+    );
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    await expect(
+      client.respondPermission("task-1", { askId: "ask-1", action: "deny", answeredBy: "User" }),
+    ).rejects.toThrow(/409/);
+  });
+
+  it("sendSessionMessage POSTs chat input to the task session route", async () => {
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => new Response(init?.body as BodyInit, { status: 202, headers: { "content-type": "application/json" } }));
+    const client = createBoardClient({ boardUrl: "http://127.0.0.1:4097", cwd: "/repo", fetch: fetch as never, stat: vi.fn() as never });
+    const input = { text: "Continue", mode: "queue" as const, sentBy: "User", clientMessageId: "msg-1", expectedSessionId: "ses-1" };
+    await client.sendSessionMessage("task-1", input);
+    expect(fetch).toHaveBeenCalledWith("http://127.0.0.1:4097/api/tasks/task-1/session-messages", expect.objectContaining({ method: "POST", body: JSON.stringify(input) }));
+  });
+});
+
+describe("streamSessionEvents lifecycle", () => {
+  function sseResponse(body: ReadableStream<Uint8Array>): Response {
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+
+  it("close() consumes reader.cancel() rejection instead of leaking an unhandled rejection (live-view quit bug)", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const body = new ReadableStream<Uint8Array>({
+        pull() {
+          // Stays pending, like a live SSE socket with no frames due.
+          return new Promise(() => {});
+        },
+        cancel() {
+          return Promise.reject(new Error("cancel failed"));
+        },
+      });
+      const fetchMock = vi.fn(async () => sseResponse(body));
+      const client = createBoardClient(makeOptions([CWD], fetchMock));
+      const stream = await client.streamSessionEvents("task-1", () => {});
+      stream.close();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
+  it("calls onEnd when the stream ends server-side (liveness signal for reconnect)", async () => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: heartbeat\ndata: {"kind":"heartbeat","lastEventAt":null,"transport":"live"}\n\n'));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn(async () => sseResponse(body));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+    const frames: unknown[] = [];
+    let ended = 0;
+    const stream = await client.streamSessionEvents("task-1", (frame) => frames.push(frame), {
+      onEnd: () => {
+        ended += 1;
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(frames).toHaveLength(1);
+    expect(ended).toBe(1);
+    expect(stream.active).toBe(false);
+  });
+
+  it("does not call onEnd after an explicit client-side close()", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise(() => {});
+      },
+    });
+    const fetchMock = vi.fn(async () => sseResponse(body));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+    let ended = 0;
+    const stream = await client.streamSessionEvents("task-1", () => {}, {
+      onEnd: () => {
+        ended += 1;
+      },
+    });
+    stream.close();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(ended).toBe(0);
+  });
 });

@@ -105,6 +105,84 @@ describe("compareTaskEvidence", () => {
     }
   });
 
+  it("refuses honestly when the base Review card's work is uncommitted in its live worktree", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+    // Base: worktree with UNCOMMITTED edits — branch tip is still the fork commit.
+    const buildWt = join(tmpDir, "build");
+    runGit(repoDir, ["worktree", "add", "-b", "board/build", buildWt, "HEAD"]);
+    writeFileSync(join(buildWt, "README.md"), "# Uncommitted build output\n");
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, "HEAD"]);
+    writeFileSync(join(fixWt, "fix.ts"), "export const fix = true;\n");
+    runGit(fixWt, ["add", "fix.ts"]);
+    runGit(fixWt, ["commit", "-m", "fix output"]);
+
+    const buildTask = makeTask({
+      id: "task_build",
+      directory: repoDir,
+      worktreePath: buildWt,
+      worktreeBranch: "board/build",
+      baseBranch: "main",
+      baseCommit,
+    });
+    const fixTask = makeTask({
+      id: "task_fix",
+      directory: repoDir,
+      worktreePath: fixWt,
+      worktreeBranch: "board/fix",
+      baseBranch: "main",
+      baseCommit,
+    });
+
+    const result = await compareTaskEvidence(buildTask, fixTask);
+    expect(result.kind).toBe("no-git");
+    if (result.kind === "no-git") {
+      expect(result.reason).toContain("uncommitted");
+      expect(result.reason).toContain("board/build");
+    }
+  });
+
+  it("still compares against a live-worktree base whose branch has real commits beyond the fork point", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+    const buildWt = join(tmpDir, "build");
+    runGit(repoDir, ["worktree", "add", "-b", "board/build", buildWt, "HEAD"]);
+    writeFileSync(join(buildWt, "README.md"), "# Committed build output\n");
+    runGit(buildWt, ["add", "README.md"]);
+    runGit(buildWt, ["commit", "-m", "build output"]);
+    // Extra uncommitted noise on top of the committed output must not block the compare.
+    writeFileSync(join(buildWt, "scratch.txt"), "wip\n");
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, "HEAD"]);
+    runGit(fixWt, ["merge", "board/build", "-m", "merge build output"]);
+    writeFileSync(join(fixWt, "fix.ts"), "export const fix = true;\n");
+    runGit(fixWt, ["add", "fix.ts"]);
+    runGit(fixWt, ["commit", "-m", "fix output"]);
+
+    const buildTask = makeTask({
+      id: "task_build",
+      directory: repoDir,
+      worktreePath: buildWt,
+      worktreeBranch: "board/build",
+      baseBranch: "main",
+      baseCommit,
+    });
+    const fixTask = makeTask({
+      id: "task_fix",
+      directory: repoDir,
+      worktreePath: fixWt,
+      worktreeBranch: "board/fix",
+      baseBranch: "main",
+      baseCommit,
+    });
+
+    const result = await compareTaskEvidence(buildTask, fixTask);
+    expect(result.kind).toBe("diff");
+  });
+
   it("returns an empty diff when both task outputs are identical", async () => {
     const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
 

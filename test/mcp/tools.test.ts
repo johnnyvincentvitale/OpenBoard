@@ -17,6 +17,7 @@ import {
   currentInstance,
   openboardStatus,
   respondPermission,
+  sendSessionMessage,
   resolveBoardUrl,
   retryTask,
   runTask,
@@ -606,6 +607,43 @@ describe("MCP orchestrator tools", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[8][1]?.body))).toEqual({ targetBranch: "main" });
   });
 
+  it("passes needsInput through block_task to POST /block (FR12 question channel)", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(task));
+    const options = makeOptions([CWD], fetchMock);
+    const report = { summary: "blocked", changedFiles: [], verification: [], residualRisk: "blocked" };
+
+    await blockTask({ taskId: "task-1", report: { ...report, needsInput: "Which env var should I use?" } }, options);
+
+    expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe("/api/tasks/task-1/block");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      ...report,
+      needsInput: "Which env var should I use?",
+    });
+  });
+
+  it("trims needsInput and rejects it once empty or over 2000 chars, mirroring the /block route", async () => {
+    const options = makeOptions([CWD]);
+    const report = { summary: "blocked", changedFiles: [], verification: [], residualRisk: "blocked" };
+
+    await expect(
+      blockTask({ taskId: "task-1", report: { ...report, needsInput: "   " } }, options),
+    ).rejects.toThrow();
+    await expect(
+      blockTask({ taskId: "task-1", report: { ...report, needsInput: "x".repeat(2001) } }, options),
+    ).rejects.toThrow();
+    expect(options.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still rejects needsInput on complete_task — /complete forbids it by design", async () => {
+    const options = makeOptions([CWD]);
+    const report = { summary: "done", changedFiles: [], verification: [], residualRisk: "none" };
+
+    await expect(
+      completeTask({ taskId: "task-1", report: { ...report, needsInput: "should not be allowed" } }, options),
+    ).rejects.toThrow();
+    expect(options.fetchMock).not.toHaveBeenCalled();
+  });
+
   it("requires completedBy for MCP moves to done", async () => {
     const options = makeOptions([CWD], vi.fn(async () => jsonResponse([task])));
 
@@ -1033,8 +1071,12 @@ describe("MCP answer_blocked_task", () => {
 
 describe("MCP respond_permission", () => {
   it("sends askId, action, and answeredBy through task permission endpoint", async () => {
-    const outcome = { ok: true, askId: "ask_1", decision: "allow_once" as const };
-    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(outcome));
+    const updatedTask = createdTask("task-1", {
+      title: "Permission task",
+      description: "d",
+      directory: CWD,
+    });
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(updatedTask));
     const options = makeOptions([CWD], fetchMock);
 
     const result = await respondPermission(
@@ -1047,13 +1089,35 @@ describe("MCP respond_permission", () => {
       options,
     );
 
-    expect(result.outcome).toEqual(outcome);
+    expect(result.task).toEqual(toTaskSummary(updatedTask));
+    expect(result.taskId).toBe("task-1");
+    expect(result.answeredBy).toBe("orchestrator");
     expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BOARD_URL}/api/tasks/task-1/permission`);
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
       askId: "ask_1",
       action: "allow_once",
       answeredBy: "orchestrator",
     });
+  });
+});
+
+describe("MCP send_session_message", () => {
+  it("sends attributed chat input to the existing session", async () => {
+    const task = createdTask("task-chat", { title: "Chat", description: "d", directory: CWD, sessionId: "ses-chat", runStartedAt: 123 });
+    const receipt = { messageId: "msg-chat", taskId: task.id, sessionId: "ses-chat", status: "accepted", mode: "queue", sentAt: 456, sentBy: "orchestrator", task };
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(receipt, 202));
+    const result = await sendSessionMessage({
+      taskId: task.id,
+      text: "Please explain the current failure",
+      mode: "queue",
+      sentBy: "orchestrator",
+      clientMessageId: "msg-chat",
+      expectedSessionId: "ses-chat",
+      expectedRunStartedAt: 123,
+    }, makeOptions([CWD], fetchMock));
+
+    expect(result.receipt.task).toEqual(toTaskSummary(task));
+    expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BOARD_URL}/api/tasks/${task.id}/session-messages`);
   });
 });
 
@@ -1288,19 +1352,14 @@ describe("MCP task_context", () => {
   };
 
   it("resolves a nested `task` handoff (P2-3)", async () => {
-    const options = makeOptions([CWD]);
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(nestedContextBody)));
-    try {
-      const result = await taskContext({ taskId: "task-1" }, options);
-      expect(result.context.task.taskId).toBe("task-1");
-      expect(result.context.directParents).toEqual([]);
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const fetchMock = vi.fn(async () => jsonResponse(nestedContextBody));
+    const options = makeOptions([CWD], fetchMock);
+    const result = await taskContext({ taskId: "task-1" }, options);
+    expect(result.context.task.taskId).toBe("task-1");
+    expect(result.context.directParents).toEqual([]);
   });
 
   it("rejects a legacy flat response body missing the nested `task` key (P2-3)", async () => {
-    const options = makeOptions([CWD]);
     const flatLegacyBody = {
       taskId: "task-1",
       title: "Target",
@@ -1308,13 +1367,23 @@ describe("MCP task_context", () => {
       inheritedParents: [],
       codeAncestors: [],
     };
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(flatLegacyBody)));
-    try {
-      await expect(taskContext({ taskId: "task-1" }, options)).rejects.toThrow(
-        "unexpected response shape",
-      );
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const fetchMock = vi.fn(async () => jsonResponse(flatLegacyBody));
+    const options = makeOptions([CWD], fetchMock);
+    await expect(taskContext({ taskId: "task-1" }, options)).rejects.toThrow(
+      "unexpected response shape",
+    );
+  });
+
+  it("goes through the board client so the selected-instance token is authorized, not a bare unauthenticated fetch", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(nestedContextBody));
+    const options = makeOptions([CWD], fetchMock);
+    options.env = { OPENBOARD_API_TOKEN: "secret-token" };
+
+    await taskContext({ taskId: "task-1" }, options);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0][1] as RequestInit | undefined;
+    const headers = init?.headers as Record<string, string> | undefined;
+    expect(headers?.Authorization).toBe("Bearer secret-token");
   });
 });

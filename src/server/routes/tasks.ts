@@ -21,6 +21,7 @@ import {
   TASK_HARNESSES,
   TASK_ISOLATION_MODES,
   TASK_KINDS,
+  SESSION_MESSAGE_MODES,
   TASK_TYPES,
   USER_COMPLETED_BY,
   blockedQuestion,
@@ -29,7 +30,7 @@ import {
   type BlockedAnswerContext,
   isColumn,
 } from "../../shared";
-import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CompletionReport, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, Task, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
+import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CompletionReport, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, SessionMessageInput, SessionMessageReceipt, Task, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
@@ -41,6 +42,8 @@ import { evaluateDonePolicy } from "../done-policy";
 const BLOCKED_ANSWER_MAX_LENGTH = 2000;
 const BLOCKED_ATTRIBUTION_MAX_LENGTH = 200;
 const inFlightBlockedAnswers = new Set<string>();
+const sessionMessageReceipts = new Map<string, SessionMessageReceipt>();
+const SESSION_MESSAGE_MAX_LENGTH = 12_000;
 
 class ConflictRouteError extends Error {
   readonly status = 409;
@@ -161,6 +164,37 @@ function isAcpOptions(value: unknown): value is AcpOptions {
 interface RetryTaskBody {
   feedback?: unknown;
   blockedAnswer?: unknown;
+}
+
+function parseSessionMessageBody(value: unknown): SessionMessageInput {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw AdapterError.validation("session message body must be an object");
+  }
+  const body = value as Record<string, unknown>;
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  const sentBy = typeof body.sentBy === "string" ? body.sentBy.trim() : "";
+  const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim() : "";
+  const expectedSessionId = typeof body.expectedSessionId === "string" ? body.expectedSessionId.trim() : "";
+  if (text.length < 1 || text.length > SESSION_MESSAGE_MAX_LENGTH) throw AdapterError.validation(`text must be 1..${SESSION_MESSAGE_MAX_LENGTH} characters`);
+  if (!(SESSION_MESSAGE_MODES as readonly unknown[]).includes(body.mode)) throw AdapterError.validation("mode must be queue or interrupt");
+  if (sentBy.length < 1 || sentBy.length > 200) throw AdapterError.validation("sentBy must be 1..200 characters");
+  if (clientMessageId.length < 1 || clientMessageId.length > 200) throw AdapterError.validation("clientMessageId must be 1..200 characters");
+  if (expectedSessionId.length < 1 || expectedSessionId.length > 500) throw AdapterError.validation("expectedSessionId must be 1..500 characters");
+  if (body.expectedRunStartedAt !== undefined && (typeof body.expectedRunStartedAt !== "number" || !Number.isFinite(body.expectedRunStartedAt))) {
+    throw AdapterError.validation("expectedRunStartedAt must be a finite number");
+  }
+  if (body.blockedReportedAt !== undefined && (typeof body.blockedReportedAt !== "number" || !Number.isFinite(body.blockedReportedAt))) {
+    throw AdapterError.validation("blockedReportedAt must be a finite number");
+  }
+  return {
+    text,
+    mode: body.mode as SessionMessageInput["mode"],
+    sentBy,
+    clientMessageId,
+    expectedSessionId,
+    ...(body.expectedRunStartedAt === undefined ? {} : { expectedRunStartedAt: body.expectedRunStartedAt as number }),
+    ...(body.blockedReportedAt === undefined ? {} : { blockedReportedAt: body.blockedReportedAt as number }),
+  };
 }
 
 /**
@@ -514,6 +548,25 @@ export function registerTaskRoutes(
       return respondWithError(c, err);
     } finally {
       if (blockedAnswerKey) inFlightBlockedAnswers.delete(blockedAnswerKey);
+    }
+  });
+
+  app.post(TASK_ROUTE_PATTERNS.sessionMessages, async (c) => {
+    const id = c.req.param("id");
+    try {
+      const input = parseSessionMessageBody(await c.req.json());
+      const key = `${id}:${input.clientMessageId}`;
+      const prior = sessionMessageReceipts.get(key);
+      if (prior) return c.json(prior, 202);
+      const receipt = await dispatcher.sendSessionMessage(id, input);
+      sessionMessageReceipts.set(key, receipt);
+      if (sessionMessageReceipts.size > 1_000) {
+        const oldest = sessionMessageReceipts.keys().next().value;
+        if (oldest) sessionMessageReceipts.delete(oldest);
+      }
+      return c.json(receipt, 202);
+    } catch (err) {
+      return respondWithError(c, err);
     }
   });
 

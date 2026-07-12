@@ -22,10 +22,11 @@ import type {
   BlockedAnswerContext,
   PendingPermissionAsk,
   RespondPermissionInput,
-  RespondPermissionOutcome,
   RosterAgent,
   RosterProvider,
   SessionActivityFrame,
+  SessionMessageInput,
+  SessionMessageReceipt,
   Task,
   TaskContext,
   TaskHarness,
@@ -201,6 +202,13 @@ export interface StreamSessionEventsOptions {
   cursor?: number;
   /** AbortSignal to cancel the stream. */
   signal?: AbortSignal;
+  /**
+   * Called once when the stream ends for any reason other than an explicit
+   * client-side close() — server restart, socket reset, response end. Gives
+   * the consumer a liveness signal to reconnect on; without it a dead stream
+   * is indistinguishable from a healthy quiet one.
+   */
+  onEnd?: () => void;
 }
 
 /**
@@ -259,8 +267,16 @@ export interface BoardClient {
   getTaskContext(id: string): Promise<TaskContext>;
   /** Stream live session activity frames for a task via SSE. */
   streamSessionEvents(id: string, onFrame: SessionActivityFrameCallback, options?: StreamSessionEventsOptions): Promise<SessionEventsStream>;
-  /** Respond to a pending permission ask on a task. */
-  respondPermission(id: string, input: RespondPermissionInput): Promise<RespondPermissionOutcome>;
+  /**
+   * Respond to a pending permission ask on a task. POST /api/tasks/:id/permission
+   * returns the shared projected Task on success (see server/routes/permission.ts) —
+   * not a RespondPermissionOutcome (that's the dispatcher's internal outcome shape).
+   * Non-2xx responses throw via requestJson; callers should catch and inspect the
+   * error message for a "(409)" status to detect a stale/already-resolved ask.
+   */
+  respondPermission(id: string, input: RespondPermissionInput): Promise<Task>;
+  /** Send operator-authored chat input to the card's existing harness session. */
+  sendSessionMessage(id: string, input: SessionMessageInput): Promise<SessionMessageReceipt>;
   getHealth(): Promise<BoardHealth>;
   getDiagnostics(): Promise<BoardDiagnostics>;
 }
@@ -446,7 +462,9 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
     getTaskContext: (id) => requestJson<TaskContext>(resolved, buildTaskPath.context(id), { method: "GET" }),
     streamSessionEvents: (id, onFrame, options) => streamSessionEvents(resolved, id, onFrame, options),
     respondPermission: (id, input) =>
-      postJson<RespondPermissionOutcome>(resolved, buildTaskPath.permissionReply(id), input),
+      postJson<Task>(resolved, buildTaskPath.permissionReply(id), input),
+    sendSessionMessage: (id, input) =>
+      postJson<SessionMessageReceipt>(resolved, buildTaskPath.sessionMessages(id), input),
     getHealth: () => requestJson<BoardHealth>(resolved, "/api/health", { method: "GET" }),
     getDiagnostics: () => requestJson<BoardDiagnostics>(resolved, "/api/diagnostics", { method: "GET" }),
   };
@@ -855,6 +873,7 @@ async function streamSessionEvents(
 
   let active = true;
   let closed = false;
+  let closedByClient = false;
   const decoder = new TextDecoder("utf-8");
 
   // SSE line-buffer: accumulated partial line bytes across chunk boundaries.
@@ -949,6 +968,13 @@ async function streamSessionEvents(
       } catch {
         // Reader may already be released.
       }
+      if (!closedByClient) {
+        try {
+          options?.onEnd?.();
+        } catch {
+          // Consumer callback failures must not become unhandled rejections.
+        }
+      }
     }
   })();
 
@@ -959,10 +985,18 @@ async function streamSessionEvents(
     close() {
       active = false;
       closed = true;
+      closedByClient = true;
       try {
-        reader.cancel();
+        // reader.cancel() returns a promise that can reject asynchronously
+        // (e.g. cancelling a reader whose stream already errored). The TUI
+        // installs a fatal unhandledRejection handler that exits the process,
+        // so the rejection must be consumed here — a bare try/catch only
+        // covers the synchronous throw.
+        void reader.cancel().catch(() => {
+          // Reader may already be closed/errored — benign during teardown.
+        });
       } catch {
-        // Reader may already be closed.
+        // Reader may already be released.
       }
     },
   };

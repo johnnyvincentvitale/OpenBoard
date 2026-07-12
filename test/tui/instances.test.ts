@@ -3073,6 +3073,87 @@ describe("TUI manual task creation", () => {
     expect(s.status).toBe("retry is only available for error cards or rebase-conflict Review cards");
   });
 
+  // Production-shaped blocked Review card: the /block route and watchdog
+  // exhaustion both set runState "error" on a blocked-completion Review
+  // card, so a fixture using runState "idle" (as earlier drafts of this
+  // suite used) never exercises the precedence bug where the generic
+  // runState==="error" branch shadowed the blocked-aware shortcuts.
+  function blockedReviewCard(id: string): Task {
+    return {
+      ...task(id, "review"),
+      runState: "error",
+      completionSource: "reported",
+      completion: {
+        outcome: "blocked",
+        summary: "Need input",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "Pick A or B",
+        reportedAt: 123,
+      },
+    };
+  }
+
+  it("does not treat a blocked Review card (runState error) as a generic error card: integrate stays unavailable, but done and retry are reachable", async () => {
+    const integrateTask = vi.fn(async () => ({ task: blockedReviewCard("blocked-card"), ok: true, conflict: false, message: "" }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [blockedReviewCard("blocked-card")],
+      selectedTaskId: "blocked-card",
+    });
+
+    await handleKeypress({ name: "i", sequence: "i" } as any, s, actions({ client: { integrateTask } }));
+    expect(integrateTask).not.toHaveBeenCalled();
+    expect(s.status).toBe("integrate is only available for Review cards");
+
+    await handleKeypress({ name: "x", sequence: "x" } as any, s, actions());
+    expect(s.status).not.toBe("done is only available for Review cards");
+    expect(s.pendingConfirmation).toEqual({ action: "move-to-done", taskId: "blocked-card" });
+  });
+
+  it("x (done) on a blocked Review card attaches blockedAcceptance to moveTask on the second press, exactly like m->Done", async () => {
+    const moveTask = vi.fn(async () => []);
+    const runAction = vi.fn(async (_label: string, action: (t: Task) => Promise<unknown>) => {
+      await action(blockedReviewCard("blocked-card"));
+    });
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [blockedReviewCard("blocked-card")],
+      selectedTaskId: "blocked-card",
+    });
+    const a = actions({ client: { moveTask }, runAction });
+
+    await handleKeypress({ name: "x", sequence: "x" } as any, s, a);
+    expect(moveTask).not.toHaveBeenCalled();
+
+    await handleKeypress({ name: "x", sequence: "x" } as any, s, a);
+    expect(moveTask).toHaveBeenCalledWith("blocked-card", "done", 0, "User", { acceptIncomplete: true, blockedReportedAt: 123 });
+  });
+
+  it("archive stays unavailable on a blocked Review card until it reaches Done", async () => {
+    const archiveTask = vi.fn(async () => undefined);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [blockedReviewCard("blocked-card")],
+      selectedTaskId: "blocked-card",
+    });
+
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, actions({ archiveTask }));
+    expect(archiveTask).not.toHaveBeenCalled();
+    expect(s.status).toBe("archive is only available for Done cards");
+
+    // Once accepted into Done (accepted-blocked), archive is unconditional
+    // for any Done card — no separate blocked-aware gate needed there.
+    const doneCard: Task = { ...blockedReviewCard("blocked-card"), column: "done", completedBy: "User" };
+    const doneState = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [doneCard],
+      selectedTaskId: "blocked-card",
+    });
+    await handleKeypress({ name: "a", sequence: "a" } as any, doneState, actions({ archiveTask }));
+    expect(doneState.status).not.toBe("archive is only available for Done cards");
+  });
+
   it("deletes Error cards from the board shortcut", async () => {
     const deleteTask = vi.fn(async () => undefined);
     const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});

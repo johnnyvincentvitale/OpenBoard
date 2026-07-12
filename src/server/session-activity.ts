@@ -231,6 +231,19 @@ export class SessionActivityCollector {
     const normalized = this.normalize(input);
     if (!normalized) return null;
 
+    // OpenCode can emit the same assistant text once in a tool-calls turn
+    // and again in the post-tool stop turn. Within one operator turn, keep
+    // the first identical assistant reply. A user text event resets the
+    // boundary, so equal answers to separate user messages remain visible.
+    if (normalized.kind === "text" && normalized.role === "assistant" && normalized.text?.trim()) {
+      const candidate = normalized.text.trim();
+      for (let index = runState.events.length - 1; index >= 0; index -= 1) {
+        const prior = runState.events[index]!;
+        if (prior.kind === "text" && prior.role === "user") break;
+        if (prior.kind === "text" && prior.role === "assistant" && prior.text?.trim() === candidate) return null;
+      }
+    }
+
     const seq = runState.nextSeq++;
 
     const event: SessionActivityEvent = {

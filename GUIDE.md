@@ -40,9 +40,10 @@ The mental model, in three sentences:
 - **Review is the automatic endpoint; Done is a decision.** The board never
   marks work accepted on its own.
 
-What OpenBoard is *not*: it's not a chat UI, and it's not hosted. Everything —
-the board, the agents, your code, the task database — runs and stays on your
-machine.
+What OpenBoard is *not*: it is not a general-purpose hosted chat client. Session
+Chat is an operator surface for an agent session already attached to a card;
+everything — the board, the agents, your code, the task database, and that chat
+history — runs and stays on your machine.
 
 ## 2. Before you start
 
@@ -147,7 +148,9 @@ retries. Press **`?`** anytime for the full key reference.
 ## 5. Core concepts
 
 **Task vs. session.** A task is the durable spec on the board; a session is the
-live agent run it dispatches. Retry creates a fresh session for the same task.
+live agent run it dispatches. Session Chat continues a resumable session in the
+same working tree. Retry is the task-work control: it may resume an eligible
+blocked session or create a fresh session while preserving the task baseline.
 
 **Agents come from your harnesses, not from OpenBoard.** OpenCode cards bind
 one of your OpenCode agents (`build`, `plan`, `general`, `explore`, plus any
@@ -155,9 +158,9 @@ you define in your OpenCode config). Claude Code cards dispatch a Claude Code
 session instead. OpenBoard adds the board, the dispatch, and the lifecycle —
 it doesn't invent its own agent system.
 
-**Five lanes.** To Do · In Progress · Review · Done · Error. The board moves
-cards through the first three automatically; Error means dispatch or the run
-itself failed.
+**Four lanes, plus run state.** To Do · In Progress · Review · Done are the
+board lanes. The board moves cards through the first three automatically;
+errors and blocks are distinct task states surfaced on their current card.
 
 **Reported vs. unconfirmed completion.** Every dispatched prompt tells the
 agent how to end its turn: report back with a structured completion — summary,
@@ -218,7 +221,26 @@ surface exposes read-only inspection tools for orchestrator diagnostics:
 - `answer_blocked_task` — submit an operator answer to a blocked card's
   question with blocked context; the board gates admission on current-block
   matching and duplicate in-flight guarding.
+- `send_session_message` — send an attributed operator message to an existing
+  card session, either queued behind the active turn or interrupting that turn.
 - `task_events` — durable events recorded for one task (not run history).
+
+**Chat with a running card.** Select a card with a session and press `w`. The
+Session Chat screen shows assistant messages as conversation, keeps tool activity
+visible but secondary, and surfaces permission asks inline. Press `i` to compose;
+`Enter` sends/queues and `Ctrl+Enter` interrupts the current prompt turn before
+sending. The message continues the same session and working tree. A Review card
+with a still-resumable session can be chatted with the same way without leaving
+Review or replacing its completion evidence. Use Retry when you intend to resume
+task execution. Internal completion-report calls are hidden from the chat transcript,
+and exact same-turn provider echoes render once.
+
+When a message contains a Markdown fenced-code block, Session Chat renders it in
+a separate language-labelled box instead of flattening it into prose. The newest
+block is selected automatically. Press `Tab`/`Shift+Tab` to move among blocks and
+`c` to copy the selected block's complete source text to the system clipboard;
+copying uses the original message even when the terminal only has room to display
+part of a long block.
 
 **Dependencies and handoffs.** Cards can declare parent tasks. A child with
 unmet parents refuses to run, and once its parents complete, their summaries,
@@ -339,12 +361,12 @@ The instance's **workspace** matters: task directories must live inside it, so
 register the instance against the repo — or parent directory — you actually
 want agents working in.
 
-**The TUI.** Five lanes plus a sidebar showing the selected card's full detail
+**The TUI.** Four lanes plus a sidebar showing the selected card's full detail
 (state, agent/harness, model, directory, worktree, session). Press **`?`** for
 the complete key overlay — that's the authoritative reference. The ones you'll
-use constantly: `n` new task, `r` run, `enter` read the handoff, `x` accept to
-Done, `v` view a Review-card diff, `e` open the selected diff file in your
-editor, `b` switch instances, `A` browse the archive.
+use constantly: `n` new task, `r` run, `w` open Session Chat, `enter` read the
+handoff, `x` accept to Done, `v` view a Review-card diff, `e` open the selected
+diff file in your editor, `b` switch instances, `A` browse the archive.
 
 **Worktree isolation — the multi-agent rule.** Concurrent agents in one repo
 share a working tree and *will* clobber each other; there's no file locking.
@@ -476,10 +498,10 @@ Things we already know about — no need to report these:
   probably it — startup errors aren't surfaced well in the TUI yet.
 - **Worktrees and `board/*` branches accumulate.** There's no cleanup
   affordance yet; sweep stale ones manually.
-- **No stall detection.** A hung agent session isn't auto-detected; if a card
-  sits In Progress implausibly long, check it yourself.
-- **Retries are unbounded.** Nothing stops you (or an orchestrator) from
-  retrying a doomed card forever.
+- **The watchdog is conservative, not instantaneous.** It waits for the configured
+  no-progress window, suppresses intervention while permissions or reconnects are
+  unresolved, and performs at most two automatic same-worktree retries before
+  moving the card to blocked Review. Manual Retry remains an operator decision.
 - **Stopping a Claude Code card is best-effort.** Claude doesn't expose a
   reliable background-stop yet; abort may just record an error on the card.
 - **MCP `add_tasks` rejects models with two-slash ids** (e.g.
@@ -510,6 +532,9 @@ The flows we most want exercised, roughly in order:
 6. **Orchestration** — if you're comfortable: install the plugin, open a
    cockpit session, and let it run a small multi-card plan against a scratch
    repo.
+7. **Session Chat** — press `w` on a live or resumable Review card, send a
+   follow-up, confirm the answer appears without another message, and ask for a
+   fenced code sample. Verify `Tab` selects its box and `c` copies the exact code.
 
 **Reporting:** open a Bug report or Tester feedback issue on this repo. Include
 what you did, what you expected, what happened, and — if a card was involved —
@@ -542,6 +567,12 @@ startup rather than half-starting. Pick another port or stop the squatter.
 **A Review card says "unconfirmed."** The agent went idle without filing a
 completion report. The work may be fine — inspect the session output before
 accepting.
+
+**A Session Chat answer does not appear.** Keep the chat open long enough for
+the agent turn to finish, then press `u` once to rebind if the instance restarted
+mid-turn. If the stream shows `GAP` or `RECONNECTING`, check `openboard status
+<name>` and `openboard logs <name>`; do not send a duplicate message just to
+force the transcript to refresh.
 
 **Two agents stepped on each other.** That's the no-file-locking constraint.
 Enable worktree isolation or assign non-overlapping work.

@@ -53,6 +53,7 @@ function makeDispatcher(store: SqliteTaskStore): Dispatcher {
     resolveOrphanWorktree: vi.fn(async (worktreePath) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
     listPendingPermissions: vi.fn(() => []),
     respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
+    sendSessionMessage: vi.fn(async (taskId: string, input) => ({ messageId: input.clientMessageId, taskId, sessionId: input.expectedSessionId, status: "accepted" as const, mode: input.mode, sentAt: Date.now(), sentBy: input.sentBy, task: store.get(taskId)! })),
     start: vi.fn(),
     shutdown: vi.fn(),
   };

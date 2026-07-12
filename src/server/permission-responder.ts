@@ -173,6 +173,15 @@ export interface PermissionResponderPool {
    * in-place overrides; it does not change polling/reply behavior.
    */
   register(sessionID: string, directory: string, options?: { source?: PermissionAskSource }): void;
+  /**
+   * Attach a descendant session (an OpenCode subagent spawned inside the
+   * run) to a registered root target. Requests raised by the child share the
+   * root's directory and are answered/raised under the ROOT session's runId,
+   * so task→ask ownership routing is unchanged. Without this, a fenced
+   * subagent's ask matches no registered target and hangs the run forever.
+   * No-op when the root is not (or no longer) registered.
+   */
+  addChildSession(rootSessionID: string, childSessionID: string): void;
   /** Stop responding to asks for this session and free its state. */
   unregister(sessionID: string): void;
   /** Stop the pool's poll loop entirely and free all state. */
@@ -197,6 +206,8 @@ interface TargetState {
   lastDenial: DenialInfo | null;
   /** Source classification applied to every broker ask raised for this session. */
   source: PermissionAskSource;
+  /** Descendant sessions whose requests this target also answers (see addChildSession). */
+  childSessionIds: Set<string>;
   /**
    * Board ask id -> native request id, for asks currently pending in the
    * broker. Kept private to this target (never exposed publicly) so a
@@ -282,10 +293,15 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
 
     for (const request of pending) {
       if (stopped || !targets.has(sessionID)) return;
-      if (request.sessionID !== sessionID) continue;
+      // Accept the root session's own requests and those of its attached
+      // descendant sessions — a fenced subagent's ask otherwise matches no
+      // target and hangs the run until the watchdog trips.
+      if (request.sessionID !== sessionID && !state.childSessionIds.has(request.sessionID)) continue;
       if (state.replied.has(request.id)) continue;
 
-      const toolName = await resolveToolName(sessionID, state.directory, request);
+      // Tool identity lives in the session that raised the request — for a
+      // child ask that's the child session's messages, not the root's.
+      const toolName = await resolveToolName(request.sessionID, state.directory, request);
       const isReadClass = toolName !== undefined && READ_TOOLS.has(toolName);
 
       // Mark handled before any reply/broker submission so a slow reply — or
@@ -376,8 +392,14 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
         failingReply: false,
         lastDenial: null,
         source: registerOptions?.source ?? "worktree-fence",
+        childSessionIds: new Set(),
         pendingAskNativeIds: new Map(),
       });
+    },
+    addChildSession(rootSessionID: string, childSessionID: string): void {
+      const state = targets.get(rootSessionID);
+      if (!state || childSessionID === rootSessionID) return;
+      state.childSessionIds.add(childSessionID);
     },
     unregister(sessionID: string): void {
       broker.clearRun(sessionID);

@@ -185,6 +185,7 @@ describe("ClaudeAcpRunner", () => {
     expect(promptText).toContain("not applicable: research only");
     expect(promptText).not.toContain("parent handoffs/raw files read");
     expect(promptText).toContain('complete_task with { taskId: "task_1", runStartedAt: 123');
+    expect(promptText).toContain("When blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.");
   });
 
   it("uses parent handoff guidance for linked tasks", async () => {
@@ -199,7 +200,7 @@ describe("ClaudeAcpRunner", () => {
     expect(promptText).toContain("parent handoffs/raw files read");
   });
 
-  it("marks the in-memory session idle when the prompt completes", async () => {
+  it("keeps the ACP process alive and resumable when a prompt turn completes", async () => {
     const { harness, prompt, result, runner } = await launchRunner();
 
     harness.respond(prompt, { stopReason: "end_turn" });
@@ -210,7 +211,34 @@ describe("ClaudeAcpRunner", () => {
       terminal: true,
       cwd: "/repo",
     });
-    expect(harness.child.kill).toHaveBeenCalledTimes(1);
+    expect(harness.child.kill).not.toHaveBeenCalled();
+  });
+
+  it("sends a second prompt through the same ACP session", async () => {
+    const { harness, prompt, result, runner } = await launchRunner();
+    harness.respond(prompt, { stopReason: "end_turn" });
+    await Promise.resolve();
+
+    await runner.sendMessage(result.sessionName, "Please refine that", { mode: "queue", runStartedAt: 456 });
+    const followup = await harness.nextMessage("session/prompt");
+    expect(followup.params).toEqual({
+      sessionId: "acp-session-1",
+      prompt: [{ type: "text", text: "Please refine that" }],
+    });
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    await expect(runner.poll(result.sessionName)).resolves.toMatchObject({ status: "running", terminal: false });
+  });
+
+  it("cancels the active ACP turn before an interrupt message", async () => {
+    const { harness, prompt, result, runner } = await launchRunner();
+    const send = runner.sendMessage(result.sessionName, "Change direction", { mode: "interrupt", runStartedAt: 789 });
+    const cancel = await harness.nextMessage("session/cancel");
+    expect(cancel.params).toEqual({ sessionId: "acp-session-1" });
+    harness.respond(prompt, { stopReason: "cancelled" });
+    await send;
+    const replacement = await harness.nextMessage("session/prompt");
+    expect(replacement.params?.prompt).toEqual([{ type: "text", text: "Change direction" }]);
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
   });
 
   it("cancels the ACP session on abort", async () => {
@@ -261,7 +289,7 @@ describe("ClaudeAcpRunner", () => {
 
     harness.requestPermission({
       sessionId: "acp-session-1",
-      toolCall: { kind: "edit", title: "Edit", rawInput: { file_path: "/repo/secret-token.txt", content: "PRIVATE" } },
+      toolCall: { kind: "edit", title: "Edit", rawInput: { file_path: "/outside/secret-token.txt", content: "PRIVATE" } },
       options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }],
     });
     await expectNoMessage(harness);
@@ -271,7 +299,7 @@ describe("ClaudeAcpRunner", () => {
       source: "acp",
       permission: "edit",
       tool: "Edit",
-      patterns: ["/repo/secret-token.txt"],
+      patterns: ["/outside/secret-token.txt"],
     })]);
     expect(JSON.stringify(runner.listPendingPermissions("openboard-task_1-123"))).not.toContain("PRIVATE");
 
@@ -287,7 +315,7 @@ describe("ClaudeAcpRunner", () => {
     const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" }, { onPermissionEvent: (event) => events.push(event) });
     harness.requestPermission({
       sessionId: "acp-session-1",
-      toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } },
+      toolCall: { kind: "edit", rawInput: { file_path: "/outside/file.ts" } },
       options: [{ optionId: "allow_always", kind: "allow_always" }, { optionId: "reject", kind: "reject" }],
     });
     const askId = runner.listPendingPermissions("openboard-task_1-123")[0].id;
@@ -300,52 +328,69 @@ describe("ClaudeAcpRunner", () => {
     expect(await harness.nextMessage()).toMatchObject({ result: { outcome: { optionId: "reject" } } });
   });
 
+  it("replies immediately to policy-allowed ACP permission requests without holding for the operator", async () => {
+    const harness = makeAcpHarness();
+    const events: PermissionAskEvent[] = [];
+    const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" }, { onPermissionEvent: (event) => events.push(event) });
+
+    harness.requestPermission({
+      sessionId: "acp-session-1",
+      toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } },
+      options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }],
+    });
+
+    expect(await harness.nextMessage()).toEqual({
+      jsonrpc: "2.0",
+      id: 99,
+      result: { outcome: { outcome: "selected", optionId: "allow_once" } },
+    });
+    expect(runner.listPendingPermissions("openboard-task_1-123")).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
   it("uses the existing permission policy on timeout", async () => {
     const clock = manualClock();
     const harness = makeAcpHarness();
     await launchRunner(harness, { ...task, permissionMode: "manual" }, { permissionClock: clock, permissionGraceMs: 10 });
     harness.requestPermission({
       sessionId: "acp-session-1",
-      toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } },
+      toolCall: { kind: "edit", rawInput: { file_path: "/outside/file.ts" } },
       options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }],
     });
     await expectNoMessage(harness);
     clock.tick(10);
-    expect(await harness.nextMessage()).toMatchObject({ result: { outcome: { optionId: "allow_once" } } });
+    expect(await harness.nextMessage()).toMatchObject({ result: { outcome: { optionId: "reject" } } });
   });
 
-  it("does not loop when a timeout policy reply fails, keeps ask pending, and later deny succeeds", async () => {
+  it("keeps a failed operator reply pending until the still-live deadline applies policy, without looping", async () => {
     const clock = manualClock();
     const harness = makeAcpHarness();
     const events: PermissionAskEvent[] = [];
     const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" }, { permissionClock: clock, permissionGraceMs: 10, onPermissionEvent: (event) => events.push(event) });
     harness.requestPermission({
       sessionId: "acp-session-1",
-      toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } },
+      toolCall: { kind: "edit", rawInput: { file_path: "/outside/file.ts" } },
       options: [{ optionId: "allow_always", kind: "allow_always" }, { optionId: "reject", kind: "reject" }],
     });
     const askId = runner.listPendingPermissions("openboard-task_1-123")[0].id;
-    clock.tick(10);
-    await Promise.resolve();
-    await expectNoMessage(harness);
+
+    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "reply-failed" });
     expect(events.filter((event) => event.type === "permission_reply_failed")).toHaveLength(1);
-    expect(events.at(-1)).toMatchObject({ type: "permission_reply_failed", reason: "policy-timeout", decision: "allow_once" });
+    expect(events.at(-1)).toMatchObject({ type: "permission_reply_failed", reason: "operator", decision: "allow_once" });
     expect(runner.listPendingPermissions("openboard-task_1-123").map((ask) => ask.id)).toEqual([askId]);
 
-    clock.tick(1_000);
+    clock.tick(10);
     await Promise.resolve();
-    await expectNoMessage(harness);
-    expect(events.filter((event) => event.type === "permission_reply_failed")).toHaveLength(1);
-
-    await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "deny", answeredBy: "Operator" })).resolves.toMatchObject({ ok: true });
     expect(await harness.nextMessage()).toMatchObject({ result: { outcome: { optionId: "reject" } } });
+    expect(events.filter((event) => event.type === "permission_reply_failed")).toHaveLength(1);
+    expect(runner.listPendingPermissions("openboard-task_1-123")).toEqual([]);
   });
 
   it("surfaces provider reply failure without dropping ACP asks", async () => {
     const harness = makeAcpHarness();
     const events: PermissionAskEvent[] = [];
     const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" }, { onPermissionEvent: (event) => events.push(event) });
-    harness.requestPermission({ sessionId: "acp-session-1", toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } }, options: [{ optionId: "allow_always", kind: "allow_always" }] });
+    harness.requestPermission({ sessionId: "acp-session-1", toolCall: { kind: "edit", rawInput: { file_path: "/outside/file.ts" } }, options: [{ optionId: "allow_always", kind: "allow_always" }] });
     const askId = runner.listPendingPermissions("openboard-task_1-123")[0].id;
     await expect(runner.respondPermission("openboard-task_1-123", { askId, action: "allow_once", answeredBy: "Operator" })).resolves.toMatchObject({ ok: false, conflict: "reply-failed" });
     expect(events.at(-1)).toMatchObject({ type: "permission_reply_failed", decision: "allow_once" });
@@ -355,7 +400,7 @@ describe("ClaudeAcpRunner", () => {
   it("clears exact-run asks on prompt terminal closure", async () => {
     const harness = makeAcpHarness();
     const { prompt, runner } = await launchRunner(harness, { ...task, permissionMode: "manual" });
-    harness.requestPermission({ sessionId: "acp-session-1", toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } }, options: [{ optionId: "reject", kind: "reject" }] });
+    harness.requestPermission({ sessionId: "acp-session-1", toolCall: { kind: "edit", rawInput: { file_path: "/outside/file.ts" } }, options: [{ optionId: "reject", kind: "reject" }] });
     expect(runner.listPendingPermissions("openboard-task_1-123")).toHaveLength(1);
     harness.respond(prompt, { stopReason: "end_turn" });
     await Promise.resolve();
@@ -376,6 +421,48 @@ describe("ClaudeAcpRunner", () => {
     ]);
     expect(JSON.stringify(activity)).not.toContain("PRIVATE");
     expect(JSON.stringify(activity)).not.toContain("secret");
+  });
+
+  it("normalizes the real ACP session/update envelope (sessionUpdate discriminator) into activity", async () => {
+    const harness = makeAcpHarness();
+    const activity: Array<{ taskId: string; runStartedAt: number; input: SessionActivityEventInput }> = [];
+    await launchRunner(harness, task, { onActivity: (taskId, runStartedAt, input) => activity.push({ taskId, runStartedAt, input }) });
+
+    harness.notify("session/update", {
+      sessionId: "acp-session-1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Reading the file now." } },
+    });
+    harness.notify("session/update", {
+      sessionId: "acp-session-1",
+      update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "I should check the tests first." } },
+    });
+    harness.notify("session/update", {
+      sessionId: "acp-session-1",
+      update: { sessionUpdate: "tool_call", toolCallId: "call_1", title: "Read file.ts", kind: "read", status: "pending", rawInput: { file_path: "/repo/file.ts" } },
+    });
+    harness.notify("session/update", {
+      sessionId: "acp-session-1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "call_1", status: "in_progress" },
+    });
+    harness.notify("session/update", {
+      sessionId: "acp-session-1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "call_1", status: "completed" },
+    });
+    harness.notify("session/update", {
+      sessionId: "acp-session-1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "call_2", title: "Bash", status: "failed" },
+    });
+    // A recognized-but-unmapped sessionUpdate variant (e.g. "plan") must not surface as activity.
+    harness.notify("session/update", { sessionId: "acp-session-1", update: { sessionUpdate: "plan", entries: [] } });
+
+    expect(activity).toEqual([
+      expect.objectContaining({ taskId: "task_1", runStartedAt: 123, input: expect.objectContaining({ kind: "text", role: "assistant", text: "Reading the file now." }) }),
+      expect.objectContaining({ input: expect.objectContaining({ kind: "text", role: "assistant", text: "I should check the tests first." }) }),
+      expect.objectContaining({ input: expect.objectContaining({ kind: "tool", tool: expect.objectContaining({ name: "Read file.ts", callId: "call_1", status: "started" }) }) }),
+      expect.objectContaining({ input: expect.objectContaining({ kind: "tool", tool: expect.objectContaining({ callId: "call_1", status: "running" }) }) }),
+      expect.objectContaining({ input: expect.objectContaining({ kind: "tool", tool: expect.objectContaining({ callId: "call_1", status: "complete" }) }) }),
+      expect.objectContaining({ input: expect.objectContaining({ kind: "tool", tool: expect.objectContaining({ name: "Bash", callId: "call_2", status: "error" }) }) }),
+    ]);
   });
 
   it("keeps default/manual permission decisions inside the task directory", () => {
@@ -479,7 +566,7 @@ describe("CodexAcpRunner", () => {
     await harness.nextMessage("session/prompt");
     const result = await runPromise;
 
-    harness.requestPermission({ sessionId: "cursor-session-1", toolCall: { kind: "edit", rawInput: { file_path: "/repo/file.ts" } }, options: [{ optionId: "allow_once", kind: "allow_once" }] });
+    harness.requestPermission({ sessionId: "cursor-session-1", toolCall: { kind: "edit", rawInput: { file_path: "/outside/file.ts" } }, options: [{ optionId: "allow_once", kind: "allow_once" }] });
     expect(runner.listPendingPermissions(result.sessionName)).toEqual([expect.objectContaining({ harness: "cursor-acp", source: "acp" })]);
     harness.notify("session/update", { sessionId: "cursor-session-1", status: "working" });
     expect(activity).toEqual([expect.objectContaining({ taskId: "task_1", runStartedAt: 789, input: expect.objectContaining({ harness: "cursor-acp", kind: "status", text: "working" }) })]);

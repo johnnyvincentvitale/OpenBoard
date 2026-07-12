@@ -1306,6 +1306,19 @@ describe("SessionActivityCollector", () => {
       expect(snapshotB?.events.map((e) => e.text)).toEqual(["b1"]);
     });
 
+    it("collapses identical assistant echoes within one user turn but resets at the next user message", () => {
+      collector.startRun(makeRun());
+      collector.recordEvent("task_1", 1000, makeInput({ role: "user", text: "first" }));
+      collector.recordEvent("task_1", 1000, makeInput({ role: "assistant", text: "YES" }));
+      expect(collector.recordEvent("task_1", 1000, makeInput({ role: "assistant", text: "YES" }))).toBeNull();
+      collector.recordEvent("task_1", 1000, makeInput({ role: "user", text: "second" }));
+      expect(collector.recordEvent("task_1", 1000, makeInput({ role: "assistant", text: "YES" }))).not.toBeNull();
+
+      const { frames } = collectFrames(collector, "task_1", 0);
+      const snapshot = frames.find((frame) => frame.kind === "snapshot");
+      expect(snapshot?.kind === "snapshot" ? snapshot.events.map((event) => event.text) : []).toEqual(["first", "YES", "second", "YES"]);
+    });
+
     it("reconnect with cursor: subscriber gets gap + snapshot + heartbeat", () => {
       const small = makeCollector({ maxEvents: 2 });
       now = 1000;

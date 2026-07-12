@@ -16,6 +16,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   AddTasksInputSchema,
   AnswerBlockedTaskInputSchema,
+  BlockTaskInputSchema,
   CommentTaskInputSchema,
   CompleteTaskInputSchema,
   CreateTaskInputSchema,
@@ -23,6 +24,7 @@ import {
   LinkTasksInputSchema,
   MoveTaskInputSchema,
   RespondPermissionInputSchema,
+  SendSessionMessageInputSchema,
   RetryTaskInputSchema,
   SelectInstanceInputSchema,
   TailSessionInputSchema,
@@ -46,6 +48,7 @@ import {
   moveTask,
   openboardStatus,
   respondPermission,
+  sendSessionMessage,
   retryTask,
   runTask,
   selectInstance,
@@ -203,8 +206,8 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
     "block_task",
     {
       title: "Block OpenBoard task",
-      description: "Submit a structured blocked report through POST /api/tasks/:id/block.",
-      inputSchema: CompleteTaskInputSchema,
+      description: "Submit a structured blocked report through POST /api/tasks/:id/block. When blocked on a question the operator must answer, include needsInput with the direct question (1-2000 chars) so the board can surface it for an answer.",
+      inputSchema: BlockTaskInputSchema,
     },
     async (args) => toToolResult(await blockTask(args, toolOptions)),
   );
@@ -243,10 +246,20 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
     "respond_permission",
     {
       title: "Respond to permission ask",
-      description: "Respond to a pending permission ask for a task. Actions: allow_once (grant this request, permission returns to ask on next matching call), deny (block this request, permission returns to ask). answeredBy is required for audit trail.",
+      description: "Respond to a pending permission ask for a task. Actions: allow_once (grant this request, permission returns to ask on next matching call), deny (block this request, permission returns to ask). answeredBy is required for audit trail. Returns the updated task projection (post-resolution pending asks included), not an ok/decision outcome object.",
       inputSchema: RespondPermissionInputSchema,
     },
     async (args) => toToolResult(await respondPermission(args, toolOptions)),
+  );
+
+  server.registerTool(
+    "send_session_message",
+    {
+      title: "Send session message",
+      description: "Send operator-authored chat input to an existing card session. queue continues the session without cancelling the current turn; interrupt cancels the current turn before sending. Requires explicit sender, idempotency id, and expected session identity.",
+      inputSchema: SendSessionMessageInputSchema,
+    },
+    async (args) => toToolResult(await sendSessionMessage(args, toolOptions)),
   );
 
   server.registerTool(

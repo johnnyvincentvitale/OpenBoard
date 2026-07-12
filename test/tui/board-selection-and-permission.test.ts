@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleKeypress } from "../../src/tui/index";
 import { createMockInstanceProvider } from "../../src/tui/model";
-import type { Column, PendingPermissionAsk, RespondPermissionOutcome, Task } from "../../src/shared";
+import type { Column, PendingPermissionAsk, Task } from "../../src/shared";
 
 function task(id: string, column: Column, overrides: Partial<Task> = {}): Task {
   return {
@@ -67,12 +67,10 @@ function actions(overrides: Record<string, unknown> = {}) {
     shutdown: vi.fn(),
     runAction: vi.fn(async () => undefined),
     client: {
+      // POST /api/tasks/:id/permission returns the projected Task on
+      // success — not an {ok, decision} outcome shape.
       respondPermission: vi.fn(
-        async (_taskId: string, input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({
-          ok: true,
-          askId: input.askId,
-          decision: input.action,
-        }),
+        async (taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<Task> => task(taskId, "in_progress"),
       ),
       ...(overrides as any).client,
     },
@@ -200,5 +198,59 @@ describe("Permission response is bound to the ask/card actually shown (P3-8)", (
 
     expect(s.selectedTaskId).toBe("second");
     expect(s.permissionAskBinding).toEqual({ taskId: "second", askId: "ask-2" });
+  });
+});
+
+describe("Permission reply status reflects the actual server response shape", () => {
+  it("shows a success status (not 'undefined') after allowing once, since the server returns a Task, not an {ok} outcome", async () => {
+    const t = task("t1", "in_progress", { pendingPermissions: [ask("ask-1")] });
+    const s = state({ tasks: [t], selectedTaskId: "t1" });
+    const a = actions();
+
+    await handleKeypress({ sequence: "y", name: "y" } as any, s, a);
+
+    expect(s.status).toBe("permission allowed once");
+    expect(s.status).not.toContain("undefined");
+    expect(a.refresh).toHaveBeenCalledWith(true);
+  });
+
+  it("shows a success status after denying", async () => {
+    const t = task("t1", "in_progress", { pendingPermissions: [ask("ask-1")] });
+    const s = state({ tasks: [t], selectedTaskId: "t1" });
+    const a = actions();
+
+    await handleKeypress({ sequence: "N", name: "N" } as any, s, a);
+
+    expect(s.status).toBe("permission denied");
+    expect(s.status).not.toContain("undefined");
+  });
+
+  it("refreshes and reports a stale ask on a 409 (already-resolved or not-found conflict) instead of surfacing a raw error", async () => {
+    const t = task("t1", "in_progress", { pendingPermissions: [ask("ask-1")] });
+    const s = state({ tasks: [t], selectedTaskId: "t1" });
+    const respondPermission = vi.fn(async () => {
+      throw new Error("OpenBoard request failed (409): Permission ask already resolved: ask-1");
+    });
+    const a = actions({ client: { respondPermission } });
+
+    await handleKeypress({ sequence: "y", name: "y" } as any, s, a);
+
+    expect(s.status).toBe("permission ask changed; refreshing...");
+    expect(s.error).toBeUndefined();
+    expect(a.refresh).toHaveBeenCalledWith(true);
+  });
+
+  it("surfaces a non-409 failure (e.g. 502 provider reply failure) as an error instead of retrying", async () => {
+    const t = task("t1", "in_progress", { pendingPermissions: [ask("ask-1")] });
+    const s = state({ tasks: [t], selectedTaskId: "t1" });
+    const respondPermission = vi.fn(async () => {
+      throw new Error("OpenBoard request failed (502): Permission reply failed: provider unreachable");
+    });
+    const a = actions({ client: { respondPermission } });
+
+    await handleKeypress({ sequence: "y", name: "y" } as any, s, a);
+
+    expect(s.status).toBe("permission answer failed");
+    expect(s.error).toContain("502");
   });
 });

@@ -101,7 +101,9 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
     sweepOrphanedWorktrees: vi.fn(async () => []),
     resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
     listPendingPermissions: vi.fn(() => []),
-    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),    start: vi.fn(),
+    respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
+    sendSessionMessage: vi.fn(async (taskId: string, input) => ({ messageId: input.clientMessageId, taskId, sessionId: input.expectedSessionId, status: "accepted" as const, mode: input.mode, sentAt: Date.now(), sentBy: input.sentBy, task: store.get(taskId)! })),
+    start: vi.fn(),
     shutdown: vi.fn(),
   };
 }
@@ -1532,6 +1534,50 @@ describe("POST /api/tasks/:id/retry", () => {
     const body = await res.json();
     expect(body.error.message).toContain("Manual tasks cannot retry");
     expect(dispatcher.retry).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/tasks/:id/session-messages", () => {
+  let store: SqliteTaskStore;
+  let dispatcher: ReturnType<typeof makeFakeDispatcher>;
+
+  beforeEach(() => {
+    store = new SqliteTaskStore(":memory:");
+    dispatcher = makeFakeDispatcher(store);
+  });
+
+  afterEach(() => store.close());
+
+  it("validates and forwards an operator message with session identity", async () => {
+    const task = store.create({ title: "Chat", description: "", directory: repoDir });
+    store.update(task.id, { sessionId: "ses_chat", runStartedAt: 123, runState: "running" });
+    const app = buildApp(store, dispatcher);
+    const body = {
+      text: "Please check the failing test",
+      mode: "queue",
+      sentBy: "User",
+      clientMessageId: "msg-1",
+      expectedSessionId: "ses_chat",
+      expectedRunStartedAt: 123,
+    };
+    const res = await app.request(`/api/tasks/${task.id}/session-messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(202);
+    expect(dispatcher.sendSessionMessage).toHaveBeenCalledWith(task.id, body);
+  });
+
+  it("rejects empty messages before dispatch", async () => {
+    const task = store.create({ title: "Chat", description: "", directory: repoDir });
+    const app = buildApp(store, dispatcher);
+    const res = await app.request(`/api/tasks/${task.id}/session-messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "  ", mode: "queue", sentBy: "User", clientMessageId: "msg-2", expectedSessionId: "ses" }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 

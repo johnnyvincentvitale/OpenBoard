@@ -216,17 +216,23 @@ export function buildConfirmationCopy(
       ];
       break;
     case "move-to-done":
-      if (task.completion?.outcome === "blocked" && task.completionSource === "reported") {
+      // Any blocked completion demands the deliberate-acceptance copy —
+      // "reported" (agent-authored) and "watchdog" (system-authored after
+      // retry exhaustion) alike. Watchdog blocks are the routine triage
+      // surface; showing them the generic copy while silently attaching
+      // acceptance bypassed exactly the confirmation this flow exists for.
+      if (task.completion?.outcome === "blocked" && (task.completionSource === "reported" || task.completionSource === "watchdog")) {
         const verification = task.completion.verification.length
           ? task.completion.verification.map((item) => `${item.command} ${item.result}`).join(", ")
           : "none reported";
+        const sourceLabel = task.completionSource === "watchdog" ? "watchdog-blocked (auto-retries exhausted)" : "agent-reported blocked";
         body = [
           "BLOCKED-INCOMPLETE ACCEPTANCE REQUIRED.",
           `Question: ${task.completion.needsInput || task.completion.residualRisk || task.completion.summary}`,
           `Summary: ${task.completion.summary}`,
           `Verification: ${verification}`,
           `Risk: ${task.completion.residualRisk || "none reported"}`,
-          `Source: agent-reported blocked at ${task.completion.reportedAt}`,
+          `Source: ${sourceLabel} at ${task.completion.reportedAt}`,
           "Confirming accepts incomplete blocked work and moves the card to Done.",
         ];
         break;

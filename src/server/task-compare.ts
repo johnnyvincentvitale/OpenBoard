@@ -84,8 +84,27 @@ async function resolveBaseSource(task: Task): Promise<ResolvedRefSource | Unsupp
     return { kind: "unsupported", reason: `Task ${task.id} durable ref is unsafe and was rejected before git invocation` };
   }
 
-  if (!(await isValidRef(cwd, ref))) {
+  const tip = await execGit(cwd, ["rev-parse", "--verify", ref]);
+  const tipSha = tip.code === 0 ? tip.stdout.trim() : "";
+  if (!tipSha) {
     return { kind: "unsupported", reason: `Task ${task.id} durable ref ${ref} is not available` };
+  }
+
+  // A Review card's work usually sits UNCOMMITTED in its live worktree until
+  // Integrate — its branch tip is still the fork commit. Diffing against
+  // that tip would silently present the base's entire output as absent
+  // (a confident wrong answer), so refuse honestly when the worktree holds
+  // uncommitted changes the tip doesn't contain. A branch with commits
+  // beyond the fork point, or a genuinely clean worktree at the fork
+  // (the card produced no output), remains a truthful durable base.
+  if (task.worktreePath && ref === task.worktreeBranch && task.baseCommit && tipSha === task.baseCommit) {
+    const status = await execGit(task.worktreePath, ["status", "--porcelain"]);
+    if (status.code === 0 && status.stdout.trim().length > 0) {
+      return {
+        kind: "unsupported",
+        reason: `Task ${task.id}'s output is still uncommitted in its live worktree (branch ${ref} has no commits beyond its fork point) — integrate the task or commit its work before comparing against it`,
+      };
+    }
   }
 
   return { kind: "ref", repoRoot: identity.repoRoot, gitCommonDir: identity.gitCommonDir, ref };

@@ -159,6 +159,46 @@ describe("confirmation copy builders", () => {
     expect(copy.body).toContain("Source: agent-reported");
   });
 
+  it("shows the blocked-incomplete acceptance copy for WATCHDOG-blocked cards, not the generic signoff (P2 regression)", () => {
+    const copy = buildConfirmationCopy("move-to-done", {
+      title: "Stalled card",
+      completionSource: "watchdog",
+      completion: {
+        outcome: "blocked",
+        summary: "Watchdog exhausted automatic retries",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "run never completed",
+        reportedAt: 5,
+        needsInput: "Review the partial work and decide how to proceed.",
+      },
+    });
+
+    expect(copy.body[0]).toBe("BLOCKED-INCOMPLETE ACCEPTANCE REQUIRED.");
+    expect(copy.body).toContain("Question: Review the partial work and decide how to proceed.");
+    expect(copy.body.some((line) => line.includes("watchdog-blocked (auto-retries exhausted)"))).toBe(true);
+    expect(copy.body).toContain("Confirming accepts incomplete blocked work and moves the card to Done.");
+  });
+
+  it("keeps the agent-reported source label for reported blocked cards", () => {
+    const copy = buildConfirmationCopy("move-to-done", {
+      title: "Blocked card",
+      completionSource: "reported",
+      completion: {
+        outcome: "blocked",
+        summary: "Blocked on missing credentials",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "cannot verify",
+        reportedAt: 7,
+        needsInput: "Which API key should I use?",
+      },
+    });
+
+    expect(copy.body[0]).toBe("BLOCKED-INCOMPLETE ACCEPTANCE REQUIRED.");
+    expect(copy.body.some((line) => line.includes("agent-reported blocked at 7"))).toBe(true);
+  });
+
   it("run confirmation for a worktree-isolated card names the exact isolation mode", () => {
     const copy = buildConfirmationCopy("run", { title: "Widget work", isolation: "worktree", harness: "opencode" });
 

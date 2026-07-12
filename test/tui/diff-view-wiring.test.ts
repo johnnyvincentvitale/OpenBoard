@@ -97,6 +97,7 @@ function actions(overrides: Record<string, unknown> = {}) {
     closeArchive: vi.fn(),
     refreshArchive: vi.fn(async () => undefined),
     setupWorkspace: vi.fn(async () => undefined),
+    copyToClipboard: vi.fn(async () => undefined),
     editorSpawner: {
       runTerminalEditor: vi.fn(async () => ({ code: 0 })),
       spawnGuiEditor: vi.fn(),
@@ -109,7 +110,10 @@ function actions(overrides: Record<string, unknown> = {}) {
 describe("TUI diff view entry (v)", () => {
   it("disables background board polling while the diff renderer owns scroll state", () => {
     expect(shouldAutoRefresh({ view: "diff", previousView: "board" })).toBe(false);
-    expect(shouldAutoRefresh({ view: "follow", previousView: "board" })).toBe(false);
+    // "follow" polls deliberately: permission asks raised mid-run must surface
+    // in the follow view's banner before their deadline (scroll state lives in
+    // followView, so the quiet refresh can't disturb the reading position).
+    expect(shouldAutoRefresh({ view: "follow", previousView: "board" })).toBe(true);
     expect(shouldAutoRefresh({ view: "archive", previousView: "board" })).toBe(false);
     expect(shouldAutoRefresh({ view: "launch", previousView: "board" })).toBe(false);
     expect(shouldAutoRefresh({ view: "workspaceGate", previousView: "launch" })).toBe(false);
@@ -128,6 +132,61 @@ describe("TUI diff view entry (v)", () => {
     expect(a.shutdown).not.toHaveBeenCalled();
     expect(s.viewState.view).toBe("board");
     expect(a.refresh).toHaveBeenCalledWith(true);
+  });
+
+  it("composes and sends a message from Session Chat against the bound session", async () => {
+    const chatTask = task("task-1", "in_progress", { sessionId: "ses-1", runStartedAt: 123, runState: "running" });
+    const followView = { taskId: "task-1", events: [], connection: "LIVE", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 };
+    const s = state({ tasks: [chatTask], selectedTaskId: chatTask.id, viewState: { view: "follow", previousView: "board" }, followView });
+    const sendSessionMessage = vi.fn(async (_id: string, input: any) => ({ messageId: input.clientMessageId, taskId: chatTask.id, sessionId: "ses-1", status: "queued", mode: input.mode, sentAt: 456, sentBy: "User", task: chatTask }));
+    const a = actions({ client: { sendSessionMessage, streamSessionEvents: vi.fn(async () => ({ active: true, close: vi.fn() })) } });
+
+    await handleKeypress({ name: "i", sequence: "i" } as any, s, a);
+    for (const char of "hello") await handleKeypress({ name: char, sequence: char } as any, s, a);
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+
+    expect(sendSessionMessage).toHaveBeenCalledWith("task-1", expect.objectContaining({ text: "hello", mode: "queue", expectedSessionId: "ses-1", expectedRunStartedAt: 123 }));
+    expect(s.sessionChatDraft).toBeUndefined();
+    expect(s.status).toContain("queued");
+  });
+
+  it("renders the Follow surface as Session Chat", () => {
+    const chatTask = task("task-1", "in_progress", { sessionId: "ses-1", runState: "running" });
+    const s = state({ tasks: [chatTask], selectedTaskId: chatTask.id, viewState: { view: "follow", previousView: "board" }, followView: { taskId: "task-1", events: [], connection: "LIVE", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 } });
+    expect(textOf(renderApp(fakeUi(), s))).toContain("Session Chat");
+    expect(textOf(renderApp(fakeUi(), s))).toContain("Press i to message this session");
+  });
+
+  it("renders fenced code as a labelled copy box and copies the selected source", async () => {
+    const chatTask = task("task-1", "review", { sessionId: "ses-1", runState: "idle" });
+    const codeEvent = {
+      seq: 7,
+      taskId: "task-1",
+      runStartedAt: 1,
+      sessionId: "ses-1",
+      rootSessionId: "ses-1",
+      harness: "opencode",
+      occurredAt: 7,
+      kind: "text",
+      role: "assistant",
+      text: "To retest:\n\n```sh\nopenboard attach qa-wave\n```",
+    };
+    const s = state({
+      tasks: [chatTask],
+      selectedTaskId: chatTask.id,
+      viewState: { view: "follow", previousView: "board" },
+      followView: { taskId: "task-1", events: [codeEvent], connection: "STATIC", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 },
+    });
+    const copyToClipboard = vi.fn(async () => undefined);
+    const rendered = renderApp(fakeUi(), s);
+
+    expect(textOf(rendered)).toContain("sh · COPY c · SELECTED");
+    expect(textOf(rendered)).toContain("openboard attach qa-wave");
+    expect(nodesByType(rendered, "Box").some((node) => node.props.borderStyle === "rounded")).toBe(true);
+
+    await handleKeypress({ name: "c", sequence: "c" } as any, s, actions({ copyToClipboard }));
+    expect(copyToClipboard).toHaveBeenCalledWith("openboard attach qa-wave");
+    expect(s.status).toBe("copied sh block to clipboard");
   });
 
   it("opens the full-screen diff view for a selected Review card and fetches its diff", async () => {

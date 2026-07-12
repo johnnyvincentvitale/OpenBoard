@@ -101,6 +101,12 @@ class FakeOpencodeClient {
   nextSessionId = "ses_x";
   createShouldError: { error: unknown } | null = null;
   promptShouldError: { error: unknown } | null = null;
+  /** When > 0, the next N session.create() calls fail (decrementing), independent of
+   * the persistent createShouldError flag — for simulating a bounded run of failures
+   * (e.g. one failed watchdog retry attempt followed by a successful one). */
+  createShouldErrorCount = 0;
+  /** Same as createShouldErrorCount but for promptAsync(). */
+  promptShouldErrorCount = 0;
   childrenResponses = new Map<string, unknown[]>();
   childrenShouldError: { error: unknown } | null = null;
   childrenCalls: Array<{ sessionID: string }> = [];
@@ -126,6 +132,10 @@ class FakeOpencodeClient {
       permission?: unknown;
     }) => {
       this.createCalls.push(params);
+      if (this.createShouldErrorCount > 0) {
+        this.createShouldErrorCount -= 1;
+        return { data: undefined, error: this.createShouldError?.error ?? { message: "session create failed" } };
+      }
       if (this.createShouldError) {
         return { data: undefined, error: this.createShouldError.error };
       }
@@ -142,6 +152,10 @@ class FakeOpencodeClient {
       parts: unknown;
     }) => {
       this.promptCalls.push(params);
+      if (this.promptShouldErrorCount > 0) {
+        this.promptShouldErrorCount -= 1;
+        return { data: undefined, error: this.promptShouldError?.error ?? { message: "prompt failed" } };
+      }
       if (this.promptShouldError) {
         return { data: undefined, error: this.promptShouldError.error };
       }
@@ -224,6 +238,7 @@ function makeClaudeRunner(): ClaudeCodeRunnerLike & {
   retry: ReturnType<typeof vi.fn>;
   poll: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
+  sendMessage: ReturnType<typeof vi.fn>;
 } {
   return {
     run: vi.fn(async () => ({
@@ -238,6 +253,7 @@ function makeClaudeRunner(): ClaudeCodeRunnerLike & {
     })),
     poll: vi.fn(async () => undefined),
     abort: vi.fn(async () => undefined),
+    sendMessage: vi.fn(async () => undefined),
   };
 }
 
@@ -862,6 +878,31 @@ describe("TaskDispatcher", () => {
       expect(prompt.indexOf("Fix the audited issue")).toBeLessThan(
         prompt.indexOf("OPENBOARD TASK CONTEXT"),
       );
+    });
+
+    it("continues a live ACP card through the existing harness session", async () => {
+      const task = store.create({ title: "Claude chat", description: "Start", directory: myProjectDir, harness: "claude-code" });
+      const claudeRunner = makeClaudeRunner();
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+      await dispatcher.run(task.id);
+      const current = store.get(task.id)!;
+
+      const receipt = await dispatcher.sendSessionMessage(task.id, {
+        text: "Now focus on the API test",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-acp",
+        expectedSessionId: "claude-session-1",
+        expectedRunStartedAt: current.runStartedAt,
+      });
+
+      expect(claudeRunner.sendMessage).toHaveBeenCalledWith(
+        "openboard-task-claude",
+        expect.stringContaining("Now focus on the API test"),
+        expect.objectContaining({ mode: "queue" }),
+      );
+      expect(receipt.task.harnessSessionId).toBe("claude-session-1");
+      expect(claudeRunner.run).toHaveBeenCalledTimes(1);
     });
 
     it("injects satisfied parent handoffs before the completion-contract footer", async () => {
@@ -1599,6 +1640,241 @@ describe("TaskDispatcher", () => {
       // Exactly one of each.
       expect(events.filter((e) => e === "task_watchdog_retry")).toHaveLength(1);
       expect(events.filter((e) => e === "task_watchdog_fallback")).toHaveLength(1);
+    });
+
+    it("session-create failure on a watchdog retry consumes the next attempt slot and succeeds (P1 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_create_fail_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+
+      // The first watchdog-retry attempt (attempt 1) fails to create a session;
+      // the second (attempt 2) succeeds.
+      client.createShouldErrorCount = 1;
+      client.nextSessionId = "ses_create_fail_2";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_create_fail_0", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      // Two create calls were attempted for the retry: the failed attempt 1 and
+      // the successful attempt 2.
+      expect(client.createCalls).toHaveLength(3);
+      // The card is running again on the fresh session, not stranded on the dead one.
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_create_fail_2", runState: "running", autoRetries: 2 });
+      const events = store.listEvents(task.id).map((event) => event.type);
+      expect(events).toContain("task_watchdog_retry_failed");
+      expect(events).toContain("task_watchdog_retry");
+      expect(events).not.toContain("task_watchdog_exhausted");
+      // A fresh watchdog is armed on the new run.
+      const runRecord = (dispatcher as never as { openCodeRunsByTask: Map<string, { rootSessionId: string; watchdog: { snapshot: () => { stage: string } } }> }).openCodeRunsByTask.get(task.id);
+      expect(runRecord?.rootSessionId).toBe("ses_create_fail_2");
+      expect(runRecord?.watchdog.snapshot().stage).toBe("healthy");
+    });
+
+    it("session-create failure that exhausts the retry budget system-blocks the task (P1 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_create_exhaust_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+
+      // Both remaining automatic-retry attempts (1 and 2) fail to create a session.
+      client.createShouldErrorCount = 2;
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_create_exhaust_0", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      // Only the two failing create calls happened — no third attempt beyond the cap.
+      expect(client.createCalls).toHaveLength(3);
+      expect(store.get(task.id)).toMatchObject({ column: "review", runState: "error", completionSource: "watchdog" });
+      expect(store.get(task.id)?.completion).toMatchObject({ outcome: "blocked", needsInput: expect.stringContaining("Review the partial") });
+      const events = store.listEvents(task.id).map((event) => event.type);
+      expect(events.filter((e) => e === "task_watchdog_retry_failed")).toHaveLength(2);
+      expect(events).toContain("task_watchdog_exhausted");
+      // The dangling run record from the aborted root is cleaned up, not left running forever.
+      expect((dispatcher as never as { openCodeRunsByTask: Map<string, unknown> }).openCodeRunsByTask.has(task.id)).toBe(false);
+    });
+
+    it("prompt-admission failure on a watchdog retry consumes the next attempt slot and succeeds (P2 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_prompt_fail_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+
+      // Attempt 1 creates a session but fails to admit the prompt; attempt 2 succeeds fully.
+      client.promptShouldErrorCount = 1;
+      client.nextSessionId = "ses_prompt_fail_1";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_prompt_fail_0", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      // Two session creates for the retry: attempt 1 (prompt fails) and attempt 2 (succeeds).
+      expect(client.createCalls).toHaveLength(3);
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_prompt_fail_1", runState: "running", autoRetries: 2 });
+      const events = store.listEvents(task.id).map((event) => event.type);
+      expect(events).toContain("task_watchdog_retry_failed");
+      expect(events).not.toContain("task_watchdog_exhausted");
+      const runRecord = (dispatcher as never as { openCodeRunsByTask: Map<string, { rootSessionId: string }> }).openCodeRunsByTask.get(task.id);
+      expect(runRecord?.rootSessionId).toBe("ses_prompt_fail_1");
+    });
+
+    it("prompt-admission failure that exhausts the retry budget system-blocks the task (P2 regression)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_prompt_exhaust_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+
+      // Both remaining automatic-retry attempts (1 and 2) create sessions fine but
+      // fail prompt admission every time.
+      client.promptShouldErrorCount = 2;
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_prompt_exhaust_0", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      expect(store.get(task.id)).toMatchObject({ column: "review", runState: "error", completionSource: "watchdog" });
+      expect(store.get(task.id)?.completion).toMatchObject({ outcome: "blocked", needsInput: expect.stringContaining("Review the partial") });
+      const events = store.listEvents(task.id).map((event) => event.type);
+      expect(events.filter((e) => e === "task_watchdog_retry_failed")).toHaveLength(2);
+      expect(events).toContain("task_watchdog_exhausted");
+      expect((dispatcher as never as { openCodeRunsByTask: Map<string, unknown> }).openCodeRunsByTask.has(task.id)).toBe(false);
+    });
+
+    it("watchdog trip on a still-busy session tree re-arms instead of aborting (long quiet tool call)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_busy_probe";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      client.sessionStatus = { ses_busy_probe: "busy" };
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+
+      (dispatcher as unknown as {
+        handleWatchdogTermination(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; terminatedAt: number }): void;
+      }).handleWatchdogTermination({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_busy_probe", attempt: 0 },
+        reason: "liveness-timeout",
+        terminatedAt: Date.now(),
+      });
+
+      await waitFor(() => store.listEvents(task.id).some((event) => event.type === "task_watchdog_busy_wait"));
+      expect(client.abortCalls).toEqual([]);
+      expect(store.get(task.id)?.runState).toBe("running");
+      expect(store.listEvents(task.id).some((event) => event.type === "task_watchdog_tripped")).toBe(false);
+    });
+
+    it("busy re-arm budget is bounded: a session wedged in status busy still trips after MAX re-arms", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_busy_wedged";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      client.sessionStatus = { ses_busy_wedged: "busy" };
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+      const internal = dispatcher as unknown as {
+        handleWatchdogTermination(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; terminatedAt: number }): void;
+      };
+      const trip = () => internal.handleWatchdogTermination({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_busy_wedged", attempt: 0 },
+        reason: "liveness-timeout",
+        terminatedAt: Date.now(),
+      });
+
+      trip();
+      await waitFor(() => store.listEvents(task.id).filter((event) => event.type === "task_watchdog_busy_wait").length === 1);
+      trip();
+      await waitFor(() => store.listEvents(task.id).filter((event) => event.type === "task_watchdog_busy_wait").length === 2);
+      trip();
+      await waitFor(() => store.listEvents(task.id).some((event) => event.type === "task_watchdog_tripped"));
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_busy_wedged" }]);
+    });
+
+    it("watchdog trip on an idle session tree aborts without a busy re-arm", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_idle_probe";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      client.sessionStatus = { ses_idle_probe: "idle" };
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+
+      (dispatcher as unknown as {
+        handleWatchdogTermination(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; terminatedAt: number }): void;
+      }).handleWatchdogTermination({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_idle_probe", attempt: 0 },
+        reason: "liveness-timeout",
+        terminatedAt: Date.now(),
+      });
+
+      await waitFor(() => store.listEvents(task.id).some((event) => event.type === "task_watchdog_tripped"));
+      expect(store.listEvents(task.id).some((event) => event.type === "task_watchdog_busy_wait")).toBe(false);
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_idle_probe" }]);
+    });
+
+    it("manual retry resets the breaker surface (autoRetries and fallback activeModel)", async () => {
+      const task = createTask({ directory: myProjectDir });
+      store.update(task.id, { model: { providerID: "openai", id: "gpt-5.5" } });
+      client.nextSessionId = "ses_retry_reset";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      // Simulate a prior watchdog fallback escalation left on the record.
+      store.update(task.id, { autoRetries: 2, activeModel: { providerID: "openrouter", id: "fallback-model" } });
+
+      await dispatcher.retry(task.id);
+
+      expect(store.get(task.id)).toMatchObject({
+        autoRetries: 0,
+        activeModel: { providerID: "openai", id: "gpt-5.5" },
+        runState: "running",
+      });
+    });
+
+    it("watchdog fresh attempts carry a retry-context preamble naming the prior stalled attempt", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_preamble_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+      client.nextSessionId = "ses_preamble_1";
+
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_preamble_0", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      const retryPrompt = JSON.stringify(client.promptCalls.at(-1)?.parts ?? "");
+      expect(retryPrompt).toContain("WATCHDOG RETRY CONTEXT (attempt 1)");
+      expect(retryPrompt).toContain("preserve work already done");
+      // The original dispatch prompt must NOT carry the preamble.
+      expect(JSON.stringify(client.promptCalls[0]?.parts ?? "")).not.toContain("WATCHDOG RETRY CONTEXT");
     });
   });
 
@@ -3484,6 +3760,57 @@ describe("TaskDispatcher", () => {
       expect(contractIdx).toBeGreaterThan(-1);
       expect(taskCtxIdx).toBeLessThan(parentCtxIdx);
       expect(parentCtxIdx).toBeLessThan(contractIdx);
+    });
+
+    it("chats over a Review card through the same OpenCode session without replacing lifecycle evidence", async () => {
+      const task = createTask({ title: "Chat continuation" });
+      client.nextSessionId = "ses_chat_same";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const baseline = store.get(task.id)?.baseCommit;
+      store.setCompletion(task.id, { outcome: "complete", summary: "first turn", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 10 }, "reported");
+      store.move(task.id, "review", 0);
+      store.update(task.id, { runState: "idle" });
+
+      const receipt = await dispatcher.sendSessionMessage(task.id, {
+        text: "Please explain the remaining risk",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-review",
+        expectedSessionId: "ses_chat_same",
+        expectedRunStartedAt: store.get(task.id)?.runStartedAt,
+      });
+
+      expect(receipt.status).toBe("accepted");
+      expect(receipt.task).toMatchObject({ sessionId: "ses_chat_same", column: "review", runState: "running", completion: { summary: "first turn" }, baseCommit: baseline });
+      expect(client.createCalls).toHaveLength(1);
+      expect(client.promptCalls).toHaveLength(2);
+      const chatPrompt = String((client.promptCalls.at(-1)?.parts as Array<{ text: string }>)[0]?.text);
+      expect(chatPrompt).toContain("OPENBOARD SESSION CHAT");
+      expect(chatPrompt).toContain("Do not call complete_task or block_task");
+      expect(chatPrompt).not.toContain("OPENBOARD COMPLETION CONTRACT");
+    });
+
+    it("interrupts only the active OpenCode turn before sending a replacement message", async () => {
+      const task = createTask({ title: "Chat redirect" });
+      client.nextSessionId = "ses_chat_interrupt";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const active = store.get(task.id)!;
+
+      const receipt = await dispatcher.sendSessionMessage(task.id, {
+        text: "Stop and use the smaller fixture",
+        mode: "interrupt",
+        sentBy: "User",
+        clientMessageId: "msg-interrupt",
+        expectedSessionId: "ses_chat_interrupt",
+        expectedRunStartedAt: active.runStartedAt,
+      });
+
+      expect(client.abortCalls).toContainEqual({ sessionID: "ses_chat_interrupt" });
+      expect(receipt.task.sessionId).toBe("ses_chat_interrupt");
+      expect(client.createCalls).toHaveLength(1);
+      expect(client.promptCalls).toHaveLength(2);
     });
   });
 });

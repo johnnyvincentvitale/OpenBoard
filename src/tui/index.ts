@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES } from "../shared";
 import { validateInstanceName } from "../shared/instances";
 import { assertOpenTuiRuntime } from "./runtime";
@@ -92,7 +93,8 @@ import {
 } from "./confirmations";
 import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
 import { bindPermissionAsk, firstPendingPermissionAsk, permissionInFlightKey, resolveBoundPermissionAsk, type PermissionAskBinding } from "./permission-surface";
-import { applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, descendantSessionLabel, followVisibleEvents, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, tailFollow, type FollowViewState } from "./follow-view";
+import { applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, descendantSessionLabel, followVisibleEvents, markFollowDisconnected, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, tailFollow, type FollowViewState } from "./follow-view";
+import { chatCodeBlocks, cycleChatCodeBlock, parseChatMarkdown, selectedChatCodeBlock } from "./chat-markdown";
 import { backspaceBlockedAnswerDraft, blockedAnswerDraftKey, blockedAnswerSubmitLabel, createBlockedAnswerDraft, editBlockedAnswerDraft, lineDeleteBlockedAnswerDraft, staleBlockedAnswerDraft, type BlockedAnswerDraft } from "./blocked-answer";
 import { createDiffLineageState, diffLineageHeader, fetchSelectedDiffEvidence, moveAncestorSelection, type DiffLineageState } from "./diff-lineage";
 import { fallbackModelOptions, modelRetryLabel, predictedBlockedAnswerResumeMode } from "./model-fallback";
@@ -128,7 +130,12 @@ const ARCHIVE_READER_MAX_BUFFER = 16 * 1024 * 1024;
 const DETAIL_SCROLL_STEP_ROWS = 3;
 
 export function shouldAutoRefresh(viewState: ViewState): boolean {
-  return !["archive", "diff", "follow", "launch", "workspaceGate", "settings"].includes(viewState.view);
+  // "follow" stays in the poll loop deliberately: permission asks raised while
+  // the operator watches a live session must surface in the follow view's
+  // banner before their deadline expires, and that projection rides on
+  // state.tasks. Scroll/tail state lives in followView, so a quiet refresh
+  // does not disturb the reading position.
+  return !["archive", "diff", "launch", "workspaceGate", "settings"].includes(viewState.view);
 }
 
 export function boardApiFetchInit(init: RequestInit = {}, boardToken = process.env.OPENBOARD_API_TOKEN): RequestInit {
@@ -612,6 +619,13 @@ interface CommentDraftState {
   text: string;
 }
 
+interface SessionChatDraft {
+  taskId: string;
+  text: string;
+  submitting: boolean;
+  error?: string;
+}
+
 interface TuiState {
   tasks: Task[];
   agents: RosterAgent[];
@@ -684,6 +698,9 @@ interface TuiState {
   permissionAskBinding?: PermissionAskBinding;
   followView?: FollowViewState;
   followStream?: { close(): void };
+  /** Pending reconnect attempt for a dropped follow stream. */
+  followReconnectTimer?: ReturnType<typeof setTimeout>;
+  sessionChatDraft?: SessionChatDraft;
   blockedAnswer?: BlockedAnswerDraft;
   blockedAnswerDrafts?: Record<string, BlockedAnswerDraft>;
   diffLineage?: DiffLineageState;
@@ -743,6 +760,28 @@ function createRealEditorSpawner(renderer: { suspend: () => void; resume: () => 
   };
 }
 
+export function copyTextToClipboard(text: string): Promise<void> {
+  const command = process.platform === "darwin" ? "pbcopy" : process.platform === "win32" ? "clip" : "wl-copy";
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [], { stdio: ["pipe", "ignore", "ignore"] });
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    child.once("error", fail);
+    child.stdin.once("error", fail);
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with code ${code ?? "unknown"}`));
+    });
+    child.stdin.end(text);
+  });
+}
+
 interface TuiActions {
   refresh: (quiet?: boolean) => Promise<void>;
   render: () => void;
@@ -768,6 +807,7 @@ interface TuiActions {
   refreshSettings: () => Promise<void>;
   // Open-in-editor (e on a DiffView selection)
   editorSpawner: EditorSpawner;
+  copyToClipboard: (text: string) => Promise<void>;
 }
 
 /** Minimal shape of OpenTUI's scrollable code renderable (a TextBufferRenderable). */
@@ -1374,6 +1414,7 @@ export async function runOpenBoardTui(
       openSettings,
       refreshSettings,
       editorSpawner,
+      copyToClipboard: copyTextToClipboard,
     }).catch((error) => {
       setError(error, "key handling failed");
       render();
@@ -1786,8 +1827,14 @@ function renderDiffViewMain(ui: OpenTui, state: TuiState) {
 
 function renderFollowViewMain(ui: OpenTui, state: TuiState) {
   const follow = state.followView;
-  const windowSize = Math.max(1, state.terminalRows - 10);
+  const followedTask = follow ? state.tasks.find((task) => task.id === follow.taskId) : undefined;
+  const pendingAsk = followedTask ? firstPendingPermissionAsk(followedTask) : undefined;
+  const pendingCount = followedTask?.pendingPermissions?.length ?? 0;
+  const chatDraft = state.sessionChatDraft?.taskId === follow?.taskId ? state.sessionChatDraft : undefined;
+  const windowSize = Math.max(1, Math.floor((state.terminalRows - (pendingAsk ? 16 : 15)) / 2));
   const rows = follow ? followVisibleEvents(follow, windowSize) : [];
+  const codeBlocks = follow ? chatCodeBlocks(follow.events) : [];
+  const selectedCodeKey = selectedChatCodeBlock(codeBlocks, follow?.selectedCodeBlockKey)?.key;
   return ui.Box(
     {
       flexGrow: 1,
@@ -1801,20 +1848,86 @@ function renderFollowViewMain(ui: OpenTui, state: TuiState) {
       ...boxBg(COLORS.panel),
     },
     ui.Text({
-      content: `Follow ${follow?.taskId ?? "task"} · ${follow?.connection ?? "STATIC"}${follow?.gapReason ? ` · GAP: ${follow.gapReason}` : ""}${follow?.autoFollow ? " · tail" : " · manual"}`,
+      content: `Session Chat · ${followedTask?.title ?? follow?.taskId ?? "task"} · ${follow?.connection ?? "STATIC"}${follow?.gapReason ? ` · GAP: ${follow.gapReason}` : ""}${follow?.autoFollow ? " · tail" : " · manual"}`,
       fg: follow?.connection === "LIVE" ? COLORS.accentBright : follow?.connection === "GAP" ? COLORS.bright : COLORS.muted,
       height: 1,
       truncate: true,
     }),
-    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
-    ...(rows.length
-      ? rows.map((event) => ui.Text({
-          content: `${event.seq} ${descendantSessionLabel(event)} ${event.kind} ${event.text ?? event.tool?.name ?? ""}`,
-          fg: event.kind === "warning" || event.tool?.status === "error" ? COLORS.bright : COLORS.text,
+    ...(pendingAsk
+      ? [ui.Text({
+          content: `⚠ NEEDS USER INPUT${pendingCount > 1 ? ` (${pendingCount})` : ""}: ${pendingAsk.summary ?? pendingAsk.id} · y allow once · N deny`,
+          fg: COLORS.bright,
+          ...textBg(COLORS.accent),
           height: 1,
           truncate: true,
-        }))
+        })]
+      : []),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...(rows.length
+      ? rows.flatMap<VChild>((event) => {
+          if (event.kind !== "text") {
+            return [ui.Text({
+              content: `${descendantSessionLabel(event)} · ${event.kind.toUpperCase()} · ${event.text ?? event.tool?.name ?? ""}`,
+              fg: event.kind === "warning" || event.tool?.status === "error" ? COLORS.bright : event.kind === "tool" ? COLORS.muted : COLORS.text,
+              height: 1,
+              truncate: true,
+            })];
+          }
+
+          const role = event.role === "user" ? "YOU" : event.role === "assistant" ? "AGENT" : "SYSTEM";
+          const fg = event.role === "user" ? COLORS.accentBright : COLORS.text;
+          let blockIndex = 0;
+          let roleShown = false;
+          return parseChatMarkdown(event.text ?? "").flatMap<VChild>((segment) => {
+            if (segment.type === "text") {
+              const content = `${roleShown ? "" : `${role} · `}${segment.text}`;
+              roleShown = true;
+              if (!content.trim()) return [];
+              return [ui.Text({ content, fg, height: Math.min(4, Math.max(1, content.split("\n").length)), wrapMode: "word" as const })];
+            }
+
+            const key = `${event.seq}:${blockIndex}`;
+            blockIndex += 1;
+            const selected = key === selectedCodeKey;
+            const codeHeight = Math.min(8, Math.max(1, segment.code.split("\n").length));
+            const label = segment.language ?? "code";
+            const heading = `${roleShown ? "" : `${role} · `}${label} · COPY c${selected ? " · SELECTED" : ""}`;
+            roleShown = true;
+            return [ui.Box(
+              {
+                width: "100%",
+                height: codeHeight + 3,
+                flexDirection: "column",
+                border: true,
+                borderStyle: "rounded",
+                borderColor: selected ? COLORS.accentBright : COLORS.border,
+                paddingLeft: 1,
+                paddingRight: 1,
+                ...boxBg(COLORS.panelRaised),
+              },
+              ui.Text({ content: heading, fg: selected ? COLORS.accentBright : COLORS.muted, height: 1, truncate: true }),
+              ui.Text({ content: segment.code || " ", fg: COLORS.text, height: codeHeight, truncate: true }),
+            )];
+          });
+        })
       : [ui.Text({ content: "Waiting for session activity...", fg: COLORS.muted, height: 1, truncate: true })]),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ui.Text({
+      content: chatDraft
+        ? `MESSAGE ▸ ${chatDraft.text || " "}▍`
+        : "Press i to message this session · messages continue the same session and worktree",
+      fg: chatDraft ? COLORS.bright : COLORS.muted,
+      height: chatDraft ? 3 : 1,
+      ...(chatDraft ? { wrapMode: "word" as const } : { truncate: true }),
+    }),
+    ui.Text({
+      content: chatDraft
+        ? chatDraft.error ?? (chatDraft.submitting ? "sending..." : "enter queue/send · ctrl+enter interrupt & send · esc cancel · ctrl+u clear")
+        : `i compose · ↑/↓ history · f tail${codeBlocks.length ? " · tab select code · c copy" : ""} · y/N permission · b/esc/q return`,
+      fg: chatDraft?.error ? COLORS.bright : COLORS.dim,
+      height: 1,
+      truncate: true,
+    }),
   );
 }
 
@@ -3663,6 +3776,19 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
       : shortcutList("view-diff", "archive", "delete", "move", "details");
   }
 
+  // Blocked Review cards carry runState "error" (set by the /block route and
+  // watchdog exhaustion), so this must be checked before the generic error
+  // branch below or the blocked-aware shortcuts (done, no integrate) are
+  // unreachable. Reuses the same precedence the rest of the TUI/MCP use
+  // (src/shared/lifecycle.ts) so this can't diverge from how the card is
+  // actually displayed.
+  if (dominantTaskState(task) === "blocked") {
+    const actions: SelectedCardAction[] = ["view-diff", "retry"];
+    if (task.worktreePath) actions.push("discard-worktree");
+    actions.push("done", "delete", "move", "details");
+    return shortcutList(...actions);
+  }
+
   if (task.runState === "error") {
     return shortcutList("retry", "delete", "move", "details");
   }
@@ -3679,8 +3805,8 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
 
   if (task.column === "review") {
     const actions: SelectedCardAction[] = ["view-diff"];
-    if (task.pending === "rebase-conflict" || task.completion?.outcome === "blocked") actions.push("retry");
-    if (task.completion?.outcome !== "blocked") actions.push("integrate");
+    if (task.pending === "rebase-conflict") actions.push("retry");
+    actions.push("integrate");
     if (task.worktreePath) actions.push("discard-worktree");
     actions.push("done", "delete", "move", "details");
     return shortcutList(...actions);
@@ -3956,7 +4082,9 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             : state.viewState.view === "diff"
             ? diffViewKeyHints(state.diffView)
             : state.viewState.view === "follow"
-            ? "↑/↓ manual scroll · f tail · b/esc/q return · u quiet refresh"
+            ? state.sessionChatDraft
+              ? "type message · shift+enter newline · enter queue/send · ctrl+enter interrupt/send · esc cancel"
+              : "i message · ↑/↓ history · f tail · tab code · c copy · y/N permission · b/esc/q return · u refresh"
             : state.viewState.view === "settings"
             ? state.settingsDirtyWorktrees
               ? "↑/↓ dirty worktrees · d delete · u refresh · b/esc back · q quit"
@@ -4015,15 +4143,21 @@ function renderHelpOverlay(ui: OpenTui) {
     ["n", "new task"],
     ["p", "settings"],
     ["v", "view diff (Review or Done cards)"],
-    ["w", "follow live session activity"],
+    ["w", "open live session chat"],
     ["u", "refresh board"],
     ["b", "switch instances"],
     ["esc", "detach / close overlay"],
     ["q", "quit"],
     ["", ""],
-    ["FOLLOW VIEW", ""],
+    ["SESSION CHAT", ""],
+    ["i", "compose a message"],
+    ["enter", "send now or queue behind the active turn"],
+    ["shift+enter", "insert a newline in the message"],
+    ["ctrl+enter", "interrupt the active turn and send"],
     ["↑/↓", "manual scroll"],
     ["f", "jump to tail / auto-follow"],
+    ["tab / shift+tab", "select the next / previous code block"],
+    ["c", "copy the selected code block"],
     ["b / esc / q", "back to board (does not quit)"],
     ["", ""],
     ["ARCHIVE", ""],
@@ -5258,6 +5392,14 @@ export function handlePaste(event: PasteEvent, state: TuiState, actions: Pick<Tu
   const text = decodePastedText(event.bytes);
   if (!text) return;
 
+  if (state.viewState.view === "follow" && state.sessionChatDraft && !state.sessionChatDraft.submitting) {
+    state.sessionChatDraft.text = `${state.sessionChatDraft.text}${normalizePastedText(text, "description")}`.slice(0, 12_000);
+    state.sessionChatDraft.error = undefined;
+    event.preventDefault();
+    actions.render();
+    return;
+  }
+
   if ((state.overlay === "newTask" || state.newTask) && state.viewState.view === "board") {
     const draft = state.newTask ?? createNewTaskDraft(state);
     state.newTask = draft;
@@ -5445,6 +5587,33 @@ async function answerSelectedPermission(state: TuiState, actions: TuiActions, ac
     return;
   }
 
+  await submitPermissionAnswer(state, actions, task, ask, action);
+}
+
+/**
+ * Answer a pending ask on the task the follow view is pinned to — which is
+ * not necessarily the board's selected card. The view is bound to one task
+ * for its whole lifetime, so the selection-drift guard the board path needs
+ * does not apply here; the in-flight dedup and stale-ask handling do.
+ */
+async function answerFollowedPermission(state: TuiState, actions: TuiActions, action: "allow_once" | "deny"): Promise<void> {
+  const taskId = state.followView?.taskId;
+  const task = taskId ? state.tasks.find((candidate) => candidate.id === taskId) : undefined;
+  if (!task) {
+    state.status = "no task bound to follow view";
+    actions.render();
+    return;
+  }
+  const ask = firstPendingPermissionAsk(task);
+  if (!ask) {
+    state.status = "no pending permission ask on followed task";
+    actions.render();
+    return;
+  }
+  await submitPermissionAnswer(state, actions, task, ask, action);
+}
+
+async function submitPermissionAnswer(state: TuiState, actions: TuiActions, task: Pick<Task, "id">, ask: PendingPermissionAsk, action: "allow_once" | "deny"): Promise<void> {
   const key = permissionInFlightKey(task.id, ask.id);
   const inFlight = state.permissionAnswersInFlight ?? (state.permissionAnswersInFlight = new Set());
   if (inFlight.has(key)) {
@@ -5457,13 +5626,12 @@ async function answerSelectedPermission(state: TuiState, actions: TuiActions, ac
   state.error = undefined;
   actions.render();
   try {
-    const outcome = await actions.client.respondPermission(task.id, { askId: ask.id, action, answeredBy: "User" });
-    if (!outcome.ok && outcome.conflict === "not-found") {
-      state.status = "permission ask is stale; refreshing...";
-      await actions.refresh(true);
-      return;
-    }
-    state.status = outcome.ok ? `permission ${outcome.decision === "allow_once" ? "allowed once" : "denied"}` : `permission reply failed: ${outcome.error ?? outcome.conflict}`;
+    // POST /api/tasks/:id/permission returns the projected Task on success
+    // (not a RespondPermissionOutcome) — a 2xx response here always means
+    // the reply succeeded, so the status message is derived from the action
+    // the user pressed rather than a field on the response.
+    await actions.client.respondPermission(task.id, { askId: ask.id, action, answeredBy: "User" });
+    state.status = action === "allow_once" ? "permission allowed once" : "permission denied";
     await actions.refresh(true);
   } catch (error) {
     const message = errorMessage(error);
@@ -5738,7 +5906,6 @@ async function cycleDiffEvidenceSource(state: TuiState, actions: TuiActions): Pr
 }
 
 async function openFollowViewForSelection(state: TuiState, actions: TuiActions): Promise<void> {
-  let followTrailingTimer: ReturnType<typeof setTimeout> | undefined;
   clearPendingConfirmation(state);
   const task = selectedTask(state);
   if (!task || (!task.sessionId && !task.harnessSessionId)) {
@@ -5749,14 +5916,35 @@ async function openFollowViewForSelection(state: TuiState, actions: TuiActions):
   closeInlineDetail(state);
   state.moveTargetColumn = undefined;
   state.followStream?.close();
-  cancelFollowTrailingFlush(followTrailingTimer);
-  followTrailingTimer = undefined;
+  clearFollowReconnectTimer(state);
   state.followView = createFollowViewState(task.id);
   state.viewState = transitionView(state.viewState, "follow");
   actions.render();
+  await connectFollowStream(state, actions, task.id, false);
+}
+
+const FOLLOW_RECONNECT_INTERVAL_MS = 2000;
+
+function clearFollowReconnectTimer(state: TuiState): void {
+  if (state.followReconnectTimer) {
+    clearTimeout(state.followReconnectTimer);
+    state.followReconnectTimer = undefined;
+  }
+}
+
+/**
+ * Connect (or reconnect) the follow view's SSE stream. Reconnects resume from
+ * the last received seq via the stream cursor; the server replays a fresh
+ * snapshot, which the frame handler applies wholesale. A stream that ends
+ * without an explicit close() and before the terminal frame is a lost
+ * connection — surface RECONNECTING and retry until the view is exited or the
+ * connection comes back (the timer dies with the view).
+ */
+async function connectFollowStream(state: TuiState, actions: TuiActions, taskId: string, isReconnect: boolean): Promise<void> {
+  let followTrailingTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    state.followStream = await actions.client.streamSessionEvents(task.id, (frame) => {
-      if (!state.followView || state.followView.taskId !== task.id) return;
+    const stream = await actions.client.streamSessionEvents(taskId, (frame) => {
+      if (!state.followView || state.followView.taskId !== taskId) return;
       const result = applyFollowFrameWithRender(state.followView, frame);
       state.followView = result.state;
       if (result.shouldRender) {
@@ -5768,31 +5956,176 @@ async function openFollowViewForSelection(state: TuiState, actions: TuiActions):
         // Schedule a trailing flush so the final frame of a burst is always rendered (P3-5).
         followTrailingTimer = scheduleFollowTrailingFlush(state.followView, () => {
           followTrailingTimer = undefined;
-          if (state.followView && state.followView.taskId === task.id) {
+          if (state.followView && state.followView.taskId === taskId) {
             state.followView = markFollowRendered(state.followView);
             actions.render();
           }
         }, followTrailingTimer);
       }
+    }, {
+      cursor: isReconnect && state.followView?.taskId === taskId ? state.followView.lastSeq : undefined,
+      onEnd: () => {
+        cancelFollowTrailingFlush(followTrailingTimer);
+        followTrailingTimer = undefined;
+        if (state.viewState.view !== "follow" || state.followView?.taskId !== taskId) return;
+        if (state.followView.terminalSeen) return;
+        state.followView = markFollowDisconnected(state.followView);
+        actions.render();
+        scheduleFollowReconnect(state, actions, taskId);
+      },
     });
-  } catch (error) {
-    if (state.followView?.taskId === task.id) {
-      state.followView = { ...state.followView, connection: "STATIC", gapReason: errorMessage(error) };
-      state.status = "follow stream unavailable; showing static buffer";
+    if (state.viewState.view !== "follow" || state.followView?.taskId !== taskId) {
+      // View changed while connecting — don't adopt (or leak) the stream.
+      stream.close();
+      return;
     }
+    state.followStream = stream;
+    if (isReconnect) {
+      state.status = "follow stream reconnected";
+      actions.render();
+    }
+  } catch (error) {
+    if (state.viewState.view !== "follow" || state.followView?.taskId !== taskId) return;
+    if (isReconnect) {
+      // Board still unreachable — keep the RECONNECTING banner and retry.
+      scheduleFollowReconnect(state, actions, taskId);
+      return;
+    }
+    state.followView = { ...state.followView, connection: "STATIC", gapReason: errorMessage(error) };
+    state.status = "follow stream unavailable; showing static buffer";
     actions.render();
   }
 }
 
+function scheduleFollowReconnect(state: TuiState, actions: TuiActions, taskId: string): void {
+  clearFollowReconnectTimer(state);
+  state.followReconnectTimer = setTimeout(() => {
+    state.followReconnectTimer = undefined;
+    if (state.viewState.view !== "follow" || state.followView?.taskId !== taskId) return;
+    void connectFollowStream(state, actions, taskId, true);
+  }, FOLLOW_RECONNECT_INTERVAL_MS);
+}
+
 async function handleFollowViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
   const keyName = key.name || key.sequence;
+  const draft = state.sessionChatDraft;
+  if (draft) {
+    if (isEscapeKey(key)) {
+      state.sessionChatDraft = undefined;
+      state.status = "message draft cancelled";
+      actions.render();
+      return;
+    }
+    if (draft.submitting) return;
+    if (key.ctrl && keyName === "u") {
+      draft.text = "";
+      draft.error = undefined;
+      actions.render();
+      return;
+    }
+    if (keyName === "backspace" || key.sequence === "\u007f") {
+      draft.text = draft.text.slice(0, -1);
+      draft.error = undefined;
+      actions.render();
+      return;
+    }
+    if (isEnterKey(key) && key.shift) {
+      draft.text = `${draft.text}\n`.slice(0, 12_000);
+      actions.render();
+      return;
+    }
+    if (isEnterKey(key)) {
+      const task = state.tasks.find((item) => item.id === draft.taskId);
+      const sessionId = task?.sessionId ?? task?.harnessSessionId;
+      if (!task || !sessionId || !draft.text.trim()) {
+        draft.error = !draft.text.trim() ? "type a message first" : "session is no longer resumable";
+        actions.render();
+        return;
+      }
+      draft.submitting = true;
+      draft.error = undefined;
+      actions.render();
+      try {
+        const receipt = await actions.client.sendSessionMessage(task.id, {
+          text: draft.text.trim(),
+          mode: key.ctrl ? "interrupt" : "queue",
+          sentBy: "User",
+          clientMessageId: randomUUID(),
+          expectedSessionId: sessionId,
+          ...(task.runStartedAt === undefined ? {} : { expectedRunStartedAt: task.runStartedAt }),
+          ...(task.completion?.outcome === "blocked" ? { blockedReportedAt: task.completion.reportedAt } : {}),
+        });
+        state.sessionChatDraft = undefined;
+        state.status = receipt.status === "queued" ? "message queued for this session" : "message sent to this session";
+        await actions.refresh(true);
+        // A Review/static chat stream has already delivered terminal and
+        // closed. Rebind after message admission so the same screen follows
+        // the newly reopened turn instead of remaining frozen on history.
+        state.followStream?.close();
+        clearFollowReconnectTimer(state);
+        state.followView = createFollowViewState(task.id);
+        await connectFollowStream(state, actions, task.id, false);
+      } catch (error) {
+        draft.submitting = false;
+        draft.error = errorMessage(error);
+        state.status = "session message failed";
+      }
+      actions.render();
+      return;
+    }
+    if (!key.ctrl && !key.meta && key.sequence.length === 1 && key.sequence >= " ") {
+      draft.text = `${draft.text}${key.sequence}`.slice(0, 12_000);
+      draft.error = undefined;
+      actions.render();
+    }
+    return;
+  }
   if (key.sequence === "q" || key.sequence === "b" || isEscapeKey(key)) {
+    clearFollowReconnectTimer(state);
     state.followStream?.close();
     state.followStream = undefined;
     state.followView = undefined;
+    state.sessionChatDraft = undefined;
     state.viewState = transitionView(state.viewState, "board");
     await actions.refresh(true);
     actions.render();
+    return;
+  }
+  if (key.sequence === "i") {
+    const taskId = state.followView?.taskId;
+    if (taskId) state.sessionChatDraft = { taskId, text: "", submitting: false };
+    actions.render();
+    return;
+  }
+  if ((keyName === "tab" || key.sequence === "\t") && state.followView) {
+    const blocks = chatCodeBlocks(state.followView.events);
+    state.followView.selectedCodeBlockKey = cycleChatCodeBlock(
+      blocks,
+      state.followView.selectedCodeBlockKey,
+      key.shift ? -1 : 1,
+    );
+    state.status = blocks.length ? "selected code block" : "no code blocks in this session";
+    actions.render();
+    return;
+  }
+  if (key.sequence === "c" && state.followView) {
+    const block = selectedChatCodeBlock(chatCodeBlocks(state.followView.events), state.followView.selectedCodeBlockKey);
+    if (!block) {
+      state.status = "no code blocks in this session";
+      actions.render();
+      return;
+    }
+    try {
+      await actions.copyToClipboard(block.code);
+      state.status = `copied ${block.language ?? "code"} block to clipboard`;
+    } catch (error) {
+      state.status = `copy failed: ${errorMessage(error)}`;
+    }
+    actions.render();
+    return;
+  }
+  if (key.sequence === "y" || key.sequence === "N") {
+    await answerFollowedPermission(state, actions, key.sequence === "y" ? "allow_once" : "deny");
     return;
   }
   if (key.sequence === "f" && state.followView) {

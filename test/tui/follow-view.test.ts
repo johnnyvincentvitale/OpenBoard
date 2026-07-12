@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyFollowFrame, applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, descendantSessionLabel, followVisibleEvents, FOLLOW_RENDER_INTERVAL_MS, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, shouldRenderFollowFrame, tailFollow } from "../../src/tui/follow-view";
+import { applyFollowFrame, applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, descendantSessionLabel, followVisibleEvents, FOLLOW_RENDER_INTERVAL_MS, markFollowDisconnected, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, shouldRenderFollowFrame, tailFollow } from "../../src/tui/follow-view";
 import type { SessionActivityEvent } from "../../src/shared";
 
 function event(seq: number, sessionId = "root"): SessionActivityEvent {
@@ -16,6 +16,47 @@ describe("follow view state", () => {
     state = applyFollowFrame(state, { kind: "gap", afterSeq: 3, reason: "evicted" });
     expect(state.connection).toBe("GAP");
     expect(state.gapReason).toBe("evicted");
+  });
+
+  it("maps every terminal outcome (complete, aborted, error) to STATIC, not RECONNECTING", () => {
+    // An errored run is over, not a connection problem to reconnect from —
+    // "error" must land on STATIC exactly like "complete"/"aborted" do.
+    for (const status of ["complete", "aborted", "error"] as const) {
+      let state = createFollowViewState("task-1");
+      state = applyFollowFrame(state, { kind: "snapshot", run: { taskId: "task-1", runStartedAt: 1, sessionId: "root", rootSessionId: "root", harness: "opencode" }, events: [], lastEventAt: null, transport: "live" });
+      expect(state.connection).toBe("LIVE");
+      state = applyFollowFrame(state, { kind: "terminal", status });
+      expect(state.connection).toBe("STATIC");
+    }
+  });
+
+  it("does not let a late heartbeat flip a terminal (STATIC) connection back to LIVE", () => {
+    let state = createFollowViewState("task-1");
+    state = applyFollowFrame(state, { kind: "snapshot", run: { taskId: "task-1", runStartedAt: 1, sessionId: "root", rootSessionId: "root", harness: "opencode" }, events: [], lastEventAt: null, transport: "live" });
+    state = applyFollowFrame(state, { kind: "terminal", status: "complete" });
+    expect(state.connection).toBe("STATIC");
+
+    state = applyFollowFrame(state, { kind: "heartbeat", lastEventAt: null, transport: "live" });
+    expect(state.connection).toBe("STATIC");
+  });
+
+  it("marks a lost stream RECONNECTING before the terminal frame, and a normal close after it", () => {
+    let state = createFollowViewState("task-1");
+    state = applyFollowFrame(state, { kind: "snapshot", run: { taskId: "task-1", runStartedAt: 1, sessionId: "root", rootSessionId: "root", harness: "opencode" }, events: [event(1)], lastEventAt: 1, transport: "live" });
+    expect(state.terminalSeen).toBeFalsy();
+
+    // Stream drops mid-run (board restart, socket reset) — that's a lost
+    // connection the view must surface, not a silent freeze at LIVE.
+    const disconnected = markFollowDisconnected(state);
+    expect(disconnected.connection).toBe("RECONNECTING");
+    expect(disconnected.gapReason).toContain("reconnecting");
+
+    // After the terminal frame, a stream end is the run's normal close.
+    state = applyFollowFrame(state, { kind: "terminal", status: "complete" });
+    expect(state.terminalSeen).toBe(true);
+    const afterTerminal = markFollowDisconnected(state);
+    expect(afterTerminal.connection).toBe("STATIC");
+    expect(afterTerminal).toBe(state);
   });
 
   it("tracks manual scroll, tail, render throttling, and descendant labels", () => {

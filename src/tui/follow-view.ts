@@ -14,6 +14,14 @@ export interface FollowViewState {
   gapReason?: string;
   /** Set when a frame was applied but rendering was throttled (P3-5). */
   needsTrailingFlush?: boolean;
+  /**
+   * Set once a terminal frame arrives. A stream that ends after the terminal
+   * frame is a normal close (the run is over), not a connection loss — the
+   * reconnect path must not fire for it.
+   */
+  terminalSeen?: boolean;
+  /** Stable event/block key selected for clipboard copy. Undefined follows the newest block. */
+  selectedCodeBlockKey?: string;
 }
 
 export const FOLLOW_MAX_RENDER_FPS = 10;
@@ -52,9 +60,25 @@ export function applyFollowFrame(state: FollowViewState, frame: SessionActivityF
     return { ...state, connection: "GAP", gapReason: frame.reason };
   }
   if (frame.kind === "heartbeat") {
-    return { ...state, connection: state.connection === "GAP" ? "GAP" : followConnectionFromTransport(frame.transport) };
+    // A terminal run is done for good — a late heartbeat (e.g. one still
+    // in flight when the terminal frame landed) must not flip the
+    // connection back to LIVE.
+    if (state.connection === "GAP" || state.connection === "STATIC") return state;
+    return { ...state, connection: followConnectionFromTransport(frame.transport) };
   }
-  return { ...state, connection: frame.status === "error" ? "RECONNECTING" : "STATIC" };
+  // Terminal: every outcome (complete, aborted, or error) means the run is
+  // over and nothing more will arrive, so all three map to STATIC — an
+  // errored run isn't a connection problem to reconnect from.
+  return { ...state, connection: "STATIC", terminalSeen: true };
+}
+
+/**
+ * Mark the stream as lost (server restart, socket reset). Only meaningful
+ * before the terminal frame — after it, a stream end is the normal close.
+ */
+export function markFollowDisconnected(state: FollowViewState): FollowViewState {
+  if (state.terminalSeen) return state;
+  return { ...state, connection: "RECONNECTING", gapReason: "stream disconnected; reconnecting..." };
 }
 
 export function shouldRenderFollowFrame(state: FollowViewState, now = Date.now()): boolean {

@@ -216,8 +216,8 @@ and `list_tasks` projection), the orchestrator responds through
 returns to ask on the next matching call) or `"deny"` (block this request), each
 with an explicit `answeredBy` attribution for the audit trail. `allow_once` is
 not `allow` — it does not persist; the permission layer re-asks on the next
-matching tool call. There is no timeout on the ask; the 45s stall detector is
-the backstop, not an ask deadline.
+matching tool call. Each ask carries a deadline (60s by default) and
+auto-resolves to deny on timeout, so respond promptly when an ask appears.
 
 ### Session Diagnostics
 
@@ -233,6 +233,15 @@ configurable timeout (default 3s). Use it for orchestrator diagnostics — did
 the worker actually produce output? is a provider death leaving the session
 in `reconnecting`? — not for continuous monitoring; unbounded streaming
 requires the SSE endpoint directly.
+
+Use `send_session_message` when an engaged operator or cockpit needs to clarify,
+redirect, or converse with an existing session. On an active card it guides the
+current task; on a Review card it is chat-only and preserves the Review completion.
+Use `retry_task` or `answer_blocked_task` to resume task execution. Supply `sentBy`, a unique
+`clientMessageId`, and the exact current `expectedSessionId`. Use `mode: "queue"`
+for a normal follow-up and `mode: "interrupt"` only when the current turn should
+be cancelled before the replacement message. This is distinct from
+`respond_permission` and the stale-safe `answer_blocked_task` contract.
 
 `task_context` retrieves the full resolved task lineage without raw
 transcripts: the target handoff, direct-parent handoffs, inherited-ancestor

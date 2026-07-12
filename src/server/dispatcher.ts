@@ -14,7 +14,7 @@
  */
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -170,6 +170,14 @@ const DENIAL_RECENCY_WINDOW_MS = 2 * 60 * 1000;
 const LINEAGE_PROMPT_MAX_CHARS = 24_000;
 const SESSION_TREE_MAX_DEPTH = 16;
 const SESSION_TREE_MAX_SESSIONS = 256;
+/**
+ * How many consecutive watchdog trips the pre-abort status probe may absorb
+ * while the session tree still reports busy. Each absorption re-arms the
+ * watchdog for one more full window (a long quiet tool call — build, test
+ * suite — earns extra patience), but the budget is finite so a session
+ * wedged in status "busy" forever still trips.
+ */
+const MAX_WATCHDOG_BUSY_REARMS = 2;
 /**
  * Consecutive reconnect cycles with zero visibility into a run's root
  * session (no status(), no confirmable session tree) before the watchdog is
@@ -516,6 +524,8 @@ function normalizeActivityFromEvent(event: OpencodeEvent): Omit<SessionActivityE
     const partType = stringProp(part, "type");
     if (partType === "tool") {
       const state = readRecord(part?.state);
+      const toolName = stringProp(part, "tool") ?? "tool";
+      if (isOpenBoardReportTool(toolName)) return null;
       const rawStatus = stringProp(state, "status");
       const status = rawStatus === "pending"
         ? "started"
@@ -527,7 +537,7 @@ function normalizeActivityFromEvent(event: OpencodeEvent): Omit<SessionActivityE
       return {
         kind: "tool",
         tool: {
-          name: stringProp(part, "tool") ?? "tool",
+          name: toolName,
           callId: stringProp(part, "callID", "callId", "id"),
           status,
           durationMs: durationFromTime(state?.time),
@@ -556,13 +566,32 @@ function normalizeActivityFromEvent(event: OpencodeEvent): Omit<SessionActivityE
   }
 }
 
+function isOpenBoardReportTool(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return normalized.includes("openboard") && (normalized.endsWith("complete_task") || normalized.endsWith("block_task"));
+}
+
 interface OpenCodeRunRecord {
   taskId: string;
   runStartedAt: number;
   rootSessionId: string;
   sessionIds: Set<string>;
   watchdog: RunWatchdog;
-  abortPromise?: Promise<boolean>;
+  /**
+   * Outcome of the watchdog termination flow: true/false = abort
+   * confirmed/unconfirmed, "busy-rearm" = the pre-abort status probe found
+   * the session tree still busy and re-armed the watchdog instead — the
+   * paired retry decision must treat that as a no-op, not a failed abort.
+   */
+  abortPromise?: Promise<boolean | "busy-rearm">;
+  /**
+   * Consecutive watchdog trips absorbed because the status probe reported
+   * the session tree still busy. Bounded (MAX_WATCHDOG_BUSY_REARMS) so a
+   * session wedged in status "busy"/"running" — the original dead-session
+   * incident class — still trips eventually; reset whenever real activity
+   * arrives.
+   */
+  busyRearms?: number;
   transportLive: boolean;
   lastLiveState: "running" | "idle" | "error" | null;
   attempt: number;
@@ -1292,7 +1321,7 @@ export class TaskDispatcher implements Dispatcher {
     const completeUrl = `${this.adapterBaseUrl}${taskPath}/complete${runQuery}`;
     const blockUrl = `${this.adapterBaseUrl}${taskPath}/block${runQuery}`;
     const authHeader = this.boardToken ? ` -H ${shellQuote(`Authorization: Bearer ${this.boardToken}`)}` : "";
-    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind, { hasParents: this.taskHasParents(task) })}\n\nWhen all work and verification are complete, report exactly once as your final action (replace JSON values with your actual report).\n\nPreferred, if OpenBoard MCP tools are available:\n- complete_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n\nFallback if MCP tools are unavailable:\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall complete_task/block_task or /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
+    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind, { hasParents: this.taskHasParents(task) })}\n\nWhen all work and verification are complete, report exactly once as your final action (replace JSON values with your actual report).\n\nPreferred, if OpenBoard MCP tools are available:\n- complete_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nFallback if MCP tools are unavailable:\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall complete_task/block_task or /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
   }
 
   private withTaskContext(task: Task, prompt: string): string {
@@ -1521,7 +1550,11 @@ export class TaskDispatcher implements Dispatcher {
     const retryDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
     if (!blockedAnswer) await this.captureDispatchBaseline(task, isolatedRetry, retryDirectory);
     const permissionRules = resolveOpenCodePermissionRules(isolatedRetry, task.permissionOverrides);
-    this.store.update(taskId, { runStartedAt });
+    // A manual retry is a fresh operator-initiated attempt on the primary
+    // model — reset the breaker surface (autoRetries counter and any
+    // watchdog fallback activeModel) so the card doesn't keep displaying
+    // "AUTO-RETRY 2/2" and the fallback model for a primary-model run.
+    this.store.update(taskId, { runStartedAt, autoRetries: 0, activeModel: task.model ?? null });
     if (hasAskRule(permissionRules)) {
       this.startPermissionResponder(sessionId, retryDirectory, isolatedRetry ? "worktree-fence" : "in-place-override");
     } else {
@@ -1697,6 +1730,7 @@ export class TaskDispatcher implements Dispatcher {
     this.openCodeRunsByTask.clear();
     this.openCodeSessionToTask.clear();
     this.permissionResponderPool.stop();
+    for (const runner of new Set(Object.values(this.acpRunners))) runner.shutdown?.();
   }
 
   listPendingPermissions(taskId: string): PendingPermissionAsk[] {
@@ -1715,6 +1749,106 @@ export class TaskDispatcher implements Dispatcher {
       return runner.respondPermission?.(task.harnessSessionName, input) ?? { ok: false, askId: input.askId, conflict: "not-found" };
     }
     return this.permissionResponderPool.respond(input);
+  }
+
+  async sendSessionMessage(taskId: string, input: SessionMessageInput): Promise<SessionMessageReceipt> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (task.archived) throw AdapterError.validation("Cannot chat with an archived task");
+    if (task.column === "done") throw AdapterError.validation("Done tasks are historical; move the task out of Done before chatting");
+    const sessionId = task.sessionId ?? task.harnessSessionId;
+    if (!sessionId) throw AdapterError.notFound("Task has no resumable session");
+    if (sessionId !== input.expectedSessionId) {
+      throw AdapterError.validation("Session changed while the message was being composed");
+    }
+    if (input.expectedRunStartedAt !== undefined && task.runStartedAt !== input.expectedRunStartedAt) {
+      throw AdapterError.validation("Task run changed while the message was being composed");
+    }
+    if (input.blockedReportedAt !== undefined && task.completion?.reportedAt !== input.blockedReportedAt) {
+      throw AdapterError.validation("Blocked question changed while the message was being composed");
+    }
+
+    const sentAt = Date.now();
+    const wasRunning = task.runState === "running";
+    const runStartedAt = wasRunning && input.mode === "queue"
+      ? task.runStartedAt ?? sentAt
+      : Math.max(sentAt, (task.runStartedAt ?? 0) + 1);
+    const promptText = wasRunning
+      ? `OPENBOARD OPERATOR GUIDANCE\n\n${input.text}\n\nApply this guidance to the active task. Preserve the existing session, working tree, and original completion contract.`
+      : `OPENBOARD SESSION CHAT\n\n${input.text}\n\nRespond conversationally in this session. Do not call complete_task or block_task, do not change files, and do not alter the card lifecycle for this chat turn.`;
+
+    if (isAcpHarness(task.harness)) {
+      const sessionName = task.harnessSessionName;
+      const runner = this.acpRunners[task.harness];
+      if (!sessionName || !runner.sendMessage) {
+        throw AdapterError.validation("This ACP session is no longer resumable; start a fresh continuation instead");
+      }
+      await runner.sendMessage(sessionName, promptText, { mode: input.mode, runStartedAt });
+      this.activity.startRun({ taskId, runStartedAt, sessionId, rootSessionId: sessionId, harness: task.harness });
+      this.activity.recordEvent(taskId, runStartedAt, {
+        sessionId,
+        rootSessionId: sessionId,
+        harness: task.harness,
+        kind: "text",
+        role: "user",
+        text: input.text,
+      });
+      this.cancelCompletionWatcher(sessionName);
+      this.startAcpWatcher(taskId, sessionName, task.harness);
+      this.store.update(taskId, {
+        runStartedAt,
+        runState: "running",
+        harnessStatus: input.mode === "queue" && wasRunning ? "queued" : "running",
+        error: undefined,
+      });
+    } else {
+      if (!task.sessionId) throw AdapterError.notFound("OpenCode session is no longer resumable");
+      if (input.mode === "interrupt" && wasRunning) {
+        await this.client.session.abort({ sessionID: task.sessionId });
+        this.cancelCompletionWatcher(task.sessionId);
+      }
+      if (!wasRunning || input.mode === "interrupt") {
+        this.bindOpenCodeRun({ task, sessionId: task.sessionId, runStartedAt, attempt: 0 });
+      }
+      const promptError = await this.prompt(task.sessionId, promptText, task.agent ?? undefined, task.activeModel ?? task.model ?? undefined);
+      if (promptError) throw AdapterError.unreachable(promptError);
+      this.recordOpenCodeActivity(taskId, task.sessionId, { kind: "text", role: "user", text: input.text });
+      this.store.update(taskId, {
+        runStartedAt,
+        runState: "running",
+        error: undefined,
+      });
+      this.startCompletionWatcher(taskId, task.sessionId);
+    }
+
+    // Chatting with a Review card is a conversation over its retained
+    // session, not a new task attempt. Keep the card and its completion
+    // evidence in Review. Active task guidance remains In Progress.
+    if (task.column === "todo") this.store.move(taskId, "in_progress", END_OF_COLUMN);
+    this.store.addEvent({
+      taskId,
+      type: "task_session_message",
+      body: {
+        messageId: input.clientMessageId,
+        sentBy: input.sentBy,
+        mode: input.mode,
+        byteCount: Buffer.byteLength(input.text),
+        sessionId,
+        runStartedAt,
+      },
+    });
+    const updated = this.store.get(taskId);
+    if (!updated) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    return {
+      messageId: input.clientMessageId,
+      taskId,
+      sessionId,
+      status: wasRunning && input.mode === "queue" ? "queued" : "accepted",
+      mode: input.mode,
+      sentAt,
+      sentBy: input.sentBy,
+      task: updated,
+    };
   }
 
   // ---- internals ----
@@ -1791,6 +1925,9 @@ export class TaskDispatcher implements Dispatcher {
       harness: "opencode",
       ...input,
     });
+    // Real activity resets the busy-probe patience along with the watchdog
+    // clock — a run that resumes and stalls again gets fresh re-arm budget.
+    run.busyRearms = 0;
     run.watchdog.recordActivity({ run: { taskId, runStartedAt: run.runStartedAt, sessionId: run.rootSessionId, attempt: run.attempt } });
   }
 
@@ -1910,12 +2047,53 @@ export class TaskDispatcher implements Dispatcher {
     const task = this.store.get(event.run.taskId);
     if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt) return;
     if (this.suppressWatchdogForPendingPermission(current, event)) return;
+    current.abortPromise = this.confirmWatchdogTerminationAfterStatusProbe(current, event, task);
+  }
+
+  /**
+   * /event-frame silence is not proof of a dead run: a single long tool call
+   * (a full test suite, a build, a download) can emit no attributable frames
+   * for the whole watchdog window while the session stays genuinely busy.
+   * Before aborting, cross-check the live session status; if any session in
+   * the run's tree still reports busy, re-arm the watchdog for a fresh
+   * window instead of killing a healthy run. A null status map (endpoint
+   * unavailable/blind) falls through to the abort — the original behavior —
+   * so a dead transport cannot suppress termination forever.
+   */
+  private async confirmWatchdogTerminationAfterStatusProbe(run: OpenCodeRunRecord, event: WatchdogTermination, task: Task): Promise<boolean | "busy-rearm"> {
+    const statuses = await this.fetchSessionStatusMap();
+    const stillBusy = statuses !== null && [...run.sessionIds].some((sessionId) => {
+      const status = statuses.get(sessionId);
+      return status === "busy" || status === "retry";
+    });
+    // Bounded patience: a session wedged in status "busy" (the original
+    // dead-session incident) must still trip once the re-arm budget is
+    // spent — "busy" earns extra full windows, not immunity.
+    if (stillBusy && (run.busyRearms ?? 0) < MAX_WATCHDOG_BUSY_REARMS) {
+      run.busyRearms = (run.busyRearms ?? 0) + 1;
+      const currentRun = this.openCodeRunsByTask.get(event.run.taskId);
+      const currentTask = this.store.get(event.run.taskId);
+      if (
+        currentRun && currentRun.runStartedAt === event.run.runStartedAt && currentRun.rootSessionId === event.run.sessionId &&
+        currentTask && currentTask.runState === "running" && currentTask.runStartedAt === event.run.runStartedAt
+      ) {
+        currentRun.watchdog.dispose();
+        currentRun.watchdog = this.createRunWatchdog();
+        currentRun.watchdog.startRun(event.run);
+        this.store.addEvent({
+          taskId: task.id,
+          type: "task_watchdog_busy_wait",
+          body: { reason: event.reason, sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt, observedAt: event.terminatedAt },
+        });
+      }
+      return "busy-rearm";
+    }
     this.store.addEvent({
       taskId: task.id,
       type: "task_watchdog_tripped",
       body: { reason: event.reason, sessionId: event.run.sessionId, runStartedAt: event.run.runStartedAt, observedAt: event.terminatedAt },
     });
-    current.abortPromise = this.confirmWatchdogAbort(event.run);
+    return this.confirmWatchdogAbort(event.run);
   }
 
   private suppressWatchdogForPendingPermission(run: OpenCodeRunRecord, event: WatchdogTermination): boolean {
@@ -1955,6 +2133,7 @@ export class TaskDispatcher implements Dispatcher {
     const task = this.store.get(event.run.taskId);
     if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt || task.sessionId !== event.run.sessionId) return;
     const abortConfirmed = await (current.abortPromise ?? this.confirmWatchdogAbort(event.run));
+    if (abortConfirmed === "busy-rearm") return; // status probe re-armed the watchdog; the run is still healthy
     const stillExpected = this.store.get(event.run.taskId);
     if (!stillExpected || stillExpected.runState !== "running" || stillExpected.runStartedAt !== event.run.runStartedAt || stillExpected.sessionId !== event.run.sessionId) return;
     if (!abortConfirmed) {
@@ -1963,30 +2142,62 @@ export class TaskDispatcher implements Dispatcher {
       return;
     }
     if (event.outcome === "exhausted") {
-      const report = {
-        outcome: "blocked" as const,
-        summary: "OpenCode watchdog exhausted automatic recovery after two retries.",
-        changedFiles: [],
-        verification: [{ command: "OPENBOARD_WATCHDOG_MS", result: `tripped for runStartedAt ${event.run.runStartedAt}` }],
-        residualRisk: "Agent session became silent while observation was live; human input is required before continuing.",
-        needsInput: "Review the partial worktree/session output and decide whether to retry manually, change model/provider, or edit the task.",
-        reportedAt: Date.now(),
-      };
-      this.store.setCompletion(task.id, report, "watchdog");
-      this.store.update(task.id, { runState: "error", error: report.residualRisk, completionLocation: "task-directory" });
-      this.store.move(task.id, "review", END_OF_COLUMN);
-      this.store.addEvent({ taskId: task.id, type: "task_watchdog_exhausted", body: { runStartedAt: event.run.runStartedAt } });
-      this.endOpenCodeRun(task.id, event.run.runStartedAt, "error");
+      this.systemBlockAfterWatchdogExhaustion(
+        task,
+        event.run.runStartedAt,
+        `tripped for runStartedAt ${event.run.runStartedAt}`,
+        { runStartedAt: event.run.runStartedAt },
+      );
       return;
     }
 
     const nextAttempt = event.nextAttempt ?? event.run.attempt + 1;
+    await this.escalateWatchdogAttempt(task, nextAttempt);
+  }
+
+  /**
+   * Select the model for a watchdog auto-retry attempt (escalating to the
+   * configured fallback model on the second retry when it differs from the
+   * primary provider), emit the matching retry/fallback event, and start the
+   * attempt. Shared by normal watchdog escalation and by the
+   * dispatch-failure recovery path in startFreshOpenCodeAttempt.
+   */
+  private async escalateWatchdogAttempt(task: Task, nextAttempt: number): Promise<void> {
     const fallback = task.fallbackModel;
     const primary = task.model ?? null;
     const activeModel = nextAttempt === 2 && fallback && !sameProvider(primary, fallback) ? fallback : primary;
     const usedFallback = activeModel === fallback && fallback !== null;
     this.store.addEvent({ taskId: task.id, type: usedFallback ? "task_watchdog_fallback" : "task_watchdog_retry", body: { attempt: nextAttempt, model: activeModel } });
     await this.startFreshOpenCodeAttempt(task, nextAttempt, activeModel);
+  }
+
+  /**
+   * System-block the task the way watchdog exhaustion does: a blocked
+   * completion report with a needsInput question, moved to the review
+   * column. Shared by liveness-timeout exhaustion and by watchdog
+   * auto-retry attempts that fail to start (session-create or prompt
+   * admission) with no attempt budget remaining.
+   */
+  private systemBlockAfterWatchdogExhaustion(
+    task: Task,
+    runStartedAtToClose: number | undefined,
+    verificationResult: string,
+    eventBody: Record<string, unknown>,
+  ): void {
+    const report = {
+      outcome: "blocked" as const,
+      summary: "OpenCode watchdog exhausted automatic recovery after two retries.",
+      changedFiles: [],
+      verification: [{ command: "OPENBOARD_WATCHDOG_MS", result: verificationResult }],
+      residualRisk: "Agent session became silent while observation was live; human input is required before continuing.",
+      needsInput: "Review the partial worktree/session output and decide whether to retry manually, change model/provider, or edit the task.",
+      reportedAt: Date.now(),
+    };
+    this.store.setCompletion(task.id, report, "watchdog");
+    this.store.update(task.id, { runState: "error", error: report.residualRisk, completionLocation: "task-directory" });
+    this.store.move(task.id, "review", END_OF_COLUMN);
+    this.store.addEvent({ taskId: task.id, type: "task_watchdog_exhausted", body: eventBody });
+    if (runStartedAtToClose !== undefined) this.endOpenCodeRun(task.id, runStartedAtToClose, "error");
   }
 
   private async confirmWatchdogAbort(run: WatchdogRunIdentity): Promise<boolean> {
@@ -2020,26 +2231,70 @@ export class TaskDispatcher implements Dispatcher {
       permission: permissionRules,
     });
     const sessionId = extractSessionId((created as { data?: unknown }).data);
-    if (!sessionId || (created as { error?: unknown }).error) return;
+    if (!sessionId || (created as { error?: unknown }).error) {
+      const detail = errorMessage((created as { error?: unknown }).error, "OpenCode session create returned no id");
+      await this.handleWatchdogAttemptStartFailure(task, attempt, "session-create", detail);
+      return;
+    }
     const runStartedAt = Date.now();
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt });
     this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt });
     if (hasAskRule(permissionRules)) {
       this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override");
     }
-    const prompt = isolatedRun
+    const basePrompt = isolatedRun
       ? this.withWorktreeIsolationPreamble(execDirectory, this.resolveDirectory(task.directory), task.description)
       : task.description;
+    // The fresh session lands in the SAME tree the stalled attempt worked
+    // in — without saying so, the retry agent has no idea attempt N-1 left
+    // partial work behind and may redo or clobber it.
+    const prompt = [
+      `WATCHDOG RETRY CONTEXT (attempt ${attempt}): a previous session for this task stalled and was aborted.`,
+      `You are working in the same directory that attempt used, so its partial work may already be present.`,
+      `Inspect the current state first (git status, existing edits), preserve work already done, and continue the task rather than restarting it from scratch.`,
+      "",
+      basePrompt,
+    ].join("\n");
     const fullPrompt = this.withCompletionContract(task, this.withParentHandoffs(task, this.withTaskContext(task, prompt)), runStartedAt);
     const promptError = await this.prompt(sessionId, fullPrompt, task.agent ?? undefined, activeModel);
     if (promptError) {
       this.stopPermissionResponder(sessionId);
-      this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "error", error: promptError });
+      this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, error: promptError });
       this.endOpenCodeRun(task.id, runStartedAt, "error");
+      await this.handleWatchdogAttemptStartFailure(task, attempt, "prompt", promptError);
       return;
     }
     this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "running", error: undefined });
     this.startCompletionWatcher(task.id, sessionId);
+  }
+
+  /**
+   * A watchdog auto-retry attempt failed before a session could observably
+   * start (session create or prompt admission). The old root was already
+   * aborted and its watchdog is terminal, so the card must not be left
+   * runState "running" pointing at a dead session: record why, then either
+   * consume the next attempt slot within the cap (same escalation flow as a
+   * normal watchdog retry, including fallback-model selection) or
+   * system-block the task like watchdog exhaustion does.
+   */
+  private async handleWatchdogAttemptStartFailure(
+    task: Task,
+    attempt: number,
+    stage: "session-create" | "prompt",
+    detail: string,
+  ): Promise<void> {
+    this.store.addEvent({ taskId: task.id, type: "task_watchdog_retry_failed", body: { attempt, stage, error: detail } });
+    if (attempt < this.watchdogConfig.maxAutomaticRetries) {
+      await this.escalateWatchdogAttempt(task, attempt + 1);
+      return;
+    }
+    const staleRun = this.openCodeRunsByTask.get(task.id);
+    this.systemBlockAfterWatchdogExhaustion(
+      task,
+      staleRun?.runStartedAt,
+      `attempt ${attempt} failed to start (${stage}): ${detail}`,
+      { attempt, stage, error: detail },
+    );
   }
 
   private startCompletionWatcher(taskId: string, sessionId: string): void {
@@ -2174,8 +2429,28 @@ export class TaskDispatcher implements Dispatcher {
         if (watcher.cancelled) return;
 
         const task = this.getTaskForWatcher(taskId);
-        if (!task || task.sessionId !== sessionId || task.runState !== "running") {
-          if (task?.sessionId === sessionId) this.endOpenCodeRun(taskId, task.runStartedAt, task.runState === "error" ? "error" : "complete");
+        if (!task || task.sessionId !== sessionId) return;
+        if (task.runState !== "running") {
+          // complete_task/block_task can update the card before OpenCode has
+          // emitted and persisted the provider's final post-tool assistant
+          // message. Keep the activity run alive for a short, bounded flush
+          // window so Session Chat does not lose that reply until reconnect.
+          if (task.completion && Date.now() - task.completion.reportedAt <= 5_000) {
+            try {
+              const result = await this.client.session.messages({ sessionID: sessionId });
+              const messages = (result as { data?: unknown; error?: unknown }).data;
+              if (!(result as { error?: unknown }).error && hasAssistantTurnFinished(messages)) {
+                const output = extractFinalOutput(messages);
+                if (output) this.recordOpenCodeActivity(taskId, sessionId, { kind: "text", role: "assistant", text: output });
+                this.endOpenCodeRun(taskId, task.runStartedAt, task.runState === "error" ? "error" : "complete");
+                return;
+              }
+            } catch {
+              // Keep polling within the bounded flush window.
+            }
+            continue;
+          }
+          this.endOpenCodeRun(taskId, task.runStartedAt, task.runState === "error" ? "error" : "complete");
           return;
         }
 
@@ -2205,7 +2480,20 @@ export class TaskDispatcher implements Dispatcher {
         const finalOutput = this.outputCandidates.get(sessionId) ?? extractFinalOutput(messages);
 
         const beforeFallback = this.getTaskForWatcher(taskId);
-        if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
+        if (!beforeFallback || beforeFallback.runState !== "running") {
+          return;
+        }
+
+        // A Session Chat turn over a retained Review completion is not a new
+        // task attempt. Publish the final reply, restore the card's semantic
+        // idle/blocked state, and preserve its existing completion evidence.
+        if (beforeFallback.completion) {
+          if (finalOutput) this.recordOpenCodeActivity(taskId, sessionId, { kind: "text", role: "assistant", text: finalOutput });
+          this.updateTaskForWatcher(taskId, {
+            runState: beforeFallback.completion.outcome === "blocked" ? "error" : "idle",
+            error: beforeFallback.completion.outcome === "blocked" ? beforeFallback.completion.residualRisk : undefined,
+          });
+          this.endOpenCodeRun(taskId, beforeFallback.runStartedAt, beforeFallback.completion.outcome === "blocked" ? "error" : "complete");
           return;
         }
 
@@ -2426,7 +2714,14 @@ export class TaskDispatcher implements Dispatcher {
         }
 
         const beforeFallback = this.getTaskForWatcher(taskId);
-        if (!beforeFallback || beforeFallback.runState !== "running" || beforeFallback.completion) {
+        if (!beforeFallback || beforeFallback.runState !== "running") {
+          return;
+        }
+        if (beforeFallback.completion) {
+          this.updateTaskForWatcher(taskId, {
+            runState: beforeFallback.completion.outcome === "blocked" ? "error" : "idle",
+            error: beforeFallback.completion.outcome === "blocked" ? beforeFallback.completion.residualRisk : undefined,
+          });
           return;
         }
         if (await this.blockOnBaseCheckoutEscape(taskId, beforeFallback)) {
@@ -2570,6 +2865,10 @@ export class TaskDispatcher implements Dispatcher {
     if (!run || !run.sessionIds.has(parentId) || run.sessionIds.size >= SESSION_TREE_MAX_SESSIONS) return;
     run.sessionIds.add(id);
     this.openCodeSessionToTask.set(id, task.id);
+    // A fenced subagent raises permission asks under its OWN session id; the
+    // responder pool only answers sessions it knows about, so attach the
+    // child to the root's target or its asks hang until the watchdog trips.
+    if (task.sessionId) this.permissionResponderPool.addChildSession(task.sessionId, id);
     this.recordOpenCodeActivity(task.id, id, { kind: "status", text: "session.created", parentSessionId: parentId });
   }
 

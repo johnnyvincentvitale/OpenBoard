@@ -116,7 +116,10 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
     const harness = task.harness ?? "opencode";
     const runStartedAt = task.runStartedAt ?? 0;
     const effectiveDirectory = task.worktreePath ?? task.harnessCwd ?? task.directory;
-    const isTerminal = task.column === "done" || task.column === "review";
+    // Review chat temporarily marks the retained task run as running while
+    // keeping the card/evidence in Review. Treat that as a live conversation,
+    // not a static historical stream.
+    const isTerminal = task.column === "done" || (task.column === "review" && task.runState !== "running");
 
     return streamSSE(c, async (stream) => {
       let closed = false;
@@ -187,7 +190,9 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
             taskId, runStartedAt, harness, sessionId,
             backfill, budget, 0, new Set(),
           );
-          const clean: SessionActivityEvent[] = backfill.map(({ _identity: _, ...e }) => e);
+          const clean: SessionActivityEvent[] = collapseSameTurnAssistantEchoes(
+            backfill.map(({ _identity: _, ...e }) => e),
+          );
           if (clean.length > limit) clean.length = limit;
           await writeFrame({
             kind: "snapshot",
@@ -267,8 +272,24 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
         }
 
         let acpClosed2 = false;
+        // Same live bookkeeping as the OpenCode path below: the heartbeat
+        // loop must report the collector's real transport/lastEventAt and
+        // stop once the run's terminal frame has been delivered — otherwise
+        // a finished ACP run flips back to LIVE on the next heartbeat.
+        let acpLiveTransport: SessionActivityTransport = "live";
+        let acpLiveLastEventAt: number | null = null;
+        let acpTerminalSent = false;
         const unsubscribe2 = activity.subscribe(taskId, cursor, (frame) => {
           if (acpClosed2 || closed) return;
+          if (frame.kind === "append") {
+            acpLiveLastEventAt = frame.event.occurredAt;
+          }
+          if (frame.kind === "snapshot" || frame.kind === "heartbeat") {
+            acpLiveTransport = frame.transport;
+          }
+          if (frame.kind === "terminal") {
+            acpTerminalSent = true;
+          }
           if (frame.kind === "gap") {
             if (frame.reason.includes("evicted") || frame.reason.includes("replaced")) {
               void writeFrame(frame);
@@ -288,10 +309,16 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
         });
 
         try {
-          while (!closed && !stream.aborted && !acpClosed2) {
+          while (!closed && !stream.aborted && !acpClosed2 && !acpTerminalSent) {
             await stream.sleep(HEARTBEAT_INTERVAL_MS);
-            if (closed || stream.aborted) break;
-            await emitHeartbeat(null, "live");
+            if (closed || stream.aborted || acpTerminalSent) break;
+            await emitHeartbeat(acpLiveLastEventAt, acpLiveTransport);
+          }
+          // The subscriber's writes are fire-and-forget (void writeFrame) —
+          // returning while one is still in flight or queued would end the
+          // SSE stream before the terminal frame reaches the wire.
+          while (!closed && !stream.aborted && (writing || pendingFrames.length > 0)) {
+            await stream.sleep(5);
           }
         } finally {
           acpClosed2 = true;
@@ -307,11 +334,24 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
       // Phase 2: after detach, frames arriving during snapshot build.
       let pendingLiveFrames: SessionActivityFrame[] = [];
       let switchedToLive = false;
+      // Live bookkeeping the post-snapshot heartbeat loop reads from —
+      // updated by the subscriber callback in both the buffered and live
+      // phases so the loop never reports stale/hardcoded values.
+      let liveTransport: SessionActivityTransport = "live";
+      let liveLastEventAt: number | null = null;
+      let terminalSent = false;
 
       const subscriberCallback = (frame: SessionActivityFrame) => {
         if (closed || stream.aborted) return;
         if (frame.kind === "append") {
           watermarkSeq = Math.max(watermarkSeq, frame.event.seq);
+          liveLastEventAt = frame.event.occurredAt;
+        }
+        if (frame.kind === "snapshot" || frame.kind === "heartbeat") {
+          liveTransport = frame.transport;
+        }
+        if (frame.kind === "terminal") {
+          terminalSent = true;
         }
         if (switchedToLive) {
           const id = frame.kind === "append" ? String(frame.event.seq) : undefined;
@@ -408,9 +448,10 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
 
         // Sort, then slice the LAST `limit` rows (newest retained).
         allEvents.sort((a, b) => a.occurredAt - b.occurredAt || a.seq - b.seq);
-        const snapshotEvents = allEvents.length > limit
-          ? allEvents.slice(allEvents.length - limit)
-          : allEvents;
+        const collapsedEvents = collapseSameTurnAssistantEchoes(allEvents);
+        const snapshotEvents = collapsedEvents.length > limit
+          ? collapsedEvents.slice(collapsedEvents.length - limit)
+          : collapsedEvents;
 
         // Snapshot live high-watermark: max seq from collector
         // events in the snapshot + the captured watermark (before
@@ -484,30 +525,51 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
           await writeFrame({ kind: "terminal", status: terminalStatus });
         }
 
-        // Step 6: Drain buffered appends that arrived AFTER the detach
-        // (seq > snapshot high-watermark). Deduplicate by seq.
+        // Step 6: Drain frames buffered AFTER the detach, in original order.
+        // Appends are filtered to seq > snapshot high-watermark and
+        // deduplicated by seq (they may already be represented in the
+        // snapshot). Terminal, gap, and snapshot frames are not append-only
+        // — a run that ends (or replaces itself, or evicts its ring) while
+        // backfill is still in flight must still reach the viewer, so those
+        // kinds are preserved unconditionally instead of being dropped.
         switchedToLive = true;
         const drainedSeqs = new Set<number>();
-        const toDrain = pendingLiveFrames
-          .filter(
-            (f): f is { kind: "append"; event: SessionActivityEvent } =>
-              f.kind === "append" && f.event.seq > snapshotLiveHighWatermark,
-          )
-          .filter((f) => {
-            if (drainedSeqs.has(f.event.seq)) return false;
-            drainedSeqs.add(f.event.seq);
-            return true;
-          });
+        const toDrain: SessionActivityFrame[] = [];
+        for (const frame of pendingLiveFrames) {
+          if (frame.kind === "append") {
+            if (frame.event.seq > snapshotLiveHighWatermark && !drainedSeqs.has(frame.event.seq)) {
+              drainedSeqs.add(frame.event.seq);
+              toDrain.push(frame);
+            }
+            continue;
+          }
+          if (frame.kind === "terminal" || frame.kind === "gap" || frame.kind === "snapshot") {
+            toDrain.push(frame);
+          }
+          // Heartbeat frames buffered during backfill are superseded by the
+          // heartbeat loop below (which reports live, up-to-date state) and
+          // are intentionally not replayed.
+        }
         for (const frame of toDrain) {
-          await writeFrame(frame, String(frame.event.seq));
+          const id = frame.kind === "append" ? String(frame.event.seq) : undefined;
+          await writeFrame(frame, id);
         }
         pendingLiveFrames = [];
 
-        // Step 7: Heartbeat loop.
-        while (!closed && !stream.aborted) {
+        // Step 7: Heartbeat loop. Stops once a terminal frame has been sent
+        // for this run (including one just drained above) rather than
+        // looping forever; reports the collector's actual transport state
+        // and the most recently observed event time instead of a hardcoded
+        // "live" and a snapshot-frozen timestamp.
+        while (!closed && !stream.aborted && !terminalSent) {
           await stream.sleep(HEARTBEAT_INTERVAL_MS);
-          if (closed || stream.aborted) break;
-          await emitHeartbeat(lastEventAt, "live");
+          if (closed || stream.aborted || terminalSent) break;
+          await emitHeartbeat(liveLastEventAt ?? lastEventAt, liveTransport);
+        }
+        // A live terminal frame arrives via the subscriber's fire-and-forget
+        // writeFrame — don't end the stream while it is still in flight.
+        while (!closed && !stream.aborted && (writing || pendingFrames.length > 0)) {
+          await stream.sleep(5);
         }
       } finally {
         unsubscribe();
@@ -528,8 +590,25 @@ interface ByteBudget {
   truncated: boolean;
 }
 
-function fingerprint(e: { sessionId: string; occurredAt: number; kind: string; text?: string; tool?: { name: string } }): string {
-  return `${e.sessionId}:${e.occurredAt}:${e.kind}:${e.text ?? ""}:${e.tool?.name ?? ""}`;
+/**
+ * Stable dedup identity between backfill rows and collector events.
+ *
+ * `occurredAt` cannot be part of the fingerprint: the collector stamps it at
+ * record time while backfill stamps it at message-created time, so the same
+ * logical event never has equal timestamps on both sides — that mismatch is
+ * what caused every event to render twice.
+ *
+ * Tool events carry OpenCode's own `tool.callId` on both sides (backfill
+ * reads it from `part.callID`; the collector passes it through as
+ * `tool.callId`), so prefer that shared id when present. Text events have no
+ * shared stable id in the `SessionActivityEvent` wire shape on either side,
+ * so fall back to kind+text+toolName — still without occurredAt.
+ */
+function fingerprint(e: { sessionId: string; kind: string; text?: string; tool?: { name: string; callId?: string } }): string {
+  if (e.tool?.callId) {
+    return `${e.sessionId}:tool-call:${e.tool.callId}`;
+  }
+  return `${e.sessionId}:${e.kind}:${e.text ?? ""}:${e.tool?.name ?? ""}`;
 }
 
 async function traverseSessionTree(
@@ -573,7 +652,12 @@ async function traverseSessionTree(
         ? (["assistant", "user", "system"].includes(info.role) ? info.role as SessionActivityRole : "system")
         : "system";
       const messageId = typeof info?.id === "string" ? info.id : "";
-      const occurredAt = typeof info?.created === "number" ? info.created : 0;
+      const messageTime = info?.time as Record<string, unknown> | undefined;
+      const occurredAt = typeof info?.created === "number"
+        ? info.created
+        : typeof messageTime?.created === "number"
+          ? messageTime.created
+          : 0;
 
       const parts = Array.isArray(record.parts)
         ? (record.parts as Array<Record<string, unknown>>)
@@ -586,9 +670,10 @@ async function traverseSessionTree(
 
         if (type === "text") {
           const rawText = typeof part.text === "string" ? part.text : "";
-          const text = rawText.slice(0, MAX_TEXT_LENGTH);
+          const text = displayTextForBackfill(rawText, role).slice(0, MAX_TEXT_LENGTH);
+          if (!text.trim()) continue;
           const event = {
-            seq: -(visited.size * 10000 + partIndex),
+            seq: visited.size * 10000 + partIndex,
             taskId,
             runStartedAt,
             sessionId,
@@ -604,6 +689,7 @@ async function traverseSessionTree(
           pushEvent(event, out, budget);
         } else if (type === "tool") {
           const toolName = typeof part.tool === "string" ? part.tool : "unknown";
+          if (isOpenBoardReportTool(toolName)) continue;
           const callId = typeof part.callID === "string" ? part.callID : undefined;
           const state = part.state as Record<string, unknown> | undefined;
           const status: SessionActivityToolStatus =
@@ -618,7 +704,7 @@ async function traverseSessionTree(
           const output = typeof state?.output === "string" ? state.output : undefined;
           const outputBytes = output !== undefined ? Buffer.byteLength(output, "utf-8") : undefined;
           const event = {
-            seq: -(visited.size * 10000 + partIndex),
+            seq: visited.size * 10000 + partIndex,
             taskId,
             runStartedAt,
             sessionId,
@@ -671,6 +757,55 @@ async function traverseSessionTree(
   } catch {
     // Non-fatal.
   }
+}
+
+/** Keep provider backfill conversational by removing OpenBoard's injected worker envelope. */
+function displayTextForBackfill(text: string, role: SessionActivityRole): string {
+  if (role !== "user") return text;
+  const chatEnvelopes = [
+    {
+      prefix: "OPENBOARD SESSION CHAT\n\n",
+      suffix: "\n\nRespond conversationally in this session. Do not call complete_task or block_task, do not change files, and do not alter the card lifecycle for this chat turn.",
+    },
+    {
+      prefix: "OPENBOARD OPERATOR GUIDANCE\n\n",
+      suffix: "\n\nApply this guidance to the active task. Preserve the existing session, working tree, and original completion contract.",
+    },
+  ];
+  for (const envelope of chatEnvelopes) {
+    if (text.startsWith(envelope.prefix) && text.endsWith(envelope.suffix)) {
+      return text.slice(envelope.prefix.length, -envelope.suffix.length);
+    }
+  }
+  const operatorMarker = "OPERATOR MESSAGE\n\n";
+  if (text.startsWith(operatorMarker)) {
+    const body = text.slice(operatorMarker.length);
+    const suffix = "\n\nContinue the existing task in the current working tree.";
+    const suffixIndex = body.indexOf(suffix);
+    return suffixIndex >= 0 ? body.slice(0, suffixIndex) : body;
+  }
+  const contractIndex = text.indexOf("\n\n---\nOPENBOARD");
+  return contractIndex >= 0 ? text.slice(0, contractIndex) : text;
+}
+
+function isOpenBoardReportTool(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return normalized.includes("openboard") && (normalized.endsWith("complete_task") || normalized.endsWith("block_task"));
+}
+
+function collapseSameTurnAssistantEchoes(events: SessionActivityEvent[]): SessionActivityEvent[] {
+  const result: SessionActivityEvent[] = [];
+  let assistantTexts = new Set<string>();
+  for (const event of events) {
+    if (event.kind === "text" && event.role === "user") assistantTexts = new Set<string>();
+    if (event.kind === "text" && event.role === "assistant" && event.text?.trim()) {
+      const text = event.text.trim();
+      if (assistantTexts.has(text)) continue;
+      assistantTexts.add(text);
+    }
+    result.push(event);
+  }
+  return result;
 }
 
 function pushEvent(

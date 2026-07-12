@@ -35,6 +35,9 @@ export interface ClaudeCodeRunnerLike {
   retry(input: ClaudeCodeRunInput): Promise<ClaudeCodeRunResult>;
   poll(sessionName: string): Promise<ClaudeCodeStatus | undefined>;
   abort(sessionName: string): Promise<void>;
+  /** Send another prompt turn through an existing live ACP session. */
+  sendMessage?(sessionName: string, text: string, options: { mode: "queue" | "interrupt"; runStartedAt: number }): Promise<void>;
+  shutdown?(): void;
 }
 
 export interface ClaudeCodeRunnerDeps {
