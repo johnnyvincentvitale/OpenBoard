@@ -285,6 +285,9 @@ describe("resolveTaskLineage", () => {
       const result = resolveTaskLineage(child.id, store);
       expect(result).not.toBeNull();
       expect(result!.directParents).toEqual([]);
+      expect((result as any).diagnostics.missingTaskIds).toEqual(["task_missing"]);
+      expect((result as any).diagnostics.truncationReasons).toContain("missing-task");
+      expect((result as any).diagnostics.omittedCounts.missingTasks).toBe(1);
     });
 
     it("skips missing grandparent but still resolves existing parent", () => {
@@ -305,6 +308,8 @@ describe("resolveTaskLineage", () => {
       expect(result!.directParents).toHaveLength(1);
       expect(result!.directParents[0].taskId).toBe(parent.id);
       expect(result!.inheritedParents).toEqual([]);
+      expect((result as any).diagnostics.missingTaskIds).toEqual(["task_missing_gp"]);
+      expect((result as any).diagnostics.truncationReasons).toContain("missing-task");
     });
   });
 
@@ -402,6 +407,9 @@ describe("resolveTaskLineage", () => {
       const result = resolveTaskLineage(child.id, store);
       expect(result!.codeAncestors[0].branch).toBe("board/task_1");
       expect(result!.codeAncestors[0].worktreePath).toBe("/tmp/worktrees/task_1");
+      expect((result!.codeAncestors[0] as any).depth).toBe(1);
+      expect((result!.codeAncestors[0] as any).viaParentIds).toEqual([buildParent.id]);
+      expect((result!.codeAncestors[0] as any).evidenceAvailability).toBe("live-worktree");
     });
   });
 
@@ -498,6 +506,9 @@ describe("resolveTaskLineage", () => {
       const result = resolveTaskLineage(child.id, store);
 
       expect(result!.truncated).toBe(true);
+      expect((result as any).diagnostics.truncationReasons).toContain("depth");
+      expect((result as any).diagnostics.omittedCounts.depthAtLeast).toBeGreaterThan(0);
+      expect((result as any).diagnostics.limits).toMatchObject({ maxDepth: 16, maxNodes: 256, maxViaParentIds: 64 });
       expect(result!.directParents).toHaveLength(1);
       expect(result!.directParents[0].taskId).toBe(directParent.id);
 
@@ -539,6 +550,8 @@ describe("resolveTaskLineage", () => {
       const result = resolveTaskLineage(child.id, store);
 
       expect(result!.truncated).toBe(true);
+      expect((result as any).diagnostics.truncationReasons).toContain("node-count");
+      expect((result as any).diagnostics.omittedCounts.nodeCountAtLeast).toBeGreaterThan(0);
       expect(result!.directParents).toHaveLength(1);
 
       // Total collected ancestors (direct parent + inherited) must not
@@ -557,6 +570,31 @@ describe("resolveTaskLineage", () => {
       // Not every grandparent made it in — proves the cap actually bound
       // the traversal rather than silently allowing everything through.
       expect(inheritedIds.length).toBeLessThan(WIDE_COUNT);
+    });
+
+    it("bounds many direct parents within the global node budget with deterministic diagnostics", () => {
+      const DIRECT_PARENT_COUNT = 300;
+      const parents: Array<ReturnType<typeof create>> = [];
+      const child = create({ title: "Child", taskKind: "build" });
+      for (let i = 0; i < DIRECT_PARENT_COUNT; i++) {
+        const parent = create({ title: `direct-${String(i).padStart(3, "0")}` });
+        link(parent.id, child.id);
+        parents.push(parent);
+      }
+
+      const result = resolveTaskLineage(child.id, store);
+      const totalCollected = result!.directParents.length + result!.inheritedParents.length;
+
+      expect(result!.truncated).toBe(true);
+      expect((result as any).diagnostics.truncationReasons).toContain("node-count");
+      expect((result as any).diagnostics.omittedCounts.nodeCountAtLeast).toBeGreaterThan(0);
+      expect(totalCollected).toBeLessThanOrEqual(256);
+      expect(result!.directParents).toHaveLength(256);
+      expect(result!.inheritedParents).toHaveLength(0);
+      expect(result!.directParents.map((p) => p.taskId)).toEqual(
+        parents.slice(0, 256).map((p) => p.id),
+      );
+      expect(result!.directParents.some((p) => p.taskId === parents[299].id)).toBe(false);
     });
 
     it("still merges viaParentIds correctly through a diamond that stays well within the bounds", () => {

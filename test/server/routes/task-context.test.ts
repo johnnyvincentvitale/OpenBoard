@@ -113,6 +113,8 @@ describe("GET /api/tasks/:id/context", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.truncated).toBe(true);
+    expect(body.diagnostics.truncationReasons).toContain("depth");
+    expect(body.diagnostics.limits).toMatchObject({ maxDepth: 16, maxNodes: 256, maxViaParentIds: 64 });
   });
 
   it("returns structured lineage with direct parents", async () => {
@@ -195,6 +197,9 @@ describe("GET /api/tasks/:id/context", () => {
       column: "done",
       changedFiles: ["src/mod.ts"],
       hasStructuredHandoff: true,
+      depth: 1,
+      viaParentIds: [buildDone.id],
+      evidenceAvailability: "unknown",
     });
   });
 

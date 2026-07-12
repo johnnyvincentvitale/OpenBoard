@@ -22,6 +22,8 @@ export interface TaskHandoff {
 export interface DirectParentContext extends TaskHandoff {
   kind: "direct-parent";
   parentId: string;
+  branch?: string | null;
+  worktreePath?: string | null;
 }
 
 export interface InheritedParentContext {
@@ -36,6 +38,8 @@ export interface InheritedParentContext {
   hasStructuredHandoff: boolean;
 }
 
+export type CodeEvidenceAvailability = "live-worktree" | "durable-ref" | "unknown";
+
 export interface CodeAncestorCandidate {
   taskId: string;
   title: string;
@@ -46,6 +50,24 @@ export interface CodeAncestorCandidate {
   changedFiles: string[];
   summary?: string;
   hasStructuredHandoff: boolean;
+  depth?: number;
+  viaParentIds?: string[];
+  evidenceAvailability?: CodeEvidenceAvailability;
+}
+
+export type LineageTruncationReason = "depth" | "node-count" | "via-parent-ids" | "missing-task";
+
+export interface TaskContextDiagnostics {
+  truncated: boolean;
+  truncationReasons: LineageTruncationReason[];
+  limits: { maxDepth: number; maxNodes: number; maxViaParentIds: number };
+  omittedCounts: {
+    depthAtLeast: number;
+    nodeCountAtLeast: number;
+    viaParentIdsAtLeast: number;
+    missingTasks: number;
+  };
+  missingTaskIds: string[];
 }
 
 export interface TaskContext {
@@ -59,4 +81,5 @@ export interface TaskContext {
    * the lineage is exhaustive when this is set.
    */
   truncated?: boolean;
+  diagnostics?: TaskContextDiagnostics;
 }

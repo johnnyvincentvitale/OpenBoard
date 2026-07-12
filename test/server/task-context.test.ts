@@ -22,6 +22,14 @@ function buildLineage(overrides: Partial<TaskContext> = {}): TaskContext {
     directParents: [],
     inheritedParents: [],
     codeAncestors: [],
+    truncated: false,
+    diagnostics: {
+      truncated: false,
+      truncationReasons: [],
+      limits: { maxDepth: 16, maxNodes: 256, maxViaParentIds: 64 },
+      omittedCounts: { depthAtLeast: 0, nodeCountAtLeast: 0, viaParentIdsAtLeast: 0, missingTasks: 0 },
+      missingTaskIds: [],
+    },
     ...overrides,
   };
 }
@@ -142,7 +150,8 @@ describe("directParentPromptBlock", () => {
     expect(block).toContain("task_context");
     expect(block).toContain("task_compare");
     expect(block).toContain("task_diff");
-    expect(block).toContain("PARENT-abc12345");
+    expect(block).toContain("PARENT-000");
+    expect(block).toContain("PARENT-000 TASK ID: task_abc12345");
     expect(block).toContain("Build Parent");
     expect(block).toContain("Implemented the feature");
     expect(block).toContain("src/feat.ts");
@@ -187,7 +196,95 @@ describe("directParentPromptBlock", () => {
     const headerCount = (block!.match(/PARENT CONTEXT/g) || []).length;
     expect(headerCount).toBe(1);
     // Each parent gets its own section header.
-    const parentHeaders = (block!.match(/PARENT-task_/g) || []).length;
+    const parentHeaders = (block!.match(/PARENT-\d{3}:/g) || []).length;
     expect(parentHeaders).toBe(2);
+  });
+
+  it("keeps represented parent identities truthful under a many-parent small budget", () => {
+    const parents = Array.from({ length: 30 }, (_, i) => {
+      const id = `task_parent_${String(i).padStart(2, "0")}`;
+      return {
+        kind: "direct-parent" as const,
+        parentId: id,
+        taskId: id,
+        title: `Parent ${i} ${"x".repeat(80)}`,
+        description: "Parent description",
+        taskKind: "build" as const,
+        column: "review" as const,
+        completion: null,
+        changedFiles: [],
+        verification: [],
+        residualRisk: "",
+        hasStructuredHandoff: false,
+      };
+    });
+    const lineage = buildLineage({ directParents: parents });
+
+    const block = directParentPromptBlock(lineage, { maxChars: 900 });
+
+    expect(block).not.toBeNull();
+    expect(block!.length).toBeLessThanOrEqual(900);
+    expect(block).not.toContain("direct parent task IDs are preserved");
+
+    const representedLabels = Array.from(block!.matchAll(/^(PARENT-\d{3}):/gm), (match) => match[1]);
+    for (const label of representedLabels) {
+      expect(block).toContain(`${label} TASK ID:`);
+    }
+
+    const presentIds = parents.filter((parent) => block!.includes(parent.taskId));
+    expect(presentIds.length).toBeGreaterThan(0);
+    expect(presentIds.length).toBeLessThan(parents.length);
+    expect(block).toContain("Direct parent IDs omitted");
+  });
+
+  it("bounds the whole injected block while preserving direct parent identity", () => {
+    const huge = "x".repeat(2000);
+    const lineage = buildLineage({
+      directParents: [
+        {
+          kind: "direct-parent",
+          parentId: "task_oversize",
+          taskId: "task_oversize",
+          title: `Oversized ${huge}`,
+          description: huge,
+          taskKind: "build",
+          column: "review",
+          completion: {
+            outcome: "complete",
+            summary: huge,
+            changedFiles: Array.from({ length: 50 }, (_, i) => `src/file-${i}.ts`),
+            verification: [{ command: `npm test ${huge}`, result: huge }],
+            residualRisk: huge,
+            reportedAt: 1000,
+          },
+          changedFiles: Array.from({ length: 50 }, (_, i) => `src/file-${i}.ts`),
+          verification: [{ command: `npm test ${huge}`, result: huge }],
+          residualRisk: huge,
+          summary: huge,
+          hasStructuredHandoff: true,
+        },
+      ],
+      inheritedParents: [
+        {
+          kind: "inherited-parent",
+          taskId: "task_inherited",
+          title: `Inherited ${huge}`,
+          taskKind: "research",
+          column: "done",
+          depth: 2,
+          viaParentIds: ["task_oversize"],
+          summary: huge,
+          hasStructuredHandoff: true,
+        },
+      ],
+    });
+
+    const block = directParentPromptBlock(lineage, { maxChars: 1200 });
+
+    expect(block).not.toBeNull();
+    expect(block!.length).toBeLessThanOrEqual(1200);
+    expect(block).toContain("PARENT-000 TASK ID: task_oversize");
+    expect(block).toContain("omitted");
+    expect(block).toContain("task_context");
   });
 });

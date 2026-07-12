@@ -144,7 +144,7 @@ describe("compareTaskEvidence", () => {
     }
   });
 
-  it("still compares against a live-worktree base whose branch has real commits beyond the fork point", async () => {
+  it("refuses honestly when a committed base branch has any additional uncommitted output", async () => {
     const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
 
     const buildWt = join(tmpDir, "build");
@@ -152,7 +152,7 @@ describe("compareTaskEvidence", () => {
     writeFileSync(join(buildWt, "README.md"), "# Committed build output\n");
     runGit(buildWt, ["add", "README.md"]);
     runGit(buildWt, ["commit", "-m", "build output"]);
-    // Extra uncommitted noise on top of the committed output must not block the compare.
+    // Extra uncommitted output on top of committed output must refuse the compare.
     writeFileSync(join(buildWt, "scratch.txt"), "wip\n");
 
     const fixWt = join(tmpDir, "fix");
@@ -180,7 +180,149 @@ describe("compareTaskEvidence", () => {
     });
 
     const result = await compareTaskEvidence(buildTask, fixTask);
-    expect(result.kind).toBe("diff");
+    expect(result.kind).toBe("no-git");
+    if (result.kind === "no-git") {
+      expect(result.reason).toContain("uncommitted");
+      expect(result.reason).toContain("board/build");
+    }
+  });
+
+  it("refuses dirty ACP harness base output represented by harnessCwd and harnessBranch", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+    const harnessWt = join(tmpDir, "harness-build");
+    runGit(repoDir, ["worktree", "add", "-b", "acp/build", harnessWt, "HEAD"]);
+    writeFileSync(join(harnessWt, "README.md"), "# Committed ACP build output\n");
+    runGit(harnessWt, ["add", "README.md"]);
+    runGit(harnessWt, ["commit", "-m", "acp build output"]);
+    writeFileSync(join(harnessWt, "README.md"), "# Dirty tracked ACP build output\n");
+    writeFileSync(join(harnessWt, "untracked-acp-output.txt"), "wip\n");
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, "acp/build"]);
+    writeFileSync(join(fixWt, "fix.ts"), "export const fix = true;\n");
+    runGit(fixWt, ["add", "fix.ts"]);
+    runGit(fixWt, ["commit", "-m", "fix output"]);
+
+    const buildTask = makeTask({
+      id: "task_build",
+      harness: "claude-code",
+      directory: repoDir,
+      harnessCwd: harnessWt,
+      harnessBranch: "acp/build",
+      baseBranch: "main",
+      baseCommit,
+    });
+    const fixTask = makeTask({
+      id: "task_fix",
+      directory: repoDir,
+      worktreePath: fixWt,
+      worktreeBranch: "board/fix",
+      baseBranch: "main",
+      baseCommit,
+    });
+
+    const result = await compareTaskEvidence(buildTask, fixTask);
+    expect(result.kind).toBe("no-git");
+    if (result.kind === "no-git") {
+      expect(result.reason).toContain("uncommitted");
+      expect(result.reason).toContain("acp/build");
+      expect(result.baseRef).toBe("acp/build");
+      expect(result.baseSha).toMatch(/^[0-9a-f]{40}$/);
+    }
+  });
+
+  it("refuses comparison when base worktree cleanliness cannot be established", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+    const buildWt = join(tmpDir, "build");
+    runGit(repoDir, ["worktree", "add", "-b", "board/build", buildWt, "HEAD"]);
+    writeFileSync(join(buildWt, "README.md"), "# Committed build output\n");
+    runGit(buildWt, ["add", "README.md"]);
+    runGit(buildWt, ["commit", "-m", "build output"]);
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, "board/build"]);
+    writeFileSync(join(fixWt, "fix.ts"), "export const fix = true;\n");
+    runGit(fixWt, ["add", "fix.ts"]);
+    runGit(fixWt, ["commit", "-m", "fix output"]);
+
+    const buildTask = makeTask({
+      id: "task_build",
+      directory: repoDir,
+      worktreePath: buildWt,
+      worktreeBranch: "board/build",
+      baseBranch: "main",
+      baseCommit,
+    });
+    const fixTask = makeTask({
+      id: "task_fix",
+      directory: repoDir,
+      worktreePath: fixWt,
+      worktreeBranch: "board/fix",
+      baseBranch: "main",
+      baseCommit,
+    });
+
+    const realExecGit = vi.mocked(execGit).getMockImplementation();
+    expect(realExecGit).toBeDefined();
+    vi.mocked(execGit).mockImplementation(async (cwd: string, args: string[]) => {
+      if (cwd === buildWt && args[0] === "status") {
+        return { code: 128, stdout: "", stderr: "fatal: could not read index" };
+      }
+      return realExecGit!(cwd, args);
+    });
+
+    try {
+      const result = await compareTaskEvidence(buildTask, fixTask);
+      expect(result.kind).toBe("no-git");
+      if (result.kind === "no-git") {
+        expect(result.reason).toContain("cleanliness");
+        expect(result.baseRef).toBe("board/build");
+        expect(result.baseSha).toMatch(/^[0-9a-f]{40}$/);
+      }
+    } finally {
+      vi.mocked(execGit).mockImplementation(realExecGit!);
+    }
+  });
+
+  it("refuses divergent task branches instead of presenting unrelated churn as Build->Fix", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+    const buildWt = join(tmpDir, "build");
+    runGit(repoDir, ["worktree", "add", "-b", "board/build", buildWt, "HEAD"]);
+    writeFileSync(join(buildWt, "build.ts"), "export const build = true;\n");
+    runGit(buildWt, ["add", "build.ts"]);
+    runGit(buildWt, ["commit", "-m", "build output"]);
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, "HEAD"]);
+    writeFileSync(join(fixWt, "fix.ts"), "export const fix = true;\n");
+    runGit(fixWt, ["add", "fix.ts"]);
+    runGit(fixWt, ["commit", "-m", "fix output"]);
+
+    const buildTask = makeTask({
+      id: "task_build",
+      directory: repoDir,
+      worktreeBranch: "board/build",
+      baseBranch: "main",
+      baseCommit,
+    });
+    const fixTask = makeTask({
+      id: "task_fix",
+      directory: repoDir,
+      worktreeBranch: "board/fix",
+      baseBranch: "main",
+      baseCommit,
+    });
+
+    const result = await compareTaskEvidence(buildTask, fixTask);
+    expect(result.kind).toBe("no-git");
+    if (result.kind === "no-git") {
+      expect(result.reason).toContain("diverged");
+      expect(result.baseRef).toBe("board/build");
+      expect(result.targetRef).toBe("board/fix");
+    }
   });
 
   it("returns an empty diff when both task outputs are identical", async () => {
@@ -193,10 +335,7 @@ describe("compareTaskEvidence", () => {
     runGit(wtA, ["commit", "-m", "task a"]);
 
     const wtB = join(tmpDir, "b");
-    runGit(repoDir, ["worktree", "add", "-b", "board/b", wtB, "HEAD"]);
-    writeFileSync(join(wtB, "same.ts"), "export const same = true;\n");
-    runGit(wtB, ["add", "same.ts"]);
-    runGit(wtB, ["commit", "-m", "task b"]);
+    runGit(repoDir, ["worktree", "add", "-b", "board/b", wtB, "board/a"]);
 
     const taskA = makeTask({
       id: "task_a",
@@ -264,6 +403,10 @@ describe("compareTaskEvidence", () => {
       expect(result.root).toBe(reviewWt);
       expect(result.baseRef).toBe("board/done");
       expect(result.targetRef).toBeNull();
+      expect(result.comparisonMode).toBe("live-target");
+      expect(result.baseSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(result.targetSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(result.mergeBaseSha).toBe(result.baseSha);
     }
   });
 
@@ -447,7 +590,7 @@ describe("compareTaskEvidence", () => {
     runGit(baseWt, ["commit", "-m", "base"]);
 
     const targetWt = join(tmpDir, "target");
-    runGit(repoDir, ["worktree", "add", "-b", "board/target", targetWt, "HEAD"]);
+    runGit(repoDir, ["worktree", "add", "-b", "board/target", targetWt, "board/base"]);
     writeFileSync(join(targetWt, "target.ts"), "export const target = true;\n");
     runGit(targetWt, ["add", "target.ts"]);
     runGit(targetWt, ["commit", "-m", "target"]);

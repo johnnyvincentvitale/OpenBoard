@@ -47,6 +47,8 @@ export type DiffResponse =
   | { kind: "diff"; files: DiffFile[]; capped: boolean; root?: string }
   | { kind: "no-git"; reason: string };
 
+export type TaskComparisonMode = "ancestor" | "live-target" | "unsupported";
+
 export type TaskCompareResponse =
   | {
       kind: "diff";
@@ -54,6 +56,10 @@ export type TaskCompareResponse =
       targetTaskId: string;
       baseRef: string;
       targetRef: string | null;
+      comparisonMode: TaskComparisonMode;
+      baseSha: string;
+      targetSha: string;
+      mergeBaseSha: string;
       files: DiffFile[];
       capped: boolean;
       root?: string;
@@ -65,6 +71,10 @@ export type TaskCompareResponse =
       baseRef: string | null;
       targetRef: string | null;
       reason: string;
+      comparisonMode?: TaskComparisonMode;
+      baseSha?: string | null;
+      targetSha?: string | null;
+      mergeBaseSha?: string | null;
     };
 
 /**

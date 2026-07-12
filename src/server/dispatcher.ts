@@ -29,7 +29,7 @@ import { completionHandoffGuidance } from "./completion-contract";
 import { loadPermissionConfig, loadWatchdogConfig, type WatchdogConfig } from "./config";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
 import { SessionActivityCollector, type SessionActivityEventInput } from "./session-activity";
-import { taskExecutionContext } from "./task-context";
+import { directParentPromptBlock, taskExecutionContext } from "./task-context";
 import type { PermissionAskEvent, RespondOutcome } from "./permission-broker";
 import { resolveTaskLineage } from "./task-lineage";
 import { RunWatchdog, type WatchdogClock, type WatchdogRetryDecision, type WatchdogRunIdentity, type WatchdogTermination } from "./watchdog";
@@ -1367,85 +1367,11 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   private withParentHandoffs(task: Task, prompt: string): string {
-    const lineage = resolveTaskLineage(task.id, this.store);
-    if (!lineage || lineage.directParents.length === 0) return prompt;
-
-    const lines = [
-      prompt,
-      "",
-      "---",
-      "PARENT CONTEXT",
-      "To inspect a parent's code changes, first call the openboard MCP tool task_diff with that parent's task id (listed below).",
-      "Use task_context to retrieve full inherited handoffs, task_diff for baseline diffs, and task_compare for Build->Fix comparisons.",
-      "If task_diff is unavailable, errors, or returns no-git evidence, fall back to the parent worktree with read/grep/glob/list tools only.",
-      "Parent task worktrees are read-only. Do not use bash, git -C, wc, shell grep, tests, or mutating commands against parent or sibling worktrees.",
-      "Do all implementation and verification shell commands from your own cwd.",
-      "Board tools are limited to task_diff, task_context, and task_compare for inspection and complete_task/block_task for your final report. Never call other board tools (run/move/create/link/retry/abort/integrate).",
-      "",
-    ];
-    for (const [index, parentContext] of lineage.directParents.entries()) {
-      const parent = this.store.get(parentContext.taskId);
-      if (!parent) continue;
-      const label = `PARENT-${String(index).padStart(3, "0")}`;
-      const changedFiles = parentWorktreeRelativeChangedFiles(parent);
-      lines.push(`${label}: ${parent.title}`);
-      lines.push(`${label} WORKTREE: ${parent.worktreePath ?? "unavailable"}`);
-      lines.push(`${label} TASK ID: ${parent.id}`);
-      lines.push(`${label} BRANCH: ${parent.worktreeBranch ?? "unavailable"}`);
-      if (parent.completion) {
-        lines.push(`${label} SUMMARY: ${parent.completion.summary}`);
-        lines.push(`${label} Changed files:`);
-        if (changedFiles.length > 0) {
-          for (const file of changedFiles) {
-            lines.push(`- ${file}`);
-          }
-        } else {
-          lines.push("- none reported");
-        }
-        lines.push(`${label} Verification:`);
-        if (parent.completion.verification.length > 0) {
-          for (const check of parent.completion.verification) {
-            lines.push(`- ${check.command}: ${check.result}`);
-          }
-        } else {
-          lines.push("- none reported");
-        }
-        lines.push(`${label} Residual risk: ${parent.completion.residualRisk}`);
-      } else {
-        lines.push("No structured handoff exists; parent is manually marked Done.");
-      }
-      lines.push("");
-    }
-    if (lineage.inheritedParents.length > 0) {
-      const beforeCount = lines.length;
-      lines.push("INHERITED CONTEXT");
-      let omitted = 0;
-      for (const ancestor of lineage.inheritedParents) {
-        const row = [
-          `- ${ancestor.taskId}: ${ancestor.title}`,
-          `kind=${ancestor.taskKind ?? "none"}`,
-          `depth=${ancestor.depth}`,
-          `via=${ancestor.viaParentIds.join(",")}`,
-          `structured=${ancestor.hasStructuredHandoff}`,
-          `codeCandidate=${lineage.codeAncestors.some((candidate) => candidate.taskId === ancestor.taskId)}`,
-          ancestor.summary ? `summary=${ancestor.summary}` : "summary=none",
-        ].join("; ");
-        const candidate = [...lines, row].join("\n");
-        if (candidate.length > LINEAGE_PROMPT_MAX_CHARS) {
-          omitted += 1;
-          continue;
-        }
-        lines.push(row);
-      }
-      if (omitted > 0) lines.push(`Omitted ${omitted} inherited context item(s) from this prompt cap; use task_context for the full uncapped lineage.`);
-      if (lines.length === beforeCount + 1) lines.push("- none included under prompt cap; use task_context for full lineage.");
-      lines.push("");
-    }
-    lines.push("Your cwd starts from the base branch: parent changes are NOT present in your cwd unless they were already integrated.");
-    lines.push("If your task depends on un-integrated parent changes, reapply the needed changes into cwd first (guided by task_diff), then do your own work.");
-    lines.push("If a parent changed file also exists in your cwd, inspect the parent copy only to understand intent, then open/edit/test the cwd copy.");
-
-    return lines.join("\n").trimEnd();
+    const block = directParentPromptBlock(resolveTaskLineage(task.id, this.store), {
+      maxChars: LINEAGE_PROMPT_MAX_CHARS,
+    });
+    if (!block) return prompt;
+    return `${prompt}\n\n---\n${block}`;
   }
 
   /**
