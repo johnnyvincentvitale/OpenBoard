@@ -10,7 +10,7 @@ import {
   resolveDefaultInstance,
 } from "../instances";
 import type { BoardHealth } from "../shared/health";
-import type { AcpConfigCatalog, RosterAgent, Task } from "../shared/task";
+import { buildTaskPath, type AcpConfigCatalog, type RosterAgent, type Task, type TaskEvent } from "../shared/task";
 import type { RosterProvider } from "../shared/providers";
 import type {
   InstanceDefinition,
@@ -201,6 +201,10 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
 
     async listTasks(name) {
       return fetchJson<Task[]>(name, "/api/tasks");
+    },
+
+    async listTaskEvents(name, taskId) {
+      return fetchJson<TaskEvent[]>(name, buildTaskPath.taskEvents(taskId));
     },
 
     async listAgents(name) {

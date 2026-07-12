@@ -3,7 +3,7 @@ import type {
   InstanceRuntimeState,
 } from "../shared/instances";
 import type { BoardHealth } from "../shared/health";
-import type { AcpConfigCatalog, RosterAgent, Task } from "../shared/task";
+import type { AcpConfigCatalog, RosterAgent, Task, TaskEvent } from "../shared/task";
 import type { RosterProvider } from "../shared/providers";
 
 export interface InstanceLogResult {
@@ -95,6 +95,7 @@ export interface InstanceLifecycleProvider {
 
   /** Authenticated read-only board API helpers. */
   listTasks(name: string): Promise<Task[]>;
+  listTaskEvents(name: string, taskId: string): Promise<TaskEvent[]>;
   listAgents(name: string): Promise<RosterAgent[]>;
   listProviders(name: string): Promise<RosterProvider[]>;
   getAcpConfig(name: string): Promise<AcpConfigCatalog>;

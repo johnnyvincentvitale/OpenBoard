@@ -341,9 +341,10 @@ openboard attach my-repo                          # open the TUI
 openboard list                                    # status + identity of all instances
 openboard status my-repo                          # read-only diagnostics
 openboard default show / set my-repo / clear      # inspect or control attach default
-openboard stop my-repo / start my-repo / remove my-repo / rename old new
+openboard stop my-repo / start my-repo / rename old new
+openboard remove my-repo                          # unregisters only; data dir retained
 openboard restart my-repo                         # stop + start + wait for health
-openboard doctor my-repo                          # deeper operator diagnostics
+openboard doctor my-repo                          # deeper operator diagnostics incl. unsafe RUNNING cards
 openboard logs my-repo                            # tail the instance log (secrets scrubbed)
 openboard tasks / agents / providers / harnesses / worktrees my-repo   # read-only introspection
 ```
@@ -366,7 +367,10 @@ want agents working in.
 the complete key overlay — that's the authoritative reference. The ones you'll
 use constantly: `n` new task, `r` run, `w` open Session Chat, `enter` read the
 handoff, `x` accept to Done, `v` view a Review-card diff, `e` open the selected
-diff file in your editor, `b` switch instances, `A` browse the archive.
+diff file in your editor, `b` switch instances, `A` browse the global archive
+mirrored across instances. Removing an instance only unregisters it; retained
+per-instance data directories and the global archive remain on disk until you
+clean them up manually.
 
 **Worktree isolation — the multi-agent rule.** Concurrent agents in one repo
 share a working tree and *will* clobber each other; there's no file locking.

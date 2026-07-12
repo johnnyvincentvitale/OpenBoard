@@ -18,7 +18,7 @@ import type {
   InstanceRuntimeState,
 } from "../shared/instances";
 import type { BoardHealth } from "../shared/health";
-import type { AcpConfigCatalog, RosterAgent, Task } from "../shared/task";
+import type { AcpConfigCatalog, RosterAgent, Task, TaskEvent } from "../shared/task";
 import type { RosterProvider } from "../shared/providers";
 import { createDefaultProvider } from "./default-provider";
 import type { InstanceLifecycleProvider, InstanceWorktreeSummary } from "./provider";
@@ -428,6 +428,80 @@ function writeJson(value: unknown, stdout: OutStream): void {
   stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+interface UnsafeRunningTask {
+  id: string;
+  title: string;
+  reason: string;
+}
+
+interface TaskDiagnostics {
+  status: "ok" | "unavailable";
+  unsafeRunningTasks: UnsafeRunningTask[];
+  detail?: string;
+}
+
+interface TaskEventLoadResult {
+  eventsByTask: Map<string, TaskEvent[]>;
+  failuresByTask: Map<string, string>;
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function okTaskDiagnostics(tasks: Task[]): TaskDiagnostics {
+  return { status: "ok", unsafeRunningTasks: unsafeRunningTasks(tasks) };
+}
+
+function unavailableTaskDiagnostics(error: unknown): TaskDiagnostics {
+  return {
+    status: "unavailable",
+    unsafeRunningTasks: [],
+    detail: formatErrorMessage(error),
+  };
+}
+
+function unsafeRunningTasks(tasks: Task[]): UnsafeRunningTask[] {
+  return tasks.flatMap((task) => {
+    if (task.runState !== "running") return [];
+    const reasons: string[] = [];
+    if (task.column !== "in_progress") reasons.push(`RUNNING while in ${task.column} lane`);
+    if (!task.sessionId && !task.harnessSessionId) reasons.push("RUNNING with no linked session");
+    if (reasons.length === 0) return [];
+    return [{ id: task.id, title: task.title, reason: reasons.join("; ") }];
+  });
+}
+
+function formatUnsafeRunningSummary(issues: UnsafeRunningTask[], instanceName: string): string {
+  const count = issues.length;
+  const cards = issues.map((issue) => `${issue.id} (${issue.reason})`).join(", ");
+  return `${count} unsafe RUNNING card${count === 1 ? "" : "s"}: ${cards}. Cannot trust AUTO/RUNNING state; run openboard restart ${instanceName}, then retry/abort from the TUI or inspect the task events.`;
+}
+
+function latestAutoDispatch(events: TaskEvent[] | undefined): TaskEvent | undefined {
+  return events
+    ?.filter((event) => event.type === "task_auto_dispatched")
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+}
+
+async function loadTaskEvents(
+  provider: InstanceLifecycleProvider,
+  name: string,
+  tasks: Task[],
+): Promise<TaskEventLoadResult> {
+  const entries = await Promise.all(tasks.map(async (task) => {
+    try {
+      return { taskId: task.id, events: await provider.listTaskEvents(name, task.id) };
+    } catch (error) {
+      return { taskId: task.id, events: [] as TaskEvent[], failure: formatErrorMessage(error) };
+    }
+  }));
+  return {
+    eventsByTask: new Map(entries.map((entry) => [entry.taskId, entry.events])),
+    failuresByTask: new Map(entries.flatMap((entry) => entry.failure ? [[entry.taskId, entry.failure] as const] : [])),
+  };
+}
+
 function printDefaultInfo(
   info: Awaited<ReturnType<InstanceLifecycleProvider["getDefaultInfo"]>>,
   stdout: OutStream,
@@ -484,6 +558,7 @@ function printStatus(
   runtime: InstanceRuntimeState,
   health: BoardHealth | undefined,
   stdout: OutStream,
+  taskDiagnostics: TaskDiagnostics = { status: "ok", unsafeRunningTasks: [] },
 ): void {
   stdout.write(`Instance: ${definition.name}\n`);
   stdout.write(`Runtime: ${runtime.status}\n`);
@@ -493,6 +568,14 @@ function printStatus(
   stdout.write(`Task DB path: ${definition.dbPath}\n`);
   stdout.write(`OpenCode backend: ${formatOpencodeBackend(definition, health)}\n`);
   stdout.write(`Board token: ${definition.boardToken?.trim() ? "present" : "absent"}\n`);
+
+  if (taskDiagnostics.status === "unavailable") {
+    stdout.write(`Task diagnostics: unavailable (${taskDiagnostics.detail ?? "unknown error"})\n`);
+  } else if (taskDiagnostics.unsafeRunningTasks.length > 0) {
+    stdout.write(`Task diagnostics: ${formatUnsafeRunningSummary(taskDiagnostics.unsafeRunningTasks, definition.name)}\n`);
+  } else if (runtime.status === "running") {
+    stdout.write("Task diagnostics: no unsafe RUNNING cards detected\n");
+  }
 
   if (!health) {
     stdout.write("Live identity: unavailable (start the instance to query /api/health)\n");
@@ -518,6 +601,7 @@ function statusPayload(
   definition: InstanceDefinition,
   runtime: InstanceRuntimeState,
   health: BoardHealth | undefined,
+  taskDiagnostics: TaskDiagnostics = { status: "ok", unsafeRunningTasks: [] },
 ): Record<string, unknown> {
   return {
     name: definition.name,
@@ -530,6 +614,7 @@ function statusPayload(
     },
     runtime,
     health: health ?? null,
+    taskDiagnostics,
   };
 }
 
@@ -578,24 +663,60 @@ async function buildDoctorPayload(
   else checks.push({ name: "opencode", status: "warn", detail: "unreachable or not queried" });
 
   if (runtime.status === "running") {
-    try {
-      const [agents, providers, acp, tasks, worktrees, log] = await Promise.all([
-        provider.listAgents(name),
-        provider.listProviders(name),
-        provider.getAcpConfig(name),
-        provider.listTasks(name),
-        provider.listWorktrees(name),
-        provider.readLog(name, 20),
-      ]);
-      checks.push({ name: "roster", status: agents.length > 0 ? "ok" : "warn", detail: `${agents.length} agents` });
-      checks.push({ name: "provider", status: providers.length > 0 ? "ok" : "warn", detail: `${providers.length} providers` });
-      const acpAvailable = Object.values(acp).filter((config) => config?.available).length;
+    const [agentsResult, providersResult, acpResult, tasksResult, worktreesResult, logResult] = await Promise.allSettled([
+      provider.listAgents(name),
+      provider.listProviders(name),
+      provider.getAcpConfig(name),
+      provider.listTasks(name),
+      provider.listWorktrees(name),
+      provider.readLog(name, 20),
+    ]);
+
+    if (agentsResult.status === "fulfilled") {
+      checks.push({ name: "roster", status: agentsResult.value.length > 0 ? "ok" : "warn", detail: `${agentsResult.value.length} agents` });
+    } else {
+      checks.push({ name: "roster", status: "warn", detail: formatErrorMessage(agentsResult.reason) });
+    }
+
+    if (providersResult.status === "fulfilled") {
+      checks.push({ name: "provider", status: providersResult.value.length > 0 ? "ok" : "warn", detail: `${providersResult.value.length} providers` });
+    } else {
+      checks.push({ name: "provider", status: "warn", detail: formatErrorMessage(providersResult.reason) });
+    }
+
+    if (acpResult.status === "fulfilled") {
+      const acpAvailable = Object.values(acpResult.value).filter((config) => config?.available).length;
       checks.push({ name: "acp", status: acpAvailable > 0 ? "ok" : "warn", detail: `${acpAvailable} harnesses available` });
-      checks.push({ name: "tasks", status: "ok", detail: `${tasks.length} active tasks` });
-      checks.push({ name: "worktrees", status: worktrees.some((w) => w.orphanCandidate) ? "warn" : "ok", detail: `${worktrees.length} managed worktrees` });
-      checks.push({ name: "startup-log", status: log.missing ? "warn" : "ok", detail: log.missing ? "missing" : log.path });
-    } catch (error) {
-      checks.push({ name: "live-api", status: "warn", detail: error instanceof Error ? error.message : String(error) });
+    } else {
+      checks.push({ name: "acp", status: "warn", detail: formatErrorMessage(acpResult.reason) });
+    }
+
+    if (tasksResult.status === "fulfilled") {
+      const runningIssues = unsafeRunningTasks(tasksResult.value);
+      checks.push({ name: "tasks", status: "ok", detail: `${tasksResult.value.length} active tasks` });
+      checks.push({
+        name: "running-cards",
+        status: runningIssues.length > 0 ? "fail" : "ok",
+        detail: runningIssues.length > 0
+          ? formatUnsafeRunningSummary(runningIssues, name)
+          : "no unsafe RUNNING cards detected",
+      });
+    } else {
+      const detail = formatErrorMessage(tasksResult.reason);
+      checks.push({ name: "tasks", status: "warn", detail });
+      checks.push({ name: "running-cards", status: "fail", detail: `task diagnostics unavailable: ${detail}` });
+    }
+
+    if (worktreesResult.status === "fulfilled") {
+      checks.push({ name: "worktrees", status: worktreesResult.value.some((w) => w.orphanCandidate) ? "warn" : "ok", detail: `${worktreesResult.value.length} managed worktrees` });
+    } else {
+      checks.push({ name: "worktrees", status: "warn", detail: formatErrorMessage(worktreesResult.reason) });
+    }
+
+    if (logResult.status === "fulfilled") {
+      checks.push({ name: "startup-log", status: logResult.value.missing ? "warn" : "ok", detail: logResult.value.missing ? "missing" : logResult.value.path });
+    } else {
+      checks.push({ name: "startup-log", status: "warn", detail: formatErrorMessage(logResult.reason) });
     }
   }
   return { name, runtime: runtime.status, boardUrl: runtime.boardUrl, build: health?.build ?? null, checks };
@@ -656,13 +777,26 @@ function summarizeTasks(tasks: Task[]): Record<string, unknown> {
   return { total: tasks.length, byColumn, byRunState, tasks };
 }
 
-function printTasks(tasks: Task[], stdout: OutStream): void {
+function printTasks(
+  tasks: Task[],
+  stdout: OutStream,
+  eventsByTask: Map<string, TaskEvent[]> = new Map(),
+  eventFailuresByTask: Map<string, string> = new Map(),
+): void {
   const summary = summarizeTasks(tasks) as { total: number; byColumn: Record<string, number>; byRunState: Record<string, number> };
   stdout.write(`Tasks: ${summary.total}\n`);
   stdout.write(`Columns: ${Object.entries(summary.byColumn).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\n`);
   stdout.write(`Run states: ${Object.entries(summary.byRunState).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\n`);
   for (const task of tasks) {
-    stdout.write(`- ${task.id} [${task.column}/${task.runState}] ${task.title}\n`);
+    const eventFailure = eventFailuresByTask.get(task.id);
+    const autoDispatch = eventFailure ? undefined : latestAutoDispatch(eventsByTask.get(task.id));
+    const parentId = autoDispatch?.body?.parentId;
+    const causality = eventFailure
+      ? ` · causality unavailable: ${eventFailure}`
+      : typeof parentId === "string"
+        ? ` · task_auto_dispatched: auto-dispatched by parent ${parentId}`
+        : "";
+    stdout.write(`- ${task.id} [${task.column}/${task.runState}] ${task.title}${causality}\n`);
   }
 }
 
@@ -832,7 +966,7 @@ Commands:
   list --json                             Show registered instances as JSON
   add <name> --workspace <dir> [--port N]
                                             Register a new instance
-  remove <name> [--force]                 Unregister an instance
+  remove <name> [--force]                 Unregister an instance (data directory retained)
   start <name>                            Start an instance daemon
   stop <name>                             Stop an instance daemon
   rename <old> <new>                      Rename an instance (stops/restarts if
@@ -850,6 +984,7 @@ Commands:
                                            Show read-only task summary
   worktrees <name>                        Show managed worktree summary
   restart <name>                          Stop/start and wait for health
+  global archive                          Browse with TUI key A; mirrored rows remain cross-instance
   attach [name]                           Attach the TUI to an instance
   mcp [--instance <name>]                  Start MCP unbound, or bound to a running instance
   <name>                                  Start-if-stopped, then attach the TUI
@@ -967,7 +1102,7 @@ export async function runOpenboard(
           }
         }
         await provider.remove(parsed.name);
-        stdout.write(`Removed instance "${parsed.name}"\n`);
+        stdout.write(`Unregistered instance "${parsed.name}"; data directory retained for manual cleanup/re-add. The global archive remains available across instances.\n`);
         return 0;
       }
       case "start": {
@@ -1019,15 +1154,24 @@ export async function runOpenboard(
         const definition = await provider.get(parsed.name);
         const runtime = await provider.getRuntime(parsed.name);
         const health = await provider.getHealth(parsed.name);
-        if (parsed.json) writeJson(statusPayload(definition, runtime, health), stdout);
-        else printStatus(definition, runtime, health, stdout);
+        let taskDiagnostics: TaskDiagnostics = { status: "ok", unsafeRunningTasks: [] };
+        if (runtime.status === "running") {
+          try {
+            taskDiagnostics = okTaskDiagnostics(await provider.listTasks(parsed.name));
+          } catch (error) {
+            taskDiagnostics = unavailableTaskDiagnostics(error);
+          }
+        }
+        if (parsed.json) writeJson(statusPayload(definition, runtime, health, taskDiagnostics), stdout);
+        else printStatus(definition, runtime, health, stdout, taskDiagnostics);
         return 0;
       }
       case "doctor": {
         const payload = await buildDoctorPayload(provider, parsed.name);
         if (parsed.json) writeJson(payload, stdout);
         else printDoctor(payload, stdout);
-        return 0;
+        const checks = payload.checks as Array<{ name: string; status: string }>;
+        return checks.some((check) => check.name === "running-cards" && check.status === "fail") ? 1 : 0;
       }
       case "logs": {
         const log = await provider.readLog(parsed.name, parsed.tail);
@@ -1068,7 +1212,10 @@ export async function runOpenboard(
         if (parsed.review) tasks = tasks.filter((task) => task.column === "review");
         if (parsed.running) tasks = tasks.filter((task) => task.runState === "running" || task.column === "in_progress");
         if (parsed.json) writeJson(summarizeTasks(tasks), stdout);
-        else printTasks(tasks, stdout);
+        else {
+          const eventLoad = await loadTaskEvents(provider, parsed.name, tasks);
+          printTasks(tasks, stdout, eventLoad.eventsByTask, eventLoad.failuresByTask);
+        }
         return 0;
       }
       case "worktrees": {
@@ -1083,6 +1230,18 @@ export async function runOpenboard(
         const health = await provider.getHealth(parsed.name);
         stdout.write(`Instance "${parsed.name}" is ${runtime.status} at ${runtime.boardUrl}\n`);
         stdout.write(`Health: ${health ? "ok" : "unavailable after start"}\n`);
+        if (runtime.status === "running") {
+          try {
+            const runningIssues = unsafeRunningTasks(await provider.listTasks(parsed.name));
+            if (runningIssues.length > 0) {
+              stdout.write(`Restart warning: ${formatUnsafeRunningSummary(runningIssues, parsed.name)}\n`);
+              return 1;
+            }
+            stdout.write("Restart reconciliation: no unsafe RUNNING cards detected\n");
+          } catch (error) {
+            stdout.write(`Restart reconciliation: task diagnostics unavailable (${error instanceof Error ? error.message : String(error)})\n`);
+          }
+        }
         return 0;
       }
       case "mcp": {

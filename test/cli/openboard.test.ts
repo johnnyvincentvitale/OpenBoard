@@ -58,6 +58,7 @@ function mockProvider(
     getHealth: vi.fn().mockResolvedValue(undefined),
     readLog: vi.fn().mockResolvedValue({ path: "/logs/openboard.log", content: "started\n", truncated: false, missing: false }),
     listTasks: vi.fn().mockResolvedValue([]),
+    listTaskEvents: vi.fn().mockResolvedValue([]),
     listAgents: vi.fn().mockResolvedValue([]),
     listProviders: vi.fn().mockResolvedValue([]),
     getAcpConfig: vi.fn().mockResolvedValue({}),
@@ -148,6 +149,8 @@ describe("openboard --help", () => {
     expect(out).toContain("doctor <name>");
     expect(out).toContain("logs <name>");
     expect(out).toContain("tasks <name>");
+    expect(out).toContain("data directory retained");
+    expect(out).toContain("global archive");
   });
 });
 
@@ -352,7 +355,9 @@ describe("openboard remove", () => {
     });
     const { code, out } = await run(["remove", "my-project"], provider);
     expect(code).toBe(0);
-    expect(out).toContain('Removed instance "my-project"');
+    expect(out).toContain('Unregistered instance "my-project"');
+    expect(out).toContain("data directory retained");
+    expect(out).toContain("global archive remains available");
     expect(provider.remove).toHaveBeenCalledWith("my-project");
   });
 
@@ -375,7 +380,8 @@ describe("openboard remove", () => {
     expect(code).toBe(0);
     expect(provider.stop).toHaveBeenCalledWith("my-project");
     expect(provider.remove).toHaveBeenCalledWith("my-project");
-    expect(out).toContain('Removed instance "my-project"');
+    expect(out).toContain('Unregistered instance "my-project"');
+    expect(out).toContain("data directory retained");
   });
 
   it("surfaces unknown instances", async () => {
@@ -558,6 +564,63 @@ describe("openboard status", () => {
     expect(parsed.registry.boardTokenPresent).toBe(true);
     expect(out).not.toContain("token-1");
   });
+  it("reports orphaned/impossible running cards in status output", async () => {
+    const orphan = {
+      id: "stuck-1",
+      title: "Stuck",
+      description: "",
+      directory: "/ws",
+      column: "todo",
+      position: 0,
+      runState: "running",
+      baseCommit: null,
+      dirtyAtDispatch: false,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      listTasks: vi.fn().mockResolvedValue([orphan]),
+    });
+
+    const { code, out } = await run(["status", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("Task diagnostics: 1 unsafe RUNNING card");
+    expect(out).toContain("stuck-1");
+    expect(out).toContain("retry/abort from the TUI");
+    expect(out).toContain("openboard restart my-project");
+  });
+
+  it("reports task diagnostics as unavailable instead of all-clear when status cannot list tasks", async () => {
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      listTasks: vi.fn().mockRejectedValue(new Error("tasks unreachable")),
+    });
+
+    const { code, out } = await run(["status", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("Task diagnostics: unavailable");
+    expect(out).toContain("tasks unreachable");
+    expect(out).not.toContain("no unsafe RUNNING cards detected");
+  });
+
+  it("marks status JSON task diagnostics unavailable when task listing fails", async () => {
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      listTasks: vi.fn().mockRejectedValue(new Error("tasks unreachable")),
+    });
+
+    const { code, out } = await run(["status", "my-project", "--json"], provider);
+
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out);
+    expect(parsed.taskDiagnostics.status).toBe("unavailable");
+    expect(parsed.taskDiagnostics.detail).toContain("tasks unreachable");
+    expect(parsed.taskDiagnostics.unsafeRunningTasks).toEqual([]);
+  });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -600,6 +663,56 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
     const { code, out } = await run(["doctor", "my-project", "--json"], provider);
     expect(code).toBe(0);
     expect(JSON.parse(out).name).toBe("my-project");
+  });
+
+  it("fails doctor with actionable recovery for unsafe RUNNING cards", async () => {
+    const unsafe = { ...task, id: "stuck-1", title: "Stuck", column: "todo", runState: "running", sessionId: undefined };
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "ok", version: "1" } }),
+      listTasks: vi.fn().mockResolvedValue([unsafe]),
+    });
+
+    const { code, out } = await run(["doctor", "my-project"], provider);
+
+    expect(code).toBe(1);
+    expect(out).toContain("running-cards");
+    expect(out).toContain("stuck-1");
+    expect(out).toContain("Cannot trust AUTO/RUNNING state");
+    expect(out).toContain("openboard restart my-project");
+  });
+
+  it("fails doctor when running-card diagnostics cannot list tasks", async () => {
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "ok", version: "1" } }),
+      listTasks: vi.fn().mockRejectedValue(new Error("tasks unreachable")),
+    });
+
+    const { code, out } = await run(["doctor", "my-project"], provider);
+
+    expect(code).toBe(1);
+    expect(out).toContain("running-cards");
+    expect(out).toContain("task diagnostics unavailable");
+    expect(out).toContain("tasks unreachable");
+    expect(out).not.toContain("no unsafe RUNNING cards detected");
+  });
+
+  it("still reports running-card diagnostics when another live doctor read fails", async () => {
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+      getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "ok", version: "1" } }),
+      listAgents: vi.fn().mockRejectedValue(new Error("agents unreachable")),
+      listTasks: vi.fn().mockResolvedValue([]),
+    });
+
+    const { code, out } = await run(["doctor", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("running-cards");
+    expect(out).toContain("no unsafe RUNNING cards detected");
+    expect(out).toContain("roster");
+    expect(out).toContain("agents unreachable");
   });
 
   it("tails logs", async () => {
@@ -647,6 +760,36 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
     expect(parsed.tasks[0].id).toBe("task-1");
   });
 
+  it("surfaces parent-triggered auto-dispatch history in task summaries", async () => {
+    const provider = mockProvider({
+      listTasks: vi.fn().mockResolvedValue([{ ...task, id: "child-1", column: "in_progress", runState: "running" }]),
+      listTaskEvents: vi.fn().mockResolvedValue([
+        { id: "event-1", taskId: "child-1", type: "task_auto_dispatched", body: { parentId: "parent-1" }, createdAt: 1234 },
+      ]),
+    });
+
+    const { code, out } = await run(["tasks", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("child-1");
+    expect(out).toContain("auto-dispatched by parent parent-1");
+    expect(out).toContain("task_auto_dispatched");
+  });
+
+  it("warns when task event history cannot be loaded", async () => {
+    const provider = mockProvider({
+      listTasks: vi.fn().mockResolvedValue([{ ...task, id: "child-1", column: "in_progress", runState: "running" }]),
+      listTaskEvents: vi.fn().mockRejectedValue(new Error("events unreachable")),
+    });
+
+    const { code, out } = await run(["tasks", "my-project"], provider);
+
+    expect(code).toBe(0);
+    expect(out).toContain("child-1");
+    expect(out).toContain("causality unavailable");
+    expect(out).toContain("events unreachable");
+  });
+
   it("shows worktree summaries", async () => {
     const provider = mockProvider({
       listWorktrees: vi.fn().mockResolvedValue([{ taskId: "task-1", title: "Review me", column: "review", runState: "idle", worktreePath: "/wt", worktreeBranch: "board/task-1", exists: true, dirty: false, orphanCandidate: false }]),
@@ -664,6 +807,20 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
     expect(provider.stop).toHaveBeenCalledWith("my-project");
     expect(provider.start).toHaveBeenCalledWith("my-project");
     expect(out).toContain("Health: ok");
+  });
+
+  it("reports unsafe RUNNING cards that remain after restart", async () => {
+    const provider = mockProvider({
+      getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "ok", version: "1" } }),
+      listTasks: vi.fn().mockResolvedValue([{ ...task, id: "stuck-after-restart", column: "todo", runState: "running", sessionId: undefined }]),
+    });
+
+    const { code, out } = await run(["restart", "my-project"], provider);
+
+    expect(code).toBe(1);
+    expect(out).toContain("Restart warning");
+    expect(out).toContain("stuck-after-restart");
+    expect(out).toContain("retry/abort from the TUI");
   });
 });
 
