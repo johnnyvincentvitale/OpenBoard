@@ -9,6 +9,7 @@ import {
   boardFilterCategories,
   boardFilterOptions,
   closeSwitcher,
+  adjacentLaneSelection,
   filterTasks,
   formatElapsed,
   initialViewState,
@@ -25,6 +26,7 @@ import {
   runStateLabel,
   selectInstanceInSwitcher,
   shortPath,
+  middleEllipsize,
   sidebarDetailMode,
   taskMatchesBoardFilter,
   tasksByColumn,
@@ -73,8 +75,44 @@ describe("TUI task model", () => {
   it("navigates within and across columns", () => {
     expect(nextTaskId(tasks, "todo-1", 1)).toBe("todo-2");
     expect(nextTaskId(tasks, "todo-1", -1)).toBe("done-1");
-    expect(nearestTaskInColumn(tasks, "todo-1", 1)).toBe("review-1");
-    expect(nearestTaskInColumn(tasks, "review-1", -1)).toBe("todo-1");
+    expect(nearestTaskInColumn(tasks, "todo-1", 1)).toBe("todo-1");
+    expect(nearestTaskInColumn(tasks, "review-1", -1)).toBe("review-1");
+  });
+
+  it("moves horizontally only to the visually adjacent lane and keeps row position when possible", () => {
+    const laneTasks = [
+      task("todo-1", "todo", 0),
+      task("todo-2", "todo", 1),
+      task("progress-1", "in_progress", 0),
+      task("progress-2", "in_progress", 1),
+      task("review-1", "review", 0),
+    ];
+
+    expect(adjacentLaneSelection(laneTasks, "todo-2", 1)).toEqual({
+      taskId: "progress-2",
+      column: "in_progress",
+      moved: true,
+    });
+    expect(adjacentLaneSelection(laneTasks, "progress-2", 1)).toEqual({
+      taskId: "review-1",
+      column: "review",
+      moved: true,
+    });
+  });
+
+  it("does not wrap or skip empty lanes during horizontal navigation", () => {
+    expect(adjacentLaneSelection(tasks, "todo-1", -1)).toEqual({
+      taskId: "todo-1",
+      column: "todo",
+      moved: false,
+      status: "Already at To-Do lane",
+    });
+    expect(adjacentLaneSelection(tasks, "todo-1", 1)).toEqual({
+      taskId: "todo-1",
+      column: "in_progress",
+      moved: false,
+      status: "In-Progress lane is empty",
+    });
   });
 
   it("lands on the first (down) or last (up) task, not a skipped neighbor, when the selection is missing from the list (P3-7)", () => {
@@ -92,6 +130,13 @@ describe("TUI task model", () => {
       "~/code/openboard",
     );
     expect(truncateText("OpenBoard", 5)).toBe("Open…");
+  });
+
+  it("middle-ellipsizes constrained paths so the identifying tail remains visible", () => {
+    expect(middleEllipsize("/very/long/path/to/openboard/board.sqlite", 24)).toBe("/very/long/…board.sqlite");
+    expect(middleEllipsize("/db/board.sqlite", 24)).toBe("/db/board.sqlite");
+    expect(middleEllipsize("abcdef", 1)).toBe("…");
+    expect(middleEllipsize("abcdef", 0)).toBe("");
   });
 
   it("formats elapsed run time in the design mock's style", () => {

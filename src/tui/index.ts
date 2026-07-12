@@ -22,10 +22,11 @@ import {
   modelLabel,
   laneCapacity,
   laneInnerHeight,
-  nearestTaskInColumn,
+  adjacentLaneSelection,
   nextTaskId,
   reconcileLaneOffset,
   shortPath,
+  middleEllipsize,
   sidebarDetailMode,
   taskStatus,
   tasksByColumn,
@@ -1669,10 +1670,10 @@ function renderHeader(ui: OpenTui, state: TuiState) {
     if (currentInstance) {
       instanceLabel = ` · INSTANCE ${currentInstance.definition.name}:${currentInstance.definition.port}`;
       workspaceLabel = `WORKSPACE ${shortPath(currentInstance.definition.workspace)}`;
-      dbLabel = `DB ${shortPath(state.health?.identity?.dbPath ?? currentInstance.definition.dbPath)}`;
+      dbLabel = formatDbPathLabel(state.health?.identity?.dbPath ?? currentInstance.definition.dbPath, state.terminalCols);
     } else {
       workspaceLabel = `WORKSPACE ${shortPath(state.cwd)}`;
-      if (state.health?.identity?.dbPath) dbLabel = `DB ${shortPath(state.health.identity.dbPath)}`;
+      if (state.health?.identity?.dbPath) dbLabel = formatDbPathLabel(state.health.identity.dbPath, state.terminalCols);
     }
     if (state.boardFilter) filterLabel = `FILTER ${state.boardFilter.kind}:${state.boardFilter.value}`;
   } else if (state.viewState.view === "launch") {
@@ -1740,6 +1741,11 @@ function renderHeader(ui: OpenTui, state: TuiState) {
       truncate: true,
     }),
   );
+}
+
+function formatDbPathLabel(dbPath: string, terminalCols: number): string {
+  const maxPathColumns = Math.max(12, Math.min(48, Math.floor(Math.max(0, terminalCols) * 0.25)));
+  return `DB ${middleEllipsize(shortPath(dbPath), maxPathColumns)}`;
 }
 
 function boardHealthLabel(state: TuiState): string {
@@ -4190,11 +4196,13 @@ function renderHelpOverlay(ui: OpenTui) {
     ["enter", "open Prompt/Handoff/Output/Comments"],
     ["↑/↓", "scroll open detail tabs"],
     ["←/→/tab", "switch detail tabs"],
-    ["c / r", "comment / reply (Comments tab)"],
+    ["c", "new comment (Comments tab); copy selected code block in Session Chat"],
+    ["r", "reply to selected comment (Comments tab)"],
     ["e", "edit selected To Do card"],
     ["f", "filter selected lane (again to clear)"],
     ["r", "run selected task"],
     ["R", "retry failed run"],
+    ["k", "abort selected In Progress card"],
     ["y / N", "answer permission allow-once / deny"],
     ["a", "archive task"],
     ["A", "global archive browser"],
@@ -4208,7 +4216,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["p", "settings"],
     ["v", "view diff (Review or Done cards)"],
     ["w", "open live session chat"],
-    ["u", "refresh board"],
+    ["u", "refresh/reconcile board"],
     ["b", "switch instances"],
     ["esc", "detach / close overlay"],
     ["q", "quit"],
@@ -5398,8 +5406,16 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     const visibleTasks = filterTasks(state.tasks, state.boardFilter);
     if (keyName === "down") state.selectedTaskId = nextTaskId(visibleTasks, state.selectedTaskId, 1);
     else if (keyName === "up") state.selectedTaskId = nextTaskId(visibleTasks, state.selectedTaskId, -1);
-    else if (keyName === "left") state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, -1);
-    else state.selectedTaskId = nearestTaskInColumn(visibleTasks, state.selectedTaskId, 1);
+    else {
+      const innerHeight = laneInnerHeight(state.terminalRows);
+      const laneSelection = adjacentLaneSelection(visibleTasks, state.selectedTaskId, keyName === "left" ? -1 : 1, {
+        laneOffsets: state.laneOffsets,
+        laneCapacity: (_column, total) => innerHeight > 0 ? laneCapacity(innerHeight, total, TUI_LAYOUT.cardHeight) : total,
+      });
+      state.selectedTaskId = laneSelection.taskId;
+      if (!laneSelection.moved && laneSelection.status) state.status = laneSelection.status;
+      else state.status = `${TUI_COLUMN_LABELS[laneSelection.column ?? selectedTask(state)?.column ?? "todo"]} lane`;
+    }
     state.permissionAskBinding = bindPermissionAsk(selectedTask(state));
     state.reviewDiffStat = reconcileReviewDiffStatCache(state.reviewDiffStat, selectedTask(state));
     state.reviewCommitStatus = reconcileReviewCommitStatusCache(state.reviewCommitStatus, selectedTask(state));

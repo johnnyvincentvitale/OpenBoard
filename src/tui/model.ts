@@ -436,24 +436,81 @@ export function nextTaskId(tasks: Task[], selectedTaskId: string | undefined, de
   return ordered[next]?.id;
 }
 
+export interface AdjacentLaneSelection {
+  taskId: string | undefined;
+  column: Column | undefined;
+  moved: boolean;
+  status?: string;
+}
+
+export interface AdjacentLaneSelectionOptions {
+  laneOffsets?: Partial<Record<Column, number>>;
+  laneCapacity?: (column: Column, total: number) => number;
+}
+
+export function adjacentLaneSelection(
+  tasks: Task[],
+  selectedTaskId: string | undefined,
+  delta: number,
+  options: AdjacentLaneSelectionOptions = {},
+): AdjacentLaneSelection {
+  const grouped = tasksByColumn(tasks);
+  const ordered = orderedTasks(tasks);
+  if (ordered.length === 0) {
+    return { taskId: undefined, column: undefined, moved: false, status: "no cards visible" };
+  }
+
+  const selected = selectedTaskId ? tasks.find((task) => task.id === selectedTaskId) : undefined;
+  const fallbackTask = selected ?? (delta >= 0 ? ordered[0] : ordered[ordered.length - 1]);
+  const currentColumnIndex = selected ? TUI_COLUMNS.indexOf(selected.column) : delta >= 0 ? -1 : TUI_COLUMNS.length;
+  const targetColumnIndex = currentColumnIndex + (delta >= 0 ? 1 : -1);
+
+  if (targetColumnIndex < 0 || targetColumnIndex >= TUI_COLUMNS.length) {
+    return {
+      taskId: fallbackTask?.id,
+      column: fallbackTask?.column,
+      moved: false,
+      status: fallbackTask ? `Already at ${TUI_COLUMN_LABELS[fallbackTask.column]} lane` : "no cards visible",
+    };
+  }
+
+  const targetColumn = TUI_COLUMNS[targetColumnIndex];
+  const targetTasks = grouped[targetColumn];
+  if (targetTasks.length === 0) {
+    return {
+      taskId: fallbackTask?.id,
+      column: targetColumn,
+      moved: false,
+      status: `${TUI_COLUMN_LABELS[targetColumn]} lane is empty`,
+    };
+  }
+
+  const capacityFor = (column: Column, total: number): number => {
+    const capacity = options.laneCapacity?.(column, total) ?? total;
+    return Math.max(0, Math.trunc(capacity));
+  };
+  const offsetFor = (column: Column, selectedIndex: number, total: number): number =>
+    reconcileLaneOffset(options.laneOffsets?.[column] ?? 0, selectedIndex, total, capacityFor(column, total));
+
+  const selectedColumnTasks = selected ? grouped[selected.column] : [];
+  const selectedIndex = selected ? selectedColumnTasks.findIndex((task) => task.id === selected.id) : -1;
+  const sourceOffset = selected && selectedIndex >= 0 ? offsetFor(selected.column, selectedIndex, selectedColumnTasks.length) : 0;
+  const sourceCapacity = selected ? capacityFor(selected.column, selectedColumnTasks.length) : selectedColumnTasks.length;
+  const selectedRow = selected && selectedIndex >= 0
+    ? Math.min(Math.max(0, selectedIndex - sourceOffset), Math.max(0, sourceCapacity - 1))
+    : 0;
+  const targetOffset = offsetFor(targetColumn, -1, targetTasks.length);
+  const targetIndex = Math.min(targetTasks.length - 1, targetOffset + selectedRow);
+  const target = targetTasks[targetIndex];
+  return { taskId: target?.id, column: targetColumn, moved: Boolean(target) };
+}
+
 export function nearestTaskInColumn(
   tasks: Task[],
   selectedTaskId: string | undefined,
   delta: number,
 ): string | undefined {
-  const grouped = tasksByColumn(tasks);
-  const selected = tasks.find((task) => task.id === selectedTaskId);
-  const currentColumnIndex = selected ? TUI_COLUMNS.indexOf(selected.column) : 0;
-
-  for (let step = 1; step <= TUI_COLUMNS.length; step += 1) {
-    const nextColumn = TUI_COLUMNS[(currentColumnIndex + delta * step + TUI_COLUMNS.length) % TUI_COLUMNS.length];
-    const tasksInColumn = grouped[nextColumn];
-    if (tasksInColumn.length > 0) {
-      return tasksInColumn[0]?.id;
-    }
-  }
-
-  return selectedTaskId ?? orderedTasks(tasks)[0]?.id;
+  return adjacentLaneSelection(tasks, selectedTaskId, delta).taskId;
 }
 
 export function runStateLabel(runState: TaskRunState): string {
@@ -720,4 +777,15 @@ export function truncateText(value: string, maxLength: number): string {
   if (maxLength <= 1) return value.slice(0, maxLength);
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength - 1)}…`;
+}
+
+export function middleEllipsize(value: string, maxLength: number): string {
+  const width = Math.max(0, Math.trunc(maxLength));
+  if (width === 0) return "";
+  if (value.length <= width) return value;
+  if (width === 1) return "…";
+
+  const tailLength = Math.max(1, Math.min(value.length - 1, Math.ceil((width - 1) / 2)));
+  const headLength = Math.max(0, width - 1 - tailLength);
+  return `${value.slice(0, headLength)}…${value.slice(value.length - tailLength)}`;
 }

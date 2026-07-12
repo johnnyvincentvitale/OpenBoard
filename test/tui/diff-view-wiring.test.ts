@@ -108,6 +108,68 @@ function actions(overrides: Record<string, unknown> = {}) {
 }
 
 describe("TUI diff view entry (v)", () => {
+
+  it("renders help for all active card actions and contextual c/u copy", async () => {
+    const s = state({ overlay: "help" });
+    const text = textOf(renderApp(fakeUi(), s));
+
+    expect(text).toContain("k");
+    expect(text).toContain("abort selected In Progress card");
+    expect(text).toContain("u");
+    expect(text).toContain("refresh/reconcile board");
+    expect(text).toContain("new comment (Comments tab)");
+    expect(text).toContain("copy selected code block in Session Chat");
+  });
+
+
+  it("middle-ellipsizes the header DB path so the database tail stays visible", () => {
+    const s = state({
+      terminalCols: 160,
+      health: {
+        adapter: "ok",
+        identity: { dbPath: "/very/long/path/to/openboard/board.sqlite" },
+        opencode: { status: "ok", version: "test" },
+        build: { version: "test" },
+      },
+    });
+
+    expect(textOf(renderApp(fakeUi(), s))).toContain("DB /very/long/path/to/…enboard/board.sqlite");
+  });
+
+  it("left/right lane navigation reports empty adjacent lanes without wrapping or skipping", async () => {
+    const todo = task("todo-1", "todo");
+    const review = task("review-1", "review");
+    const s = state({ tasks: [todo, review], selectedTaskId: "todo-1" });
+    const a = actions();
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, a);
+
+    expect(s.selectedTaskId).toBe("todo-1");
+    expect(s.status).toBe("In-Progress lane is empty");
+    expect(a.render).toHaveBeenCalled();
+  });
+
+  it("left/right lane navigation preserves the selected card viewport row across scrolled lanes", async () => {
+    const positionedTask = (id: string, column: Column, position: number) => task(id, column, { position, createdAt: position, updatedAt: position });
+    const tasks = [
+      ...Array.from({ length: 8 }, (_, index) => positionedTask(`todo-${index}`, "todo", index)),
+      ...Array.from({ length: 8 }, (_, index) => positionedTask(`progress-${index}`, "in_progress", index)),
+    ];
+    const s = state({
+      tasks,
+      selectedTaskId: "todo-6",
+      terminalRows: 44,
+      laneOffsets: { todo: 5, in_progress: 0, review: 0, done: 0 },
+    });
+    const a = actions();
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, a);
+
+    expect(s.selectedTaskId).toBe("progress-1");
+    expect(s.status).toBe("In-Progress lane");
+    expect(a.render).toHaveBeenCalled();
+  });
+
   it("disables background board polling while the diff renderer owns scroll state", () => {
     expect(shouldAutoRefresh({ view: "diff", previousView: "board" })).toBe(false);
     // "follow" polls deliberately: permission asks raised mid-run must surface
@@ -293,6 +355,7 @@ describe("TUI diff view entry (v)", () => {
       await handleKeypress({ sequence: "v", name: "v" } as any, s, a);
       expect(s.viewState.view).not.toBe("diff");
       expect(a.client.getTaskDiff).not.toHaveBeenCalled();
+      expect(s.status).toBe("diff view is only available for Review or Done agent cards");
     }
 
     const manual = task("manual-1", "review", { type: "manual" });
@@ -308,6 +371,7 @@ describe("TUI diff view entry (v)", () => {
     await handleKeypress({ sequence: "v", name: "v" } as any, manualDoneState, manualDoneActions);
     expect(manualDoneState.viewState.view).not.toBe("diff");
     expect(manualDoneActions.client.getTaskDiff).not.toHaveBeenCalled();
+    expect(manualDoneState.status).toBe("diff view is only available for Review or Done agent cards");
   });
 
   it("renders a readable no-git message instead of crashing", async () => {
