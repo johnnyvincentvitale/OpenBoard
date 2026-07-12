@@ -207,6 +207,9 @@ export interface TaskEvent {
   createdAt: number;
 }
 
+/** Latest durable auto-dispatch cause for each task, keyed by task id. */
+export type TaskCausalityMap = Record<string, { autoDispatchedBy: string }>;
+
 export type CompletionSource = "reported" | "idle-fallback" | "watchdog";
 
 export interface PendingPermissionAsk {
@@ -748,6 +751,7 @@ export const TASK_ROUTE_PATTERNS = {
   diff: "/api/tasks/:id/diff",
   comments: "/api/tasks/:id/comments",
   taskEvents: "/api/tasks/:id/events",
+  taskCausality: "/api/tasks/causality",
   permissionReply: "/api/tasks/:id/permission",
   sessionEvents: "/api/tasks/:id/session-events",
   sessionMessages: "/api/tasks/:id/session-messages",
@@ -776,6 +780,7 @@ export const buildTaskPath = {
     `/api/tasks/${encodeURIComponent(id)}/links/${encodeURIComponent(parentId)}`,
   comments: (id: string) => `/api/tasks/${encodeURIComponent(id)}/comments`,
   taskEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/events`,
+  taskCausality: () => "/api/tasks/causality",
   permissionReply: (id: string) => `/api/tasks/${encodeURIComponent(id)}/permission`,
   sessionEvents: (id: string) => `/api/tasks/${encodeURIComponent(id)}/session-events`,
   sessionMessages: (id: string) => `/api/tasks/${encodeURIComponent(id)}/session-messages`,

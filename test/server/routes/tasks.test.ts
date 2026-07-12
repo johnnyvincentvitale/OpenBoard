@@ -1853,20 +1853,54 @@ describe("POST /api/tasks/:id/move", () => {
     });
   });
 
-  it("rejects Done moves for Review worktrees with unintegrated or dirty file changes", async () => {
+  it.each(["todo", "in_progress", "review"] as const)(
+    "rejects %s to Done moves for worktrees with unintegrated or dirty file changes",
+    async (sourceColumn) => {
+      const a = store.create({ title: "A", description: "", directory: repoDir });
+      store.move(a.id, sourceColumn, 0);
+      store.update(a.id, {
+        worktreePath: "/worktrees/a",
+        worktreeBranch: "board/a",
+        baseBranch: "main",
+        runState: "idle",
+        completion: { outcome: "complete", summary: "done", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 77 },
+        completionSource: "reported",
+      });
+      dispatcher.getWorktreeCommitStatus.mockResolvedValueOnce({
+        committedFiles: ["src/committed.ts"],
+        uncommittedFiles: ["src/dirty.ts"],
+      });
+      const app = buildApp(store, dispatcher);
+
+      const res = await app.request(`/api/tasks/${a.id}/move`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ column: "done", position: 0, completedBy: "Reviewer" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error.code).toBe("unintegrated_worktree_changes");
+      expect(body.error.requirement).toMatchObject({
+        transition: "move",
+        committedFiles: ["src/committed.ts"],
+        uncommittedFiles: ["src/dirty.ts"],
+      });
+      expect(body.error.message).toContain("Integrate");
+      expect(dispatcher.getWorktreeCommitStatus).toHaveBeenCalledWith(a.id, undefined);
+      expect(store.get(a.id)?.column).toBe(sourceColumn);
+      expect(store.listEvents(a.id).filter((event) => event.type === "task_moved")).toHaveLength(0);
+    },
+  );
+
+  it("rejects a running worktree task even when its current commit status is clean", async () => {
     const a = store.create({ title: "A", description: "", directory: repoDir });
-    store.move(a.id, "review", 0);
     store.update(a.id, {
+      column: "in_progress",
       worktreePath: "/worktrees/a",
       worktreeBranch: "board/a",
       baseBranch: "main",
-      runState: "idle",
-      completion: { outcome: "complete", summary: "done", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 77 },
-      completionSource: "reported",
-    });
-    dispatcher.getWorktreeCommitStatus.mockResolvedValueOnce({
-      committedFiles: ["src/committed.ts"],
-      uncommittedFiles: ["src/dirty.ts"],
+      runState: "running",
     });
     const app = buildApp(store, dispatcher);
 
@@ -1877,16 +1911,93 @@ describe("POST /api/tasks/:id/move", () => {
     });
 
     expect(res.status).toBe(409);
-    const body = await res.json();
-    expect(body.error.code).toBe("unintegrated_worktree_changes");
-    expect(body.error.requirement).toMatchObject({
-      transition: "move",
-      committedFiles: ["src/committed.ts"],
-      uncommittedFiles: ["src/dirty.ts"],
+    expect(await res.json()).toMatchObject({
+      error: {
+        code: "worktree_session_running",
+        requirement: { transition: "move", taskId: a.id, action: "stop_session" },
+      },
     });
-    expect(body.error.message).toContain("Integrate");
-    expect(dispatcher.getWorktreeCommitStatus).toHaveBeenCalledWith(a.id, undefined);
-    expect(store.get(a.id)?.column).toBe("review");
+    expect(dispatcher.getWorktreeCommitStatus).not.toHaveBeenCalled();
+    expect(store.get(a.id)?.column).toBe("in_progress");
+    expect(store.listEvents(a.id).filter((event) => event.type === "task_moved")).toHaveLength(0);
+  });
+
+  it.each([
+    { label: "missing worktree branch", worktreeBranch: undefined, baseBranch: "main", failure: undefined },
+    { label: "missing base reference", worktreeBranch: "board/a", baseBranch: undefined, failure: AdapterError.validation("No base reference for commit status") },
+    { label: "externally deleted worktree", worktreeBranch: "board/a", baseBranch: "main", failure: new Error("ENOENT: worktree directory does not exist") },
+    { label: "commit-status command failure", worktreeBranch: "board/a", baseBranch: "main", failure: AdapterError.internal("diff --name-only failed") },
+  ])("returns an actionable 409 when worktree status is unavailable: $label", async ({ worktreeBranch, baseBranch, failure }) => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.update(a.id, {
+      worktreePath: "/worktrees/a",
+      worktreeBranch,
+      baseBranch,
+      runState: "idle",
+    });
+    if (failure) dispatcher.getWorktreeCommitStatus.mockRejectedValueOnce(failure);
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: "done", position: 0, completedBy: "Reviewer" }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      error: {
+        code: "worktree_status_unavailable",
+        requirement: { transition: "move", taskId: a.id, action: "restore_or_resolve_worktree" },
+      },
+    });
+    expect(body.error.message).toContain("Restore the worktree");
+    expect(store.get(a.id)?.column).toBe("todo");
+    expect(store.listEvents(a.id).filter((event) => event.type === "task_moved")).toHaveLength(0);
+  });
+
+  it("does not let blocked acceptance bypass the worktree guard", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.setCompletion(a.id, { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "Need choice", reportedAt: 321 }, "reported");
+    store.update(a.id, {
+      worktreePath: "/worktrees/a",
+      worktreeBranch: "board/a",
+      baseBranch: "main",
+    });
+    dispatcher.getWorktreeCommitStatus.mockResolvedValueOnce({
+      committedFiles: ["src/blocked.ts"],
+      uncommittedFiles: [],
+    });
+    const app = buildApp(store, dispatcher);
+    const acceptedMove = {
+      column: "done",
+      position: 0,
+      completedBy: "Reviewer",
+      blockedAcceptance: { acceptIncomplete: true, blockedReportedAt: 321 },
+    };
+
+    const res = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(acceptedMove),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error.code).toBe("unintegrated_worktree_changes");
+    expect(store.get(a.id)?.column).toBe("todo");
+    expect(store.listEvents(a.id).filter((event) => event.type === "task_blocked_accepted")).toHaveLength(0);
+
+    dispatcher.getWorktreeCommitStatus.mockResolvedValueOnce({ committedFiles: [], uncommittedFiles: [] });
+    const accepted = await app.request(`/api/tasks/${a.id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(acceptedMove),
+    });
+
+    expect(accepted.status).toBe(200);
+    expect(store.get(a.id)?.column).toBe("done");
+    expect(store.listEvents(a.id).filter((event) => event.type === "task_blocked_accepted")).toHaveLength(1);
   });
 
   it("rejects stray blocked acceptance on nonblocked Done moves", async () => {
@@ -1912,7 +2023,12 @@ describe("POST /api/tasks/:id/move", () => {
       reportedAt: 321,
     }, "reported");
     store.move(a.id, "done", 0);
-    store.update(a.id, { completedBy: "Original Reviewer" });
+    store.update(a.id, {
+      completedBy: "Original Reviewer",
+      worktreePath: "/worktrees/a",
+      worktreeBranch: "board/a",
+      baseBranch: "main",
+    });
     const app = buildApp(store, dispatcher);
 
     const res = await app.request(`/api/tasks/${a.id}/move`, {
@@ -1922,6 +2038,7 @@ describe("POST /api/tasks/:id/move", () => {
     });
 
     expect(res.status).toBe(200);
+    expect(dispatcher.getWorktreeCommitStatus).not.toHaveBeenCalled();
     expect(store.get(a.id)?.completedBy).toBe("Original Reviewer");
     const events = store.listEvents(a.id);
     expect(events.filter((event) => event.type === "task_blocked_accepted")).toHaveLength(0);

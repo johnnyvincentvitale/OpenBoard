@@ -232,6 +232,96 @@ describe("compareTaskEvidence", () => {
     }
   });
 
+  it("refuses dirty ACP harness base output represented only by harnessCommit", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+    const harnessWt = join(tmpDir, "harness-build");
+    runGit(repoDir, ["worktree", "add", "--detach", harnessWt, "HEAD"]);
+    writeFileSync(join(harnessWt, "README.md"), "# Committed ACP build output\n");
+    runGit(harnessWt, ["add", "README.md"]);
+    runGit(harnessWt, ["commit", "-m", "acp build output"]);
+    const harnessCommit = runGit(harnessWt, ["rev-parse", "HEAD"]);
+    writeFileSync(join(harnessWt, "untracked-acp-output.txt"), "wip\n");
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, harnessCommit]);
+    writeFileSync(join(fixWt, "fix.ts"), "export const fix = true;\n");
+    runGit(fixWt, ["add", "fix.ts"]);
+    runGit(fixWt, ["commit", "-m", "fix output"]);
+
+    const buildTask = makeTask({
+      id: "task_build",
+      harness: "claude-code",
+      directory: repoDir,
+      harnessCwd: harnessWt,
+      harnessCommit,
+      baseBranch: "main",
+      baseCommit,
+    });
+    const fixTask = makeTask({
+      id: "task_fix",
+      directory: repoDir,
+      worktreePath: fixWt,
+      worktreeBranch: "board/fix",
+      baseBranch: "main",
+      baseCommit,
+    });
+
+    const result = await compareTaskEvidence(buildTask, fixTask);
+    expect(result.kind).toBe("no-git");
+    if (result.kind === "no-git") {
+      expect(result.reason).toContain("uncommitted");
+      expect(result.reason).toContain("harness commit");
+      expect(result.baseRef).toBe(harnessCommit);
+    }
+  });
+
+  it("ignores disposable OS metadata when establishing base cleanliness", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+
+    const buildWt = join(tmpDir, "build");
+    runGit(repoDir, ["worktree", "add", "-b", "board/build", buildWt, "HEAD"]);
+    writeFileSync(join(buildWt, "README.md"), "# Build output\n");
+    runGit(buildWt, ["add", "README.md"]);
+    runGit(buildWt, ["commit", "-m", "build output"]);
+    writeFileSync(join(buildWt, ".DS_Store"), "metadata\n");
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, "board/build"]);
+    writeFileSync(join(fixWt, "fix.ts"), "export const fix = true;\n");
+    runGit(fixWt, ["add", "fix.ts"]);
+    runGit(fixWt, ["commit", "-m", "fix output"]);
+
+    const result = await compareTaskEvidence(
+      makeTask({ id: "task_build", directory: repoDir, worktreePath: buildWt, worktreeBranch: "board/build", baseCommit }),
+      makeTask({ id: "task_fix", directory: repoDir, worktreePath: fixWt, worktreeBranch: "board/fix", baseCommit }),
+    );
+
+    expect(result.kind).toBe("diff");
+    if (result.kind === "diff") expect(result.files.map((file) => file.file)).toEqual(["fix.ts"]);
+  });
+
+  it("does not ignore tracked OS-named files when they are modified", async () => {
+    const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
+    const buildWt = join(tmpDir, "build");
+    runGit(repoDir, ["worktree", "add", "-b", "board/build", buildWt, "HEAD"]);
+    writeFileSync(join(buildWt, ".DS_Store"), "tracked metadata\n");
+    runGit(buildWt, ["add", ".DS_Store"]);
+    runGit(buildWt, ["commit", "-m", "track metadata"]);
+    writeFileSync(join(buildWt, ".DS_Store"), "modified tracked metadata\n");
+
+    const fixWt = join(tmpDir, "fix");
+    runGit(repoDir, ["worktree", "add", "-b", "board/fix", fixWt, "board/build"]);
+
+    const result = await compareTaskEvidence(
+      makeTask({ id: "task_build", directory: repoDir, worktreePath: buildWt, worktreeBranch: "board/build", baseCommit }),
+      makeTask({ id: "task_fix", directory: repoDir, worktreePath: fixWt, worktreeBranch: "board/fix", baseCommit }),
+    );
+
+    expect(result.kind).toBe("no-git");
+    if (result.kind === "no-git") expect(result.reason).toContain("uncommitted");
+  });
+
   it("refuses comparison when base worktree cleanliness cannot be established", async () => {
     const { baseCommit, repoDir } = initRepo(join(tmpDir, "repo"));
 

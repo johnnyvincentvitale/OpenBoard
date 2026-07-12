@@ -1148,15 +1148,44 @@ function cleanBounded(value: unknown, field: string, max: number, code: string):
 
 async function assertWorktreeDoneMoveResolved(dispatcher: Dispatcher, task: Task): Promise<void> {
   if (task.column === "done") return;
-  if (task.column !== "review") return;
-  if (!task.worktreePath || !task.worktreeBranch) return;
+  if (!task.worktreePath) return;
 
-  const status = await dispatcher.getWorktreeCommitStatus(task.id, undefined);
+  if (task.runState === "running") {
+    throw new ConflictRouteError(
+      "worktree_session_running",
+      "The task session is still running and may continue writing to its worktree. Stop the session before accepting Done.",
+      {
+        requirement: {
+          transition: "move",
+          taskId: task.id,
+          action: "stop_session",
+        },
+      },
+    );
+  }
+
+  let status: Awaited<ReturnType<Dispatcher["getWorktreeCommitStatus"]>>;
+  try {
+    if (!task.worktreeBranch) throw new Error("Task worktree branch is unavailable");
+    status = await dispatcher.getWorktreeCommitStatus(task.id, undefined);
+  } catch {
+    throw new ConflictRouteError(
+      "worktree_status_unavailable",
+      "OpenBoard could not verify that the task worktree is resolved. Restore the worktree and its base reference, or explicitly discard or integrate it before accepting Done.",
+      {
+        requirement: {
+          transition: "move",
+          taskId: task.id,
+          action: "restore_or_resolve_worktree",
+        },
+      },
+    );
+  }
   if (status.committedFiles.length === 0 && status.uncommittedFiles.length === 0) return;
 
   throw new ConflictRouteError(
     "unintegrated_worktree_changes",
-    "Review worktree has unintegrated changes. Integrate the card, commit or discard remaining files, or explicitly resolve the worktree before accepting Done.",
+    "Task worktree has unintegrated changes. Integrate the card, commit or discard remaining files, or explicitly resolve the worktree before accepting Done.",
     {
       requirement: {
         transition: "move",

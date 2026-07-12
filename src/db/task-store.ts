@@ -465,7 +465,7 @@ export class SqliteTaskStore implements TaskStore {
         "INSERT INTO task_events (id, task_id, type, body, created_at) VALUES (@id, @taskId, @type, @body, @createdAt)",
       ),
       listEvents: this.db.prepare(
-        "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at, id",
+        "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at, rowid",
       ),
     };
   }

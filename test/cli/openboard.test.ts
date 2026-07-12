@@ -34,6 +34,11 @@ const STOPPED_RUNTIME: InstanceRuntimeState = {
   boardUrl: "http://127.0.0.1:4097",
 };
 
+const HEALTHY_DEFINITION: InstanceDefinition = {
+  ...DEFAULT_DEFINITION,
+  workspace: process.cwd(),
+};
+
 function mockProvider(
   overrides: Partial<InstanceLifecycleProvider> = {},
 ): InstanceLifecycleProvider {
@@ -58,7 +63,7 @@ function mockProvider(
     getHealth: vi.fn().mockResolvedValue(undefined),
     readLog: vi.fn().mockResolvedValue({ path: "/logs/openboard.log", content: "started\n", truncated: false, missing: false }),
     listTasks: vi.fn().mockResolvedValue([]),
-    listTaskEvents: vi.fn().mockResolvedValue([]),
+    getTaskCausality: vi.fn().mockResolvedValue({}),
     listAgents: vi.fn().mockResolvedValue([]),
     listProviders: vi.fn().mockResolvedValue([]),
     getAcpConfig: vi.fn().mockResolvedValue({}),
@@ -644,6 +649,7 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
 
   it("prints doctor human diagnostics", async () => {
     const provider = mockProvider({
+      get: vi.fn().mockResolvedValue(HEALTHY_DEFINITION),
       getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
       getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "unreachable" } }),
       listAgents: vi.fn().mockResolvedValue([{ id: "build", mode: "primary" }]),
@@ -659,7 +665,10 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
   });
 
   it("prints doctor JSON", async () => {
-    const provider = mockProvider({ getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME) });
+    const provider = mockProvider({
+      get: vi.fn().mockResolvedValue(HEALTHY_DEFINITION),
+      getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME),
+    });
     const { code, out } = await run(["doctor", "my-project", "--json"], provider);
     expect(code).toBe(0);
     expect(JSON.parse(out).name).toBe("my-project");
@@ -700,6 +709,7 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
 
   it("still reports running-card diagnostics when another live doctor read fails", async () => {
     const provider = mockProvider({
+      get: vi.fn().mockResolvedValue(HEALTHY_DEFINITION),
       getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
       getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "ok", version: "1" } }),
       listAgents: vi.fn().mockRejectedValue(new Error("agents unreachable")),
@@ -713,6 +723,18 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
     expect(out).toContain("no unsafe RUNNING cards detected");
     expect(out).toContain("roster");
     expect(out).toContain("agents unreachable");
+  });
+
+  it("fails doctor when any diagnostic check fails", async () => {
+    const provider = mockProvider({
+      get: vi.fn().mockResolvedValue({ ...HEALTHY_DEFINITION, boardToken: undefined }),
+      getRuntime: vi.fn().mockResolvedValue(STOPPED_RUNTIME),
+    });
+
+    const { code, out } = await run(["doctor", "my-project"], provider);
+
+    expect(code).toBe(1);
+    expect(out).toContain("✗ token: absent");
   });
 
   it("tails logs", async () => {
@@ -763,9 +785,7 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
   it("surfaces parent-triggered auto-dispatch history in task summaries", async () => {
     const provider = mockProvider({
       listTasks: vi.fn().mockResolvedValue([{ ...task, id: "child-1", column: "in_progress", runState: "running" }]),
-      listTaskEvents: vi.fn().mockResolvedValue([
-        { id: "event-1", taskId: "child-1", type: "task_auto_dispatched", body: { parentId: "parent-1" }, createdAt: 1234 },
-      ]),
+      getTaskCausality: vi.fn().mockResolvedValue({ "child-1": { autoDispatchedBy: "parent-1" } }),
     });
 
     const { code, out } = await run(["tasks", "my-project"], provider);
@@ -774,12 +794,26 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
     expect(out).toContain("child-1");
     expect(out).toContain("auto-dispatched by parent parent-1");
     expect(out).toContain("task_auto_dispatched");
+    expect(provider.getTaskCausality).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes batched auto-dispatch causality in JSON task output", async () => {
+    const provider = mockProvider({
+      listTasks: vi.fn().mockResolvedValue([{ ...task, id: "child-1" }]),
+      getTaskCausality: vi.fn().mockResolvedValue({ "child-1": { autoDispatchedBy: "parent-1" } }),
+    });
+
+    const { code, out } = await run(["tasks", "my-project", "--json"], provider);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(out).tasks[0].causality).toEqual({ type: "task_auto_dispatched", autoDispatchedBy: "parent-1" });
+    expect(provider.getTaskCausality).toHaveBeenCalledTimes(1);
   });
 
   it("warns when task event history cannot be loaded", async () => {
     const provider = mockProvider({
       listTasks: vi.fn().mockResolvedValue([{ ...task, id: "child-1", column: "in_progress", runState: "running" }]),
-      listTaskEvents: vi.fn().mockRejectedValue(new Error("events unreachable")),
+      getTaskCausality: vi.fn().mockRejectedValue(new Error("events unreachable")),
     });
 
     const { code, out } = await run(["tasks", "my-project"], provider);
@@ -788,6 +822,18 @@ describe("openboard doctor/logs/harnesses/agents/providers/tasks/worktrees/resta
     expect(out).toContain("child-1");
     expect(out).toContain("causality unavailable");
     expect(out).toContain("events unreachable");
+  });
+
+  it("fails restart when post-start task diagnostics are unavailable", async () => {
+    const provider = mockProvider({
+      getHealth: vi.fn().mockResolvedValue({ adapter: "ok", opencode: { status: "ok", version: "1" } }),
+      listTasks: vi.fn().mockRejectedValue(new Error("tasks unreachable")),
+    });
+
+    const { code, out } = await run(["restart", "my-project"], provider);
+
+    expect(code).toBe(1);
+    expect(out).toContain("task diagnostics unavailable");
   });
 
   it("shows worktree summaries", async () => {

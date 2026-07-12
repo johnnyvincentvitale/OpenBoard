@@ -1433,26 +1433,32 @@ export class TaskDispatcher implements Dispatcher {
     }
   }
 
-  private async decideOpenCodeBlockedAnswerResume(task: Task): Promise<BlockedAnswerResumeDecision> {
+  private async decideOpenCodeBlockedAnswerResume(task: Task): Promise<{
+    decision: BlockedAnswerResumeDecision;
+    fenceSessionBeforeFresh: boolean;
+  }> {
     if (task.completionSource !== "reported" || !task.sessionId) {
-      return { mode: "fresh-session", evidence: "not-resumable" };
+      return {
+        decision: { mode: "fresh-session", evidence: "not-resumable" },
+        fenceSessionBeforeFresh: Boolean(task.sessionId),
+      };
     }
-    const statuses = await this.fetchSessionStatusMap();
+    const statuses = await this.withBlockedResumeProbeTimeout(this.fetchSessionStatusMap());
     const status = statuses?.get(task.sessionId);
     if (status === "idle" || status === "busy" || status === "retry") {
-      return { mode: "same-session", evidence: "status" };
+      return { decision: { mode: "same-session", evidence: "status" }, fenceSessionBeforeFresh: false };
     }
     if (statuses && statuses.has(task.sessionId)) {
-      return { mode: "fresh-session", evidence: "not-resumable" };
+      return { decision: { mode: "fresh-session", evidence: "not-resumable" }, fenceSessionBeforeFresh: true };
     }
 
     try {
       const result = await this.withBlockedResumeProbeTimeout(this.client.session.messages({ sessionID: task.sessionId }));
       if (result && !(result as { error?: unknown }).error && Array.isArray((result as { data?: unknown }).data)) {
-        return { mode: "same-session", evidence: "messages" };
+        return { decision: { mode: "same-session", evidence: "messages" }, fenceSessionBeforeFresh: false };
       }
       if (result && (result as { error?: unknown }).error && isNotFoundError((result as { error?: unknown }).error)) {
-        return { mode: "fresh-session", evidence: "not-resumable" };
+        return { decision: { mode: "fresh-session", evidence: "not-resumable" }, fenceSessionBeforeFresh: false };
       }
     } catch {
       // Message evidence is best-effort; fall through to session-tree evidence.
@@ -1462,14 +1468,35 @@ export class TaskDispatcher implements Dispatcher {
       if ("children" in this.client.session) {
         const result = await this.withBlockedResumeProbeTimeout((this.client.session as unknown as { children(input: { sessionID: string }): Promise<unknown> }).children({ sessionID: task.sessionId }));
         const error = (result as { error?: unknown } | undefined)?.error;
-        if (result && !error) return { mode: "same-session", evidence: "session-tree" };
-        if (error && isNotFoundError(error)) return { mode: "fresh-session", evidence: "not-resumable" };
+        if (result && !error) return { decision: { mode: "same-session", evidence: "session-tree" }, fenceSessionBeforeFresh: false };
+        if (error && isNotFoundError(error)) return { decision: { mode: "fresh-session", evidence: "not-resumable" }, fenceSessionBeforeFresh: false };
       }
     } catch {
       // Session-tree evidence is best-effort.
     }
 
-    return { mode: "fresh-session", evidence: "not-resumable" };
+    return { decision: { mode: "fresh-session", evidence: "not-resumable" }, fenceSessionBeforeFresh: true };
+  }
+
+  private async fenceBlockedAnswerSessionBeforeFresh(task: Task): Promise<void> {
+    if (!task.sessionId) return;
+    try {
+      const result = await this.withBlockedResumeProbeTimeout(this.client.session.abort({ sessionID: task.sessionId }));
+      if (!result) throw new Error("OpenCode session abort timed out");
+      const error = (result as { error?: unknown }).error;
+      if (error && !isNotFoundError(error)) throw error;
+    } catch (err) {
+      if (!isNotFoundError(err)) {
+        throw AdapterError.unreachable(
+          "Could not confirm the prior OpenCode session was stopped; the blocked report was preserved",
+          err,
+        );
+      }
+    }
+    this.cancelCompletionWatcher(task.sessionId);
+    this.stopPermissionResponder(task.sessionId);
+    this.endOpenCodeRun(task.id, task.runStartedAt, "aborted");
+    this.outputCandidates.delete(task.sessionId);
   }
 
   private withBlockedAnswerPrompt(task: Task, answer: BlockedAnswerContext, feedback: string | undefined, liveSession: boolean): string {
@@ -1549,8 +1576,12 @@ export class TaskDispatcher implements Dispatcher {
     if (!blockedAnswer) this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
     if (task.sessionId) this.outputCandidates.delete(task.sessionId);
 
-    const blockedAnswerResumeDecision = blockedAnswer ? await this.decideOpenCodeBlockedAnswerResume(task) : undefined;
+    const blockedAnswerResumePlan = blockedAnswer ? await this.decideOpenCodeBlockedAnswerResume(task) : undefined;
+    const blockedAnswerResumeDecision = blockedAnswerResumePlan?.decision;
     if (blockedAnswer && blockedAnswerResumeDecision?.mode !== "same-session") {
+      if (blockedAnswerResumePlan?.fenceSessionBeforeFresh) {
+        await this.fenceBlockedAnswerSessionBeforeFresh(task);
+      }
       const fresh = await this.startFreshOpenCodeAnsweredBlock(task, this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false));
       return { ...fresh, blockedAnswerResumeDecision };
     }
@@ -2268,12 +2299,27 @@ export class TaskDispatcher implements Dispatcher {
     const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
     const isolatedRun = wantsWorktree(task);
     const permissionRules = resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides);
-    const created = await this.client.session.create({
-      agent: task.agent ?? undefined,
-      model: activeModel ?? undefined,
-      directory: execDirectory,
-      permission: permissionRules,
-    });
+    let created: unknown;
+    try {
+      created = await this.client.session.create({
+        agent: task.agent ?? undefined,
+        model: activeModel ?? undefined,
+        directory: execDirectory,
+        permission: permissionRules,
+      });
+    } catch (err) {
+      await this.handleWatchdogAttemptStartFailure(
+        task,
+        attempt,
+        "session-create",
+        errorMessage(err, "OpenCode session create threw"),
+        activeModel,
+        previousSessionId,
+        undefined,
+        reason,
+      );
+      return;
+    }
     const sessionId = extractSessionId((created as { data?: unknown }).data);
     if (!sessionId || (created as { error?: unknown }).error) {
       const detail = errorMessage((created as { error?: unknown }).error, "OpenCode session create returned no id");

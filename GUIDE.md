@@ -358,6 +358,12 @@ When `attach` is run without a name, OpenBoard uses the explicit default set by
 are multiple instances and no explicit default, use `openboard default show` for
 the current state or pass a name explicitly.
 
+`openboard doctor` exits nonzero when any diagnostic check fails. `openboard
+restart` also exits nonzero when post-start health or task reconciliation is
+unavailable, or when an unsafe RUNNING card remains. `openboard tasks` loads
+auto-dispatch causality in one batch for both human and `--json` output; a
+failed causality read is labeled instead of silently presented as no cause.
+
 The instance's **workspace** matters: task directories must live inside it, so
 register the instance against the repo — or parent directory — you actually
 want agents working in.

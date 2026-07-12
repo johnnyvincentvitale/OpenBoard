@@ -539,12 +539,14 @@ export function resolveBoardUrl(options: BoardClientOptions = {}): string {
 export function parseModelRef(model: string): ModelRef {
   const trimmed = model.trim();
   const slash = trimmed.indexOf("/");
+  const providerID = slash > 0 ? trimmed.slice(0, slash).trim() : "";
+  const id = slash > 0 ? trimmed.slice(slash + 1).trim() : "";
 
-  if (slash <= 0 || slash === trimmed.length - 1) {
+  if (!providerID || !id || id.split("/").some((segment) => segment.trim().length === 0)) {
     throw new Error('model must use "provider/model-id"');
   }
 
-  return { providerID: trimmed.slice(0, slash).trim(), id: trimmed.slice(slash + 1).trim() };
+  return { providerID, id };
 }
 
 export function toTaskSummary(task: Task): TaskSummary {

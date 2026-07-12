@@ -18,7 +18,7 @@ import type {
   InstanceRuntimeState,
 } from "../shared/instances";
 import type { BoardHealth } from "../shared/health";
-import type { AcpConfigCatalog, RosterAgent, Task, TaskEvent } from "../shared/task";
+import type { AcpConfigCatalog, RosterAgent, Task, TaskCausalityMap } from "../shared/task";
 import type { RosterProvider } from "../shared/providers";
 import { createDefaultProvider } from "./default-provider";
 import type { InstanceLifecycleProvider, InstanceWorktreeSummary } from "./provider";
@@ -440,9 +440,9 @@ interface TaskDiagnostics {
   detail?: string;
 }
 
-interface TaskEventLoadResult {
-  eventsByTask: Map<string, TaskEvent[]>;
-  failuresByTask: Map<string, string>;
+interface TaskCausalityLoadResult {
+  causality: TaskCausalityMap;
+  failure?: string;
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -478,28 +478,15 @@ function formatUnsafeRunningSummary(issues: UnsafeRunningTask[], instanceName: s
   return `${count} unsafe RUNNING card${count === 1 ? "" : "s"}: ${cards}. Cannot trust AUTO/RUNNING state; run openboard restart ${instanceName}, then retry/abort from the TUI or inspect the task events.`;
 }
 
-function latestAutoDispatch(events: TaskEvent[] | undefined): TaskEvent | undefined {
-  return events
-    ?.filter((event) => event.type === "task_auto_dispatched")
-    .sort((a, b) => b.createdAt - a.createdAt)[0];
-}
-
-async function loadTaskEvents(
+async function loadTaskCausality(
   provider: InstanceLifecycleProvider,
   name: string,
-  tasks: Task[],
-): Promise<TaskEventLoadResult> {
-  const entries = await Promise.all(tasks.map(async (task) => {
-    try {
-      return { taskId: task.id, events: await provider.listTaskEvents(name, task.id) };
-    } catch (error) {
-      return { taskId: task.id, events: [] as TaskEvent[], failure: formatErrorMessage(error) };
-    }
-  }));
-  return {
-    eventsByTask: new Map(entries.map((entry) => [entry.taskId, entry.events])),
-    failuresByTask: new Map(entries.flatMap((entry) => entry.failure ? [[entry.taskId, entry.failure] as const] : [])),
-  };
+): Promise<TaskCausalityLoadResult> {
+  try {
+    return { causality: await provider.getTaskCausality(name) };
+  } catch (error) {
+    return { causality: {}, failure: formatErrorMessage(error) };
+  }
 }
 
 function printDefaultInfo(
@@ -767,36 +754,45 @@ function printProviders(providers: RosterProvider[], stdout: OutStream): void {
   stdout.write("Restart guidance: provider auth/model changes may require restarting OpenCode via openboard restart <name>.\n");
 }
 
-function summarizeTasks(tasks: Task[]): Record<string, unknown> {
+function taskCausalityFields(task: Task, load: TaskCausalityLoadResult): Record<string, unknown> {
+  const autoDispatchedBy = load.causality[task.id]?.autoDispatchedBy;
+  if (autoDispatchedBy) return { causality: { type: "task_auto_dispatched", autoDispatchedBy } };
+  if (load.failure) return { causalityUnavailable: load.failure };
+  return {};
+}
+
+function summarizeTasks(tasks: Task[], causality: TaskCausalityLoadResult = { causality: {} }): Record<string, unknown> {
   const byColumn: Record<string, number> = {};
   const byRunState: Record<string, number> = {};
   for (const task of tasks) {
     byColumn[task.column] = (byColumn[task.column] ?? 0) + 1;
     byRunState[task.runState] = (byRunState[task.runState] ?? 0) + 1;
   }
-  return { total: tasks.length, byColumn, byRunState, tasks };
+  return {
+    total: tasks.length,
+    byColumn,
+    byRunState,
+    tasks: tasks.map((task) => ({ ...task, ...taskCausalityFields(task, causality) })),
+  };
 }
 
 function printTasks(
   tasks: Task[],
   stdout: OutStream,
-  eventsByTask: Map<string, TaskEvent[]> = new Map(),
-  eventFailuresByTask: Map<string, string> = new Map(),
+  causality: TaskCausalityLoadResult = { causality: {} },
 ): void {
-  const summary = summarizeTasks(tasks) as { total: number; byColumn: Record<string, number>; byRunState: Record<string, number> };
+  const summary = summarizeTasks(tasks, causality) as { total: number; byColumn: Record<string, number>; byRunState: Record<string, number> };
   stdout.write(`Tasks: ${summary.total}\n`);
   stdout.write(`Columns: ${Object.entries(summary.byColumn).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\n`);
   stdout.write(`Run states: ${Object.entries(summary.byRunState).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\n`);
   for (const task of tasks) {
-    const eventFailure = eventFailuresByTask.get(task.id);
-    const autoDispatch = eventFailure ? undefined : latestAutoDispatch(eventsByTask.get(task.id));
-    const parentId = autoDispatch?.body?.parentId;
-    const causality = eventFailure
-      ? ` · causality unavailable: ${eventFailure}`
+    const parentId = causality.causality[task.id]?.autoDispatchedBy;
+    const cause = causality.failure
+      ? ` · causality unavailable: ${causality.failure}`
       : typeof parentId === "string"
         ? ` · task_auto_dispatched: auto-dispatched by parent ${parentId}`
         : "";
-    stdout.write(`- ${task.id} [${task.column}/${task.runState}] ${task.title}${causality}\n`);
+    stdout.write(`- ${task.id} [${task.column}/${task.runState}] ${task.title}${cause}\n`);
   }
 }
 
@@ -984,13 +980,15 @@ Commands:
                                            Show read-only task summary
   worktrees <name>                        Show managed worktree summary
   restart <name>                          Stop/start and wait for health
-  global archive                          Browse with TUI key A; mirrored rows remain cross-instance
   attach [name]                           Attach the TUI to an instance
   mcp [--instance <name>]                  Start MCP unbound, or bound to a running instance
   <name>                                  Start-if-stopped, then attach the TUI
 
 Options:
   -h, --help                              Show this message
+
+Notes:
+  Browse the cross-instance global archive from the TUI with key A.
 `);
 }
 
@@ -1171,7 +1169,7 @@ export async function runOpenboard(
         if (parsed.json) writeJson(payload, stdout);
         else printDoctor(payload, stdout);
         const checks = payload.checks as Array<{ name: string; status: string }>;
-        return checks.some((check) => check.name === "running-cards" && check.status === "fail") ? 1 : 0;
+        return checks.some((check) => check.status === "fail") ? 1 : 0;
       }
       case "logs": {
         const log = await provider.readLog(parsed.name, parsed.tail);
@@ -1211,11 +1209,9 @@ export async function runOpenboard(
         let tasks = await provider.listTasks(parsed.name);
         if (parsed.review) tasks = tasks.filter((task) => task.column === "review");
         if (parsed.running) tasks = tasks.filter((task) => task.runState === "running" || task.column === "in_progress");
-        if (parsed.json) writeJson(summarizeTasks(tasks), stdout);
-        else {
-          const eventLoad = await loadTaskEvents(provider, parsed.name, tasks);
-          printTasks(tasks, stdout, eventLoad.eventsByTask, eventLoad.failuresByTask);
-        }
+        const causality = await loadTaskCausality(provider, parsed.name);
+        if (parsed.json) writeJson(summarizeTasks(tasks, causality), stdout);
+        else printTasks(tasks, stdout, causality);
         return 0;
       }
       case "worktrees": {
@@ -1230,19 +1226,22 @@ export async function runOpenboard(
         const health = await provider.getHealth(parsed.name);
         stdout.write(`Instance "${parsed.name}" is ${runtime.status} at ${runtime.boardUrl}\n`);
         stdout.write(`Health: ${health ? "ok" : "unavailable after start"}\n`);
+        let restartFailed = runtime.status !== "running" || !health;
         if (runtime.status === "running") {
           try {
             const runningIssues = unsafeRunningTasks(await provider.listTasks(parsed.name));
             if (runningIssues.length > 0) {
               stdout.write(`Restart warning: ${formatUnsafeRunningSummary(runningIssues, parsed.name)}\n`);
-              return 1;
+              restartFailed = true;
+            } else {
+              stdout.write("Restart reconciliation: no unsafe RUNNING cards detected\n");
             }
-            stdout.write("Restart reconciliation: no unsafe RUNNING cards detected\n");
           } catch (error) {
             stdout.write(`Restart reconciliation: task diagnostics unavailable (${error instanceof Error ? error.message : String(error)})\n`);
+            restartFailed = true;
           }
         }
-        return 0;
+        return restartFailed ? 1 : 0;
       }
       case "mcp": {
         const repoRoot = cliRepoRoot();

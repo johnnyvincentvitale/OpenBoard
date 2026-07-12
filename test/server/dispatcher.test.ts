@@ -106,6 +106,7 @@ class FakeOpencodeClient {
    * the persistent createShouldError flag — for simulating a bounded run of failures
    * (e.g. one failed watchdog retry attempt followed by a successful one). */
   createShouldErrorCount = 0;
+  createShouldThrowCount = 0;
   /** Same as createShouldErrorCount but for promptAsync(). */
   promptShouldErrorCount = 0;
   childrenResponses = new Map<string, unknown[]>();
@@ -114,6 +115,7 @@ class FakeOpencodeClient {
   childrenCalls: Array<{ sessionID: string }> = [];
   sessionStatus: Record<string, unknown> = {};
   statusShouldError: { error: unknown } | null = null;
+  statusNeverResolves = false;
   statusCalls = 0;
 
   private scripts: OpencodeEvent[][] = [];
@@ -134,6 +136,10 @@ class FakeOpencodeClient {
       permission?: unknown;
     }) => {
       this.createCalls.push(params);
+      if (this.createShouldThrowCount > 0) {
+        this.createShouldThrowCount -= 1;
+        throw new Error("session create transport failed");
+      }
       if (this.createShouldErrorCount > 0) {
         this.createShouldErrorCount -= 1;
         return { data: undefined, error: this.createShouldError?.error ?? { message: "session create failed" } };
@@ -177,6 +183,7 @@ class FakeOpencodeClient {
     },
     status: async () => {
       this.statusCalls += 1;
+      if (this.statusNeverResolves) return new Promise(() => undefined);
       if (this.statusShouldError) return { data: undefined, error: this.statusShouldError.error };
       return { data: this.sessionStatus, error: undefined };
     },
@@ -1711,6 +1718,34 @@ describe("TaskDispatcher", () => {
       const runRecord = (dispatcher as never as { openCodeRunsByTask: Map<string, { rootSessionId: string; watchdog: { snapshot: () => { stage: string } } }> }).openCodeRunsByTask.get(task.id);
       expect(runRecord?.rootSessionId).toBe("ses_create_fail_2");
       expect(runRecord?.watchdog.snapshot().stage).toBe("healthy");
+    });
+
+    it("thrown session-create failures stay inside watchdog recovery instead of escaping fire-and-forget", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_create_throw_0";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const runStartedAt = store.get(task.id)?.runStartedAt;
+
+      client.createShouldThrowCount = 1;
+      client.nextSessionId = "ses_create_throw_2";
+      await (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: runStartedAt!, sessionId: "ses_create_throw_0", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+
+      expect(store.get(task.id)).toMatchObject({ sessionId: "ses_create_throw_2", runState: "running", autoRetries: 2 });
+      expect(store.listEvents(task.id).find((event) => event.type === "task_watchdog_retry_failed")?.body).toMatchObject({
+        attempt: 1,
+        stage: "session-create",
+        error: "session create transport failed",
+        outcome: "start-failed",
+      });
     });
 
     it("session-create failure that exhausts the retry budget system-blocks the task (P1 regression)", async () => {
@@ -3403,6 +3438,29 @@ describe("TaskDispatcher", () => {
       }
     });
 
+    it("bounds a hanging status probe and continues with message evidence", async () => {
+      const task = createTask();
+      store.update(task.id, { sessionId: "ses_hanging_status", baseCommit: "original-base" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 20 }, "reported");
+      client.statusNeverResolves = true;
+      client.stableMessagesResponse = [];
+      dispatcher = new TaskDispatcher({ client: client as never, store, blockedResumeProbeTimeoutMs: 10 });
+
+      const result = await Promise.race([
+        dispatcher.retry(task.id, "Use option B", { blockedReportedAt: 20, answeredBy: "Reviewer" }),
+        new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 200)),
+      ]);
+
+      expect(result).not.toBe("timed-out");
+      expect(result).toMatchObject({
+        sessionId: "ses_hanging_status",
+        blockedAnswerResumeDecision: { mode: "same-session", evidence: "messages" },
+      });
+      expect(client.statusCalls).toBe(1);
+      expect(client.abortCalls).toEqual([]);
+      expect(client.createCalls).toHaveLength(0);
+    });
+
     it("answered watchdog blocked retry starts fresh even when the old session is busy", async () => {
       const worktreePath = join(projectDir, "wt-watchdog");
       mkdirSync(worktreePath, { recursive: true });
@@ -3422,7 +3480,7 @@ describe("TaskDispatcher", () => {
       expect(result.sessionId).toBe("ses_watchdog_fresh");
     });
 
-    it("answered blocked retry falls back fresh when resume eligibility probes time out", async () => {
+    it("fences the old session before falling back fresh when resume eligibility probes time out", async () => {
       const task = createTask();
       store.update(task.id, { sessionId: "ses_stalled", baseCommit: "original-base" });
       store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 25 }, "reported");
@@ -3442,8 +3500,65 @@ describe("TaskDispatcher", () => {
         sessionId: "ses_fresh_after_probe_timeout",
         blockedAnswerResumeDecision: { mode: "fresh-session", evidence: "not-resumable" },
       });
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_stalled" }]);
       expect(client.createCalls).toHaveLength(1);
       expect(client.promptCalls.at(-1)).toMatchObject({ sessionID: "ses_fresh_after_probe_timeout" });
+    });
+
+    it("does not start a fresh writer when an inconclusive blocked-answer session cannot be fenced", async () => {
+      const task = createTask();
+      store.move(task.id, "review", 0);
+      store.update(task.id, { sessionId: "ses_unfenced", runState: "idle", baseCommit: "original-base" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 26 }, "reported");
+      client.sessionStatus = {};
+      client.messagesNeverResolves = true;
+      client.childrenNeverResolves = true;
+      client.abortShouldError = { error: { message: "abort refused" } };
+      client.nextSessionId = "ses_must_not_start";
+      dispatcher = new TaskDispatcher({ client: client as never, store, blockedResumeProbeTimeoutMs: 10 });
+
+      await expect(dispatcher.retry(task.id, "Use option B", { blockedReportedAt: 26, answeredBy: "Reviewer" })).rejects.toMatchObject({
+        code: "opencode_unreachable",
+        message: expect.stringContaining("blocked report was preserved"),
+      });
+
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_unfenced" }]);
+      expect(client.createCalls).toHaveLength(0);
+      expect(store.get(task.id)).toMatchObject({
+        column: "review",
+        sessionId: "ses_unfenced",
+        runState: "idle",
+        completionSource: "reported",
+        completion: { outcome: "blocked", reportedAt: 26 },
+      });
+    });
+
+    it("bounds a hanging blocked-answer fence and preserves the reported block", async () => {
+      const task = createTask();
+      store.move(task.id, "review", 0);
+      store.update(task.id, { sessionId: "ses_abort_hangs", runState: "idle" });
+      store.setCompletion(task.id, { outcome: "blocked", summary: "Need input", changedFiles: [], verification: [], residualRisk: "Which option?", reportedAt: 27 }, "reported");
+      client.sessionStatus = {};
+      client.messagesNeverResolves = true;
+      client.childrenNeverResolves = true;
+      client.abortDeferred = deferred();
+      client.nextSessionId = "ses_must_not_start_after_abort_timeout";
+      dispatcher = new TaskDispatcher({ client: client as never, store, blockedResumeProbeTimeoutMs: 10 });
+
+      await expect(dispatcher.retry(task.id, "Use option B", { blockedReportedAt: 27, answeredBy: "Reviewer" })).rejects.toMatchObject({
+        code: "opencode_unreachable",
+        message: expect.stringContaining("blocked report was preserved"),
+      });
+
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_abort_hangs" }]);
+      expect(client.createCalls).toHaveLength(0);
+      expect(store.get(task.id)).toMatchObject({
+        column: "review",
+        sessionId: "ses_abort_hangs",
+        runState: "idle",
+        completionSource: "reported",
+        completion: { outcome: "blocked", reportedAt: 27 },
+      });
     });
 
     it("answered blocked retry prompt failure retains the current block", async () => {

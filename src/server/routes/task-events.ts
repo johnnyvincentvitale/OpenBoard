@@ -88,6 +88,24 @@ export function registerTaskEventsRoutes(app: Hono, deps: TaskEventsRouteDeps): 
       return respondWithError(c, err);
     }
   });
+
+  app.get(TASK_ROUTE_PATTERNS.taskCausality, (c) => {
+    try {
+      const causality: Record<string, { autoDispatchedBy: string }> = {};
+      for (const task of store.list()) {
+        const latest = store.listEvents(task.id)
+          .filter((event) => event.type === "task_auto_dispatched")
+          .at(-1);
+        const parentId = latest?.body?.parentId;
+        if (typeof parentId === "string" && parentId.trim()) {
+          causality[task.id] = { autoDispatchedBy: parentId };
+        }
+      }
+      return c.json(causality, 200);
+    } catch (err) {
+      return respondWithError(c, err);
+    }
+  });
 }
 
 function respondWithError(c: Context, err: unknown): Response {

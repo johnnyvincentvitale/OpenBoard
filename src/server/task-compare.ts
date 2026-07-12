@@ -70,7 +70,14 @@ async function checkCleanliness(cwd: string): Promise<CleanlinessCheck> {
   if (status.code !== 0) {
     return { kind: "unknown", reason: status.stderr.trim() || "git status failed" };
   }
-  return status.stdout.trim().length > 0 ? { kind: "dirty" } : { kind: "clean" };
+  const meaningful = status.stdout.split(/\r?\n/).filter((line) => {
+    if (!line) return false;
+    if (!line.startsWith("?? ")) return true;
+    const path = line.slice(3).replace(/^"|"$/g, "");
+    const name = path.split(/[\\/]/).at(-1);
+    return name !== ".DS_Store" && name !== "Thumbs.db";
+  });
+  return meaningful.length > 0 ? { kind: "dirty" } : { kind: "clean" };
 }
 
 function liveBaseLocationForRef(task: Task, ref: string): { path: string; label: string } | null {
@@ -79,6 +86,9 @@ function liveBaseLocationForRef(task: Task, ref: string): { path: string; label:
   }
   if (task.harnessCwd && task.harnessBranch === ref) {
     return { path: task.harnessCwd, label: `harness branch ${ref}` };
+  }
+  if (task.harnessCwd && task.harnessCommit === ref) {
+    return { path: task.harnessCwd, label: `harness commit ${ref}` };
   }
   return null;
 }

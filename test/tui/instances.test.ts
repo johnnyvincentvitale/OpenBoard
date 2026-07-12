@@ -525,6 +525,41 @@ describe("TUI label cleanup", () => {
     expect(text).not.toContain("NEEDS USER INPUT");
   });
 
+  it("budgets the Review NEEDS ANSWER row before windowing lane cards", () => {
+    const blocked = {
+      ...task("review-1", "review"),
+      position: 0,
+      runState: "error" as const,
+      completionSource: "reported" as const,
+      completion: {
+        outcome: "blocked" as const,
+        summary: "Need input",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "blocked",
+        needsInput: "Which endpoint?",
+        reportedAt: 123,
+      },
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 40,
+      tasks: [
+        blocked,
+        { ...task("review-2", "review"), position: 1 },
+        { ...task("review-3", "review"), position: 2 },
+      ],
+      selectedTaskId: "review-1",
+    }));
+    const text = textOf(app);
+
+    expect(text).toContain("Review · 3 · 1 NEEDS ANSWER");
+    expect(text).toContain("review-1");
+    expect(text).toContain("review-2");
+    expect(text).not.toContain("review-3");
+    expect(text).toContain("↓ 1 more");
+  });
+
   it("does not count blocked reports without explicit questions as NEEDS ANSWER", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -2102,6 +2137,43 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(s.selectedTaskId).toBe("second-card");
   });
 
+  it("horizontal board navigation treats the Review indicator as a rendered row", async () => {
+    const blockedReview = {
+      ...task("review-1", "review"),
+      position: 0,
+      runState: "error" as const,
+      completionSource: "reported" as const,
+      completion: {
+        outcome: "blocked" as const,
+        summary: "Need input",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "blocked",
+        needsInput: "Which endpoint?",
+        reportedAt: 123,
+      },
+    };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 40,
+      tasks: [
+        { ...task("progress-1", "in_progress"), position: 0 },
+        { ...task("progress-2", "in_progress"), position: 1 },
+        { ...task("progress-3", "in_progress"), position: 2 },
+        blockedReview,
+        { ...task("review-2", "review"), position: 1 },
+        { ...task("review-3", "review"), position: 2 },
+      ],
+      selectedTaskId: "progress-2",
+    });
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, actions());
+
+    // The indicator consumes two terminal rows including the gap, while each
+    // card slot consumes nine; review-2 is still the closest visual row.
+    expect(s.selectedTaskId).toBe("review-2");
+  });
+
   it("inline detail tab cycles forward through all five tabs with tab key", async () => {
     const s = state({
       viewState: { view: "board", previousView: "launch" },
@@ -2128,6 +2200,58 @@ describe("TUI Enter key shows inline selected-card details", () => {
 
     await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
     expect(s.detailTab).toBe("prompt");
+  });
+
+  it("refreshes watchdog attempts when the same task re-enters the Attempts tab", async () => {
+    const firstEvent = { id: "e1", taskId: "watchdog-card", type: "task_watchdog_tripped", body: {}, createdAt: 1 };
+    const secondEvent = { id: "e2", taskId: "watchdog-card", type: "task_watchdog_retry_started", body: {}, createdAt: 2 };
+    const listTaskEvents = vi.fn()
+      .mockResolvedValueOnce([firstEvent])
+      .mockResolvedValueOnce([firstEvent, secondEvent]);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("watchdog-card", "in_progress")],
+      selectedTaskId: "watchdog-card",
+      detailTab: "files",
+    });
+    const a = actions({ client: { listTaskEvents } });
+
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, a);
+    expect(s.detailTab).toBe("attempts");
+    expect(s.attempts?.events).toEqual([firstEvent]);
+
+    await handleKeypress({ name: "left", sequence: "\u001b[D" } as any, s, a);
+    expect(s.detailTab).toBe("files");
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, a);
+
+    expect(listTaskEvents).toHaveBeenCalledTimes(2);
+    expect(s.attempts?.events).toEqual([firstEvent, secondEvent]);
+  });
+
+  it("does not duplicate an in-flight watchdog attempts refresh", async () => {
+    let resolveEvents!: (events: unknown[]) => void;
+    const listTaskEvents = vi.fn(() => new Promise<unknown[]>((resolve) => {
+      resolveEvents = resolve;
+    }));
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("watchdog-card", "in_progress")],
+      selectedTaskId: "watchdog-card",
+      detailTab: "files",
+    });
+    const a = actions({ client: { listTaskEvents } });
+
+    const firstLoad = handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, a);
+    await vi.waitFor(() => expect(listTaskEvents).toHaveBeenCalledTimes(1));
+
+    // Simulate a rapid re-entry while the first request is still pending.
+    s.detailTab = "files";
+    await handleKeypress({ name: "right", sequence: "\u001b[C" } as any, s, a);
+    expect(listTaskEvents).toHaveBeenCalledTimes(1);
+
+    resolveEvents([]);
+    await firstLoad;
+    expect(s.attempts).toMatchObject({ taskId: "watchdog-card", loading: false, events: [] });
   });
 
   it("inline detail mode m key shows move options in Selected column", async () => {

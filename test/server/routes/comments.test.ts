@@ -48,6 +48,22 @@ describe("task comment and event routes", () => {
     ]);
   });
 
+  it("returns latest auto-dispatch causality for all tasks in one request", async () => {
+    const child = store.create({ title: "Child", description: "", directory: "/repo" });
+    const manual = store.create({ title: "Manual", description: "", directory: "/repo" });
+    store.addEvent({ taskId: child.id, type: "task_auto_dispatched", body: { parentId: "parent-old" } });
+    store.addEvent({ taskId: child.id, type: "task_auto_dispatched", body: { parentId: "parent-new" } });
+    store.addEvent({ taskId: manual.id, type: "task_created" });
+    const app = appFor(store);
+
+    const response = await app.request("/api/tasks/causality");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      [child.id]: { autoDispatchedBy: "parent-new" },
+    });
+  });
+
   it("creates replies to existing comments", async () => {
     const task = store.create({ title: "A", description: "", directory: "/repo" });
     store.move(task.id, "review", 0);

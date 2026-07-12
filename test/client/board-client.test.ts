@@ -78,6 +78,11 @@ describe("parseModelRef", () => {
       id: "anthropic/claude-sonnet-5",
     });
   });
+
+  it("rejects empty nested model-id segments", () => {
+    expect(() => parseModelRef("openrouter//x")).toThrow('model must use "provider/model-id"');
+    expect(() => parseModelRef("openrouter/anthropic//claude")).toThrow('model must use "provider/model-id"');
+  });
 });
 
 describe("board client", () => {

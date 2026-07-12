@@ -100,6 +100,32 @@ describe("TUI task model", () => {
     });
   });
 
+  it("accounts for rendered lane chrome when preserving a horizontal visual row", () => {
+    const laneTasks = [
+      task("todo-1", "todo", 0),
+      task("todo-2", "todo", 1),
+      task("todo-3", "todo", 2),
+      task("progress-1", "in_progress", 0),
+      task("progress-2", "in_progress", 1),
+      task("progress-3", "in_progress", 2),
+      task("review-1", "review", 0),
+      task("review-2", "review", 1),
+      task("review-3", "review", 2),
+    ];
+    const options = {
+      laneOffsets: { todo: 1, in_progress: 0, review: 0 },
+      laneCapacity: () => 2,
+      laneLeadingRows: (column: Column) => column === "review" ? 1 : 0,
+    };
+
+    // The one-row overflow indicator is shorter than a card. Terminal-row
+    // distance still keeps todo-2 nearest progress-1.
+    expect(adjacentLaneSelection(laneTasks, "todo-2", 1, options).taskId).toBe("progress-1");
+    // Review's fixed NEEDS ANSWER row adds two terminal rows including the gap;
+    // review-2 remains closer to progress-2 than review-1.
+    expect(adjacentLaneSelection(laneTasks, "progress-2", 1, options).taskId).toBe("review-2");
+  });
+
   it("does not wrap or skip empty lanes during horizontal navigation", () => {
     expect(adjacentLaneSelection(tasks, "todo-1", -1)).toEqual({
       taskId: "todo-1",
@@ -207,6 +233,12 @@ describe("lane windowing", () => {
     expect(laneCapacity(25, 3, 8)).toBe(2);
     // Done · 7 in a lane that fits 4 flat: indicators shrink it to 3.
     expect(laneCapacity(35, 7, 8)).toBe(3);
+  });
+
+  it("charges fixed leading indicator rows against lane capacity", () => {
+    // 27 rows fit three cards exactly, but Review's one-row indicator plus its
+    // gap turns the lane into a two-card window with overflow indicators.
+    expect(laneCapacity(27, 3, 8, 1)).toBe(2);
   });
 
   it("never windows below one card", () => {

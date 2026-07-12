@@ -446,6 +446,8 @@ export interface AdjacentLaneSelection {
 export interface AdjacentLaneSelectionOptions {
   laneOffsets?: Partial<Record<Column, number>>;
   laneCapacity?: (column: Column, total: number) => number;
+  /** One-row children painted before a lane's overflow indicator and cards. */
+  laneLeadingRows?: (column: Column, total: number) => number;
 }
 
 export function adjacentLaneSelection(
@@ -489,6 +491,8 @@ export function adjacentLaneSelection(
     const capacity = options.laneCapacity?.(column, total) ?? total;
     return Math.max(0, Math.trunc(capacity));
   };
+  const leadingRowsFor = (column: Column, total: number): number =>
+    Math.max(0, Math.trunc(options.laneLeadingRows?.(column, total) ?? 0));
   const offsetFor = (column: Column, selectedIndex: number, total: number): number =>
     reconcileLaneOffset(options.laneOffsets?.[column] ?? 0, selectedIndex, total, capacityFor(column, total));
 
@@ -496,11 +500,25 @@ export function adjacentLaneSelection(
   const selectedIndex = selected ? selectedColumnTasks.findIndex((task) => task.id === selected.id) : -1;
   const sourceOffset = selected && selectedIndex >= 0 ? offsetFor(selected.column, selectedIndex, selectedColumnTasks.length) : 0;
   const sourceCapacity = selected ? capacityFor(selected.column, selectedColumnTasks.length) : selectedColumnTasks.length;
-  const selectedRow = selected && selectedIndex >= 0
+  const selectedCardRow = selected && selectedIndex >= 0
     ? Math.min(Math.max(0, selectedIndex - sourceOffset), Math.max(0, sourceCapacity - 1))
     : 0;
+  // Preserve the nearest terminal row, accounting for the fact that indicator
+  // children are one row while cards are cardHeight rows. Treating both as one
+  // ordinal slot can move the selection farther away than leaving the card
+  // index unchanged.
+  const childGap = TUI_LAYOUT.laneGap;
+  const cardStride = TUI_LAYOUT.cardHeight + childGap;
+  const chromeHeight = (column: Column, total: number, offset: number): number =>
+    leadingRowsFor(column, total) * (1 + childGap) + (offset > 0 ? 1 + childGap : 0);
+  const selectedRenderedTop = selected && selectedIndex >= 0
+    ? chromeHeight(selected.column, selectedColumnTasks.length, sourceOffset) + selectedCardRow * cardStride
+    : 0;
   const targetOffset = offsetFor(targetColumn, -1, targetTasks.length);
-  const targetIndex = Math.min(targetTasks.length - 1, targetOffset + selectedRow);
+  const targetChromeHeight = chromeHeight(targetColumn, targetTasks.length, targetOffset);
+  const targetCardRow = Math.max(0, Math.round((selectedRenderedTop - targetChromeHeight) / cardStride));
+  const targetVisibleCount = Math.max(1, Math.min(capacityFor(targetColumn, targetTasks.length), targetTasks.length - targetOffset));
+  const targetIndex = Math.min(targetTasks.length - 1, targetOffset + Math.min(targetCardRow, targetVisibleCount - 1));
   const target = targetTasks[targetIndex];
   return { taskId: target?.id, column: targetColumn, moved: Boolean(target) };
 }
@@ -642,16 +660,20 @@ export function sidebarDetailMode(
 
 /**
  * How many cards a lane can paint in `innerHeight` rows. Cards are `cardHeight`
- * tall with a `laneGap` seam between children; when the full list doesn't fit,
- * two 1-row overflow slots (`↑ n more` / `↓ n more`) join the column — both are
- * always reserved under overflow so capacity stays stable while the window
+ * tall with a `laneGap` seam between children. `leadingRows` accounts for
+ * one-row children painted before the cards (for example Review's NEEDS ANSWER
+ * indicator), including each child's following gap. When the full list doesn't
+ * fit, two 1-row overflow slots (`↑ n more` / `↓ n more`) join the column — both
+ * are always reserved under overflow so capacity stays stable while the window
  * slides. Always at least 1 so the selected card can render.
  */
-export function laneCapacity(innerHeight: number, total: number, cardHeight: number): number {
+export function laneCapacity(innerHeight: number, total: number, cardHeight: number, leadingRows = 0): number {
   const gap = TUI_LAYOUT.laneGap;
   if (total <= 0) return 0;
-  if (total * (cardHeight + gap) - gap <= innerHeight) return total;
-  const budget = innerHeight - 2 * (1 + gap);
+  const leadingBudget = Math.max(0, Math.trunc(leadingRows)) * (1 + gap);
+  const cardBudget = innerHeight - leadingBudget;
+  if (total * (cardHeight + gap) - gap <= cardBudget) return total;
+  const budget = cardBudget - 2 * (1 + gap);
   return Math.max(1, Math.floor((budget + gap) / (cardHeight + gap)));
 }
 

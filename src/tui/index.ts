@@ -605,6 +605,8 @@ interface AttemptsPanelState {
   loading: boolean;
   events: TaskEvent[];
   error?: string;
+  /** Identifies the request allowed to publish into this single-task panel. */
+  requestToken?: object;
 }
 
 interface IntegrateCommitReviewState {
@@ -2801,7 +2803,9 @@ function renderColumn(ui: OpenTui, state: TuiState, column: Column, tasks: Task[
   // Arrow keys move selection, not a scrollbar — the lane renders the window of
   // cards around the selection and marks what's clipped in either direction.
   const innerHeight = laneInnerHeight(state.terminalRows);
-  const capacity = innerHeight > 0 ? laneCapacity(innerHeight, tasks.length, TUI_LAYOUT.cardHeight) : tasks.length;
+  const needsAnswerCount = column === "review" ? tasks.filter(blockedTaskNeedsAnswer).length : 0;
+  const leadingRows = needsAnswerCount > 0 ? 1 : 0;
+  const capacity = innerHeight > 0 ? laneCapacity(innerHeight, tasks.length, TUI_LAYOUT.cardHeight, leadingRows) : tasks.length;
   const selectedIndex = tasks.findIndex((task) => task.id === state.selectedTaskId);
   const offset = reconcileLaneOffset(state.laneOffsets[column], selectedIndex, tasks.length, capacity);
   state.laneOffsets[column] = offset;
@@ -2813,7 +2817,6 @@ function renderColumn(ui: OpenTui, state: TuiState, column: Column, tasks: Task[
   // laneCapacity still budgets for both slots, so the window stays stable;
   // at the edges the spare rows fall harmlessly below the last card.
   const cards: VChild[] = [];
-  const needsAnswerCount = column === "review" ? tasks.filter(blockedTaskNeedsAnswer).length : 0;
   if (needsAnswerCount > 0) cards.push(renderNeedsAnswerLaneIndicator(ui, tasks.length, needsAnswerCount));
   if (offset > 0) cards.push(renderLaneOverflow(ui, offset, "↑"));
   cards.push(...visible.map((task) => renderTask(ui, state, task)));
@@ -5408,9 +5411,15 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     else if (keyName === "up") state.selectedTaskId = nextTaskId(visibleTasks, state.selectedTaskId, -1);
     else {
       const innerHeight = laneInnerHeight(state.terminalRows);
+      const groupedVisibleTasks = tasksByColumn(visibleTasks);
+      const laneLeadingRows = (column: Column): number =>
+        column === "review" && groupedVisibleTasks.review.some(blockedTaskNeedsAnswer) ? 1 : 0;
       const laneSelection = adjacentLaneSelection(visibleTasks, state.selectedTaskId, keyName === "left" ? -1 : 1, {
         laneOffsets: state.laneOffsets,
-        laneCapacity: (_column, total) => innerHeight > 0 ? laneCapacity(innerHeight, total, TUI_LAYOUT.cardHeight) : total,
+        laneCapacity: (column, total) => innerHeight > 0
+          ? laneCapacity(innerHeight, total, TUI_LAYOUT.cardHeight, laneLeadingRows(column))
+          : total,
+        laneLeadingRows,
       });
       state.selectedTaskId = laneSelection.taskId;
       if (!laneSelection.moved && laneSelection.status) state.status = laneSelection.status;
@@ -8424,15 +8433,17 @@ function taskForBlockedAnswerDraft(state: TuiState, draft: BlockedAnswerDraft | 
 
 async function loadAttemptsForTask(state: TuiState, actions: TuiActions, task: Task | undefined): Promise<void> {
   if (!task) return;
-  if (state.attempts?.taskId === task.id && !state.attempts.error) return;
-  state.attempts = { taskId: task.id, loading: true, events: [] };
+  if (state.attempts?.taskId === task.id && state.attempts.loading) return;
+  const requestToken = {};
+  const previousEvents = state.attempts?.taskId === task.id ? state.attempts.events : [];
+  state.attempts = { taskId: task.id, loading: true, events: previousEvents, requestToken };
   actions.render();
   try {
     const events = await actions.client.listTaskEvents(task.id);
-    if (state.attempts?.taskId !== task.id) return;
+    if (state.attempts?.requestToken !== requestToken) return;
     state.attempts = { taskId: task.id, loading: false, events };
   } catch (error) {
-    if (state.attempts?.taskId !== task.id) return;
+    if (state.attempts?.requestToken !== requestToken) return;
     state.attempts = { taskId: task.id, loading: false, events: [], error: `attempt history unavailable: ${errorMessage(error)}` };
   }
   actions.render();
