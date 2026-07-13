@@ -169,21 +169,23 @@ fields (in text fields it just types `b` — see
 - Set **`TITLE`**, 
 - Write the agent's work order in **`PROMPT`**,  
 - Point **`DIR`** at that scratch Git repo—or one of its descendant directories. 
-- ***Note: Paths outside the configured workspace are rejected.***
-2. **Harness & Model.** Leave **`TASK TYPE`** on `none` and **`HARNESS`** on
-   OpenCode for this first run. `Use Agent Profile Default` lets the next
-   screen's profile choose the model. Choosing a provider unlocks a
-   type-to-filter **`MODEL`** field. **`FALLBACK`** is optional and is used only
-   by watchdog recovery.
-3. **Agent.** Pick `build`, or another general-purpose OpenCode profile from
-   the live roster.
-4. **Isolation.** Keep the default **`worktree`** setting. It gives this run a
-   dedicated `board/<taskId>` branch and worktree. **`AUTO-RUN`** should remain
-   off for a standalone first task.
-5. **Dependencies.** Select no parents. Existing cards can be toggled with
-   `space` when you build a dependency graph later.
-6. **Confirm.** Check the read-only summary and press **`enter`**. This creates
-   the card; it does not dispatch it.
+  - *Note: Paths outside the configured workspace are rejected.*
+2. **Harness & Model.** 
+- Leave **`TASK TYPE`** on `none`
+- Leave **`HARNESS`** on OpenCode for this first run. 
+- `Use Agent Profile Default` lets the next screen's profile choose the model. 
+- Choosing a provider unlocks a type-to-filter **`MODEL`** field. 
+  - **`FALLBACK`** is optional and is used only by watchdog recovery.
+3. **Agent.** 
+- Pick `build`, or another general-purpose OpenCode profile from the live roster.
+4. **Isolation.** 
+- Keep the default **`worktree`** setting. It gives this run a dedicated `board/<taskId>` branch and worktree. 
+- **`AUTO-RUN`** should remain off for a standalone first task.
+5. **Dependencies.** 
+- Do not select parents.
+  - *Existing cards can be toggled as parent with `space` when you build a dependency graph later.*
+6. **Confirm.** 
+- Check the read-only summary and press **`enter`**. This creates the card; it does not dispatch it.
 
 Once the card exists, press **`r`** once to read the run confirmation and
 **`r`** again to dispatch it. Destructive or acceptance-bearing TUI actions use
