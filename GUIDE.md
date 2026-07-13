@@ -390,9 +390,9 @@ shows a workspace-setup screen: type the repository path, `enter` to set up,
 
 Keys are intentionally reused. For example:
 
-- `e` edits a To Do card from the board, opens a file from DiffView, and expands
+- `e` edits a To Do card from the board, opens a file from View Diff, and expands
   archive detail.
-- `r` runs a To Do card, replies to a comment, or refreshes DiffView depending
+- `r` runs a To Do card, replies to a comment, or refreshes View Diff depending
   on the active surface. Uppercase `R` is Retry from the board.
 - `c` adds a comment, commits a file, or copies a Session Chat code block.
 - `s` starts/stops an instance in selectors. There is currently no board-level
@@ -735,7 +735,7 @@ their root comment, and replying to a reply attaches to that root.
 While composing a comment, `Enter` submits, `Ctrl+U` clears the draft, and
 `esc` cancels.
 
-### DiffView
+### View Diff
 
 Press `v` on a Review or Done agent card. The full-screen view supports:
 
@@ -751,8 +751,28 @@ Press `v` on a Review or Done agent card. The full-screen view supports:
   available; without lineage it reports a status message instead of switching.
 - `?` — open help; `b`/`esc` returns; `q` quits.
 
+### How Done-card diffs stay available after integration
+
 Done-card diffs are historical and read-only. They omit commit/editor actions,
 and `e` explains that the historical file cannot be edited.
+
+They keep working after the worktree is gone because of two records made
+around the run. At dispatch, OpenBoard stores the base branch and commit the
+task started from. At integration, it commits any remaining task files, merges
+the task branch into base, removes the worktree — and deliberately keeps the
+frozen `board/<taskId>` branch. Pressing `v` on the Done card (or calling MCP
+`task_diff`; both use the same board endpoint) diffs the recorded dispatch
+baseline against that frozen branch. It deliberately does not diff against the
+current base branch, which may have accumulated unrelated later integrations:
+the historical diff shows what this card changed, not what the repository has
+become. This is also why `board/*` branches are retained after integration,
+discard, and delete — remove a card's branch and its historical evidence
+honestly degrades to a no-git reason instead of a diff.
+
+While the card is still in Review, the same `v` behaves differently: it diffs
+the live worktree — including uncommitted and untracked files — against the
+recorded baseline, so pre-integration inspection never hides work the agent
+has not committed yet.
 
 ### Opening a file in your editor
 
@@ -765,7 +785,7 @@ OPENBOARD_EDITOR="hx {file}:{line}"
 
 Terminal editors suspend the TUI until they exit; known GUI editors launch
 detached. The target is the tree that produced the diff—normally the task
-worktree, not the base checkout—and DiffView refreshes when control returns.
+worktree, not the base checkout—and View Diff refreshes when control returns.
 This feature requires a local board and a configured editor; OpenBoard does not
 guess a platform opener.
 
@@ -778,7 +798,7 @@ Use evidence tools for different questions:
   code-evidence candidates reached this card?
 - `task_compare` — what did a target code card change relative to a base code
   card, typically Build → Fix?
-- `a` in DiffView — cycle the selected card's diff and usable ancestor evidence.
+- `a` in View Diff — cycle the selected card's diff and usable ancestor evidence.
 
 An Audit card's findings are evidence but not automatically a Git base. For a
 Build → Audit → Fix chain, inspect Build with `task_diff`, read the Audit
@@ -885,6 +905,8 @@ archived, missing, and dirty worktree state but does not clean anything.
 
 Branches are deliberately retained after integration, discard, delete, and
 orphan cleanup, so `board/*` branches can accumulate even when worktrees do not.
+Those retained branches are also what keep Done-card historical diffs available
+([§12](#12-reviewing-handoffs-files-comments-and-evidence)).
 
 ## 14. Named instances and CLI operations
 
@@ -1419,7 +1441,7 @@ global archive records outside OpenBoard after confirming the exact paths.
   pending `git init required`; the current handler can otherwise initialize and
   run an unintended directory.
 - **The `?` overlay is abbreviated.** It does not currently list every detail
-  tab or all DiffView controls. Use [§22](#22-contextual-key-reference) for the
+  tab or all View Diff controls. Use [§22](#22-contextual-key-reference) for the
   complete contextual reference.
 - **Claude Code abort is best-effort.** Its background adapter does not provide
   a fully reliable stop; Abort may record an error instead.
@@ -1539,7 +1561,7 @@ worktree state.
 | `R` | Retry error/rebase-conflict; on blocked Review, open answer composer |
 | `k` | Abort In Progress; press again to confirm |
 | `y` / `N` | Allow once / deny current permission ask |
-| `v` | DiffView for Review/Done agent card |
+| `v` | View Diff for Review/Done agent card |
 | `w` | Session Chat for a card with a session |
 | `i` | Integrate Review worktree; second press only when uncommitted files require confirmation |
 | `D` | Discard Review worktree; press again to confirm |
@@ -1575,7 +1597,7 @@ Moving to Done requires a second `Enter` and records acceptance; `esc` cancels.
 | `esc` | Return from Files patch, close detail, or cancel comment draft |
 | `q` | Quit while browsing detail |
 
-### DiffView
+### View Diff
 
 | Key | Action |
 |---|---|
