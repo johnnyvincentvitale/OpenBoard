@@ -81,12 +81,12 @@ Local clients launched by OpenBoard itself â€” the TUI and the `openboard` CLI â
 receive the token automatically through the environment. No manual copying is
 needed for these clients.
 
-Dispatched OpenCode sessions also receive the token inside the appended
-completion-contract prompt so they can report `/complete` or `/block` back to
-the board. That prompt may be retained anywhere OpenCode stores session history,
-transcripts, logs, or debugging output. Treat OpenCode session history and logs
-as sensitive for the lifetime of the token, and rotate the token by restarting
-the board if those records are exposed.
+Dispatched agent prompts never contain the board token or authenticated HTTP
+fallback commands. Workers report structured completion through the injected
+OpenBoard MCP `complete_task` / `block_task` tools; the MCP process receives the
+credential outside model-visible prompt text. If those tools are unavailable,
+the worker finishes normally and OpenBoard labels the idle-only Review result as
+unconfirmed instead of exposing a credential in the prompt.
 
 External clients must provide the token via the `OPENBOARD_API_TOKEN` environment
 variable. Plugin MCP starts unbound through the installed CLI:

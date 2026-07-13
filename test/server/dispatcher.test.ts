@@ -733,7 +733,7 @@ describe("TaskDispatcher", () => {
       });
     });
 
-    it("appends the completion-contract footer with task id and adapter URL", async () => {
+    it("appends an MCP-only completion-contract footer with the task id", async () => {
       const task = createTask({ description: "Do scoped work", taskKind: "build" });
       client.nextSessionId = "ses_contract";
       dispatcher = new TaskDispatcher({
@@ -754,25 +754,29 @@ describe("TaskDispatcher", () => {
       expect(text).toContain("- changedFiles: actual touched files.");
       expect(text).toContain(`complete_task with { taskId: "${task.id}"`);
       expect(text).toContain(`block_task with { taskId: "${task.id}"`);
-      expect(text).toContain(`http://127.0.0.1:5123/api/tasks/${task.id}/complete`);
-      expect(text).toContain(`http://127.0.0.1:5123/api/tasks/${task.id}/block`);
-      expect(text).toContain("Call complete_task/block_task or /complete or /block exactly once");
+      expect(text).toContain("If these MCP tools are unavailable");
+      expect(text).toContain("OpenBoard will treat an idle-only result as unconfirmed");
+      expect(text).not.toContain("http://127.0.0.1:5123");
+      expect(text).not.toContain("curl ");
     });
 
-    it("includes a shell-escaped board token in completion-contract curl commands", async () => {
+    it("never includes the board token or direct HTTP credentials in the model prompt", async () => {
       const task = createTask({ description: "Do authenticated work" });
+      const sentinelToken = "OPENBOARD_SECRET_SENTINEL_tok'en";
       dispatcher = new TaskDispatcher({
         client: client as never,
         store,
         adapterBaseUrl: "http://127.0.0.1:5123",
-        boardToken: "tok'en",
+        boardToken: sentinelToken,
       });
 
       await dispatcher.run(task.id);
 
       const text = (client.promptCalls[0]?.parts as Array<{ text: string }>)[0]?.text;
-      expect(text).toContain("-H 'Authorization: Bearer tok'\\''en'");
-      expect(text.match(/Authorization: Bearer/g)).toHaveLength(2);
+      expect(text).not.toContain(sentinelToken);
+      expect(text).not.toContain("Authorization: Bearer");
+      expect(text).not.toContain("OPENBOARD_API_TOKEN");
+      expect(text).not.toContain("/api/tasks/");
     });
 
     it("includes synthesis-specific handoff guidance in completion contracts", async () => {

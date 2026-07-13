@@ -396,6 +396,18 @@ describe("TUI label cleanup", () => {
     expect(text).not.toContain("i integrate");
   });
 
+  it("selected-card action hints expose git initialization only while a To Do card is awaiting it", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{ ...task("pending-git", "todo"), pending: "git-init" }],
+      selectedTaskId: "pending-git",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("g init git and run");
+    expect(text).not.toContain("r run");
+  });
+
   it("selected-card action hints are contextual for In Progress cards", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
@@ -3543,6 +3555,24 @@ describe("TUI manual task creation", () => {
     await handleKeypress({ name: "g", sequence: "g" } as any, s, a);
     expect(runAction.mock.calls[0]?.[0]).toBe("init git and run");
     expect(initGitAndRun).toHaveBeenCalledWith("todo-card");
+  });
+
+  it("g is rejected before a card is awaiting git initialization", async () => {
+    const initGitAndRun = vi.fn();
+    const runAction = vi.fn();
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [task("todo-card", "todo")],
+      selectedTaskId: "todo-card",
+    });
+    const a = actions({ client: { initGitAndRun }, runAction });
+
+    await handleKeypress({ name: "g", sequence: "g" } as any, s, a);
+
+    expect(initGitAndRun).not.toHaveBeenCalled();
+    expect(runAction).not.toHaveBeenCalled();
+    expect(s.pendingConfirmation).toBeUndefined();
+    expect(s.status).toBe("initialize git and run is only available for To Do agent cards awaiting git initialization");
   });
 
   it("k aborts In Progress cards", async () => {

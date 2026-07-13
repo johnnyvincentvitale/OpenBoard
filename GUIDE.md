@@ -430,6 +430,8 @@ the reason into the command strip. The common rules are:
 
 - Run and Edit are available on To Do agent cards; manual cards can be edited
   but not run.
+- A To Do worktree card awaiting Git initialization replaces Run with the
+  visible `g` **Initialize Git and Run** action.
 - Abort is available while a card is In Progress.
 - Retry is available for error cards, blocked cards, and Review cards stopped
   by a rebase conflict.
@@ -844,9 +846,9 @@ A worktree card cannot start from a non-Git directory. The card enters a
 `git init required` pending state. Press `g` once to read the consequence and
 again only when the directory truly should become a repository; OpenBoard runs
 `git init`, creates an initial commit, and dispatches the card. Otherwise cancel
-and switch the card to in-place or point it at an existing repository. The
-current `g` handler is not state-gated, so never press it on a card that is not
-visibly pending Git initialization.
+and switch the card to in-place or point it at an existing repository. The `g`
+action is exposed only on a To Do agent card that is visibly pending Git
+initialization; other card states reject the shortcut without touching Git.
 
 ### Review → Integrate → Done
 
@@ -1437,9 +1439,6 @@ global archive records outside OpenBoard after confirming the exact paths.
 - **Task sync has no board key.** `sync_task` exists through MCP/API, but `s` in
   TUI selectors controls instance start/stop. The wizard's older Sync-key hint
   should not be treated as an available action.
-- **Git-init is not state-gated in the TUI.** Use `g` only on a card visibly
-  pending `git init required`; the current handler can otherwise initialize and
-  run an unintended directory.
 - **The `?` overlay is abbreviated.** It does not currently list every detail
   tab or all View Diff controls. Use [§22](#22-contextual-key-reference) for the
   complete contextual reference.
@@ -1568,7 +1567,7 @@ worktree state.
 | `x` | Accept Review to Done; press again to confirm |
 | `a` | Archive Done; press again to confirm |
 | `d` | Delete eligible card; press again to confirm |
-| `g` | Initialize Git and Run; not state-gated, so use only on a card visibly pending Git init; press again to confirm |
+| `g` | Initialize Git and Run on a To Do agent card visibly pending Git initialization; press again to confirm |
 | `m` | Manual lane move |
 | `p` | Settings/diagnostics |
 | `u` | Refresh and reconcile |

@@ -3812,6 +3812,7 @@ function renderCompactDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
 
 type SelectedCardAction =
   | "run"
+  | "git-init"
   | "edit"
   | "retry"
   | "abort"
@@ -3832,6 +3833,7 @@ interface SelectedCardShortcut {
 
 const SELECTED_CARD_SHORTCUTS: Record<SelectedCardAction, SelectedCardShortcut> = {
   run: { action: "run", key: "r", label: "run" },
+  "git-init": { action: "git-init", key: "g", label: "init git and run" },
   edit: { action: "edit", key: "e", label: "edit" },
   retry: { action: "retry", key: "R", label: "retry" },
   abort: { action: "abort", key: "k", label: "abort" },
@@ -3874,9 +3876,9 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
   }
 
   if (task.column === "todo") {
-    return task.type === "manual"
-      ? shortcutList("edit", "delete", "move", "details")
-      : shortcutList("run", "edit", "delete", "move", "details");
+    if (task.type === "manual") return shortcutList("edit", "delete", "move", "details");
+    if (task.pending === "git-init") return shortcutList("git-init", "edit", "delete", "move", "details");
+    return shortcutList("run", "edit", "delete", "move", "details");
   }
 
   if (task.column === "review") {
@@ -3918,6 +3920,8 @@ function selectedCardActionUnavailableMessage(action: SelectedCardAction, task: 
   switch (action) {
     case "run":
       return "run is only available for To Do agent cards";
+    case "git-init":
+      return "initialize git and run is only available for To Do agent cards awaiting git initialization";
     case "edit":
       return "edit is only available for To Do cards";
     case "retry":
@@ -5353,6 +5357,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       await handleIntegrateRequested(state, actions);
       return;
     case "g":
+      if (!canUseSelectedCardAction(state, actions, "git-init")) return;
       await handleConfirmableCardAction("git-init", state, actions, (task) => actions.client.initGitAndRun(task.id), "init git and run");
       return;
     case "x":

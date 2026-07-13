@@ -2327,10 +2327,11 @@ describe("worktree isolation routes", () => {
     const task = store.create({ title: "Archived", description: "", directory: repoDir });
     store.setArchived(task.id, true);
     const client = new FakeOpencodeClient();
+    const worktrees = new FakeWorktrees();
     const realDispatcher = new TaskDispatcher({
       client: client as never,
       store,
-      worktrees: new FakeWorktrees(),
+      worktrees,
     });
     const app = buildApp(store, realDispatcher);
 
@@ -2339,6 +2340,23 @@ describe("worktree isolation routes", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error.message).toBe("Cannot run an archived task");
+    expect(worktrees.initRepoCalls).toHaveLength(0);
+    expect(client.createCalls).toHaveLength(0);
+  });
+
+  it("POST /init-git rejects a task that is not awaiting git initialization before touching git", async () => {
+    const task = store.create({ title: "Not pending", description: "", directory: repoDir, isolation: "worktree" });
+    const client = new FakeOpencodeClient();
+    const worktrees = new FakeWorktrees();
+    const realDispatcher = new TaskDispatcher({ client: client as never, store, worktrees });
+    const app = buildApp(store, realDispatcher);
+
+    const res = await app.request(`/api/tasks/${task.id}/init-git`, { method: "POST" });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toBe("Task is not awaiting git initialization");
+    expect(worktrees.initRepoCalls).toHaveLength(0);
     expect(client.createCalls).toHaveLength(0);
   });
 

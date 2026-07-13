@@ -196,7 +196,10 @@ describe.skipIf(!available)("BoardV3 lifecycle seam (integration)", () => {
       });
       expect(parentPromptText).toContain("OPENBOARD COMPLETION CONTRACT");
       expect(parentPromptText).toContain(`Task id: ${parent.id}`);
-      expect(parentPromptText).toContain(`Authorization: Bearer ${BOARD_TOKEN}`);
+      expect(parentPromptText).toContain(`complete_task with { taskId: "${parent.id}"`);
+      expect(parentPromptText).not.toContain(BOARD_TOKEN);
+      expect(parentPromptText).not.toContain("Authorization: Bearer");
+      expect(parentPromptText).not.toContain("curl ");
 
       // --- 5. Simulate the parent reaching a completion report via POST /complete
       const completeRes = await app.request(`/api/tasks/${parent.id}/complete`, {

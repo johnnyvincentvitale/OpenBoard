@@ -73,9 +73,9 @@ export class ArchivedTaskActionError extends AdapterError {
 export interface TaskDispatcherDeps {
   client: OpencodeHandle["client"];
   store: TaskStore;
-  /** Base URL for this adapter, used in dispatched completion-report instructions. */
+  /** Base URL for this adapter, injected into spawned ACP MCP configuration. */
   adapterBaseUrl?: string;
-  /** Board API token, used in dispatched completion-report instructions. */
+  /** Board API token, injected into spawned ACP MCP configuration; never placed in model prompts. */
   boardToken?: string;
   /** Claude Code background-session launcher for `claude-code` harness tasks. */
   claudeRunner?: ClaudeCodeRunnerLike;
@@ -457,10 +457,6 @@ function parentWorktreeRelativeChangedFiles(parent: Task): string[] {
     const outsideParentWorktree = rel === ".." || rel.startsWith("../") || rel.startsWith("..\\") || isAbsolute(rel);
     return rel && !outsideParentWorktree ? rel : file;
   });
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function hasAskRule(rules: Array<{ action: string }>): boolean {
@@ -1060,6 +1056,7 @@ export class TaskDispatcher implements Dispatcher {
   async initGitAndRun(taskId: string): Promise<Task> {
     const task = this.store.get(taskId);
     if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    this.assertInitGitEligible(task);
     const repoDir = this.resolveDirectory(task.directory);
     try {
       await this.worktrees.initRepo(repoDir);
@@ -1357,12 +1354,7 @@ export class TaskDispatcher implements Dispatcher {
 
   private withCompletionContract(task: Task, prompt: string, runStartedAt?: number): string {
     const taskId = task.id;
-    const taskPath = `/api/tasks/${encodeURIComponent(taskId)}`;
-    const runQuery = runStartedAt === undefined ? "" : `?runStartedAt=${encodeURIComponent(String(runStartedAt))}`;
-    const completeUrl = `${this.adapterBaseUrl}${taskPath}/complete${runQuery}`;
-    const blockUrl = `${this.adapterBaseUrl}${taskPath}/block${runQuery}`;
-    const authHeader = this.boardToken ? ` -H ${shellQuote(`Authorization: Bearer ${this.boardToken}`)}` : "";
-    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind, { hasParents: this.taskHasParents(task) })}\n\nWhen all work and verification are complete, report exactly once as your final action (replace JSON values with your actual report).\n\nPreferred, if OpenBoard MCP tools are available:\n- complete_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nFallback if MCP tools are unavailable:\n\nComplete successfully:\ncurl -sS -X POST ${JSON.stringify(completeUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what changed","changedFiles":["path/to/file"],"verification":[{"command":"npm test","result":"passed"}],"residualRisk":"none"}'\n\nBlocked or incomplete:\ncurl -sS -X POST ${JSON.stringify(blockUrl)}${authHeader} -H 'content-type: application/json' -d '{"summary":"what was attempted","changedFiles":[],"verification":[{"command":"command run","result":"result or failure"}],"residualRisk":"what remains blocked"}'\n\nCall complete_task/block_task or /complete or /block exactly once, and only as the final action. Do not continue working after reporting.`;
+    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind, { hasParents: this.taskHasParents(task) })}\n\nWhen all work and verification are complete, report exactly once as your final action (replace JSON values with your actual report).\n\nUse the OpenBoard MCP reporting tools:\n- complete_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nIf these MCP tools are unavailable, do not call board HTTP endpoints or inspect credentials. Finish with a normal final response; OpenBoard will treat an idle-only result as unconfirmed.\n\nCall complete_task or block_task exactly once, and only as the final action. Do not continue working after reporting.`;
   }
 
   private withTaskContext(task: Task, prompt: string): string {
@@ -1654,6 +1646,21 @@ export class TaskDispatcher implements Dispatcher {
 
   private assertNotArchived(task: Task, action: "run" | "retry"): void {
     if (task.archived) throw new ArchivedTaskActionError(action);
+  }
+
+  private assertInitGitEligible(task: Task): void {
+    this.assertNotArchived(task, "run");
+    if (task.type === "manual") {
+      throw AdapterError.validation("Manual tasks cannot initialize git and run; convert it to an agent task first.");
+    }
+    if (!wantsWorktree(task)) {
+      throw AdapterError.validation("Git initialization is only available for worktree-isolated tasks");
+    }
+    if (task.pending !== "git-init") {
+      throw AdapterError.validation("Task is not awaiting git initialization");
+    }
+    this.assertNotAlreadyRunning(task);
+    this.assertParentsSatisfied(task);
   }
 
   /**
