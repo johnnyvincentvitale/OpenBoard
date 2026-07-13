@@ -4115,7 +4115,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
     ? state.detailTab === "comments"
       ? "↑/↓ comments · ←/→ tabs · ↵ close details · c comment · r reply · esc close · q quit"
       : "↑/↓ scroll detail · ←/→ tabs · ↵ close details · m move · esc close · q quit"
-    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · y/N permission · w follow · f filter · p settings · u refresh · ? help · q quit · A global archive";
+    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · y/N permission · w chat · f filter · p settings · u refresh · ? help · q quit · A global archive";
 
   return ui.Box(
     {
@@ -5758,13 +5758,13 @@ async function answerFollowedPermission(state: TuiState, actions: TuiActions, ac
   const taskId = state.followView?.taskId;
   const task = taskId ? state.tasks.find((candidate) => candidate.id === taskId) : undefined;
   if (!task) {
-    state.status = "no task bound to follow view";
+    state.status = "no task bound to Session Chat";
     actions.render();
     return;
   }
   const ask = firstPendingPermissionAsk(task);
   if (!ask) {
-    state.status = "no pending permission ask on followed task";
+    state.status = "no pending permission ask on the chat task";
     actions.render();
     return;
   }
@@ -6068,7 +6068,7 @@ async function openFollowViewForSelection(state: TuiState, actions: TuiActions):
   clearPendingConfirmation(state);
   const task = selectedTask(state);
   if (!task || (!task.sessionId && !task.harnessSessionId)) {
-    state.status = "follow view needs a task with a session";
+    state.status = "Session Chat needs a task with a session";
     actions.render();
     return;
   }
@@ -6140,7 +6140,7 @@ async function connectFollowStream(state: TuiState, actions: TuiActions, taskId:
     }
     state.followStream = stream;
     if (isReconnect) {
-      state.status = "follow stream reconnected";
+      state.status = "chat stream reconnected";
       actions.render();
     }
   } catch (error) {
@@ -6151,7 +6151,7 @@ async function connectFollowStream(state: TuiState, actions: TuiActions, taskId:
       return;
     }
     state.followView = { ...state.followView, connection: "STATIC", gapReason: errorMessage(error) };
-    state.status = "follow stream unavailable; showing static buffer";
+    state.status = "chat stream unavailable; showing static buffer";
     actions.render();
   }
 }
