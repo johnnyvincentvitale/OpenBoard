@@ -457,7 +457,7 @@ export function viewDiffHeaderLabel(state: ViewDiffState | undefined): string {
 export function viewDiffKeyHints(state?: ViewDiffState): string {
   const vertical = state?.fileSelectionLocked ? "↑/↓ scroll · enter files" : "↑/↓ files · enter scroll";
   const mutableActions = state?.historical ? "" : " · c commit · e edit";
-  return `${vertical} · ←/→ hunks · a ancestor · m mark · t split/inline${mutableActions} · r refresh · b back · q quit`;
+  return `${vertical} · ←/→ hunks · a source · m mark · t split/inline${mutableActions} · r refresh · b back · q quit`;
 }
 
 export interface ViewDiffTheme {

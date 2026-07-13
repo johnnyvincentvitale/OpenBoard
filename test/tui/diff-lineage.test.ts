@@ -33,9 +33,16 @@ describe("diff lineage helpers", () => {
     expect(client.getTaskDiff).not.toHaveBeenCalled();
     expect(client.getTaskCompare).toHaveBeenCalledWith("fix", "build");
 
-    state = clearAncestorSelection(state);
+    state = moveAncestorSelection(state, 1);
+    expect(selectedCodeAncestor(state)).toBeUndefined();
+    expect(diffLineageHeader(state, { kind: "diff", files: [], capped: false })).toBe("baseline task_diff · 0 files");
     await fetchSelectedDiffEvidence(state, client);
     expect(client.getTaskDiff).toHaveBeenCalledWith("fix");
+
+    state = moveAncestorSelection(state, -1);
+    expect(selectedCodeAncestor(state)?.taskId).toBe("build");
+    state = clearAncestorSelection(state);
+    expect(selectedCodeAncestor(state)).toBeUndefined();
   });
 
   it("preserves honest no-git source metadata", () => {

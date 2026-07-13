@@ -67,6 +67,7 @@ import {
   toggleViewOverride as toggleViewDiffOverride,
   moveHunkSelection as moveDiffHunkSelection,
   diffPatchScrollTop,
+  hunkLineOffsets,
   clampFullPatchScrollTop,
   fullPatchHunkBodyOffset,
   toggleFileSelectionLock as toggleDiffFileSelectionLock,
@@ -6142,17 +6143,65 @@ async function cycleDiffEvidenceSource(state: TuiState, actions: TuiActions): Pr
     actions.render();
     return;
   }
-  state.diffLineage = moveAncestorSelection(state.diffLineage, 1);
-  state.viewDiff = { ...state.viewDiff, loading: true, sourceLabel: diffLineageHeader(state.diffLineage, undefined) };
+  if (state.diffLineage.codeAncestors.length === 0) {
+    state.status = "no code ancestors available; showing baseline diff";
+    actions.render();
+    return;
+  }
+
+  const previousViewDiff = state.viewDiff;
+  const previousScrollTop = state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0;
+  const requestLineage = moveAncestorSelection(state.diffLineage, 1);
+  const taskId = previousViewDiff.taskId;
+  state.diffLineage = requestLineage;
+  state.viewDiff = { ...previousViewDiff, loading: true, sourceLabel: diffLineageHeader(requestLineage, undefined) };
   actions.render();
   try {
-    const response = await fetchSelectedDiffEvidence(state.diffLineage, actions.client);
-    if (!state.viewDiff) return;
-    state.viewDiff = applyDiffResponse({ ...state.viewDiff, sourceLabel: diffLineageHeader(state.diffLineage, response) }, response);
+    const response = await fetchSelectedDiffEvidence(requestLineage, actions.client);
+    // Keypresses are dispatched asynchronously. A later `a`, closing View Diff,
+    // or switching cards must win over a slower earlier comparison response.
+    if (state.viewState.view !== "diff" || state.viewDiff?.taskId !== taskId || state.diffLineage !== requestLineage) return;
+
+    state.viewDiff = applyDiffEvidenceResponse(previousViewDiff, response, diffLineageHeader(requestLineage, response));
+    const selectedFile = state.viewDiff.files[state.viewDiff.selectedFileIndex];
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = state.viewDiff.fileSelectionLocked && !state.viewDiff.selectedHunk
+      ? clampFullPatchScrollTop(selectedFile?.patch, previousScrollTop)
+      : diffPatchScrollTop(state.viewDiff);
+    state.diffScrollIntent = true;
+    state.status = requestLineage.selectedAncestorIndex === null
+      ? "showing baseline diff"
+      : `comparing against ${requestLineage.codeAncestors[requestLineage.selectedAncestorIndex]?.title ?? "code ancestor"}`;
   } catch (error) {
-    if (state.viewDiff) state.viewDiff = applyDiffError(state.viewDiff, errorMessage(error));
+    if (state.viewState.view === "diff" && state.viewDiff?.taskId === taskId && state.diffLineage === requestLineage) {
+      state.viewDiff = applyDiffError(state.viewDiff, errorMessage(error));
+    }
   }
   actions.render();
+}
+
+function applyDiffEvidenceResponse(previous: ViewDiffState, response: DiffResponse, sourceLabel: string): ViewDiffState {
+  const selectedFile = previous.files[previous.selectedFileIndex];
+  let next = applyDiffResponse({ ...previous, sourceLabel }, response);
+  if (next.kind !== "diff" || next.files.length === 0) {
+    return { ...next, selectedFileIndex: 0, fileSelectionLocked: false, selectedHunk: undefined };
+  }
+
+  const matchingIndex = selectedFile ? next.files.findIndex((file) => file.file === selectedFile.file) : -1;
+  const selectedFileIndex = matchingIndex >= 0
+    ? matchingIndex
+    : Math.max(0, Math.min(previous.selectedFileIndex, next.files.length - 1));
+  const hunkCount = hunkLineOffsets(next.files[selectedFileIndex]?.patch).length;
+  const selectedHunk = matchingIndex >= 0 && previous.selectedHunk && hunkCount > 0
+    ? { fileIndex: selectedFileIndex, hunkIndex: Math.min(previous.selectedHunk.hunkIndex, hunkCount - 1) }
+    : undefined;
+
+  next = {
+    ...next,
+    selectedFileIndex,
+    fileSelectionLocked: previous.fileSelectionLocked,
+    selectedHunk,
+  };
+  return next;
 }
 
 async function openFollowViewForSelection(state: TuiState, actions: TuiActions): Promise<void> {

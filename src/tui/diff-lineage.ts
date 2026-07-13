@@ -24,11 +24,13 @@ export function selectedCodeAncestor(state: DiffLineageState): CodeAncestorCandi
 
 export function moveAncestorSelection(state: DiffLineageState, delta: number): DiffLineageState {
   if (state.codeAncestors.length === 0) return state;
-  const current = state.selectedAncestorIndex ?? -1;
-  const next = current === -1
-    ? delta > 0 ? 0 : state.codeAncestors.length - 1
-    : (current + delta + state.codeAncestors.length) % state.codeAncestors.length;
-  return { ...state, selectedAncestorIndex: next };
+  // Baseline is a real evidence source, not merely the initial state. Keeping it
+  // in the cycle lets the operator return to the card's normal task_diff without
+  // closing and reopening View Diff.
+  const sourceCount = state.codeAncestors.length + 1;
+  const currentSource = state.selectedAncestorIndex === null ? 0 : state.selectedAncestorIndex + 1;
+  const nextSource = (currentSource + delta % sourceCount + sourceCount) % sourceCount;
+  return { ...state, selectedAncestorIndex: nextSource === 0 ? null : nextSource - 1 };
 }
 
 export function clearAncestorSelection(state: DiffLineageState): DiffLineageState {

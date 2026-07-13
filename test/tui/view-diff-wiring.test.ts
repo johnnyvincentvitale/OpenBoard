@@ -107,6 +107,12 @@ function actions(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe("TUI diff view entry (v)", () => {
 
   it("renders help for all active card actions and contextual c/u copy", async () => {
@@ -313,6 +319,33 @@ describe("TUI diff view entry (v)", () => {
     expect(getTaskCompare).toHaveBeenCalledWith("fix", "build");
     expect(s.viewDiff.sourceLabel).toContain("compare Build (build) · depth 2 via audit");
     expect(s.viewDiff.sourceLabel).toContain("capped");
+
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, actions({ client: { getTaskDiff, getTaskCompare, getTaskContext } }) as any);
+    expect(getTaskDiff).toHaveBeenCalledTimes(2);
+    expect(s.viewDiff.sourceLabel).toBe("baseline task_diff · 0 files");
+    expect(s.status).toBe("showing baseline diff");
+  });
+
+  it("makes ancestor switching a no-op when the card has no code ancestors", async () => {
+    const reviewTask = task("review-1", "review");
+    const s = state({ tasks: [reviewTask], selectedTaskId: "review-1" });
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: [], capped: false }));
+    const getTaskCompare = vi.fn();
+    const getTaskContext = vi.fn(async () => ({
+      task: { taskId: "review-1", title: "Review", description: "", column: "review", completion: null, changedFiles: [], verification: [], residualRisk: "", hasStructuredHandoff: false },
+      directParents: [],
+      inheritedParents: [],
+      codeAncestors: [],
+    }));
+    const a = actions({ client: { getTaskDiff, getTaskCompare, getTaskContext } });
+
+    await handleKeypress({ name: "v", sequence: "v" } as any, s, a);
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, a);
+
+    expect(getTaskDiff).toHaveBeenCalledTimes(1);
+    expect(getTaskCompare).not.toHaveBeenCalled();
+    expect(s.viewDiff.loading).toBe(false);
+    expect(s.status).toBe("no code ancestors available; showing baseline diff");
   });
 
   it("opens a Done card's historical diff and blocks edit and commit actions", async () => {
@@ -412,6 +445,73 @@ describe("TUI diff view navigation and exit", () => {
     };
     return s;
   }
+
+  function addBuildAncestor(s: any): void {
+    s.diffLineage = {
+      targetTaskId: "review-1",
+      directParents: [],
+      inheritedParents: [],
+      codeAncestors: [{ taskId: "build", title: "Build", taskKind: "build", column: "done", branch: "board/build", changedFiles: ["b.ts"], hasStructuredHandoff: true }],
+      selectedAncestorIndex: null,
+    };
+  }
+
+  it("preserves the selected file, locked-scroll mode, and hunk while switching evidence", async () => {
+    const s = openedState({
+      selectedFileIndex: 1,
+      fileSelectionLocked: true,
+      selectedHunk: { fileIndex: 1, hunkIndex: 0 },
+    });
+    addBuildAncestor(s);
+    const getTaskCompare = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [
+        { file: "b.ts", additions: 2, deletions: 1, status: "modified" as const, patch: "@@ -1,1 +1,1 @@\n-old\n+new\n" },
+        { file: "c.ts", additions: 1, deletions: 0, status: "added" as const, patch: "@@ -0,0 +1,1 @@\n+new\n" },
+      ],
+      capped: false,
+      root: "/repo",
+    }));
+
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, actions({ client: { getTaskCompare } }));
+
+    expect(s.viewDiff.files[s.viewDiff.selectedFileIndex].file).toBe("b.ts");
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.fileSelectionLocked).toBe(true);
+    expect(s.viewDiff.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+    expect(s.detailScrollTop["diff-patch"]).toBe(0);
+  });
+
+  it("ignores an older ancestor response after a rapid second press returns to baseline", async () => {
+    const s = openedState();
+    addBuildAncestor(s);
+    const slowCompare = deferred<any>();
+    const getTaskCompare = vi.fn(() => slowCompare.promise);
+    const getTaskDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      files: [{ file: "baseline.ts", additions: 1, deletions: 0, status: "modified" as const, patch: "@@ -1 +1 @@\n-old\n+baseline\n" }],
+      capped: false,
+      root: "/repo",
+    }));
+    const a = actions({ client: { getTaskCompare, getTaskDiff } });
+
+    const firstPress = handleKeypress({ name: "a", sequence: "a" } as any, s, a);
+    const secondPress = handleKeypress({ name: "a", sequence: "a" } as any, s, a);
+    await secondPress;
+    expect(s.viewDiff.sourceLabel).toContain("baseline task_diff");
+
+    slowCompare.resolve({
+      kind: "diff",
+      files: [{ file: "stale-ancestor.ts", additions: 1, deletions: 0, status: "modified", patch: "@@ -1 +1 @@\n-old\n+stale\n" }],
+      capped: false,
+      root: "/repo",
+    });
+    await firstPress;
+
+    expect(s.viewDiff.sourceLabel).toContain("baseline task_diff");
+    expect(s.viewDiff.files.map((file: { file: string }) => file.file)).toEqual(["baseline.ts"]);
+    expect(s.status).toBe("showing baseline diff");
+  });
 
   it("esc returns to the board with the prior card selection restored", async () => {
     const s = openedState();
