@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import { createBoardClient } from "../../src/client/board-client";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { registerTaskRoutes } from "../../src/server/routes/tasks";
-import { applyDiffResponse, createLoadingDiffViewState, diffViewHeaderLabel } from "../../src/tui/diff-view";
+import { applyDiffResponse, createLoadingViewDiffState, viewDiffHeaderLabel } from "../../src/tui/view-diff";
 import type { Dispatcher, RespondPermissionOutcome, RosterAgent, Task } from "../../src/shared";
 
 let tmpDir: string | undefined;
@@ -97,7 +97,7 @@ function reviewTask(store: SqliteTaskStore, input: Partial<Task> & { title: stri
   return store.update(created.id, input)!;
 }
 
-describe("DiffView live route/client/TUI seam", () => {
+describe("View Diff live route/client/TUI seam", () => {
   let store: SqliteTaskStore;
 
   afterEach(() => {
@@ -107,7 +107,7 @@ describe("DiffView live route/client/TUI seam", () => {
   });
 
   it("flows worktree, dirty in-place, no-git, and non-Review diff outcomes through the client contract", async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "openboard-diff-view-int-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "openboard-view-diff-int-"));
     store = new SqliteTaskStore(":memory:");
     const app = makeApp(store);
     const client = makeClient(app);
@@ -139,8 +139,8 @@ describe("DiffView live route/client/TUI seam", () => {
     if (worktreeDiff.kind === "diff") {
       expect(worktreeDiff.capped).toBe(false);
       expect(worktreeDiff.files.map((file) => file.file)).toContain("src.ts");
-      const state = applyDiffResponse(createLoadingDiffViewState(worktreeReview), worktreeDiff);
-      expect(diffViewHeaderLabel(state)).toBe("worktree diff · 1 file");
+      const state = applyDiffResponse(createLoadingViewDiffState(worktreeReview), worktreeDiff);
+      expect(viewDiffHeaderLabel(state)).toBe("worktree diff · 1 file");
     }
 
     const dirtyRepo = makeRepo("dirty-repo");
@@ -155,8 +155,8 @@ describe("DiffView live route/client/TUI seam", () => {
     const dirtyDiff = await client.getTaskDiff(dirtyReview.id);
     expect(dirtyDiff.kind).toBe("diff");
     if (dirtyDiff.kind === "diff") {
-      const state = applyDiffResponse(createLoadingDiffViewState(dirtyReview), dirtyDiff);
-      expect(diffViewHeaderLabel(state)).toContain("includes pre-existing changes");
+      const state = applyDiffResponse(createLoadingViewDiffState(dirtyReview), dirtyDiff);
+      expect(viewDiffHeaderLabel(state)).toContain("includes pre-existing changes");
     }
 
     const noGitDir = join(tmpDir, "not-git");
@@ -170,8 +170,8 @@ describe("DiffView live route/client/TUI seam", () => {
     const noGit = await client.getTaskDiff(noGitReview.id);
     expect(noGit.kind).toBe("no-git");
     if (noGit.kind === "no-git") {
-      const state = applyDiffResponse(createLoadingDiffViewState(noGitReview), noGit);
-      expect(diffViewHeaderLabel(state)).toBe("working tree diff · no git evidence");
+      const state = applyDiffResponse(createLoadingViewDiffState(noGitReview), noGit);
+      expect(viewDiffHeaderLabel(state)).toBe("working tree diff · no git evidence");
     }
 
     const todo = store.create({ title: "todo", description: "", directory: dirtyRepo.repoDir });

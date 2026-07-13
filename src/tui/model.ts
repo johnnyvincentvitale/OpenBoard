@@ -281,12 +281,12 @@ export function closeArchive(state: ViewState): ViewState {
   return { view: "board", previousView: null };
 }
 
-export function openDiffView(state: ViewState): ViewState {
+export function openViewDiff(state: ViewState): ViewState {
   if (state.view === "diff") return state;
   return { view: "diff", previousView: state.view };
 }
 
-export function closeDiffView(state: ViewState): ViewState {
+export function closeViewDiff(state: ViewState): ViewState {
   if (state.previousView) return { view: state.previousView, previousView: null };
   return { view: "board", previousView: null };
 }

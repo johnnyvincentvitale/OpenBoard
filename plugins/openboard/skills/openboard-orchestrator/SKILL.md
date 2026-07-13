@@ -140,7 +140,7 @@ For each Review card:
    state.
 2. Inspect `git status --short` in the worktree.
 3. Confirm changed files respect the card boundary.
-4. Read or diff the changed files (`task_diff` / DiffView).
+4. Read or diff the changed files (`task_diff` / View Diff).
 5. Run the required build/test command in that worktree.
 6. Judge the acceptance criteria.
 7. Only then consider Sync or Integrate.

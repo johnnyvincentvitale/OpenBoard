@@ -54,34 +54,34 @@ import {
   validateWorkspacePath,
   isProjectLike,
   workspaceToInstanceName,
-  openDiffView,
-  closeDiffView,
+  openViewDiff,
+  closeViewDiff,
 } from "./model";
 import {
-  canOpenDiffView,
-  createLoadingDiffViewState,
+  canOpenViewDiff,
+  createLoadingViewDiffState,
   applyDiffResponse,
   applyDiffError,
   moveFileSelection as moveDiffFileSelection,
   toggleFileReviewed as toggleDiffFileReviewed,
-  toggleViewOverride as toggleDiffViewOverride,
+  toggleViewOverride as toggleViewDiffOverride,
   moveHunkSelection as moveDiffHunkSelection,
   diffPatchScrollTop,
   clampFullPatchScrollTop,
   fullPatchHunkBodyOffset,
   toggleFileSelectionLock as toggleDiffFileSelectionLock,
-  diffViewHeaderLabel,
-  diffViewKeyHints,
+  viewDiffHeaderLabel,
+  viewDiffKeyHints,
   diffFileCommitState,
-  renderDiffView,
+  renderViewDiff,
   editorTargetForSelection,
   DIFF_FILE_COLUMN_WIDTH,
   DIFF_FILE_ROW_HEIGHT,
   DIFF_PATCH_SCROLL_ID,
-  type DiffViewState,
-  type DiffViewTheme,
+  type ViewDiffState,
+  type ViewDiffTheme,
   type DiffFileCommitState,
-} from "./diff-view";
+} from "./view-diff";
 import { formatDiffStat } from "./diff-stat";
 import {
   buildConfirmationCopy,
@@ -696,7 +696,7 @@ interface TuiState {
   // Commit-state review shown before integrating a dirty worktree.
   integrateCommitReview?: IntegrateCommitReviewState;
   // Full-screen diff view (v on a selected Review card)
-  diffView?: DiffViewState;
+  viewDiff?: ViewDiffState;
   // Inline selected-card diff stat for Review cards, fetched once per selected task identity.
   reviewDiffStat?: ReviewDiffStatState;
   // File-level dirty-vs-committed state for Review worktrees.
@@ -819,7 +819,7 @@ interface TuiActions {
   setupWorkspace: () => Promise<void>;
   openSettings: () => Promise<void>;
   refreshSettings: () => Promise<void>;
-  // Open-in-editor (e on a DiffView selection)
+  // Open-in-editor (e on a View Diff selection)
   editorSpawner: EditorSpawner;
   copyToClipboard: (text: string) => Promise<void>;
 }
@@ -851,7 +851,7 @@ function findDiffCodeRenderables(renderer: DiffScrollRenderer): ScrollableCodeRe
 /** Read the live viewport scrollY back into state so mouse-wheel scroll survives the next
  * root-tree rebuild. No-op when the diff pane isn't mounted. */
 export function captureDiffScrollTop(state: TuiState, renderer: DiffScrollRenderer): void {
-  if (state.diffView?.kind !== "diff") return;
+  if (state.viewDiff?.kind !== "diff") return;
   const [code] = findDiffCodeRenderables(renderer);
   if (code) state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = code.scrollY;
 }
@@ -860,7 +860,7 @@ export function captureDiffScrollTop(state: TuiState, renderer: DiffScrollRender
  * maxScrollY, and write the clamped value back so a held key can't run the counter past the
  * bottom. Both panes share one position (split view keeps them in sync). */
 export function applyDiffScrollTop(state: TuiState, renderer: DiffScrollRenderer): void {
-  if (state.diffView?.kind !== "diff") return;
+  if (state.viewDiff?.kind !== "diff") return;
   const codes = findDiffCodeRenderables(renderer);
   if (codes.length === 0) return;
   const desired = Math.max(0, Math.trunc(state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0));
@@ -1558,7 +1558,7 @@ export function renderApp(ui: OpenTui, state: TuiState) {
         : state.viewState.view === "archive"
           ? renderArchiveView(ui, state)
           : state.viewState.view === "diff"
-            ? renderDiffViewMain(ui, state)
+            ? renderViewDiffMain(ui, state)
             : state.viewState.view === "follow"
               ? renderFollowViewMain(ui, state)
             : state.viewState.view === "settings"
@@ -1713,7 +1713,7 @@ function renderHeader(ui: OpenTui, state: TuiState) {
   } else if (state.viewState.view === "diff") {
     connection = "DIFF";
     host = "";
-    taskLabel = diffViewHeaderLabel(state.diffView);
+    taskLabel = viewDiffHeaderLabel(state.viewDiff);
     refreshed = "";
     healthLabel = "";
     workspaceLabel = "";
@@ -1814,7 +1814,7 @@ function renderMain(ui: OpenTui, state: TuiState) {
   );
 }
 
-const DIFF_VIEW_THEME: DiffViewTheme = {
+const VIEW_DIFF_THEME: ViewDiffTheme = {
   text: COLORS.text,
   bright: COLORS.bright,
   muted: COLORS.muted,
@@ -1836,12 +1836,12 @@ function diffFileListVisibleRows(terminalRows: number): number {
   return Math.max(1, Math.floor(Math.max(1, terminalRows - 6) / DIFF_FILE_ROW_HEIGHT));
 }
 
-function renderDiffViewMain(ui: OpenTui, state: TuiState) {
-  return renderDiffView(
+function renderViewDiffMain(ui: OpenTui, state: TuiState) {
+  return renderViewDiff(
     ui,
-    DIFF_VIEW_THEME,
+    VIEW_DIFF_THEME,
     state.detailScrollTop,
-    state.diffView,
+    state.viewDiff,
     diffPatchPaneWidth(state.terminalCols),
     diffFileListVisibleRows(state.terminalRows),
   );
@@ -3182,7 +3182,7 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
 }
 
 function reviewDiffStatRow(state: TuiState, task: Task): MetaRow | undefined {
-  if (!canOpenDiffView(task)) return undefined;
+  if (!canOpenViewDiff(task)) return undefined;
   const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
   if (!cache || cache.status === "loading") return { label: "DIFF", value: "loading...", color: COLORS.muted };
   const commitStatus = reviewCommitStatusForTask(state, task);
@@ -3471,7 +3471,7 @@ function filesTabScrollRows(state: TuiState, task: Task): number {
 
 function renderFilesTab(ui: OpenTui, state: TuiState, task: Task) {
   const scrollId = `board-detail-files-${task.id}`;
-  if (!canOpenDiffView(task)) {
+  if (!canOpenViewDiff(task)) {
     return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "Files are only available on Review or Done agent cards", fg: COLORS.muted, height: 1 }));
   }
 
@@ -4157,7 +4157,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             : state.viewState.view === "launch"
             ? "↑/↓ instances · ↵ launch board · e rename · n add board · s stop · d remove · q quit · A global archive"
             : state.viewState.view === "diff"
-            ? diffViewKeyHints(state.diffView)
+            ? viewDiffKeyHints(state.viewDiff)
             : state.viewState.view === "follow"
             ? state.sessionChatDraft
               ? "type message · shift+enter newline · enter queue/send · ctrl+enter interrupt/send · esc cancel"
@@ -5064,7 +5064,7 @@ export function applySuccessfulTaskActionResult(state: TuiState, result: unknown
   state.reviewCommitStatus = reconcileReviewCommitStatusCache(state.reviewCommitStatus, selected);
   clearPendingConfirmation(state);
   if (!selected || !canFetchReviewCommitStatus(selected)) state.integrateCommitReview = undefined;
-  if (state.detailTab === "files" && selected && !canOpenDiffView(selected)) closeInlineDetail(state);
+  if (state.detailTab === "files" && selected && !canOpenViewDiff(selected)) closeInlineDetail(state);
 }
 
 export async function handleKeypress(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
@@ -5099,7 +5099,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
   }
 
   if (state.viewState.view === "diff") {
-    await handleDiffViewKey(key, state, actions);
+    await handleViewDiffKey(key, state, actions);
     return;
   }
 
@@ -5343,7 +5343,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       );
       return;
     case "v":
-      await openDiffViewForSelection(state, actions);
+      await openViewDiffForSelection(state, actions);
       return;
     case "w":
       await openFollowViewForSelection(state, actions);
@@ -5910,10 +5910,10 @@ async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: T
   }
 }
 
-async function openDiffViewForSelection(state: TuiState, actions: TuiActions): Promise<void> {
+async function openViewDiffForSelection(state: TuiState, actions: TuiActions): Promise<void> {
   clearPendingConfirmation(state);
   const task = selectedTask(state);
-  if (!canOpenDiffView(task)) {
+  if (!canOpenViewDiff(task)) {
     state.status = "diff view is only available for Review or Done agent cards";
     actions.render();
     return;
@@ -5921,8 +5921,8 @@ async function openDiffViewForSelection(state: TuiState, actions: TuiActions): P
 
   closeInlineDetail(state);
   state.moveTargetColumn = undefined;
-  state.viewState = openDiffView(state.viewState);
-  state.diffView = createLoadingDiffViewState(task!);
+  state.viewState = openViewDiff(state.viewState);
+  state.viewDiff = createLoadingViewDiffState(task!);
   state.diffLineage = undefined;
   actions.render();
 
@@ -5934,98 +5934,98 @@ async function openDiffViewForSelection(state: TuiState, actions: TuiActions): P
     const response = state.diffLineage
       ? await fetchSelectedDiffEvidence(state.diffLineage, actions.client)
       : await actions.client.getTaskDiff(task!.id);
-    if (state.diffView?.taskId === task!.id) {
-      state.diffView = applyDiffResponse({ ...state.diffView, sourceLabel: state.diffLineage ? diffLineageHeader(state.diffLineage, response) : state.diffView.sourceLabel }, response);
+    if (state.viewDiff?.taskId === task!.id) {
+      state.viewDiff = applyDiffResponse({ ...state.viewDiff, sourceLabel: state.diffLineage ? diffLineageHeader(state.diffLineage, response) : state.viewDiff.sourceLabel }, response);
     }
-    await refreshDiffViewCommitStatus(state, actions);
+    await refreshViewDiffCommitStatus(state, actions);
   } catch (error) {
-    if (state.diffView?.taskId === task!.id) state.diffView = applyDiffError(state.diffView, errorMessage(error));
+    if (state.viewDiff?.taskId === task!.id) state.viewDiff = applyDiffError(state.viewDiff, errorMessage(error));
   }
   actions.render();
 }
 
-async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+async function handleViewDiffKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
   if (key.sequence === "q") {
     actions.shutdown();
     return;
   }
 
   if (isEscapeKey(key) || key.sequence === "b") {
-    state.viewState = closeDiffView(state.viewState);
-    state.diffView = undefined;
+    state.viewState = closeViewDiff(state.viewState);
+    state.viewDiff = undefined;
     state.diffLineage = undefined;
     actions.render();
     return;
   }
 
-  if (!state.diffView) return;
+  if (!state.viewDiff) return;
   const keyName = key.name || key.sequence;
   const patchPaneWidth = diffPatchPaneWidth(state.terminalCols);
 
   if (isEnterKey(key)) {
-    state.diffView = toggleDiffFileSelectionLock(state.diffView);
+    state.viewDiff = toggleDiffFileSelectionLock(state.viewDiff);
     // Landing in scroll-lock focuses the selected hunk (top of file when none selected).
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.viewDiff);
     state.diffScrollIntent = true;
     actions.render();
     return;
   }
 
   if (keyName === "down") {
-    if (state.diffView.fileSelectionLocked) {
-      const selectedFile = state.diffView.files[state.diffView.selectedFileIndex];
+    if (state.viewDiff.fileSelectionLocked) {
+      const selectedFile = state.viewDiff.files[state.viewDiff.selectedFileIndex];
       const current = state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0;
       state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampFullPatchScrollTop(selectedFile?.patch, current + 1);
       state.diffScrollIntent = true;
       actions.render();
       return;
     }
-    state.diffView = moveDiffFileSelection(state.diffView, 1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.viewDiff = moveDiffFileSelection(state.viewDiff, 1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.viewDiff);
     state.diffScrollIntent = true;
     actions.render();
     return;
   }
   if (keyName === "up") {
-    if (state.diffView.fileSelectionLocked) {
-      const selectedFile = state.diffView.files[state.diffView.selectedFileIndex];
+    if (state.viewDiff.fileSelectionLocked) {
+      const selectedFile = state.viewDiff.files[state.viewDiff.selectedFileIndex];
       const current = state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0;
       state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = clampFullPatchScrollTop(selectedFile?.patch, current - 1);
       state.diffScrollIntent = true;
       actions.render();
       return;
     }
-    state.diffView = moveDiffFileSelection(state.diffView, -1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.viewDiff = moveDiffFileSelection(state.viewDiff, -1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.viewDiff);
     state.diffScrollIntent = true;
     actions.render();
     return;
   }
   if (keyName === "right" || key.sequence === "\u001b[C") {
-    state.diffView = moveDiffHunkSelection(state.diffView, 1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.viewDiff = moveDiffHunkSelection(state.viewDiff, 1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.viewDiff);
     state.diffScrollIntent = true;
     actions.render();
     return;
   }
   if (keyName === "left" || key.sequence === "\u001b[D") {
-    state.diffView = moveDiffHunkSelection(state.diffView, -1);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.viewDiff = moveDiffHunkSelection(state.viewDiff, -1);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.viewDiff);
     state.diffScrollIntent = true;
     actions.render();
     return;
   }
   if (key.sequence === "m") {
-    state.diffView = toggleDiffFileReviewed(state.diffView);
+    state.viewDiff = toggleDiffFileReviewed(state.viewDiff);
     actions.render();
     return;
   }
   if (key.sequence === "c") {
-    await commitSelectedDiffViewFile(state, actions);
+    await commitSelectedViewDiffFile(state, actions);
     return;
   }
   if (key.sequence === "t") {
-    state.diffView = toggleDiffViewOverride(state.diffView, patchPaneWidth);
+    state.viewDiff = toggleViewDiffOverride(state.viewDiff, patchPaneWidth);
     actions.render();
     return;
   }
@@ -6036,7 +6036,7 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
   if (key.sequence === "r") {
     state.status = "refreshing diff...";
     actions.render();
-    await refreshDiffViewAfterEditor(state, actions);
+    await refreshViewDiffAfterEditor(state, actions);
     return;
   }
   if (key.sequence === "a") {
@@ -6051,20 +6051,20 @@ async function handleDiffViewKey(key: KeyEvent, state: TuiState, actions: TuiAct
 }
 
 async function cycleDiffEvidenceSource(state: TuiState, actions: TuiActions): Promise<void> {
-  if (!state.diffView || !state.diffLineage) {
+  if (!state.viewDiff || !state.diffLineage) {
     state.status = "no lineage context for this diff";
     actions.render();
     return;
   }
   state.diffLineage = moveAncestorSelection(state.diffLineage, 1);
-  state.diffView = { ...state.diffView, loading: true, sourceLabel: diffLineageHeader(state.diffLineage, undefined) };
+  state.viewDiff = { ...state.viewDiff, loading: true, sourceLabel: diffLineageHeader(state.diffLineage, undefined) };
   actions.render();
   try {
     const response = await fetchSelectedDiffEvidence(state.diffLineage, actions.client);
-    if (!state.diffView) return;
-    state.diffView = applyDiffResponse({ ...state.diffView, sourceLabel: diffLineageHeader(state.diffLineage, response) }, response);
+    if (!state.viewDiff) return;
+    state.viewDiff = applyDiffResponse({ ...state.viewDiff, sourceLabel: diffLineageHeader(state.diffLineage, response) }, response);
   } catch (error) {
-    if (state.diffView) state.diffView = applyDiffError(state.diffView, errorMessage(error));
+    if (state.viewDiff) state.viewDiff = applyDiffError(state.viewDiff, errorMessage(error));
   }
   actions.render();
 }
@@ -6309,9 +6309,9 @@ async function handleFollowViewKey(key: KeyEvent, state: TuiState, actions: TuiA
 }
 
 /**
- * `e` in the DiffView: resolve the selected file + hunk line, resolve an editor command from
+ * `e` in View Diff: resolve the selected file + hunk line, resolve an editor command from
  * the environment, then either suspend/spawn/resume (terminal editors) or spawn detached (GUI
- * editors). Each guard surfaces through the same `state.status` feedback row every other DiffView
+ * editors). Each guard surfaces through the same `state.status` feedback row every other View Diff
  * action uses. Never throws — spawn failures and nonzero exits become status messages, and the
  * renderer is always resumed via try/finally around the terminal-editor path.
  */
@@ -6328,7 +6328,7 @@ export function editorResolutionEnv(env: Record<string, string | undefined>): Re
 }
 
 async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): Promise<void> {
-  if (state.diffView?.historical) {
+  if (state.viewDiff?.historical) {
     state.status = "historical diff: files cannot be edited";
     actions.render();
     return;
@@ -6340,8 +6340,8 @@ async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): P
     return;
   }
 
-  const diffView = state.diffView;
-  if (!diffView || diffView.kind !== "diff" || !diffView.root) {
+  const viewDiff = state.viewDiff;
+  if (!viewDiff || viewDiff.kind !== "diff" || !viewDiff.root) {
     state.status = "diff has no local root to open";
     actions.render();
     return;
@@ -6350,25 +6350,25 @@ async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): P
   // `detailScrollTop` is now a whole-patch scroll row; `editorTargetForSelection` still wants a
   // per-hunk body offset, so convert against the selected hunk. Only meaningful in scroll-lock
   // (file-nav mode ignores liveScrollTop and jumps to the hunk's own start line).
-  const selectedFileForJump = diffView.files[diffView.selectedFileIndex];
-  const selectedHunkIndex = diffView.selectedHunk?.fileIndex === diffView.selectedFileIndex
-    ? diffView.selectedHunk.hunkIndex
+  const selectedFileForJump = viewDiff.files[viewDiff.selectedFileIndex];
+  const selectedHunkIndex = viewDiff.selectedHunk?.fileIndex === viewDiff.selectedFileIndex
+    ? viewDiff.selectedHunk.hunkIndex
     : 0;
-  const liveScrollTop = diffView.fileSelectionLocked
+  const liveScrollTop = viewDiff.fileSelectionLocked
     ? fullPatchHunkBodyOffset(
         selectedFileForJump?.patch,
         selectedHunkIndex,
         state.detailScrollTop[DIFF_PATCH_SCROLL_ID] ?? 0,
       )
     : undefined;
-  const target = editorTargetForSelection(diffView, liveScrollTop);
+  const target = editorTargetForSelection(viewDiff, liveScrollTop);
   if (!target.ok) {
     state.status = target.reason;
     actions.render();
     return;
   }
 
-  const root = diffView.root;
+  const root = viewDiff.root;
   const resolution = resolveEditorCommand(editorResolutionEnv(process.env), {
     file: isAbsolute(target.relPath) ? target.relPath : join(root, target.relPath),
     line: target.line,
@@ -6382,25 +6382,25 @@ async function openSelectedFileInEditor(state: TuiState, actions: TuiActions): P
   await launchEditorCommand(resolution.command, root, state, actions);
 }
 
-async function commitSelectedDiffViewFile(state: TuiState, actions: TuiActions): Promise<void> {
-  const diffView = state.diffView;
-  if (diffView?.historical) {
+async function commitSelectedViewDiffFile(state: TuiState, actions: TuiActions): Promise<void> {
+  const viewDiff = state.viewDiff;
+  if (viewDiff?.historical) {
     state.status = "historical diff: files cannot be committed";
     actions.render();
     return;
   }
-  if (!diffView || diffView.kind !== "diff") {
+  if (!viewDiff || viewDiff.kind !== "diff") {
     state.status = "no diff file selected";
     actions.render();
     return;
   }
-  const file = diffView.files[diffView.selectedFileIndex]?.file;
+  const file = viewDiff.files[viewDiff.selectedFileIndex]?.file;
   if (!file) {
     state.status = "no diff file selected";
     actions.render();
     return;
   }
-  await commitTaskFileAndRefresh(state, actions, diffView.taskId, file, "diff");
+  await commitTaskFileAndRefresh(state, actions, viewDiff.taskId, file, "diff");
 }
 
 async function commitSelectedFilesTabFile(state: TuiState, actions: TuiActions): Promise<void> {
@@ -6447,7 +6447,7 @@ async function commitTaskFileAndRefresh(
     state.status = outcome.commit ? `committed ${file} (${outcome.commit})` : `committed ${file}`;
     state.integrateCommitReview = undefined;
     if (source === "diff") {
-      await refreshDiffViewAfterEditor(state, actions);
+      await refreshViewDiffAfterEditor(state, actions);
     } else {
       state.reviewDiffStat = undefined;
       state.reviewCommitStatus = undefined;
@@ -6476,7 +6476,7 @@ async function launchEditorCommand(
       actions.render();
     });
     actions.render();
-    await refreshDiffViewAfterEditor(state, actions);
+    await refreshViewDiffAfterEditor(state, actions);
     return;
   }
 
@@ -6489,7 +6489,7 @@ async function launchEditorCommand(
     state.status = `editor failed to launch: ${errorMessage(error)}`;
   }
   actions.render();
-  await refreshDiffViewAfterEditor(state, actions);
+  await refreshViewDiffAfterEditor(state, actions);
 }
 
 /**
@@ -6497,61 +6497,61 @@ async function launchEditorCommand(
  * by path (falling back to a clamped index if it vanished from the refreshed diff) and the
  * current keyboard mode (file-nav vs. locked-scroll).
  */
-async function refreshDiffViewAfterEditor(state: TuiState, actions: TuiActions): Promise<void> {
-  const diffView = state.diffView;
-  if (!diffView) return;
+async function refreshViewDiffAfterEditor(state: TuiState, actions: TuiActions): Promise<void> {
+  const viewDiff = state.viewDiff;
+  if (!viewDiff) return;
 
-  const selectedFile = diffView.files[diffView.selectedFileIndex];
-  const wasLocked = diffView.fileSelectionLocked;
+  const selectedFile = viewDiff.files[viewDiff.selectedFileIndex];
+  const wasLocked = viewDiff.fileSelectionLocked;
 
   try {
     const response = state.diffLineage
       ? await fetchSelectedDiffEvidence(state.diffLineage, actions.client)
-      : await actions.client.getTaskDiff(diffView.taskId);
-    if (state.diffView?.taskId !== diffView.taskId) return;
+      : await actions.client.getTaskDiff(viewDiff.taskId);
+    if (state.viewDiff?.taskId !== viewDiff.taskId) return;
 
-    let next = applyDiffResponse({ ...state.diffView, sourceLabel: state.diffLineage ? diffLineageHeader(state.diffLineage, response) : state.diffView.sourceLabel }, response);
+    let next = applyDiffResponse({ ...state.viewDiff, sourceLabel: state.diffLineage ? diffLineageHeader(state.diffLineage, response) : state.viewDiff.sourceLabel }, response);
     if (selectedFile) {
       const restoredIndex = next.files.findIndex((file) => file.file === selectedFile.file);
       next = {
         ...next,
         selectedFileIndex: restoredIndex !== -1
           ? restoredIndex
-          : Math.max(0, Math.min(diffView.selectedFileIndex, next.files.length - 1)),
+          : Math.max(0, Math.min(viewDiff.selectedFileIndex, next.files.length - 1)),
         fileSelectionLocked: wasLocked,
       };
     }
-    state.diffView = next;
-    await refreshDiffViewCommitStatus(state, actions);
-    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.diffView);
+    state.viewDiff = next;
+    await refreshViewDiffCommitStatus(state, actions);
+    state.detailScrollTop[DIFF_PATCH_SCROLL_ID] = diffPatchScrollTop(state.viewDiff);
   } catch (error) {
-    if (state.diffView?.taskId === diffView.taskId) {
-      state.diffView = applyDiffError(state.diffView, errorMessage(error));
+    if (state.viewDiff?.taskId === viewDiff.taskId) {
+      state.viewDiff = applyDiffError(state.viewDiff, errorMessage(error));
     }
   }
   actions.render();
 }
 
-async function refreshDiffViewCommitStatus(state: TuiState, actions: TuiActions): Promise<void> {
-  const diffView = state.diffView;
-  if (!diffView) return;
-  const task = state.tasks.find((item) => item.id === diffView.taskId);
+async function refreshViewDiffCommitStatus(state: TuiState, actions: TuiActions): Promise<void> {
+  const viewDiff = state.viewDiff;
+  if (!viewDiff) return;
+  const task = state.tasks.find((item) => item.id === viewDiff.taskId);
   if (!canFetchReviewCommitStatus(task)) {
-    state.diffView = { ...diffView, commitStatus: undefined };
+    state.viewDiff = { ...viewDiff, commitStatus: undefined };
     return;
   }
 
   try {
-    const commitStatus = await actions.client.getTaskCommitStatus(diffView.taskId);
-    if (state.diffView?.taskId === diffView.taskId) {
-      state.diffView = { ...state.diffView, commitStatus };
+    const commitStatus = await actions.client.getTaskCommitStatus(viewDiff.taskId);
+    if (state.viewDiff?.taskId === viewDiff.taskId) {
+      state.viewDiff = { ...state.viewDiff, commitStatus };
     }
-    if (state.selectedTaskId === diffView.taskId) {
+    if (state.selectedTaskId === viewDiff.taskId) {
       state.reviewCommitStatus = { ...reviewDiffStatCacheKey(task), status: "success", response: commitStatus };
     }
   } catch {
-    if (state.diffView?.taskId === diffView.taskId) {
-      state.diffView = { ...state.diffView, commitStatus: undefined };
+    if (state.viewDiff?.taskId === viewDiff.taskId) {
+      state.viewDiff = { ...state.viewDiff, commitStatus: undefined };
     }
   }
 }
@@ -8463,7 +8463,7 @@ function isSameReviewDiffStatIdentity(cache: ReviewDiffStatState | undefined, ta
 }
 
 function reconcileReviewDiffStatCache(cache: ReviewDiffStatState | undefined, task: Task | undefined): ReviewDiffStatState | undefined {
-  if (!canOpenDiffView(task)) return undefined;
+  if (!canOpenViewDiff(task)) return undefined;
   return isSameReviewDiffStatIdentity(cache, task) ? cache : undefined;
 }
 
@@ -8472,7 +8472,7 @@ function isSameReviewCommitStatusIdentity(cache: ReviewCommitStatusState | undef
 }
 
 function canFetchReviewCommitStatus(task: Task | undefined): task is Task {
-  return Boolean(task && task.column === "review" && canOpenDiffView(task) && task.worktreePath);
+  return Boolean(task && task.column === "review" && canOpenViewDiff(task) && task.worktreePath);
 }
 
 function reconcileReviewCommitStatusCache(cache: ReviewCommitStatusState | undefined, task: Task | undefined): ReviewCommitStatusState | undefined {
@@ -8491,7 +8491,7 @@ async function fetchSelectedReviewDiffStat(
   render: () => void,
 ): Promise<void> {
   const task = selectedTask(state);
-  if (!task || !canOpenDiffView(task)) {
+  if (!task || !canOpenViewDiff(task)) {
     state.reviewDiffStat = undefined;
     return;
   }

@@ -1,5 +1,5 @@
 /**
- * Editor command resolution for DiffView's "open in editor" action. Pure
+ * Editor command resolution for View Diff's "open in editor" action. Pure
  * logic only — no process spawning, no terminal suspend/resume, no reads
  * from the live environment beyond the `env` map the caller passes in.
  * `index.ts` (or a future Phase 3 wiring module) owns actually spawning the

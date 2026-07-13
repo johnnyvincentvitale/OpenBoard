@@ -7,34 +7,34 @@ import {
   DIFF_PATCH_SCROLL_ID,
   applyDiffError,
   applyDiffResponse,
-  canOpenDiffView,
+  canOpenViewDiff,
   clampDiffPatchScrollTop,
   clampFullPatchScrollTop,
   fullPatchHunkBodyOffset,
-  createLoadingDiffViewState,
-  diffViewKeyHints,
+  createLoadingViewDiffState,
+  viewDiffKeyHints,
   diffPatchScrollTop,
   diffPatchForRender,
   diffFileListWindow,
   diffHunkPositionLabel,
   diffSourceLabel,
-  diffViewHeaderLabel,
+  viewDiffHeaderLabel,
   editorTargetForSelection,
-  effectiveDiffView,
+  effectiveViewDiff,
   filetypeForFile,
   hunkLineOffsets,
   isFileReviewed,
   moveFileSelection,
   moveHunkSelection,
-  renderDiffView,
+  renderViewDiff,
   selectFileIndex,
   splitAvailable,
   toggleFileSelectionLock,
   toggleFileReviewed,
   toggleViewOverride,
-  type DiffViewState,
-  type DiffViewTheme,
-} from "../../src/tui/diff-view";
+  type ViewDiffState,
+  type ViewDiffTheme,
+} from "../../src/tui/view-diff";
 import type { DiffFile, DiffResponse, Task } from "../../src/shared";
 
 function task(overrides: Partial<Task> = {}): Task {
@@ -67,13 +67,13 @@ function diffFile(overrides: Partial<DiffFile> = {}): DiffFile {
 
 describe("diff view entry gate", () => {
   it("allows Review and Done agent cards while blocking active and manual cards", () => {
-    expect(canOpenDiffView(task({ column: "review" }))).toBe(true);
-    expect(canOpenDiffView(task({ column: "done" }))).toBe(true);
-    expect(canOpenDiffView(task({ column: "todo" }))).toBe(false);
-    expect(canOpenDiffView(task({ column: "in_progress" }))).toBe(false);
-    expect(canOpenDiffView(task({ column: "review", type: "manual" }))).toBe(false);
-    expect(canOpenDiffView(task({ column: "done", type: "manual" }))).toBe(false);
-    expect(canOpenDiffView(undefined)).toBe(false);
+    expect(canOpenViewDiff(task({ column: "review" }))).toBe(true);
+    expect(canOpenViewDiff(task({ column: "done" }))).toBe(true);
+    expect(canOpenViewDiff(task({ column: "todo" }))).toBe(false);
+    expect(canOpenViewDiff(task({ column: "in_progress" }))).toBe(false);
+    expect(canOpenViewDiff(task({ column: "review", type: "manual" }))).toBe(false);
+    expect(canOpenViewDiff(task({ column: "done", type: "manual" }))).toBe(false);
+    expect(canOpenViewDiff(undefined)).toBe(false);
   });
 });
 
@@ -88,7 +88,7 @@ describe("diff source label", () => {
 
 describe("diff response application", () => {
   it("populates files from a diff response", () => {
-    const loading = createLoadingDiffViewState(task());
+    const loading = createLoadingViewDiffState(task());
     expect(loading.loading).toBe(true);
     expect(loading.sourceLabel).toBe("working tree diff");
 
@@ -102,21 +102,21 @@ describe("diff response application", () => {
   });
 
   it("carries the diff response's root through for the editor-open wiring to use", () => {
-    const loading = createLoadingDiffViewState(task());
+    const loading = createLoadingViewDiffState(task());
     const response: DiffResponse = { kind: "diff", files: [diffFile()], capped: false, root: "/tmp/worktree-abc" };
     const next = applyDiffResponse(loading, response);
     expect(next.root).toBe("/tmp/worktree-abc");
   });
 
   it("clears root when the response has none (never guesses a path)", () => {
-    const loading = createLoadingDiffViewState(task());
+    const loading = createLoadingViewDiffState(task());
     const response: DiffResponse = { kind: "diff", files: [diffFile()], capped: false };
     const next = applyDiffResponse(loading, response);
     expect(next.root).toBeUndefined();
   });
 
   it("carries the no-git sentinel as a readable reason, not an error", () => {
-    const loading = createLoadingDiffViewState(task());
+    const loading = createLoadingViewDiffState(task());
     const response: DiffResponse = { kind: "no-git", reason: "not a git repository" };
     const next = applyDiffResponse(loading, response);
     expect(next.kind).toBe("no-git");
@@ -126,7 +126,7 @@ describe("diff response application", () => {
   });
 
   it("records fetch failures as an error state", () => {
-    const loading = createLoadingDiffViewState(task());
+    const loading = createLoadingViewDiffState(task());
     const next = applyDiffError(loading, "network down");
     expect(next.loading).toBe(false);
     expect(next.error).toBe("network down");
@@ -136,38 +136,38 @@ describe("diff response application", () => {
 describe("diff view header label", () => {
   it("shows source, file count, and the dirty-at-dispatch honesty label", () => {
     const dirty = applyDiffResponse(
-      createLoadingDiffViewState(task({ dirtyAtDispatch: true })),
+      createLoadingViewDiffState(task({ dirtyAtDispatch: true })),
       { kind: "diff", files: [diffFile()], capped: false },
     );
-    expect(diffViewHeaderLabel(dirty)).toBe("working tree diff · 1 file · includes pre-existing changes");
+    expect(viewDiffHeaderLabel(dirty)).toBe("working tree diff · 1 file · includes pre-existing changes");
 
     const clean = applyDiffResponse(
-      createLoadingDiffViewState(task({ dirtyAtDispatch: false })),
+      createLoadingViewDiffState(task({ dirtyAtDispatch: false })),
       { kind: "diff", files: [diffFile(), diffFile({ file: "b.ts" })], capped: false },
     );
-    expect(diffViewHeaderLabel(clean)).toBe("working tree diff · 2 files");
-    expect(diffViewHeaderLabel(undefined)).toContain("select a Review or Done card");
+    expect(viewDiffHeaderLabel(clean)).toBe("working tree diff · 2 files");
+    expect(viewDiffHeaderLabel(undefined)).toContain("select a Review or Done card");
 
     const historical = applyDiffResponse(
-      createLoadingDiffViewState(task({ column: "done", isolation: "worktree" })),
+      createLoadingViewDiffState(task({ column: "done", isolation: "worktree" })),
       { kind: "diff", files: [diffFile()], capped: false },
     );
-    expect(diffViewHeaderLabel(historical)).toBe("historical worktree diff · 1 file");
+    expect(viewDiffHeaderLabel(historical)).toBe("historical worktree diff · 1 file");
   });
 
   it("surfaces capped server diffs in the header label", () => {
     const capped = applyDiffResponse(
-      createLoadingDiffViewState(task()),
+      createLoadingViewDiffState(task()),
       { kind: "diff", files: [diffFile()], capped: true },
     );
-    expect(diffViewHeaderLabel(capped)).toBe("working tree diff · 1 file · capped");
+    expect(viewDiffHeaderLabel(capped)).toBe("working tree diff · 1 file · capped");
   });
 });
 
 describe("diff file navigation", () => {
   const files = [diffFile({ file: "a.ts" }), diffFile({ file: "b.ts" }), diffFile({ file: "c.ts" })];
-  const base: DiffViewState = {
-    ...createLoadingDiffViewState(task()),
+  const base: ViewDiffState = {
+    ...createLoadingViewDiffState(task()),
     loading: false,
     kind: "diff",
     capped: false,
@@ -201,14 +201,14 @@ describe("diff file navigation", () => {
     expect(base.fileSelectionLocked).toBe(false);
     const locked = toggleFileSelectionLock(base);
     expect(locked.fileSelectionLocked).toBe(true);
-    expect(diffViewKeyHints(locked)).toContain("↑/↓ scroll · enter files");
-    expect(diffViewKeyHints(base)).toContain("↑/↓ files · enter scroll");
-    expect(diffViewKeyHints(locked)).toContain("e edit");
-    expect(diffViewKeyHints(base)).toContain("e edit");
+    expect(viewDiffKeyHints(locked)).toContain("↑/↓ scroll · enter files");
+    expect(viewDiffKeyHints(base)).toContain("↑/↓ files · enter scroll");
+    expect(viewDiffKeyHints(locked)).toContain("e edit");
+    expect(viewDiffKeyHints(base)).toContain("e edit");
 
-    const historical = createLoadingDiffViewState(task({ column: "done" }));
-    expect(diffViewKeyHints(historical)).not.toContain("e edit");
-    expect(diffViewKeyHints(historical)).not.toContain("c commit");
+    const historical = createLoadingViewDiffState(task({ column: "done" }));
+    expect(viewDiffKeyHints(historical)).not.toContain("e edit");
+    expect(viewDiffKeyHints(historical)).not.toContain("c commit");
   });
 });
 
@@ -224,7 +224,7 @@ describe("diff hunk navigation", () => {
       diffFile({ file: "a.ts", patch: "@@ -1,1 +1,1 @@\nx\n@@ -9,1 +9,1 @@\nz\n" }),
       diffFile({ file: "b.ts", patch: "@@ -1,1 +1,1 @@\ny\n@@ -9,1 +9,1 @@\nz\n" }),
     ];
-    let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+    let state: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
 
     state = moveHunkSelection(state, 1);
     expect(state.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
@@ -248,7 +248,7 @@ describe("diff hunk navigation", () => {
       diffFile({ file: "a.ts", patch: "@@ -1,1 +1,1 @@\nx\n" }),
       diffFile({ file: "b.ts", patch: "@@ -1,1 +1,1 @@\ny\n" }),
     ];
-    let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+    let state: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
 
     state = moveHunkSelection(state, 1);
     expect(state.selectedFileIndex).toBe(0);
@@ -266,7 +266,7 @@ describe("diff hunk navigation", () => {
 
   it("computes the patch scrollTop target for the selected hunk", () => {
     const files = [diffFile({ patch: "line0\n@@ -1,1 +1,1 @@\nline2\n@@ -5,1 +5,1 @@\nline4\n" })];
-    let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+    let state: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
     expect(diffPatchScrollTop(state)).toBe(0);
 
     state = moveHunkSelection(state, 1);
@@ -279,7 +279,7 @@ describe("diff hunk navigation", () => {
   it("rotates the rendered patch so the selected hunk is visibly at the top without resizing content", () => {
     const patch = "file header\n@@ -1,1 +1,1 @@\n-old1\n+new1\n@@ -9,1 +9,1 @@\n-old2\n+new2\n@@ -20,1 +20,1 @@\n-old3\n+new3\n";
     const files = [diffFile({ patch })];
-    let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+    let state: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
 
     expect(diffPatchForRender(state, files[0])).toBe(patch);
     state = moveHunkSelection(state, 1);
@@ -293,7 +293,7 @@ describe("diff hunk navigation", () => {
   it("scrolls the rendered patch without changing the diff geometry", () => {
     const patch = "line0\nline1\nline2\nline3\n";
     const files = [diffFile({ patch })];
-    const state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+    const state: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
 
     expect(clampDiffPatchScrollTop(patch, -1)).toBe(0);
     expect(clampDiffPatchScrollTop(patch, 99)).toBe(4);
@@ -315,7 +315,7 @@ describe("diff hunk navigation", () => {
       "+line 4",
     ].join("\n");
     const files = [diffFile({ file: "qa.ts", patch })];
-    const state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+    const state: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
 
     expect(clampDiffPatchScrollTop(patch, 99)).toBe(3);
     const rendered = diffPatchForRender(state, files[0], 99);
@@ -329,7 +329,7 @@ describe("diff hunk navigation", () => {
       diffFile({ file: "one.ts", patch: "@@ -1,1 +1,1 @@\nx\n" }),
       diffFile({ file: "two.ts", patch: "@@ -1,1 +1,1 @@\nx\n@@ -9,1 +9,1 @@\ny\n" }),
     ];
-    let state: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+    let state: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
     expect(diffHunkPositionLabel(state)).toBe("1 hunk");
 
     state = { ...state, selectedFileIndex: 1 };
@@ -351,19 +351,19 @@ describe("diff file-list windowing", () => {
 
 describe("split/inline view decision", () => {
   const files = [diffFile()];
-  const base: DiffViewState = { ...createLoadingDiffViewState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
+  const base: ViewDiffState = { ...createLoadingViewDiffState(task()), loading: false, kind: "diff", files, selectedFileIndex: 0 };
 
   it("defaults to split at every width", () => {
     expect(splitAvailable(DIFF_MIN_SPLIT_WIDTH)).toBe(true);
     expect(splitAvailable(DIFF_MIN_SPLIT_WIDTH - 1)).toBe(true);
-    expect(effectiveDiffView(base, DIFF_MIN_SPLIT_WIDTH)).toBe("split");
-    expect(effectiveDiffView(base, DIFF_MIN_SPLIT_WIDTH - 1)).toBe("split");
+    expect(effectiveViewDiff(base, DIFF_MIN_SPLIT_WIDTH)).toBe("split");
+    expect(effectiveViewDiff(base, DIFF_MIN_SPLIT_WIDTH - 1)).toBe("split");
   });
 
   it("lets the manual toggle flip split/inline at every width", () => {
     const toggled = toggleViewOverride(base, DIFF_MIN_SPLIT_WIDTH - 1);
-    expect(effectiveDiffView(toggled, DIFF_MIN_SPLIT_WIDTH - 1)).toBe("unified");
-    expect(effectiveDiffView(toggleViewOverride(toggled, DIFF_MIN_SPLIT_WIDTH - 1), DIFF_MIN_SPLIT_WIDTH - 1)).toBe("split");
+    expect(effectiveViewDiff(toggled, DIFF_MIN_SPLIT_WIDTH - 1)).toBe("unified");
+    expect(effectiveViewDiff(toggleViewOverride(toggled, DIFF_MIN_SPLIT_WIDTH - 1), DIFF_MIN_SPLIT_WIDTH - 1)).toBe("split");
   });
 });
 
@@ -375,7 +375,7 @@ describe("filetype detection", () => {
   });
 });
 
-function fakeTheme(): DiffViewTheme {
+function fakeTheme(): ViewDiffTheme {
   return {
     text: "text",
     bright: "bright",
@@ -412,24 +412,24 @@ function nodesByType(node: any, type: string): any[] {
   return [...matches, ...(node.children ?? []).flatMap((child: unknown) => nodesByType(child, type))];
 }
 
-describe("renderDiffView", () => {
+describe("renderViewDiff", () => {
   it("renders a readable message instead of crashing when there is no git evidence", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "no-git",
       reason: "task directory is not a git repository",
     });
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, state, 200);
     expect(textOf(tree)).toContain("task directory is not a git repository");
     expect(nodesByType(tree, "Diff")).toHaveLength(0);
   });
 
   it("renders the file column and the selected file's patch via the Diff renderable", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "diff",
       files: [diffFile({ file: "src/a.ts" }), diffFile({ file: "src/b.ts" })],
       capped: false,
     });
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, state, 200);
     expect(textOf(tree)).toContain("src/a.ts");
     expect(textOf(tree)).toContain("src/b.ts");
     const diffNodes = nodesByType(tree, "Diff");
@@ -438,7 +438,7 @@ describe("renderDiffView", () => {
   });
 
   it("emits a stable manual file-list box and keeps selected rows windowed into view", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "diff",
       files: [
         diffFile({ file: "src/a.ts" }),
@@ -449,7 +449,7 @@ describe("renderDiffView", () => {
       capped: false,
     });
     const selected = selectFileIndex(state, 2);
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, selected, 200, 2);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, selected, 200, 2);
     const boxes = nodesByType(tree, "Box");
     const fileList = boxes.find((node) => node.props.id === DIFF_FILE_LIST_SCROLL_ID);
     const fileRows = nodesByType(fileList, "Box").filter((node) => node.props.height === DIFF_FILE_ROW_HEIGHT);
@@ -485,47 +485,47 @@ describe("renderDiffView", () => {
   });
 
   it("does not wrap the native diff renderer in a patch ScrollBox", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "diff",
       files: [diffFile()],
       capped: false,
     });
-    const tree = renderDiffView(fakeUi(), fakeTheme(), { [DIFF_PATCH_SCROLL_ID]: 3 }, state, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), { [DIFF_PATCH_SCROLL_ID]: 3 }, state, 200);
     expect(nodesByType(tree, "ScrollBox").find((node) => node.props.id === DIFF_PATCH_SCROLL_ID)).toBeUndefined();
     expect(nodesByType(tree, "Diff")[0].props.id).toBe(DIFF_PATCH_SCROLL_ID);
   });
 
   it("passes the whole patch to the diff renderer (scroll is applied to the live viewport, not the string)", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "diff",
       files: [diffFile({ patch: "line0\nline1\nline2\n" })],
       capped: false,
     });
     // A non-zero scroll value must NOT rewrite/rotate the rendered string — the DiffRenderable
     // gets the full patch and scrolls its own viewport, keeping its gutter synced.
-    const tree = renderDiffView(fakeUi(), fakeTheme(), { [DIFF_PATCH_SCROLL_ID]: 1 }, state, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), { [DIFF_PATCH_SCROLL_ID]: 1 }, state, 200);
     expect(nodesByType(tree, "Diff")[0].props.diff).toBe("line0\nline1\nline2\n");
   });
 
   it("renders the patch header hunk count so one-hunk files do not look stuck", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "diff",
       files: [diffFile({ patch: "@@ -1,1 +1,1 @@\n-old\n+new\n" })],
       capped: false,
     });
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, state, 200);
     expect(textOf(tree)).toContain("1 hunk");
   });
 
   it("renders the whole patch in order and targets the selected hunk via scrollTop", () => {
     const patch = "preamble\n@@ -1,1 +1,1 @@\n-a\n+b\n@@ -5,1 +5,1 @@\n-c\n+d\n@@ -9,1 +9,1 @@\n-e\n+f\n";
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "diff",
       files: [diffFile({ patch })],
       capped: false,
     });
     const selected = moveHunkSelection(moveHunkSelection(state, 1), 1);
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, selected, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, selected, 200);
     const diff = nodesByType(tree, "Diff")[0];
     expect(textOf(tree)).toContain("hunk 2/3");
     // The patch is rendered whole and in original order; the selected hunk is brought to the
@@ -535,36 +535,36 @@ describe("renderDiffView", () => {
   });
 
   it("stays split below the old split width threshold", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "diff",
       files: [diffFile()],
       capped: false,
     });
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 60);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, state, 60);
     expect(nodesByType(tree, "Diff")[0].props.view).toBe("split");
   });
 
   it("renders the manual inline view when toggled", () => {
     const state = {
-      ...applyDiffResponse(createLoadingDiffViewState(task()), {
+      ...applyDiffResponse(createLoadingViewDiffState(task()), {
         kind: "diff",
         files: [diffFile()],
         capped: false,
       }),
       viewOverride: "unified" as const,
     };
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, state, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, state, 200);
     expect(textOf(tree)).toContain("inline");
     expect(nodesByType(tree, "Diff")[0].props.view).toBe("unified");
   });
 
   it("shows a loading message before the fetch resolves", () => {
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, createLoadingDiffViewState(task()), 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, createLoadingViewDiffState(task()), 200);
     expect(textOf(tree)).toContain("Loading diff");
   });
 
   it("shows a fallback message when no card has opened the view yet", () => {
-    const tree = renderDiffView(fakeUi(), fakeTheme(), {}, undefined, 200);
+    const tree = renderViewDiff(fakeUi(), fakeTheme(), {}, undefined, 200);
     expect(textOf(tree)).toContain("Select a Review card");
   });
 });
@@ -631,9 +631,9 @@ describe("editorTargetForSelection", () => {
     " ctx4",
   ].join("\n");
 
-  function diffState(overrides: Partial<DiffViewState> = {}): DiffViewState {
+  function diffState(overrides: Partial<ViewDiffState> = {}): ViewDiffState {
     return {
-      ...createLoadingDiffViewState(task()),
+      ...createLoadingViewDiffState(task()),
       loading: false,
       kind: "diff",
       capped: false,
@@ -728,17 +728,17 @@ describe("editorTargetForSelection", () => {
   });
 
   it("blocks with 'no file selected' while the diff is loading", () => {
-    const state = createLoadingDiffViewState(task());
+    const state = createLoadingViewDiffState(task());
     expect(editorTargetForSelection(state)).toEqual({ ok: false, reason: "no file selected" });
   });
 
   it("blocks with 'no file selected' on an error state", () => {
-    const state = applyDiffError(createLoadingDiffViewState(task()), "network down");
+    const state = applyDiffError(createLoadingViewDiffState(task()), "network down");
     expect(editorTargetForSelection(state)).toEqual({ ok: false, reason: "no file selected" });
   });
 
   it("blocks with 'no file selected' on a no-git state", () => {
-    const state = applyDiffResponse(createLoadingDiffViewState(task()), {
+    const state = applyDiffResponse(createLoadingViewDiffState(task()), {
       kind: "no-git",
       reason: "not a git repository",
     });

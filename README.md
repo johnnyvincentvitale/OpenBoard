@@ -31,7 +31,7 @@ The public repo is TUI/CLI/server-first:
   the card to Review when the session goes idle; the UI updates live over SSE.
 - **Review current and historical diffs in place.** On Review or Done cards, press `v` to
   open the full-screen diff view. Done-card diffs are historical and read-only.
-- **Fix it without leaving the diff.** Press `e` on a DiffView selection to open that file —
+- **Fix it without leaving the diff.** Press `e` on a View Diff selection to open that file —
   at the selected hunk's line — in `$VISUAL`/`$EDITOR` (or an `OPENBOARD_EDITOR` template).
   Terminal editors take over the terminal until you quit; GUI editors open detached. The diff
   refreshes on return so the fix rides straight into the same Integrate. Requires a local
@@ -506,17 +506,17 @@ Concurrent agents in one repo share a working tree and can clobber each other. C
   forced.
 - **Discard.** End a Review worktree *without* merging — removes the worktree, keeps the branch and
   card. For runs you don't want to integrate.
-- **Per-file review commits.** From the DiffView (`c`) you can commit individual changed files in
+- **Per-file review commits.** From the View Diff (`c`) you can commit individual changed files in
   the worktree before Integrate, so a partial result lands cleanly.
 
 ## Open in editor
 
-From a Review card's DiffView (`v`), press **`e`** to open the currently selected file — at the
+From a Review card's View Diff (`v`), press **`e`** to open the currently selected file — at the
 selected hunk's line — in your own editor. This is the in-app fix-then-integrate path: no
 in-app editor, just a suspend/resume handoff to the terminal (or a detached launch for GUI
 editors).
 
-Done-card DiffViews are historical and read-only. They omit edit/commit actions, and pressing
+Done-card View Diff screens are historical and read-only. They omit edit/commit actions, and pressing
 `e` reports that historical files cannot be edited.
 
 - **Resolution order:** `OPENBOARD_EDITOR` (a command template) → `$VISUAL` → `$EDITOR` → a
@@ -536,7 +536,7 @@ Done-card DiffViews are historical and read-only. They omit edit/commit actions,
   the task's worktree, or the in-place task directory for dirty in-place diffs — never the base
   repo copy.
 - **Diff refreshes on return.** As soon as the editor exits (terminal) or launches (GUI), the
-  DiffView re-fetches and reapplies the diff, so the edit is immediately visible and rides into
+  View Diff re-fetches and reapplies the diff, so the edit is immediately visible and rides into
   the same Integrate.
 - **Requires a local board and a configured editor.** `e` is blocked with a status message on a
   remote board (`isLocalBoardUrl` check) — same reasoning as the localhost threat model above.

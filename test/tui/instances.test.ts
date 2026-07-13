@@ -2515,7 +2515,7 @@ describe("TUI selected Review diff stat", () => {
       viewState: { view: "diff", previousView: "board" },
       tasks: [reviewCard],
       selectedTaskId: "review-card",
-      diffView: {
+      viewDiff: {
         taskId: "review-card",
         sourceLabel: "worktree diff",
         historical: false,
@@ -2537,7 +2537,7 @@ describe("TUI selected Review diff stat", () => {
     expect(getTaskDiff).toHaveBeenCalledWith("review-card");
     expect(getTaskCommitStatus).toHaveBeenCalledWith("review-card");
     expect(s.status).toContain("committed src/a.ts");
-    expect(s.diffView?.commitStatus).toEqual({ committedFiles: ["src/a.ts"], uncommittedFiles: [] });
+    expect(s.viewDiff?.commitStatus).toEqual({ committedFiles: ["src/a.ts"], uncommittedFiles: [] });
   });
 
   it("integrate prompts with committed and remaining files before committing dirty worktree files", async () => {

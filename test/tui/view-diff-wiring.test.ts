@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyDiffScrollTop, captureDiffScrollTop, handleKeypress, renderApp, shouldAutoRefresh } from "../../src/tui/index";
-import { createMockInstanceProvider, openDiffView } from "../../src/tui/model";
+import { createMockInstanceProvider, openViewDiff } from "../../src/tui/model";
 import type { Column, RespondPermissionOutcome, Task } from "../../src/shared";
 
 function fakeUi() {
@@ -187,7 +187,7 @@ describe("TUI diff view entry (v)", () => {
     const code = { scrollY: 0 };
     const s = state({
       detailScrollTop: { "diff-patch": 12 },
-      diffView: {
+      viewDiff: {
         taskId: "review-1",
         taskTitle: "review-1",
         sourceLabel: "worktree diff",
@@ -288,9 +288,9 @@ describe("TUI diff view entry (v)", () => {
     await handleKeypress({ sequence: "v", name: "v" } as any, s, a);
 
     expect(s.viewState.view).toBe("diff");
-    expect(s.diffView?.loading).toBe(false);
+    expect(s.viewDiff?.loading).toBe(false);
     expect(getTaskDiff).toHaveBeenCalledWith("review-1");
-    expect(s.diffView?.files).toHaveLength(1);
+    expect(s.viewDiff?.files).toHaveLength(1);
   });
 
   it("cycles Done diff evidence from inherited context codeAncestors and compares against Build", async () => {
@@ -311,8 +311,8 @@ describe("TUI diff view entry (v)", () => {
 
     await handleKeypress({ name: "a", sequence: "a" } as any, s, actions({ client: { getTaskDiff, getTaskCompare, getTaskContext } }) as any);
     expect(getTaskCompare).toHaveBeenCalledWith("fix", "build");
-    expect(s.diffView.sourceLabel).toContain("compare Build (build) · depth 2 via audit");
-    expect(s.diffView.sourceLabel).toContain("capped");
+    expect(s.viewDiff.sourceLabel).toContain("compare Build (build) · depth 2 via audit");
+    expect(s.viewDiff.sourceLabel).toContain("capped");
   });
 
   it("opens a Done card's historical diff and blocks edit and commit actions", async () => {
@@ -330,7 +330,7 @@ describe("TUI diff view entry (v)", () => {
     await handleKeypress({ sequence: "v", name: "v" } as any, s, a);
 
     expect(s.viewState.view).toBe("diff");
-    expect(s.diffView?.historical).toBe(true);
+    expect(s.viewDiff?.historical).toBe(true);
     expect(getTaskDiff).toHaveBeenCalledWith("done-1");
     expect(textOf(renderApp(fakeUi(), s))).toContain("historical worktree diff");
     expect(textOf(renderApp(fakeUi(), s))).not.toContain("e edit");
@@ -389,11 +389,11 @@ describe("TUI diff view entry (v)", () => {
 });
 
 describe("TUI diff view navigation and exit", () => {
-  function openedState(diffViewOverrides: Record<string, unknown> = {}): any {
+  function openedState(viewDiffOverrides: Record<string, unknown> = {}): any {
     const reviewTask = task("review-1", "review");
     const s = state({ tasks: [reviewTask], selectedTaskId: "review-1" });
-    s.viewState = openDiffView(s.viewState);
-    s.diffView = {
+    s.viewState = openViewDiff(s.viewState);
+    s.viewDiff = {
       taskId: "review-1",
       sourceLabel: "working tree diff",
       dirtyAtDispatch: false,
@@ -408,7 +408,7 @@ describe("TUI diff view navigation and exit", () => {
       selectedFileIndex: 0,
       fileSelectionLocked: false,
       reviewedFiles: new Set(),
-      ...diffViewOverrides,
+      ...viewDiffOverrides,
     };
     return s;
   }
@@ -421,7 +421,7 @@ describe("TUI diff view navigation and exit", () => {
 
     expect(s.viewState.view).toBe("board");
     expect(s.selectedTaskId).toBe("review-1");
-    expect(s.diffView).toBeUndefined();
+    expect(s.viewDiff).toBeUndefined();
   });
 
   it("b returns to the board", async () => {
@@ -471,7 +471,7 @@ describe("TUI diff view navigation and exit", () => {
 
     expect(s.viewState.view).toBe("diff");
     expect(getTaskDiff).toHaveBeenCalledWith("review-1");
-    expect(s.diffView.files.map((file: { file: string }) => file.file)).toEqual(["refreshed.ts"]);
+    expect(s.viewDiff.files.map((file: { file: string }) => file.file)).toEqual(["refreshed.ts"]);
   });
 
   it("q quits from the diff view", async () => {
@@ -485,60 +485,60 @@ describe("TUI diff view navigation and exit", () => {
   it("enter toggles whether down/up move files or scroll the selected patch", async () => {
     const s = openedState();
     await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(1);
+    expect(s.viewDiff.selectedFileIndex).toBe(1);
     await handleKeypress({ name: "up", sequence: "[A" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
 
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions());
-    expect(s.diffView.fileSelectionLocked).toBe(true);
+    expect(s.viewDiff.fileSelectionLocked).toBe(true);
     expect(s.detailScrollTop["diff-patch"]).toBe(0);
 
     await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
     expect(s.detailScrollTop["diff-patch"]).toBe(1);
 
     await handleKeypress({ name: "up", sequence: "[A" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
     expect(s.detailScrollTop["diff-patch"]).toBe(0);
 
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions());
-    expect(s.diffView.fileSelectionLocked).toBe(false);
+    expect(s.viewDiff.fileSelectionLocked).toBe(false);
     await handleKeypress({ name: "down", sequence: "[B" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(1);
+    expect(s.viewDiff.selectedFileIndex).toBe(1);
   });
 
   it("left/right hunk navigation recognizes sequence-only arrows and keeps the selected file stable", async () => {
     const s = openedState();
 
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(0);
-    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 0 });
     expect(s.detailScrollTop["diff-patch"]).toBe(0);
 
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(0);
-    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
     // Hunk nav now targets the hunk's header row in the whole patch (hunk 1 header at row 2),
     // which the viewport scrolls to — no longer a rotation-model 0.
     expect(s.detailScrollTop["diff-patch"]).toBe(2);
 
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(0);
-    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 2 });
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 2 });
     expect(s.detailScrollTop["diff-patch"]).toBe(4); // hunk 2 header at row 4
 
     await handleKeypress({ sequence: "\u001b[D" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(0);
-    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.selectedHunk).toEqual({ fileIndex: 0, hunkIndex: 1 });
   });
 
   it("one-hunk files explain their hunk count without changing files", async () => {
     const s = openedState();
-    s.diffView.selectedFileIndex = 1;
+    s.viewDiff.selectedFileIndex = 1;
 
     await handleKeypress({ sequence: "\u001b[C" } as any, s, actions());
-    expect(s.diffView.selectedFileIndex).toBe(1);
-    expect(s.diffView.selectedHunk).toEqual({ fileIndex: 1, hunkIndex: 0 });
+    expect(s.viewDiff.selectedFileIndex).toBe(1);
+    expect(s.viewDiff.selectedHunk).toEqual({ fileIndex: 1, hunkIndex: 0 });
 
     const tree = renderApp(fakeUi(), s);
     expect(textOf(tree)).toContain("1 hunk");
@@ -547,7 +547,7 @@ describe("TUI diff view navigation and exit", () => {
   it("m toggles the selected file's reviewed dimming state", async () => {
     const s = openedState();
     await handleKeypress({ sequence: "m", name: "m" } as any, s, actions());
-    expect(s.diffView.reviewedFiles.has("a.ts")).toBe(true);
+    expect(s.viewDiff.reviewedFiles.has("a.ts")).toBe(true);
   });
 
   it("does not fall through to board-view shortcuts like d (delete) while the diff view is open", async () => {
@@ -575,11 +575,11 @@ describe("TUI diff view open-in-editor (e)", () => {
     }
   });
 
-  function openedState(diffViewOverrides: Record<string, unknown> = {}): any {
+  function openedState(viewDiffOverrides: Record<string, unknown> = {}): any {
     const reviewTask = task("review-1", "review");
     const s = state({ tasks: [reviewTask], selectedTaskId: "review-1", boardUrl: "http://127.0.0.1:4097" });
-    s.viewState = openDiffView(s.viewState);
-    s.diffView = {
+    s.viewState = openViewDiff(s.viewState);
+    s.viewDiff = {
       taskId: "review-1",
       sourceLabel: "working tree diff",
       dirtyAtDispatch: false,
@@ -594,7 +594,7 @@ describe("TUI diff view open-in-editor (e)", () => {
       selectedFileIndex: 0,
       fileSelectionLocked: false,
       reviewedFiles: new Set(),
-      ...diffViewOverrides,
+      ...viewDiffOverrides,
     };
     return s;
   }
@@ -615,7 +615,7 @@ describe("TUI diff view open-in-editor (e)", () => {
 
     expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+10", "/repo/a.ts"], "/repo");
     expect(getTaskDiff).toHaveBeenCalledWith("review-1");
-    expect(s.diffView.files).toHaveLength(1);
+    expect(s.viewDiff.files).toHaveLength(1);
     expect(s.status).toContain("editor closed");
   });
 
@@ -639,7 +639,7 @@ describe("TUI diff view open-in-editor (e)", () => {
     const s = openedState();
     const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
     const spawnGuiEditor = vi.fn();
-    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.viewDiff.files, capped: false, root: "/repo" }));
     const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor }, client: { getTaskDiff } });
 
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
@@ -658,7 +658,7 @@ describe("TUI diff view open-in-editor (e)", () => {
     const spawnGuiEditor = vi.fn((argv: string[], cwd: string, onError?: (error: unknown) => void) => {
       onError?.(new Error("spawn code ENOENT"));
     });
-    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.viewDiff.files, capped: false, root: "/repo" }));
     const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor }, client: { getTaskDiff } });
 
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
@@ -742,7 +742,7 @@ describe("TUI diff view open-in-editor (e)", () => {
     const runTerminalEditor = vi.fn(async () => {
       throw new Error("spawn ENOENT");
     });
-    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.viewDiff.files, capped: false, root: "/repo" }));
     const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() }, client: { getTaskDiff } });
 
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
@@ -756,7 +756,7 @@ describe("TUI diff view open-in-editor (e)", () => {
   it("preserves the selected file by path after refresh, even if its index shifts", async () => {
     process.env.EDITOR = "vim";
     const s = openedState();
-    s.diffView.selectedFileIndex = 1; // b.ts selected
+    s.viewDiff.selectedFileIndex = 1; // b.ts selected
     const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
     // Refreshed diff reorders files so b.ts is now index 0.
     const getTaskDiff = vi.fn(async () => ({
@@ -774,14 +774,14 @@ describe("TUI diff view open-in-editor (e)", () => {
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
     expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+1", "/repo/b.ts"], "/repo");
-    expect(s.diffView.selectedFileIndex).toBe(0);
-    expect(s.diffView.files[s.diffView.selectedFileIndex].file).toBe("b.ts");
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.files[s.viewDiff.selectedFileIndex].file).toBe("b.ts");
   });
 
   it("falls back to a clamped index when the selected file vanished from the refreshed diff", async () => {
     process.env.EDITOR = "vim";
     const s = openedState();
-    s.diffView.selectedFileIndex = 1; // b.ts selected
+    s.viewDiff.selectedFileIndex = 1; // b.ts selected
     const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
     // Refreshed diff no longer contains b.ts at all.
     const getTaskDiff = vi.fn(async () => ({
@@ -794,20 +794,20 @@ describe("TUI diff view open-in-editor (e)", () => {
 
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
-    expect(s.diffView.files).toHaveLength(1);
-    expect(s.diffView.selectedFileIndex).toBe(0);
+    expect(s.viewDiff.files).toHaveLength(1);
+    expect(s.viewDiff.selectedFileIndex).toBe(0);
   });
 
   it("preserves the current keyboard mode (locked-scroll) across the refresh", async () => {
     process.env.EDITOR = "vim";
     const s = openedState({ fileSelectionLocked: true });
     const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
-    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.diffView.files, capped: false, root: "/repo" }));
+    const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.viewDiff.files, capped: false, root: "/repo" }));
     const a = actions({ editorSpawner: { runTerminalEditor, spawnGuiEditor: vi.fn() }, client: { getTaskDiff } });
 
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
-    expect(s.diffView.fileSelectionLocked).toBe(true);
+    expect(s.viewDiff.fileSelectionLocked).toBe(true);
   });
 
   it("e is active in locked-scroll mode too (not swallowed by scroll handling)", async () => {
@@ -834,7 +834,7 @@ describe("diff scroll capture/apply against the live renderable", () => {
   }
 
   function diffState(detailScrollTop: Record<string, number> = {}) {
-    return { diffView: { kind: "diff" }, detailScrollTop } as any;
+    return { viewDiff: { kind: "diff" }, detailScrollTop } as any;
   }
 
   it("captures the live viewport scrollY into state (so mouse-wheel scroll survives a rebuild)", () => {
@@ -875,7 +875,7 @@ describe("diff scroll capture/apply against the live renderable", () => {
 
   it("skips non-diff views entirely", () => {
     const code = fakeCode(0, 5);
-    const s = { diffView: { kind: "no-git" }, detailScrollTop: { [DIFF_PATCH_SCROLL_ID]: 2 } } as any;
+    const s = { viewDiff: { kind: "no-git" }, detailScrollTop: { [DIFF_PATCH_SCROLL_ID]: 2 } } as any;
     applyDiffScrollTop(s, fakeRenderer({ [`${DIFF_PATCH_SCROLL_ID}-left-code`]: code }) as any);
     expect(code.scrollY).toBe(0);
   });

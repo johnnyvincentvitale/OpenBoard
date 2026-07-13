@@ -1,6 +1,6 @@
 /**
  * TUI full-screen diff view (Review cards only). State/logic here is pure and
- * OpenTUI-agnostic except for `renderDiffView`, which builds a VChild tree the
+ * OpenTUI-agnostic except for `renderViewDiff`, which builds a VChild tree the
  * same way index.ts's render functions do. Keeping the two separate lets the
  * navigation/selection logic be unit tested without a terminal or fixture UI.
  */
@@ -15,7 +15,7 @@ type ThemeColor = string | RGBA;
 export const DIFF_FILE_COLUMN_WIDTH = 32;
 /** Every file-list entry is exactly two terminal rows: filename, then stats/marker. */
 export const DIFF_FILE_ROW_HEIGHT = 2;
-/** Legacy threshold retained for callers; DiffView no longer auto-collapses below it. */
+/** Legacy threshold retained for callers; View Diff no longer auto-collapses below it. */
 export const DIFF_MIN_SPLIT_WIDTH = 100;
 /** Shared ids/`state.detailScrollTop` keys so scroll position persists like every other detail pane. */
 export const DIFF_FILE_LIST_SCROLL_ID = "diff-files";
@@ -29,7 +29,7 @@ export interface SelectedHunk {
 }
 
 /** Result kind mirrors DiffResponse; `undefined` while the initial fetch is in flight. */
-export interface DiffViewState {
+export interface ViewDiffState {
   taskId: string;
   sourceLabel: string;
   /** Done-card evidence is historical and must never expose edit/commit actions. */
@@ -61,11 +61,11 @@ export function diffSourceLabel(task: Pick<Task, "harness" | "isolation">): stri
 }
 
 /** `v` opens current Review evidence or historical Done evidence for agent cards. */
-export function canOpenDiffView(task: Pick<Task, "column" | "type"> | undefined): boolean {
+export function canOpenViewDiff(task: Pick<Task, "column" | "type"> | undefined): boolean {
   return Boolean(task) && (task!.column === "review" || task!.column === "done") && task!.type !== "manual";
 }
 
-export function createLoadingDiffViewState(task: Task): DiffViewState {
+export function createLoadingViewDiffState(task: Task): ViewDiffState {
   return {
     taskId: task.id,
     sourceLabel: diffSourceLabel(task),
@@ -80,7 +80,7 @@ export function createLoadingDiffViewState(task: Task): DiffViewState {
   };
 }
 
-export function applyDiffResponse(state: DiffViewState, response: DiffResponse): DiffViewState {
+export function applyDiffResponse(state: ViewDiffState, response: DiffResponse): ViewDiffState {
   if (response.kind === "no-git") {
     return { ...state, loading: false, error: undefined, kind: "no-git", noGitReason: response.reason, files: [], root: undefined };
   }
@@ -109,29 +109,29 @@ export function diffFileCommitState(status: WorktreeCommitStatus | undefined, fi
   return undefined;
 }
 
-export function applyDiffError(state: DiffViewState, message: string): DiffViewState {
+export function applyDiffError(state: ViewDiffState, message: string): ViewDiffState {
   return { ...state, loading: false, error: message };
 }
 
-export function selectFileIndex(state: DiffViewState, index: number): DiffViewState {
+export function selectFileIndex(state: ViewDiffState, index: number): ViewDiffState {
   if (state.files.length === 0) return state;
   const clamped = Math.max(0, Math.min(index, state.files.length - 1));
   if (clamped === state.selectedFileIndex) return state;
   return { ...state, selectedFileIndex: clamped, fileSelectionLocked: false, selectedHunk: undefined };
 }
 
-export function moveFileSelection(state: DiffViewState, delta: number): DiffViewState {
+export function moveFileSelection(state: ViewDiffState, delta: number): ViewDiffState {
   if (state.files.length === 0) return state;
   const next = (state.selectedFileIndex + delta + state.files.length) % state.files.length;
   return { ...state, selectedFileIndex: next, fileSelectionLocked: false, selectedHunk: undefined };
 }
 
-export function toggleFileSelectionLock(state: DiffViewState): DiffViewState {
+export function toggleFileSelectionLock(state: ViewDiffState): ViewDiffState {
   if (state.files.length === 0 || state.kind !== "diff") return state;
   return { ...state, fileSelectionLocked: !state.fileSelectionLocked };
 }
 
-export function toggleFileReviewed(state: DiffViewState): DiffViewState {
+export function toggleFileReviewed(state: ViewDiffState): ViewDiffState {
   const file = state.files[state.selectedFileIndex];
   if (!file) return state;
   const next = new Set(state.reviewedFiles);
@@ -140,7 +140,7 @@ export function toggleFileReviewed(state: DiffViewState): DiffViewState {
   return { ...state, reviewedFiles: next };
 }
 
-export function isFileReviewed(state: DiffViewState, file: string): boolean {
+export function isFileReviewed(state: ViewDiffState, file: string): boolean {
   return state.reviewedFiles.has(file);
 }
 
@@ -149,14 +149,14 @@ export function splitAvailable(patchPaneWidth: number): boolean {
   return true;
 }
 
-export function effectiveDiffView(state: DiffViewState, patchPaneWidth: number): DiffPatchView {
+export function effectiveViewDiff(state: ViewDiffState, patchPaneWidth: number): DiffPatchView {
   void patchPaneWidth;
   return state.viewOverride ?? "split";
 }
 
-export function toggleViewOverride(state: DiffViewState, patchPaneWidth: number): DiffViewState {
+export function toggleViewOverride(state: ViewDiffState, patchPaneWidth: number): ViewDiffState {
   void patchPaneWidth;
-  const current = effectiveDiffView(state, patchPaneWidth);
+  const current = effectiveViewDiff(state, patchPaneWidth);
   return { ...state, viewOverride: current === "split" ? "unified" : "split" };
 }
 
@@ -167,7 +167,7 @@ export function hunkLineOffsets(patch: string | undefined): number[] {
 }
 
 /** Steps to the next/previous hunk within the currently selected file only. */
-export function moveHunkSelection(state: DiffViewState, delta: 1 | -1): DiffViewState {
+export function moveHunkSelection(state: ViewDiffState, delta: 1 | -1): ViewDiffState {
   const file = state.files[state.selectedFileIndex];
   const offsets = hunkLineOffsets(file?.patch);
   if (offsets.length === 0) return state;
@@ -181,7 +181,7 @@ export function moveHunkSelection(state: DiffViewState, delta: 1 | -1): DiffView
 }
 
 /** Target scrollTop (in patch rows) for the currently selected hunk, else the top of the file. */
-export function diffPatchScrollTop(state: DiffViewState): number {
+export function diffPatchScrollTop(state: ViewDiffState): number {
   const file = state.files[state.selectedFileIndex];
   if (!file || !state.selectedHunk || state.selectedHunk.fileIndex !== state.selectedFileIndex) return 0;
   const offsets = hunkLineOffsets(file.patch);
@@ -237,7 +237,7 @@ function scrollPatchText(patch: string, scrollTop: number): string {
  * gone, without duplicating the `patchScrollTarget`/`clampHunkBodyOffset` math twice.
  */
 function hunkRenderTarget(
-  state: DiffViewState,
+  state: ViewDiffState,
   sections: PatchSections,
   scrollTop: number,
 ): { hunkIndex: number; bodyOffset: number } {
@@ -249,7 +249,7 @@ function hunkRenderTarget(
     : { hunkIndex: selectedHunkIndex, bodyOffset: clampHunkBodyOffset(sections.hunks[selectedHunkIndex], scrollTop) };
 }
 
-export function diffPatchForRender(state: DiffViewState, file: DiffFile, scrollTop = 0): string | undefined {
+export function diffPatchForRender(state: ViewDiffState, file: DiffFile, scrollTop = 0): string | undefined {
   if (!file.patch) return undefined;
   const sections = splitPatchIntoHunkSections(file.patch);
   if (!sections) return scrollPatchText(file.patch, scrollTop);
@@ -341,7 +341,7 @@ export function diffFileListWindow(selectedIndex: number, totalFiles: number, vi
   };
 }
 
-export function diffHunkPositionLabel(state: DiffViewState): string {
+export function diffHunkPositionLabel(state: ViewDiffState): string {
   const file = state.files[state.selectedFileIndex];
   const count = hunkLineOffsets(file?.patch).length;
   if (count === 0) return "0 hunks";
@@ -351,7 +351,7 @@ export function diffHunkPositionLabel(state: DiffViewState): string {
   return `hunk ${current}/${count}`;
 }
 
-/** Result of resolving where `e` should open an editor for the current DiffView selection.
+/** Result of resolving where `e` should open an editor for the current View Diff selection.
  * Deliberately ignorant of filesystem roots, $EDITOR, or remote-board guards — a separate
  * wiring layer (src/tui/index.ts + src/tui/editor-command.ts) joins `relPath` to the diff
  * response's `root` and applies those guards.
@@ -369,7 +369,7 @@ function newFileStartLine(header: string): number | undefined {
 }
 
 /** Resolves the editor jump target (repo-relative path + 1-based line) for whatever the
- * DiffView is currently showing. Never throws — any DiffViewState shape (loading, error,
+ * View Diff is currently showing. Never throws — any ViewDiffState shape (loading, error,
  * no-git, no files) resolves to `{ ok: false }` instead.
  *
  * `liveScrollTop`, when provided, is the TUI wiring layer's actual current patch scrollTop
@@ -378,7 +378,7 @@ function newFileStartLine(header: string): number | undefined {
  * approximation (`diffPatchScrollTop(state)`, the selected hunk's own raw header offset) so
  * existing state-only callers/tests keep their prior behavior unchanged.
  */
-export function editorTargetForSelection(state: DiffViewState, liveScrollTop?: number): EditorJumpTarget {
+export function editorTargetForSelection(state: ViewDiffState, liveScrollTop?: number): EditorJumpTarget {
   if (state.kind !== "diff" || state.files.length === 0) return { ok: false, reason: "no file selected" };
 
   const file = state.files[state.selectedFileIndex];
@@ -442,7 +442,7 @@ export function filetypeForFile(file: string): string {
   return EXTENSION_FILETYPES[ext] ?? "text";
 }
 
-export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
+export function viewDiffHeaderLabel(state: ViewDiffState | undefined): string {
   if (!state) return "select a Review or Done card";
   const sourceLabel = state.historical ? `historical ${state.sourceLabel}` : state.sourceLabel;
   if (state.loading) return `${sourceLabel} · loading…`;
@@ -454,13 +454,13 @@ export function diffViewHeaderLabel(state: DiffViewState | undefined): string {
   return `${sourceLabel} · ${state.files.length} ${fileWord}${dirty}${capped}`;
 }
 
-export function diffViewKeyHints(state?: DiffViewState): string {
+export function viewDiffKeyHints(state?: ViewDiffState): string {
   const vertical = state?.fileSelectionLocked ? "↑/↓ scroll · enter files" : "↑/↓ files · enter scroll";
   const mutableActions = state?.historical ? "" : " · c commit · e edit";
   return `${vertical} · ←/→ hunks · a ancestor · m mark · t split/inline${mutableActions} · r refresh · b back · q quit`;
 }
 
-export interface DiffViewTheme {
+export interface ViewDiffTheme {
   text: ThemeColor;
   bright: ThemeColor;
   muted: ThemeColor;
@@ -475,7 +475,7 @@ export interface DiffViewTheme {
 
 function fileRow(
   ui: OpenTui,
-  theme: DiffViewTheme,
+  theme: ViewDiffTheme,
   file: DiffFile,
   selected: boolean,
   reviewed: boolean,
@@ -517,11 +517,11 @@ function fileRow(
   );
 }
 
-function fileListFillerRow(ui: OpenTui, theme: DiffViewTheme): VChild {
+function fileListFillerRow(ui: OpenTui, theme: ViewDiffTheme): VChild {
   return ui.Box({ width: "100%", height: DIFF_FILE_ROW_HEIGHT, flexShrink: 0, ...theme.boxBg(theme.panel) });
 }
 
-function fullWidthMessage(ui: OpenTui, theme: DiffViewTheme, content: string): VChild {
+function fullWidthMessage(ui: OpenTui, theme: ViewDiffTheme, content: string): VChild {
   return ui.Box(
     { flexGrow: 1, width: "100%", alignItems: "center", justifyContent: "center", ...theme.boxBg(theme.panel) },
     ui.Text({ content, fg: theme.muted }),
@@ -533,11 +533,11 @@ function fullWidthMessage(ui: OpenTui, theme: DiffViewTheme, content: string): V
  * (index.ts) wrap this with the shared header/command-strip chrome, exactly
  * like every other non-board view.
  */
-export function renderDiffView(
+export function renderViewDiff(
   ui: OpenTui,
-  theme: DiffViewTheme,
+  theme: ViewDiffTheme,
   scrollState: Record<string, number>,
-  state: DiffViewState | undefined,
+  state: ViewDiffState | undefined,
   patchPaneWidth: number,
   visibleFileRows = 12,
 ): VChild {
@@ -548,7 +548,7 @@ export function renderDiffView(
   if (state.files.length === 0) return fullWidthMessage(ui, theme, "No changes.");
   const selectedFile = state.files[state.selectedFileIndex];
   const reviewed = selectedFile ? isFileReviewed(state, selectedFile.file) : false;
-  const view = effectiveDiffView(state, patchPaneWidth);
+  const view = effectiveViewDiff(state, patchPaneWidth);
 
   const window = diffFileListWindow(state.selectedFileIndex, state.files.length, visibleFileRows);
   const visibleFiles = state.files.slice(window.offset, window.offset + window.capacity);

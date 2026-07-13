@@ -11,7 +11,7 @@ body:
     id: steps
     attributes:
       label: What did you do?
-      description: Include the command or TUI flow, such as `npm run tui`, `openboard start <name>`, creating/running a card, or opening DiffView.
+      description: Include the command or TUI flow, such as `npm run tui`, `openboard start <name>`, creating/running a card, or opening View Diff.
       placeholder: |
         1. Ran ...
         2. Pressed ...
