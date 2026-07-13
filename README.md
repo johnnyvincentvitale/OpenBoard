@@ -7,8 +7,9 @@ the card **auto-advances To Do → In Progress → Review** as the agent runs. M
 manual until OpenCode exposes a stronger task-complete signal. It's the named-agent,
 multi-agent workflow OpenCode doesn't ship.
 
-New here? Start with the **[User Guide](GUIDE.md)** — a walkthrough from a fresh
-clone to orchestrated multi-agent runs. This README is the reference.
+New here? Start with the **[User Guide](GUIDE.md)** — the operating manual,
+from a fresh clone through orchestrated multi-agent runs, review, and
+recovery. This README is the compact product and technical reference.
 
 ## Scope
 

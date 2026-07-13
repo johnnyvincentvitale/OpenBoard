@@ -1,37 +1,76 @@
 # OpenBoard User Guide
 
 This is the operating manual for OpenBoard's V1 surface: the terminal UI,
-named-instance CLI, local server, MCP orchestration tools, and bundled plugin.
-It starts with a short tour, then documents the decisions an operator has to
-make while cards are running, blocked, under review, being integrated, or being
-recovered. The [README](README.md) remains the compact product and technical
-reference; this guide is organized around real workflows.
+named-instance CLI, local server, MCP (Model Context Protocol) orchestration
+tools, and bundled plugin. It starts with a short tour, then documents the
+decisions an operator has to make while cards are running, blocked, under
+review, being integrated, or being recovered. The [README](README.md) remains
+the compact product and technical reference; this guide is organized around
+real workflows.
+
+This guide documents OpenBoard as of July 2026 on `dev`. Its behavior claims
+are deliberately specific; when a newer build disagrees with a detail here,
+trust the build and report the doc drift.
 
 ## Contents
+
+**Getting started**
 
 1. [What OpenBoard is](#1-what-openboard-is)
 2. [Before you start](#2-before-you-start)
 3. [Install](#3-install)
 4. [Your first task in five minutes](#4-your-first-task-in-five-minutes)
+
+**Concepts**
+
 5. [Core concepts](#5-core-concepts)
 6. [Orchestration and multi-agent workflows](#6-orchestration-and-multi-agent-workflows)
 7. [The OpenBoard plugin and its skills](#7-the-openboard-plugin-and-its-skills)
+
+**Operating the board**
+
 8. [TUI anatomy and control model](#8-tui-anatomy-and-control-model)
 9. [Creating and editing cards](#9-creating-and-editing-cards)
 10. [Card lifecycle and operator decisions](#10-card-lifecycle-and-operator-decisions)
 11. [Running sessions: chat, permissions, blocked answers, and watchdog](#11-running-sessions-chat-permissions-blocked-answers-and-watchdog)
 12. [Reviewing handoffs, files, comments, and evidence](#12-reviewing-handoffs-files-comments-and-evidence)
 13. [Worktree isolation, integration, discard, and cleanup](#13-worktree-isolation-integration-discard-and-cleanup)
+
+**Instances and CLI**
+
 14. [Named instances and CLI operations](#14-named-instances-and-cli-operations)
 15. [Settings, filtering, and the global archive](#15-settings-filtering-and-the-global-archive)
+
+**Harnesses and orchestration**
+
 16. [Harnesses: OpenCode, Claude Code, and other ACP agents](#16-harnesses-opencode-claude-code-and-other-acp-agents)
 17. [MCP operator guide](#17-mcp-operator-guide)
+
+**Safety and reference**
+
 18. [Safety, persistence, and data retention](#18-safety-persistence-and-data-retention)
 19. [Known issues and current boundaries](#19-known-issues-and-current-boundaries)
 20. [What to test and how to report](#20-what-to-test-and-how-to-report)
 21. [Troubleshooting by symptom](#21-troubleshooting-by-symptom)
 22. [Contextual key reference](#22-contextual-key-reference)
 23. [Environment variables and paths](#23-environment-variables-and-paths)
+24. [Glossary](#24-glossary)
+
+### Quick index: I want to…
+
+| Goal | Section |
+|---|---|
+| Run my very first card | [§4](#4-your-first-task-in-five-minutes) |
+| Kill a runaway or stuck session | [§11](#11-running-sessions-chat-permissions-blocked-answers-and-watchdog) |
+| Answer a card that is asking a question | [§11](#11-running-sessions-chat-permissions-blocked-answers-and-watchdog) |
+| Merge an agent's worktree into my branch | [§13](#13-worktree-isolation-integration-discard-and-cleanup) |
+| Throw away a result without merging | [§13](#13-worktree-isolation-integration-discard-and-cleanup) |
+| Run two agents in one repo safely | [§13](#13-worktree-isolation-integration-discard-and-cleanup) |
+| Wire an orchestrator to the board | [§17](#17-mcp-operator-guide) |
+| Prove MCP is pointed at the right board | [§17](#17-mcp-operator-guide) |
+| Figure out why a card won't run | [§21](#21-troubleshooting-by-symptom) |
+| Look up a key | [§22](#22-contextual-key-reference) |
+| Look up an env var or path | [§23](#23-environment-variables-and-paths) |
 
 ---
 
@@ -72,7 +111,8 @@ You need:
   cards with Claude instead of OpenCode.
 - Optional (experimental): other ACP agents — **Codex**, **Gemini**, **Hermes**,
   **Pi Coding Agent**, **Cursor**. Each shows up as a harness only when its ACP
-  adapter is installed and launchable; none are verified end-to-end yet (see §16).
+  adapter is installed and launchable; none are verified end-to-end yet (see
+  [§16](#16-harnesses-opencode-claude-code-and-other-acp-agents)).
 
 **Verify OpenCode works by itself first.** Before touching OpenBoard, open a
 terminal, run `opencode` in some repo, and ask it to do something trivial. If
@@ -116,11 +156,13 @@ BOARD_WORKSPACE="/absolute/path/to/scratch-repo" npm run tui
 ```
 
 This boots the board and its OpenCode backend and opens the TUI in your
-terminal. Pressing **`n`** opens a six-screen agent-card wizard. `enter` moves
-forward, `Tab` moves between fields on the current screen, and **`esc`**
-cancels the whole wizard. **`b`** goes back only when a selector—not a text or
-model-query field—is focused; otherwise it types the letter `b`. Nothing is
-created until Confirm.
+terminal. Plain `npm run tui` (no variable) opens the launcher instead — the
+instance selector when instances exist, or a workspace-setup screen on a fresh
+machine that asks for the same absolute path. Pressing **`n`** opens a
+six-screen agent-card wizard. `enter` moves forward, `Tab` moves between
+fields, and **`esc`** cancels the whole wizard; `b` steps back from selector
+fields (in text fields it just types `b` — see
+[§22](#22-contextual-key-reference)). Nothing is created until Confirm.
 
 1. **Identity.** Leave **`CARD TYPE`** on `agent`. Set **`TITLE`**, write the
    agent's work order in **`PROMPT`**, and point **`DIR`** at that scratch Git
@@ -158,9 +200,8 @@ lists and press **`i`** again to commit them and continue. If everything is
 already committed, integration proceeds on the first press. Success integrates
 the branch, removes the worktree, and moves the card to Done. If the result
 needs more work, use Session Chat for a same-session clarification or create a
-linked Fix card. Board-level **`R`** is reserved for Error, Blocked, and
-rebase-conflict recovery rather than ordinary completed Review.
-Use the contextual key tables in §22 when a key's meaning is unclear.
+linked Fix card. Use the contextual key tables in
+[§22](#22-contextual-key-reference) when a key's meaning is unclear.
 
 ## 5. Core concepts
 
@@ -185,13 +226,9 @@ changed files, verification commands and results, residual risk. A card that
 reaches Review with a report is solid ground. If the agent just went quiet
 instead, the card still reaches Review but is labeled **unconfirmed** — the
 work may be fine, but nothing vouches for it, so inspect before accepting.
-Task type changes what the handoff asks for without changing the JSON fields:
-research is evidence-first, synthesis evaluates parent findings for agreement,
-conflict, evidence strength, gaps, and implications, build reports implementation,
-audit reports findings, and fix ties changes back to the finding it resolves.
-Build, synthesis, audit, and fix cards also receive task-mode context before
-any parent handoffs. Standalone cards get context that references the card prompt
-and cwd only; linked cards get parent-oriented context plus `PARENT CONTEXT`.
+Task type changes what the handoff asks for without changing the stored shape;
+the full completion contract is in
+[§10](#10-card-lifecycle-and-operator-decisions).
 
 **Done is yours — unless you delegate it.** A human can accept an eligible
 Review card with `x`; changed worktree cards normally reach Done through
@@ -216,49 +253,25 @@ openboard mcp --instance <name>
 This injects the board URL and auth token automatically and exposes the guarded
 orchestration surface as tools: create/list/link tasks, run/retry/abort/move,
 structured complete/block reports, worktree sync/integrate, comments, and
-event streams. Guardrails are built in — moving a card to Done requires
-`completedBy`, integrating a worktree requires `confirmReviewed: true`, and
-accepting blocked work into Done requires explicit `blockedAcceptance` — so a
-cockpit can't silently accept or merge anything.
+event streams. Guardrails are built in — Done moves, integrations, and blocked
+acceptance all require explicit attribution or confirmation — so a cockpit
+can't silently accept or merge anything. The exact fields and preconditions
+are in [§17](#17-mcp-operator-guide).
 
-**Diagnostic and inspection tools.** Beyond card lifecycle tools, the MCP
-surface exposes read-only inspection tools for orchestrator diagnostics:
+**Diagnostic and inspection tools.** The same MCP surface exposes read-only
+diagnostics — bounded session tails, resolved task lineage, cross-task Git
+comparison, and durable task events — plus guarded intervention tools for
+permission asks, blocked answers, and operator messages into live sessions.
+The full tool reference and recipes are in [§17](#17-mcp-operator-guide).
 
-- `tail_session` — bounded tail snapshot of session activity events (text,
-  tool, status, permission) with run identity, transport state, gap truth, and
-  terminal signal. Waits a bounded window after the snapshot to capture the
-  terminal frame that follows on every SSE route path. Default 50 events,
-  configurable timeout.
-- `task_context` — full resolved task lineage (target handoff, direct-parent
-  handoffs, inherited-ancestor metadata, code-evidence candidates) without raw
-  transcripts.
-- `task_compare` — git delta from a base task's branch/commit to a target
-  task's output (real diff with source refs, or honest no-git reason).
-- `respond_permission` — respond to a pending permission ask with
-  `allow_once`/`deny` and explicit `answeredBy` attribution.
-- `answer_blocked_task` — submit an operator answer to a blocked card's
-  question with blocked context; the board gates admission on current-block
-  matching and duplicate in-flight guarding.
-- `send_session_message` — send an attributed operator message to an existing
-  card session, either queued behind the active turn or interrupting that turn.
-- `task_events` — durable events recorded for one task (not run history).
-
-**Chat with a running card.** Select a card with a session and press `w`. The
-Session Chat screen shows assistant messages as conversation, keeps tool activity
-visible but secondary, and surfaces permission asks inline. Press `i` to compose;
-`Enter` sends/queues and `Ctrl+Enter` interrupts the current prompt turn before
-sending. The message continues the same session and working tree. A Review card
-with a still-resumable session can be chatted with the same way without leaving
-Review or replacing its completion evidence. Use Retry when you intend to resume
-task execution. Internal completion-report calls are hidden from the chat transcript,
-and exact same-turn provider echoes render once.
-
-When a message contains a Markdown fenced-code block, Session Chat renders it in
-a separate language-labelled box instead of flattening it into prose. The newest
-block is selected automatically. Press `Tab`/`Shift+Tab` to move among blocks and
-`c` to copy the selected block's complete source text to the system clipboard;
-copying uses the original message even when the terminal only has room to display
-part of a long block.
+**Chat with a running card.** Select a card with a session and press `w` to
+open Session Chat — an operator conversation that continues the same session
+and working tree, with tool activity and permission asks visible inline and
+fenced code blocks rendered for copying. A Review card with a still-resumable
+session can be chatted with without leaving Review or replacing its completion
+evidence; use Retry when you intend to resume task execution. The complete
+Session Chat reference is in
+[§11](#11-running-sessions-chat-permissions-blocked-answers-and-watchdog).
 
 **Dependencies and handoffs.** Cards can declare parent tasks. A child with
 unmet parents refuses to run, and once its parents complete, their summaries,
@@ -309,10 +322,9 @@ Two pieces ship in the plugin:
   forced onto the board.
 - **An MCP launcher config** (`.mcp.json`) — starts the local `openboard mcp`
   process that binds to the selected board and exposes the guarded orchestration
-  surface (see §§6 and 17). It
-  starts unbound (`openboard mcp`) and is bound with `select_instance`; Done moves
-  require `completedBy` and `integrate_task` requires `confirmReviewed: true`, so
-  a cockpit can't silently accept or merge work.
+  surface. It starts unbound (`openboard mcp`) and is bound with
+  `select_instance`; the surface's guardrails and preconditions are described
+  in [§17](#17-mcp-operator-guide).
 
 ### The skill files
 
@@ -355,13 +367,20 @@ strip. The card panel is the source of truth for what the selected card can do
 *right now* among its primary lifecycle actions: shortcuts change with the
 card's type, lane, run state, pending decision, completion outcome, and worktree
 state. Global controls such as Session Chat, permission answers, refresh, and
-Settings remain in the command strip and §22.
+Settings remain in the command strip and [§22](#22-contextual-key-reference).
 
 Use `↑`/`↓` to move between cards and `←`/`→` to move between lanes. If a lane
 has more cards than fit on screen, OpenBoard windows the lane around the current
 selection and shows overflow counts. A board-wide filter may hide cards in
 other lanes, so always read the selected card's title and state before acting.
 The Review lane also surfaces how many blocked cards currently need an answer.
+
+Two gate screens can replace the board entirely. If the terminal is smaller
+than the minimum supported size, OpenBoard shows a "needs more room" prompt
+with the current and required dimensions until the window grows (`q` quits
+from there). And a self-owned launch that finds no instances and no workspace
+shows a workspace-setup screen: type the repository path, `enter` to set up,
+`Ctrl+U` to clear, `esc` to quit.
 
 ### Context matters
 
@@ -377,8 +396,9 @@ Keys are intentionally reused. For example:
 - `q` quits from most views, but returns to the board from Session Chat.
 
 The command strip gives the shortest current hints. Press `?` for the in-app
-overlay, and use the complete contextual tables in §22 when the overlay omits a
-less-common action.
+overlay, and use the complete contextual tables in
+[§22](#22-contextual-key-reference) when the overlay omits a less-common
+action.
 
 ### Opening card detail
 
@@ -387,7 +407,7 @@ Prompt, Handoff, Output, Files, Attempts, and Comments. Use `←`/`→` or `Tab`
 switch tabs and `↑`/`↓` to scroll. `esc` closes detail from any tab. `enter`
 closes ordinary text tabs, opens a selected Files patch, and submits an active
 comment draft; Comments browsing closes with `esc`. Tab-specific controls are
-described in §12.
+described in [§12](#12-reviewing-handoffs-files-comments-and-evidence).
 
 ### Confirmation model
 
@@ -546,16 +566,23 @@ Review, Done, idle, then queued.
 ### Completion contract
 
 Every dispatched prompt asks the worker to report a summary, changed files,
-verification commands/results, and residual risk. Research, synthesis, build,
-audit, and fix cards receive different handoff guidance but use the same stored
-shape.
+verification commands/results, and residual risk. Task type changes what the
+handoff asks for without changing the JSON fields: research is evidence-first,
+synthesis evaluates parent findings for agreement, conflict, evidence
+strength, gaps, and implications, build reports implementation, audit reports
+findings, and fix ties changes back to the finding it resolves. Build,
+synthesis, audit, and fix cards also receive task-mode context before any
+parent handoffs. Standalone cards get context that references the card prompt
+and cwd only; linked cards get parent-oriented context plus `PARENT CONTEXT`.
 
 An agent-reported complete outcome is the strongest normal Review state. An
 `idle-fallback` Review means the provider went idle without filing that report;
 OpenBoard advances the card so it does not remain stuck, but labels it
-Unconfirmed. A watchdog block is system-authored after the automatic retry
-budget is exhausted and remains incomplete until a human resolves or accepts
-it.
+Unconfirmed. A late structured report can still upgrade that card: when the
+completion arrives after the idle-fallback advance, the Review card gains the
+report in place and stops being Unconfirmed. A watchdog block is
+system-authored after the automatic retry budget is exhausted and remains
+incomplete until a human resolves or accepts it.
 
 ### Review is not Done
 
@@ -580,7 +607,10 @@ source, and timestamp.
 ### Session Chat
 
 Select a card with a recorded session and press `w` to open its activity and
-history. Sending continues that card's existing working tree only when the
+history. Assistant messages read as conversation, tool activity stays visible
+but secondary, and permission asks surface inline. Internal completion-report
+calls are hidden from the transcript, and exact same-turn provider echoes
+render once. Sending continues that card's existing working tree only when the
 provider session is still resumable; admission reports an error otherwise.
 Session Chat is not a new task and does not replace the card's completion
 evidence.
@@ -593,7 +623,7 @@ evidence.
 - `↑`/`↓` scroll manually; `f` returns to the live tail.
 - `Tab`/`Shift+Tab` select fenced code blocks; `c` copies the complete original
   block even if the terminal display is truncated.
-- `y`/`N` answer a visible permission ask for the followed card.
+- `y`/`N` answer a visible permission ask for the open chat card.
 - `u` refreshes task/board state; stream reconnection itself is automatic.
   `b`, `esc`, or `q` returns to the board.
 
@@ -654,7 +684,7 @@ Archived cards cannot be answered. The TUI does not integrate blocked cards;
 either resolve them or salvage/resolve/discard their worktree. Explicit
 incomplete Done acceptance works only after worktree changes have been resolved;
 `x` does not bypass that guard. MCP/API integration has a separate explicit
-incomplete-acceptance guard described in §17.
+incomplete-acceptance guard described in [§17](#17-mcp-operator-guide).
 
 ### Watchdog and fallback recovery
 
@@ -713,7 +743,8 @@ Press `v` on a Review or Done agent card. The full-screen view supports:
 - `c` — commit the selected file on a Review worktree.
 - `e` — open the selected file at the selected hunk line.
 - `r` — refresh the diff after an external edit.
-- `a` — cycle current-card and code-ancestor evidence when lineage is available.
+- `a` — cycle current-card and code-ancestor evidence when lineage is
+  available; without lineage it reports a status message instead of switching.
 - `?` — open help; `b`/`esc` returns; `q` quits.
 
 Done-card diffs are historical and read-only. They omit commit/editor actions,
@@ -835,7 +866,7 @@ audit/review worktrees that should never merge. Successful delete/discard
 cleanup keeps the branch so an operator can salvage it later. Dirty cleanup is
 not forced by these TUI actions; inspect/commit or use an explicitly authorized
 API cleanup path. MCP/API callers can cross the blocked boundary only with
-explicit incomplete acceptance (§17).
+explicit incomplete acceptance ([§17](#17-mcp-operator-guide)).
 
 ### Orphan cleanup
 
@@ -918,7 +949,7 @@ MCP status expose the registry and live board name, workspace, database, build,
 URL, and token presence. Compare those fields yourself before mutation.
 `doctor` checks important live port/workspace mismatches, while pre-bound MCP
 startup proves registry runtime and token presence; neither substitutes for the
-full operator identity proof in §17.
+full operator identity proof in [§17](#17-mcp-operator-guide).
 
 ### Status, doctor, and recovery
 
@@ -1100,7 +1131,8 @@ treat them as experimental.
   Harness screen's `MODEL` and permission-mode controls are sourced from what the
   live adapter reports; you can also type a model ID freeform per harness.
 - **Adapter resolution.** OpenBoard looks for, in order: the harness's explicit
-  command override (the exact variable names are listed in §23) → a bundled
+  command override (the exact variable names are listed in
+  [§23](#23-environment-variables-and-paths)) → a bundled
   `@agentclientprotocol/*` adapter package if installed (Claude, Codex, Gemini) →
   the adapter binary on your `PATH` (`codex-acp`, `gemini-agent-acp`,
   `hermes-agent-acp`, `pi-coding-agent-acp`, `cursor-agent-acp`).
@@ -1169,10 +1201,10 @@ the token value.
 | Board inspection | `list_tasks`, `list_agents` | Read-only. Use immediately after selection to prove board alignment. |
 | Card creation | `create_task`, `add_tasks` | Writes To Do cards; never dispatches. Directory must be admitted by the board. |
 | Dependencies | `link_tasks`, `unlink_tasks` | Writes graph metadata. Both tasks must exist; self-links and cycles are rejected. |
-| Execution | `run_task`, `retry_task`, `abort_task` | Changes session/task state and may create a worktree. Agent/archived/parent gates apply. |
+| Execution | `run_task`, `retry_task`, `abort_task` | Changes session/task state and may create a worktree. Agent/archived/parent gates apply. `retry_task` accepts optional `feedback` text forwarded into the retried session. |
 | Placement and reports | `move_task`, `complete_task`, `block_task` | Writes lifecycle evidence. Done requires `completedBy`; blocked Done also needs current incomplete acceptance. Reports should identify the active run. |
-| Operator intervention | `respond_permission`, `answer_blocked_task`, `send_session_message` | Mutates a live/resumable session and requires exact current ask, block, and session identities. |
-| Session diagnostics | `tail_session` | Read-only bounded snapshot: default 50, maximum 200 events. Not continuous monitoring. |
+| Operator intervention | `respond_permission`, `answer_blocked_task`, `send_session_message` | Mutates a live/resumable session and requires exact current ask, block, and session identities. `respond_permission` needs `taskId` plus `askId`; `send_session_message` uses `sentBy` and `mode` (`queue`/`interrupt`), with text capped at 12,000 characters. |
+| Session diagnostics | `tail_session` | Read-only bounded snapshot: default 50, maximum 200 events; optional `cursor` and `timeoutMs` (100–30000, default 3000) shape the window, and the call waits briefly for a trailing terminal frame. Not continuous monitoring. |
 | Evidence | `task_events`, `task_context`, `task_diff`, `task_compare` | Read-only. Diff is Review/Done; Compare needs two distinct cards with usable ordered Git evidence. Context excludes raw transcripts. |
 | Worktree Git | `sync_task`, `integrate_task` | Mutates Git. Worktree required; integration requires `confirmReviewed: true` and may commit, integrate, remove the worktree, and move Done. |
 | Discussion | `comment_task`, `add_note` | Writes durable task comments. This is not Session Chat; `add_note` is an alias. |
@@ -1193,7 +1225,8 @@ deliberate concurrency guards:
   for retrying the same logical message.
 - `expectedSessionId` stops a stale draft from landing in a replacement session;
   include `expectedRunStartedAt` when known.
-- `askId` identifies one permission request; `answeredBy` records attribution.
+- `askId` identifies one permission request (paired with its `taskId`);
+  `answeredBy` records attribution.
 - `blockedReportedAt` identifies the current blocked report and is required for
   blocked answers and incomplete acceptance.
 - `completedBy` is required for MCP Done moves. It records who accepted work; it
@@ -1278,9 +1311,14 @@ incomplete work.
 The current MCP surface does not expose general task editing, deletion,
 archive/unarchive, global-archive browsing, worktree discard/orphan cleanup,
 per-file commits, terminal creation, provider/ACP discovery, raw transcripts,
-or unbounded SSE monitoring. Those remain TUI, CLI, or direct authenticated API
-operations. `tail_session` is bounded, `task_context` deliberately omits raw
-transcripts, comments are not chat, and Session Chat is not a Retry substitute.
+or unbounded SSE (server-sent events) monitoring. Task editing, deletion,
+archiving, discard, orphan cleanup, and per-file commits remain TUI or
+authenticated-API operations; provider/ACP discovery remains CLI
+(`providers`, `harnesses`) or API; unarchive and terminal creation are
+authenticated-API-only (no TUI or CLI surface exists for terminals today);
+raw provider transcripts are not exposed by any surface. `tail_session` is
+bounded, `task_context` deliberately omits raw transcripts, comments are not
+chat, and Session Chat is not a Retry substitute.
 
 ## 18. Safety, persistence, and data retention
 
@@ -1311,7 +1349,9 @@ Read [SECURITY.md](SECURITY.md) before running agents on anything sensitive.
 
 Named-instance tokens are stored in the registry and injected automatically by
 the CLI, TUI, and bound MCP wrapper. Health is public on loopback; other API
-routes require the token. OpenBoard displays only token presence.
+routes require the token. Clients normally send it as a bearer header;
+SSE/EventSource clients may pass the same token as a `board_token` query
+parameter instead. OpenBoard displays only token presence.
 
 Do not publish `instances.json`, SQLite databases, daemon logs, task JSON,
 session output, or screenshots without review. They can contain prompts,
@@ -1337,10 +1377,29 @@ global archive records outside OpenBoard after confirming the exact paths.
 
 ## 19. Known issues and current boundaries
 
-Things already understood about the current V1 surface:
+### Deliberate boundaries — don't report these
 
 - **Agent roster updates need restart.** OpenCode reads agent config at boot;
   restart the instance after adding or changing profiles.
+- **Branches accumulate deliberately.** Integration, discard, delete, and
+  orphan cleanup keep `board/*` branches for salvage. Clean orphan worktrees are
+  swept automatically; dirty ones require explicit Settings cleanup.
+- **Watchdog is conservative.** It waits the configured no-progress window and
+  defers around permissions/reconnect uncertainty before spending its two-retry
+  budget.
+- **Container isolation is a placeholder.** It appears as a disabled concept
+  but has no runtime or permissions implementation.
+- **The global archive is read-only in the TUI.** There is no TUI unarchive or
+  per-record purge workflow.
+- **MCP is intentionally narrower than the authenticated API.** See
+  [§17](#17-mcp-operator-guide) for unavailable
+  task-edit/archive/discard/per-file/orphan operations.
+- **The terminal API has no TUI or CLI surface.** A server-side terminal
+  backend exists (workspace-confined, session-capped), but nothing in the TUI,
+  CLI, or MCP reaches it today; it is authenticated-API-only.
+
+### Rough edges — reports welcome
+
 - **Malformed OpenCode profiles can prevent startup.** Use `doctor` and logs;
   startup errors are not surfaced well in the TUI.
 - **Registered-but-never-started rename can fail.** Rename moves the old data
@@ -1356,24 +1415,13 @@ Things already understood about the current V1 surface:
   pending `git init required`; the current handler can otherwise initialize and
   run an unintended directory.
 - **The `?` overlay is abbreviated.** It does not currently list every detail
-  tab or all DiffView controls. Use §22 for the complete contextual reference.
-- **Branches accumulate deliberately.** Integration, discard, delete, and
-  orphan cleanup keep `board/*` branches for salvage. Clean orphan worktrees are
-  swept automatically; dirty ones require explicit Settings cleanup.
-- **Watchdog is conservative.** It waits the configured no-progress window and
-  defers around permissions/reconnect uncertainty before spending its two-retry
-  budget.
+  tab or all DiffView controls. Use [§22](#22-contextual-key-reference) for the
+  complete contextual reference.
 - **Claude Code abort is best-effort.** Its background adapter does not provide
   a fully reliable stop; Abort may record an error instead.
 - **Non-Claude ACP harnesses are experimental.** Codex, Gemini, Hermes, Pi
   Coding Agent, and Cursor are discovered and wired but not verified end to
   end. Permission-mode validation is still shaped around Claude's mode set.
-- **Container isolation is a placeholder.** It appears as a disabled concept
-  but has no runtime or permissions implementation.
-- **The global archive is read-only in the TUI.** There is no TUI unarchive or
-  per-record purge workflow.
-- **MCP is intentionally narrower than the authenticated API.** See §17 for
-  unavailable task-edit/archive/discard/per-file/orphan operations.
 
 Nested provider model IDs such as `openrouter/anthropic/claude-*` are supported;
 they are no longer a known limitation.
@@ -1384,7 +1432,8 @@ The flows most worth exercising, roughly in order:
 
 1. **Fresh install** — clone, install, build, link, register, start, doctor, and
    attach on a machine the project has not touched.
-2. **First worktree task** — follow §4, verify the double-run confirmation,
+2. **First worktree task** — follow [§4](#4-your-first-task-in-five-minutes),
+   verify the double-run confirmation,
    detail tabs, diff, conditional integration confirmation, Done attribution,
    removed worktree, and retained branch.
 3. **Card configuration** — create/edit agent and manual cards; exercise model
@@ -1420,7 +1469,9 @@ npm run test:integration
 npm run build:app
 ```
 
-Report what you did, expected, and observed. Include the instance name,
+File reports as GitHub issues on the repository (Bug report or Tester
+feedback): <https://github.com/johnnyvincentvitale/OpenBoard/issues>. Report
+what you did, expected, and observed. Include the instance name,
 OpenBoard build/commit, harness/provider/model, card state, task ID, relevant
 Handoff/Attempts/Event evidence, and the smallest useful scrubbed log excerpt.
 State whether integration tests ran or self-skipped. Never paste API tokens,
@@ -1465,6 +1516,8 @@ worktree state.
 | MCP tools target the wrong board | MCP selection and visible TUI differ | Stop mutations; run `current_instance`, reselect, then prove with `openboard_status`, tasks, and agents. |
 | `add_tasks` failed halfway | Earlier cards were already created | Re-list and reconcile returned/title-prefixed cards before retrying. |
 | Archived card is missing from board | Archive hides active rows | Press `A`, clear search/filters, and inspect the correct source instance. |
+| Board shows only "OpenBoard needs more room" | Terminal is below the minimum supported size | Enlarge the terminal window; the board renders once it fits. `q` quits. |
+| TUI asks for a workspace at launch | Self-owned launch found no instances and no workspace | Enter the intended repository path, or quit and launch with `BOARD_WORKSPACE` or a named instance. |
 
 ## 22. Contextual key reference
 
@@ -1497,8 +1550,10 @@ worktree state.
 | `A` | Global archive |
 | `?` | In-app help overlay |
 | `q` | Quit |
+| `esc` | Clear a pending confirmation |
 
-`Ctrl+C` shuts down from any surface.
+`Ctrl+C` shuts down from any surface. Uppercase `E` and `F` behave like `e`
+and `f`; in the wizard, `B` behaves like `b`.
 
 After `m`, choose a lane with `↑`/`↓` or `1`–`4`, then press `Enter`.
 Moving to Done requires a second `Enter` and records acceptance; `esc` cancels.
@@ -1546,9 +1601,12 @@ Moving to Done requires a second `Enter` and records acceptance; `esc` cancels.
 | `f` | Return to live tail |
 | `Tab`/`Shift+Tab` | Next/previous code block |
 | `c` | Copy complete selected code block |
-| `y`/`N` | Allow once / deny permission for followed card |
+| `y`/`N` | Allow once / deny permission for the open chat card |
 | `u` | Refresh board/task state |
 | `b`/`esc`/`q` | Return to board |
+
+Bracketed paste is supported in the Session Chat composer, the blocked-answer
+composer, wizard text fields, and the workspace-setup screen.
 
 ### Archive
 
@@ -1592,13 +1650,15 @@ matter mainly for raw/dev launches, deliberate overrides, or troubleshooting.
 | `OPENCODE_PORT` | Legacy/fallback spawned OpenCode port when `OPENBOARD_OPENCODE_PORT` is unset. |
 | `OPENCODE_BASE_URL` | Connect to an existing OpenCode server instead of selecting spawn mode implicitly. |
 | `OPENCODE_MANAGE_PROCESS` | Explicitly control whether OpenBoard owns the configured OpenCode process. |
-| `OPENCODE_HOSTNAME` | Bind hostname used by the board and spawned OpenCode server; keep the loopback default. |
+| `OPENCODE_HOSTNAME` | Bind hostname used by the board and spawned OpenCode server; keep the loopback default. Named-instance health probes always target `127.0.0.1`, so a non-loopback hostname also breaks `list`/`status` health checks. |
+| `OPENCODE_HEALTHCHECK_ATTEMPTS`, `OPENCODE_HEALTHCHECK_TIMEOUT_MS`, `OPENCODE_HEALTHCHECK_DELAY_MS` | Tune spawned-OpenCode health probing: attempt count, per-attempt timeout, and retry delay. |
 | `OPENBOARD_API_TOKEN` | Explicit bearer token for raw/manual clients. Named CLI/TUI/MCP injection is preferred. |
 | `OPENBOARD_ALLOW_EXTERNAL_DIRECTORIES` | Process-wide workspace-boundary override (`true`/`1`). Unsafe for shared/general instances. |
 | `OPENBOARD_WATCHDOG_MS` | No-progress threshold; default `600000`, `0` disables. |
 | `OPENBOARD_PERMISSION_GRACE_MS` | Permission answer window; default `60000`. |
 | `OPENBOARD_EDITOR` | Editor command template supporting `{file}` and `{line}`. |
 | `VISUAL`, `EDITOR` | Editor fallback order after `OPENBOARD_EDITOR`. |
+| `OPENBOARD_TUI_SAFE` | Force the TUI's color-safe rendering mode. |
 | ACP command overrides | `OPENBOARD_CLAUDE_ACP_COMMAND`, `OPENBOARD_CODEX_ACP_COMMAND`, `OPENBOARD_GEMINI_ACP_COMMAND`, `OPENBOARD_HERMES_ACP_COMMAND`, `OPENBOARD_PI_ACP_COMMAND`, `OPENBOARD_CURSOR_ACP_COMMAND`; Cursor also accepts `OPENBOARD_CURSOR_ACP_MCP_COMMAND`. |
 | `OPENCODE_BOARD_URL` | Advanced/manual board URL for MCP or external clients. Named selection is safer. |
 | `OPENBOARD_ARCHIVE_DB` | Override the global archive database used by both server writes and TUI reads; both processes must resolve the same path. |
@@ -1618,5 +1678,48 @@ matter mainly for raw/dev launches, deliberate overrides, or troubleshooting.
 | Managed task worktrees | Normally `<repo-parent>/.opencode-board-worktrees/<repo>/<task-id>` when admitted; otherwise `<workspace>/.opencode-board-worktrees/<repo>/<task-id>` |
 | OpenCode agent profiles | Usually `~/.config/opencode/agent/<name>.md` or `opencode.jsonc` |
 
+Raw launches that leave `OPENBOARD_DB` unset fall back to the legacy pair
+`board-tasks.sqlite` (task store) and `board.sqlite` (column store) in the
+working directory.
+
 Never commit `dist/`, `node_modules/`, `.env*`, `*.sqlite*`, `*.log`,
 `.opencode-board-worktrees/`, `.claude/worktrees/`, or `.DS_Store`.
+
+## 24. Glossary
+
+- **ACP (Agent Client Protocol)** — the protocol OpenBoard uses to drive
+  non-OpenCode harnesses (Claude Code, Codex, Gemini, Hermes, Pi Coding Agent,
+  Cursor).
+- **Admission** — the server-side checks a request must pass before OpenBoard
+  acts: workspace boundary, task/session identity, and current-state matching.
+- **Base checkout** — the repository checkout a worktree card branched from;
+  its before/after state feeds escape detection.
+- **Blocked** — a structured incomplete report carrying a question or
+  unresolved dependency; distinct from a generic error and from a permission
+  ask.
+- **Card / task** — the same durable board object; "card" emphasizes the TUI
+  representation, "task" the stored record.
+- **Cockpit / orchestrator** — a coding-agent session that drives the board
+  through MCP while you supervise.
+- **Completion source** — who vouched for Review: `reported` (agent handoff),
+  `idle-fallback` (session went idle; Unconfirmed), or `watchdog`
+  (system-authored block).
+- **Dominant state** — the single most decision-relevant state the board
+  surfaces when column, run state, pending decisions, and completion overlap
+  (precedence in [§10](#10-card-lifecycle-and-operator-decisions)).
+- **Escape detection** — comparing the base checkout before and after an
+  isolated run to catch writes that landed outside the task worktree.
+- **Handoff** — the structured completion report: summary, changed files,
+  verification commands/results, residual risk.
+- **Harness** — the agent runtime that executes a card: OpenCode, or an ACP
+  adapter such as Claude Code.
+- **MCP (Model Context Protocol)** — the tool protocol orchestrators use to
+  control the board (`openboard mcp`).
+- **Session** — one live agent run dispatched from a card; Session Chat
+  continues it, Retry resumes or replaces it.
+- **SSE (server-sent events)** — the one-way HTTP streams the TUI and clients
+  use for live board and session activity.
+- **Workspace** — the admission-boundary directory registered for an instance;
+  task directories must normally live inside it.
+- **Worktree isolation** — a per-card `git worktree` on a `board/<taskId>`
+  branch so concurrent cards never share a checkout.
