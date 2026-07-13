@@ -164,10 +164,11 @@ fields, and **`esc`** cancels the whole wizard; `b` steps back from selector
 fields (in text fields it just types `b` — see
 [§22](#22-contextual-key-reference)). Nothing is created until Confirm.
 
-1. **Identity.** Leave **`CARD TYPE`** on `agent`. Set **`TITLE`**, write the
-   agent's work order in **`PROMPT`**, and point **`DIR`** at that scratch Git
-   repo—or one of its descendant directories. Paths outside the configured
-   workspace are rejected.
+1. **Identity.** 
+Leave **`CARD TYPE`** on `agent`. 
+Set **`TITLE`**, 
+Write the agent's work order in **`PROMPT`**,  
+Point **`DIR`** at that scratch Git repo—or one of its descendant directories. Paths outside the configured workspace are rejected.
 2. **Harness & Model.** Leave **`TASK TYPE`** on `none` and **`HARNESS`** on
    OpenCode for this first run. `Use Agent Profile Default` lets the next
    screen's profile choose the model. Choosing a provider unlocks a
