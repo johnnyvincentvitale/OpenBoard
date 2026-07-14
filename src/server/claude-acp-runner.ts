@@ -9,7 +9,7 @@ import type {
   ClaudeCodeRunnerDeps,
   ClaudeCodeRunnerLike,
   ClaudeCodeStatus,
-} from "./claude-code-runner";
+} from "./acp-runner";
 import { completionHandoffGuidance } from "./completion-contract";
 import { createPermissionBroker, PermissionActionUnsupportedError, type PermissionAskEvent, type PermissionBroker, type PermissionBrokerClock, type RespondOutcome } from "./permission-broker";
 import type { SessionActivityEventInput } from "./session-activity";

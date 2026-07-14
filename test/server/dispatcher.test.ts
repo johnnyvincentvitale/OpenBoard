@@ -9,7 +9,7 @@ import { TaskDispatcher } from "../../src/server/dispatcher";
 import type { PermissionAskEvent } from "../../src/server/permission-broker";
 import { SessionActivityCollector } from "../../src/server/session-activity";
 import type { SessionActivityFrame } from "../../src/shared";
-import type { ClaudeCodeRunnerLike } from "../../src/server/claude-code-runner";
+import type { ClaudeCodeRunnerLike } from "../../src/server/acp-runner";
 import { cleanupTestWorkspace, setupTestWorkspace } from "./test-workspace";
 
 async function* makeAsyncGenerator<T>(items: T[]): AsyncGenerator<T> {

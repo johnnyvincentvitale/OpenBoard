@@ -24,7 +24,7 @@ import { eventLiveState, eventSessionId } from "./events/session-status";
 import { createPermissionResponderPool, type PermissionResponderPool } from "./permission-responder";
 import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, GeminiAcpRunner, HermesAcpRunner, PiAcpRunner } from "./claude-acp-runner";
-import type { ClaudeCodeRunnerLike } from "./claude-code-runner";
+import type { ClaudeCodeRunnerLike } from "./acp-runner";
 import { completionHandoffGuidance } from "./completion-contract";
 import { loadPermissionConfig, loadWatchdogConfig, type WatchdogConfig } from "./config";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
