@@ -94,9 +94,13 @@ Translate the score into advice — advice, not board actions:
   guardrails.
 - **L1–L2 with Tier 1 gaps →** advise against unattended feature work in the
   shared tree. Recommend worktree isolation at minimum, and report the
-  readiness fixes to close first.
-- **No self-verifiable test/build →** advise blocking the dispatch and say
-  why: the agent cannot check its own work; a green card would be meaningless.
+  readiness fixes to close first. Read-only lanes stay viable below L3:
+  research/audit/synthesis cards can run in-place with `edit` and `bash` both
+  `deny` (write-fenced, autoRun-eligible), and a worktree card can set bash
+  policy `ask` — interactive-strict, every shell call operator-gated.
+- **No self-verifiable test/build →** advise blocking write dispatches and
+  say why: the agent cannot check its own work; a green card would be
+  meaningless. Read-only research/audit dispatches remain viable.
 
 ## Report Format
 

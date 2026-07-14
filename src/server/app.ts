@@ -24,6 +24,7 @@ import { registerTaskCompareRoutes } from "./routes/task-compare";
 import { registerTaskContextRoutes } from "./routes/task-context";
 import { registerPermissionRoutes } from "./routes/permission";
 import { registerSessionEventsRoutes } from "./routes/session-events";
+import { registerPermissionSettingsRoutes } from "./routes/permission-settings";
 import type { ChainAdvancer } from "./chain-advancer";
 import type { SessionActivityCollector } from "./session-activity";
 
@@ -109,6 +110,7 @@ export function createApp(deps: AppDeps): Hono {
   registerTaskCompareRoutes(app, { store: deps.taskStore });
   registerTaskContextRoutes(app, { store: deps.taskStore });
   registerPermissionRoutes(app, { store: deps.taskStore, dispatcher: deps.dispatcher });
+  registerPermissionSettingsRoutes(app, { dispatcher: deps.dispatcher });
   registerSessionEventsRoutes(app, { store: deps.taskStore, client: deps.client, activity: deps.activity });
 
   // Safety net — route modules already translate their own AdapterErrors, this catches escapes.

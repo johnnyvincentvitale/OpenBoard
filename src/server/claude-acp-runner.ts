@@ -13,6 +13,7 @@ import type {
 import { completionHandoffGuidance } from "./completion-contract";
 import { createPermissionBroker, PermissionActionUnsupportedError, type PermissionAskEvent, type PermissionBroker, type PermissionBrokerClock, type RespondOutcome } from "./permission-broker";
 import type { SessionActivityEventInput } from "./session-activity";
+import { DEFAULT_PERMISSION_TIMEOUT_MS } from "../shared/permission-settings";
 
 type Spawn = typeof nodeSpawn;
 type SpawnedProcess = ReturnType<Spawn>;
@@ -75,7 +76,7 @@ export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
   commandArgs?: string[];
   service?: AcpRunnerServiceConfig;
   mcpCommand?: string;
-  permissionGraceMs?: number;
+  permissionGraceMs?: number | (() => number);
   permissionClock?: PermissionBrokerClock;
   /** Board-wide broker. When omitted, this runner owns a private broker. */
   permissionBroker?: PermissionBroker;
@@ -84,7 +85,6 @@ export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
   onRunTerminal?: (taskId: string, runStartedAt: number, status: "complete" | "error" | "aborted") => void;
 }
 
-const ACP_PERMISSION_GRACE_MS = 60_000;
 const SUMMARY_MAX = 240;
 const READ_TOOL_NAMES = new Set(["Read", "LS", "Glob", "Grep", "TodoRead", "TaskList", "TaskGet"]);
 const OPENBOARD_REPORT_TOOLS = new Set([
@@ -484,7 +484,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   private readonly commandArgs: string[];
   private readonly mcpCommand: string;
   private readonly permissionMode: AcpPermissionMode;
-  private readonly permissionGraceMs: number;
+  private readonly permissionGraceMs: () => number;
   private readonly permissionNow: () => number;
   private readonly service: AcpRunnerServiceConfig;
   private readonly broker: PermissionBroker;
@@ -506,7 +506,10 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     this.mcpCommand = (deps.mcpCommand ?? (this.service.mcpCommandEnv ? this.env[this.service.mcpCommandEnv]?.trim() : undefined)) || "openboard";
     const envPermissionMode = this.env.OPENBOARD_CLAUDE_PERMISSION_MODE?.trim();
     this.permissionMode = (deps.permissionMode as AcpPermissionMode | undefined) ?? (envPermissionMode as AcpPermissionMode | undefined) ?? DEFAULT_ACP_PERMISSION_MODE;
-    this.permissionGraceMs = deps.permissionGraceMs ?? ACP_PERMISSION_GRACE_MS;
+    const configuredPermissionGraceMs = deps.permissionGraceMs;
+    this.permissionGraceMs = typeof configuredPermissionGraceMs === "function"
+      ? configuredPermissionGraceMs
+      : () => configuredPermissionGraceMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
     this.permissionNow = deps.permissionClock?.now ?? (() => Date.now());
     this.ownsBroker = deps.permissionBroker === undefined;
     this.broker = deps.permissionBroker ?? createPermissionBroker({ clock: deps.permissionClock, onEvent: deps.onPermissionEvent });
@@ -872,7 +875,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       // Policy already allows this request (e.g. an edit inside the task's cwd) — reply
       // immediately, matching pre-FR08 base behavior. Only requests the write-fence policy
       // would otherwise reject are held for the operator broker below, so a normal in-cwd
-      // session is not stalled 60s per tool call waiting on an ask nobody needs to answer.
+      // session is not stalled for the configured operator window per tool call.
       await this.writePermissionResponse(state, id, permission, "allow_once");
       return;
     }
@@ -893,7 +896,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       tool: toolName(permission.toolCall) ?? permission.toolCall.title,
       summary: summarizePermission(permission),
       patterns: summarizeLocations(permission),
-      deadline: this.permissionNow() + Math.max(0, this.permissionGraceMs),
+      deadline: this.permissionNow() + Math.max(0, this.permissionGraceMs()),
       timeoutDecision: "deny",
       reopenOnReplyFailure: true,
       replyToProvider: async (decision) => this.writePermissionResponse(state, id, permission, decision),

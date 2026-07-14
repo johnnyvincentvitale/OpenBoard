@@ -53,6 +53,16 @@ describe("SqliteTaskStore — isolation fields + settings", () => {
     store.close();
   });
 
+  it("persists the instance permission timeout override", () => {
+    const store = new SqliteTaskStore(":memory:");
+    expect(store.getPermissionGraceMs()).toBeNull();
+
+    store.setPermissionGraceMs(450_000);
+
+    expect(store.getPermissionGraceMs()).toBe(450_000);
+    store.close();
+  });
+
   it("migrates a pre-BoardV3 task table in place with data intact", () => {
     // Simulate an older DB: a task table without the new columns.
     const db = new Database(":memory:");

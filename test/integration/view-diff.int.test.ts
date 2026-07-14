@@ -36,6 +36,8 @@ function makeRepo(name: string): { repoDir: string; baseCommit: string } {
 
 function makeDispatcher(store: SqliteTaskStore): Dispatcher {
   return {
+    getPermissionGraceMs: () => store.getPermissionGraceMs() ?? 300_000,
+    setPermissionGraceMs: (value) => store.setPermissionGraceMs(value),
     run: vi.fn(async (taskId: string) => store.get(taskId)!),
     retry: vi.fn(async (taskId: string) => store.get(taskId)!),
     abort: vi.fn(async () => undefined),

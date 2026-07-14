@@ -102,7 +102,10 @@ review-only and deny edits in both prompt and permission config.
    which real YAML rejects; that gap has shipped a broken profile. Use:
 
    ```sh
-   # Node (js-yaml is in the OpenBoard repo's dependency tree):
+   # js-yaml is NOT an OpenBoard dependency — install it into the staging
+   # area first; do not expect require() to find it from the repo:
+   npm install --prefix "$stage" --no-save js-yaml >/dev/null
+   NODE_PATH="$stage/node_modules" \
    node -e 'const y=require("js-yaml"),fs=require("fs");
      const m=fs.readFileSync(process.argv[1],"utf8").match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
      if(!m) throw new Error("no single frontmatter block");
@@ -119,8 +122,10 @@ review-only and deny edits in both prompt and permission config.
    A missing parser is a blocker, not a license to approximate.
 
 4. **Validate model/provider.** Check `opencode models` /
-   `opencode models <provider>` when possible. If model auth is uncertain,
-   name a fallback in the run plan before cards are created.
+   `opencode models <provider>` when possible. Multi-segment ids
+   (`openrouter/vendor/model`) are valid — the board splits the provider on
+   the first slash only. If model auth is uncertain, name a fallback in the
+   run plan before cards are created.
 
 5. **Validate OpenCode parsing away from live config.** Copy the current
    OpenCode config into a temporary config home, add the staged profile, then:
@@ -142,14 +147,18 @@ review-only and deny edits in both prompt and permission config.
 
 7. **Restart the selected control surface and prove the live roster.**
    OpenCode config is not hot-reloaded. Restart the exact OpenCode server path
-   the selected OpenBoard surface uses — a named instance: stop/start that
-   instance (or a product `restart` command); an explicit `OPENCODE_BASE_URL`
-   board: OpenBoard does not own the process, so restart the external
-   `opencode serve` or ask the operator. Then prove:
+   the selected OpenBoard surface uses — a named instance: `openboard restart
+   <name>` (stops, starts, waits for health, flags unsafe RUNNING cards); an
+   explicit `OPENCODE_BASE_URL` board: OpenBoard does not own the process, so
+   restart the external `opencode serve` or ask the operator. Then prove the
+   roster with `openboard agents <name>` (token injected) or MCP
+   `list_agents`; for raw curl remember every route except `/api/health`
+   needs the board token:
 
    ```sh
    curl -s "$OPENCODE_BOARD_URL/api/health"
-   curl -s "$OPENCODE_BOARD_URL/api/agents" | jq -e \
+   curl -s -H "Authorization: Bearer $OPENBOARD_API_TOKEN" \
+     "$OPENCODE_BOARD_URL/api/agents" | jq -e \
      '.[] | select(.id=="<name>") | select(.mode=="primary" and .model.id=="<model-id>")'
    ```
 
@@ -157,7 +166,9 @@ review-only and deny edits in both prompt and permission config.
    `mode` AND `model` from the Profile Manifest. A profile present by name but
    with a null/missing model means OpenCode dropped its frontmatter (most
    often an unquoted colon in `description`) — that is a validation FAILURE,
-   not a display quirk; fix the file and restart again. This roster proof is
+   not a display quirk; fix the file and restart again. The TUI new-task
+   wizard now also blocks submission when the chosen agent has no usable
+   roster model — treat that as the same dropped-frontmatter symptom. This roster proof is
    also the task-model proof: OpenBoard copies the roster model onto each
    created task assigned to this agent unless the plan supplies an explicit
    override.
@@ -194,7 +205,8 @@ When a profile config already broke OpenCode/OpenBoard:
    `.opencode/agents/` participates in config loading.
 4. Still failing? Bisect recently edited agent files one at a time until
    `opencode agent list` starts.
-5. Restart OpenBoard/OpenCode and verify `/api/health` and `/api/agents`.
+5. Restart OpenBoard/OpenCode (`openboard restart <name>` for a named
+   instance) and verify health plus the roster (`openboard agents <name>`).
 6. Reintroduce the profile through the staged validation workflow above.
 
 ## Failure Modes

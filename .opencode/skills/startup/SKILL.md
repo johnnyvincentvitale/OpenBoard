@@ -24,8 +24,9 @@ roster in the current turn.
    sessions the board dispatches.
 2. Prove board state (Connect, below) and bind MCP (MCP Readiness, below)
    before dispatching or judging anything.
-3. Probe ACP harness availability with `GET /api/acp-config` (server-cached
-   ~30s; `/api/acp-models` is the models-only projection). For each of the six
+3. Probe ACP harness availability with `openboard harnesses <name>`, or
+   `GET /api/acp-config` with the board token (server-cached ~30s;
+   `/api/acp-models` is the models-only projection). For each of the six
    ACP harnesses — `claude-code`, `codex`, `gemini-acp`, `hermes`,
    `pi-coding-agent`, `cursor-acp` — record whether `available` is true and
    the reported `modes`/`models`. A harness with `available: false` (or an
@@ -66,7 +67,11 @@ confirmation unless the user already approved a multi-step run this turn.
    legacy single-board fallback after confirming there is no named-instance
    selection to make. If nothing can be selected safely, stop and ask instead
    of probing a default port.
-3. Probe the selected adapter: `GET /api/agents` and `GET /api/tasks`.
+3. Probe the selected adapter. Every `/api/*` route except `/api/health`
+   requires the board token, so probe through MCP (`list_agents`,
+   `list_tasks`), the CLI (`openboard agents|tasks|doctor <name>`), or curl
+   with `Authorization: Bearer $OPENBOARD_API_TOKEN`. `openboard doctor
+   <name>` is the one-shot health/roster/ACP/task/worktree check.
 4. Confirm the TUI and API match: the task list includes the cards the user
    can see, or tell the user the endpoint is a different board/store.
 5. Startup side effect: bringing up a named instance runs a best-effort
@@ -97,6 +102,14 @@ Tools (a guarded control surface over the task API):
 - `sync_task` / `integrate_task` — worktree merges; integrate requires `confirmReviewed: true`.
 - `comment_task` / `add_note`, `task_events` — scoped comments and durable task events.
 - `task_diff` — structured Review- or Done-card diff without shelling into worktrees.
+- `answer_blocked_task` — stale-safe answer + retry for a blocked card's
+  `needsInput` question.
+- `respond_permission` — operator `allow_once`/`deny` on a pending permission ask.
+- `send_session_message` — queue or interrupt an operator message into a
+  task's live session.
+- `tail_session` — bounded tail snapshot of a task's session activity.
+- `task_context` / `task_compare` — resolved lineage handoffs and base→target
+  evidence comparison.
 
 Verify the MCP client points at the board the user is viewing: `list_tasks`
 must match the visible cards and the selected instance's `GET /api/tasks`. If
@@ -117,9 +130,11 @@ Hand the next skill these facts:
   reported `available: false` or was not probed.
 - Existing relevant card IDs and columns.
 - Any mismatch between visible TUI, API, and MCP.
-- Profile/roster restart target: the exact instance name to stop/start when
-  profile changes must load; for explicit `OPENCODE_BASE_URL` boards, OpenBoard
-  does not own the OpenCode process — the operator restarts it.
+- Profile/roster restart target: the exact instance name to restart when
+  profile changes must load (`openboard restart <name>` stops, starts, waits
+  for health, and flags unsafe RUNNING cards); for explicit
+  `OPENCODE_BASE_URL` boards, OpenBoard does not own the OpenCode process —
+  the operator restarts it.
 
 Then ask whether to move to repository readiness. Do not proceed without the
 user's confirmation unless they already requested the full sequence.

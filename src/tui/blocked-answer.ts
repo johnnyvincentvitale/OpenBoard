@@ -20,7 +20,7 @@ export function currentBlockedReport(task: Pick<Task, "id" | "completion"> | und
 
 export function createBlockedAnswerDraft(task: Pick<Task, "id" | "completion">, existing?: BlockedAnswerDraft): BlockedAnswerDraft | undefined {
   const report = currentBlockedReport(task);
-  if (!report) return undefined;
+  if (!report || !task.completion?.needsInput?.trim()) return undefined;
   if (existing && existing.taskId === report.taskId && existing.blockedReportedAt === report.reportedAt) return existing;
   return { taskId: report.taskId, blockedReportedAt: report.reportedAt, text: "", submitting: false };
 }
@@ -41,8 +41,4 @@ export function lineDeleteBlockedAnswerDraft(draft: BlockedAnswerDraft): Blocked
 export function staleBlockedAnswerDraft(task: Pick<Task, "id" | "completion"> | undefined, draft: BlockedAnswerDraft | undefined): boolean {
   if (!draft) return false;
   return task?.id !== draft.taskId || task.completion?.outcome !== "blocked" || task.completion.reportedAt !== draft.blockedReportedAt;
-}
-
-export function blockedAnswerSubmitLabel(draft: BlockedAnswerDraft): "plain-retry" | "answer-blocked" {
-  return draft.text.trim() ? "answer-blocked" : "plain-retry";
 }

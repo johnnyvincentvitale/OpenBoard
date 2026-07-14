@@ -55,6 +55,8 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
   resolveOrphanWorktree: ReturnType<typeof vi.fn>;
 } {
   return {
+    getPermissionGraceMs: () => store.getPermissionGraceMs() ?? 300_000,
+    setPermissionGraceMs: (value: number) => store.setPermissionGraceMs(value),
     run: vi.fn(async (taskId: string): Promise<Task> => {
       const updated = store.update(taskId, { runState: "running", column: "in_progress" });
       if (!updated) throw new Error(`unknown task ${taskId}`);

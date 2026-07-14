@@ -7,9 +7,9 @@ the card **auto-advances To Do → In Progress → Review** as the agent runs. M
 manual until OpenCode exposes a stronger task-complete signal. It's the named-agent,
 multi-agent workflow OpenCode doesn't ship.
 
-New here? Start with the **[User Guide](GUIDE.md)** — the operating manual,
-from a fresh clone through orchestrated multi-agent runs, review, and
-recovery. This README is the compact product and technical reference.
+📖 **User Guide:** read it at **https://openboard-docs.vercel.app**, or download the single-file
+[`GUIDE.md`](https://openboard-docs.vercel.app/GUIDE.md) to hand to an agent.
+This README is the compact product and technical reference.
 
 ## Scope
 
@@ -307,7 +307,12 @@ or commit actions. To Do and In Progress cards return
 409, unknown tasks return 404, and missing or removed git evidence returns a
 readable no-git response instead of crashing.
 
-### Permission model (FR08)
+## Sessions, evidence, and recovery
+
+How running cards are permissioned, observed, chatted with, evidenced, and
+recovered — each control below is available from both the TUI and MCP.
+
+### Permission model
 
 In worktree isolation, OpenCode's `external_directory` permission is set to `ask`.
 A live auto-responder classifies each ask: known read-class requests (read, glob,
@@ -316,7 +321,11 @@ are raised to the operator through `pendingPermissions` on the task summary.
 The worktree wizard exposes an explicit BASH policy: `allow` is unattended
 compatibility (the worktree and post-run escape detector still apply, but shell
 containment is not claimed), `ask` is interactive-strict, and `deny` disables
-bash. Interactive-strict asks time out to deny and cannot be auto-run.
+bash. Interactive-strict asks wait five minutes by default, then time out to deny,
+and cannot be auto-run. Press `p` for Settings and `t` to edit the instance's
+permission timeout in seconds; the persisted value applies to future OpenCode and
+ACP asks without restarting the board. `OPENBOARD_PERMISSION_GRACE_MS` remains the
+startup fallback until an instance override is saved.
 `allow_once` grants the single request only — the permission returns to ask on the
 next matching tool call. Permission asks carry a `deadline`; an unanswered ask
 after the deadline is treated as a denial. The TUI shows harness, source, tool,
@@ -333,7 +342,7 @@ and the narrow OpenBoard completion/block reporting tools are auto-allowed in
 strict modes. OpenBoard does not use shell-string or lexical-path inspection as
 a containment boundary.
 
-### Session diagnostics (FR09)
+### Session diagnostics
 
 `tail_session` returns a bounded tail snapshot from a task's session-activity SSE
 stream — run identity, transport state (`live`/`reconnecting`/`static`), finite event
@@ -343,20 +352,23 @@ window after the snapshot to capture the terminal frame, then resolves. If the t
 does not arrive within the window the session may still be live; orchestrators should
 check the task column for completion. It is for orchestrator inspection, not continuous monitoring.
 
-### Interactive session chat (FR09B)
+### Session Chat
 
 Press `w` on a card with a session to open **Session Chat**. Assistant messages are
-streamed live, tool activity stays visible as compact rows, and `i` opens the message
-composer. `Enter` sends or queues a message on the existing session; `Ctrl+Enter`
-cancels the current prompt turn and sends the replacement after cancellation. The card
+streamed live and tool activity stays visible as compact agent rows without internal
+session-topology labels. Press `m` to compose a normal message, or `i` while a turn is
+active to compose replacement guidance. `Enter` sends the normal message or cancels the
+active prompt turn before sending an interrupt replacement. The card
 keeps its current worktree and original diff baseline. Sending from Review reopens the
 same resumable session as conversation while keeping the card and its completion evidence
-in Review. Use Retry/answer-blocked when the intent is to resume task work rather than chat.
+in Review. Use `Shift+R` Retry for an ordinary blocked card or `Shift+R` Answer for a
+**NEEDS ANSWER** card when the intent is to resume task work rather than chat.
 OpenBoard's internal completion-report tools are hidden from the conversation, and identical
 post-tool assistant echoes are collapsed into one visible reply.
-Markdown fenced code is rendered in a distinct language-labelled box. The newest block
-is selected automatically; use `Tab`/`Shift+Tab` to select another block and `c` to copy
-its complete, untruncated contents to the system clipboard.
+Markdown fenced code is rendered in a distinct language-labelled box. The newest visible
+block is selected automatically; use `Tab`/`Shift+Tab` to cycle only the code blocks in the
+current visible chat window and `c` to copy the selected block's complete, untruncated
+contents to the system clipboard.
 
 The same write path is available to orchestrators as `send_session_message`. Callers must
 provide an explicit sender, client message id, and expected session id so reconnect retries
@@ -364,7 +376,7 @@ are idempotent and stale drafts cannot land in a replacement session. OpenCode a
 Claude ACP sessions support same-session continuation. If an ACP process or provider session
 is gone, OpenBoard reports it as non-resumable rather than silently starting a new chat.
 
-### Watchdog and retry (FR10)
+### Watchdog and automatic retry
 
 `OPENBOARD_WATCHDOG_MS` (default 600000 = 10 min) controls the automatic retry
 watchdog. Set to `0` to disable. On a crashed/abandoned session the watchdog sweeps
@@ -377,7 +389,7 @@ the watchdog stamps a synthetic `blocked` completion report itself, sets
 `completionSource: "watchdog"` (distinct from `"reported"` and `"idle-fallback"`),
 and moves the card to Review for human triage.
 
-### Task evidence and lineage (FR11)
+### Task evidence and lineage
 
 `task_context` retrieves the full resolved lineage (target handoff, direct-parent
 handoffs, inherited-ancestor metadata, code-evidence candidates) without raw
@@ -390,11 +402,15 @@ cards inspect parent diffs with `task_diff` (audit findings are context, not a
 code ref), downstream cards retrieve full ancestor context with `task_context`,
 and fix cards compare their branch against the build output with `task_compare`.
 
-### Blocked cards and answer retry (FR12)
+### Blocked cards and answers
 
 A card blocking on environment/permissions (completion `outcome: "blocked"`,
 `runState: "error"`) is distinct from a generic error or a card asking for user
-input. The operator answers through `answer_blocked_task`, which carries the
+input. In the TUI, an explicit question is labeled **NEEDS ANSWER**, receives a
+stronger highlighted card treatment, and uses `Shift+R` to open **Answer Question**.
+An ordinary **BLOCKED** card uses `Shift+R` for the normal retry confirmation and
+never opens the answer composer. The operator answer path calls
+`answer_blocked_task`, which carries the
 answer as bounded retry feedback with the blocking context: the `blockedReportedAt`
 must match the current block timestamp, and only one answer may be in flight
 at a time. On admission the board emits typed events without raw answer text
@@ -402,8 +418,9 @@ and preserves the blocked evidence/baseline until the admission succeeds.
 Live-status-gated same-session resume is preferred (the blocked session sees
 its own partial work); when the blocking session is gone (watchdog, missing
 session), a fresh session starts in the same cwd with blocked context
-injected. A plain `retry_task` (without `blockedAnswer`) clears the block and
-follows generic retry semantics.
+injected. The answer composer requires a non-empty answer. A plain `retry_task`
+(without `blockedAnswer`) clears an ordinary block and follows generic retry
+semantics.
 
 Moving a blocked card to Done or integrating it requires explicit
 `blockedAcceptance` (`acceptIncomplete: true` plus the current
@@ -411,7 +428,7 @@ Moving a blocked card to Done or integrating it requires explicit
 cleans up the worktree at Review without accepting the work. This is the
 server-enforced blocked Done acceptance policy.
 
-## BoardV3 task lifecycle
+## Task lifecycle
 Beyond Run/Retry/Stop, a Task carries an explicit completion contract, optional
 parent/child dependencies, and an archive flag — all exposed on `/api/tasks`.
 

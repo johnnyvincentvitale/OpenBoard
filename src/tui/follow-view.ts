@@ -111,11 +111,6 @@ export function followVisibleEvents(state: FollowViewState, windowSize: number):
   return state.events.slice(start, start + size);
 }
 
-export function descendantSessionLabel(event: Pick<SessionActivityEvent, "sessionId" | "rootSessionId" | "parentSessionId">): string {
-  if (event.sessionId === event.rootSessionId) return "root";
-  return event.parentSessionId ? `child of ${event.parentSessionId.slice(0, 8)}` : "descendant";
-}
-
 function trimFollowEvents(state: FollowViewState): FollowViewState {
   if (state.events.length <= state.maxEvents) return state;
   return { ...state, events: state.events.slice(-state.maxEvents) };

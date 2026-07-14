@@ -398,6 +398,37 @@ describe("ClaudeAcpRunner", () => {
     expect(await harness.nextMessage()).toMatchObject({ result: { outcome: { optionId: "reject" } } });
   });
 
+  it("reads the live timeout supplier when each new ACP ask is raised", async () => {
+    const clock = manualClock();
+    const harness = makeAcpHarness();
+    let graceMs = 10;
+    const { runner } = await launchRunner(harness, { ...task, permissionMode: "manual" }, {
+      permissionClock: clock,
+      permissionGraceMs: () => graceMs,
+    });
+
+    harness.requestPermission({
+      sessionId: "acp-session-1",
+      toolCall: { kind: "edit", rawInput: { file_path: "/outside/one.ts" } },
+      options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }],
+    }, 99);
+    await expectNoMessage(harness);
+    const first = runner.listPendingPermissions("openboard-task_1-123")[0];
+    expect(first.deadline - first.raisedAt).toBe(10);
+    await runner.respondPermission("openboard-task_1-123", { askId: first.id, action: "deny", answeredBy: "Operator" });
+    await harness.nextMessage();
+
+    graceMs = 25;
+    harness.requestPermission({
+      sessionId: "acp-session-1",
+      toolCall: { kind: "edit", rawInput: { file_path: "/outside/two.ts" } },
+      options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }],
+    }, 100);
+    await expectNoMessage(harness);
+    const second = runner.listPendingPermissions("openboard-task_1-123")[0];
+    expect(second.deadline - second.raisedAt).toBe(25);
+  });
+
   it("keeps a failed operator reply pending until the still-live deadline applies policy, without looping", async () => {
     const clock = manualClock();
     const harness = makeAcpHarness();

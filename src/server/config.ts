@@ -13,6 +13,7 @@
 import { createServer } from "node:net";
 import { format, parse } from "node:path";
 import { OPENCODE_DEFAULTS, BOARD_SERVER_DEFAULTS } from "../shared/opencode-defaults";
+import { DEFAULT_PERMISSION_TIMEOUT_MS } from "../shared/permission-settings";
 import type { InstanceConfig } from "../shared/task";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace } from "./workspace";
 
@@ -65,7 +66,7 @@ export const WATCHDOG_DEFAULTS: WatchdogConfig = {
 };
 
 export const PERMISSION_DEFAULTS: PermissionConfig = {
-  graceMs: 60_000,
+  graceMs: DEFAULT_PERMISSION_TIMEOUT_MS,
 };
 
 const WATCHDOG_TIMEOUT_MAX_MS = 24 * 60 * 60 * 1000;

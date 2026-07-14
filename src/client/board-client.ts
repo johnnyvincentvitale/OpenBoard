@@ -21,6 +21,8 @@ import type {
   BlockedAcceptance,
   BlockedAnswerContext,
   PendingPermissionAsk,
+  PermissionSettings,
+  UpdatePermissionSettingsInput,
   RespondPermissionInput,
   RosterAgent,
   RosterProvider,
@@ -291,6 +293,8 @@ export interface BoardClient {
   sendSessionMessage(id: string, input: SessionMessageInput): Promise<SessionMessageReceipt>;
   getHealth(): Promise<BoardHealth>;
   getDiagnostics(): Promise<BoardDiagnostics>;
+  getPermissionSettings(): Promise<PermissionSettings>;
+  updatePermissionSettings(input: UpdatePermissionSettingsInput): Promise<PermissionSettings>;
 }
 
 interface ResolvedOptions {
@@ -479,6 +483,12 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       postJson<SessionMessageReceipt>(resolved, buildTaskPath.sessionMessages(id), input),
     getHealth: () => requestJson<BoardHealth>(resolved, "/api/health", { method: "GET" }),
     getDiagnostics: () => requestJson<BoardDiagnostics>(resolved, "/api/diagnostics", { method: "GET" }),
+    getPermissionSettings: () => requestJson<PermissionSettings>(resolved, "/api/settings/permissions", { method: "GET" }),
+    updatePermissionSettings: (input) => requestJson<PermissionSettings>(resolved, "/api/settings/permissions", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }),
   };
 }
 

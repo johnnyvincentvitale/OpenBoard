@@ -377,7 +377,7 @@ describe("TUI label cleanup", () => {
     const text = textOf(app);
     expect(text).toContain("v diff · a archive · d delete");
     expect(text).toContain("m move · ↵ details");
-    expect(text).not.toContain("r run · R retry");
+    expect(text).not.toContain("r run · Shift+R retry");
     expect(text).not.toContain("s sync");
   });
 
@@ -391,7 +391,7 @@ describe("TUI label cleanup", () => {
     const text = textOf(app);
     expect(text).toContain("r run · e edit · d delete");
     expect(text).toContain("m move · ↵ details");
-    expect(text).not.toContain("R retry");
+    expect(text).not.toContain("Shift+R retry");
     expect(text).not.toContain("s sync");
     expect(text).not.toContain("i integrate");
   });
@@ -419,7 +419,7 @@ describe("TUI label cleanup", () => {
     expect(text).toContain("k abort · m move");
     expect(text).toContain("↵ details");
     expect(text).not.toContain("r run");
-    expect(text).not.toContain("R retry");
+    expect(text).not.toContain("Shift+R retry");
     expect(text).not.toContain("a archive");
     expect(text).not.toContain("d delete");
   });
@@ -432,7 +432,7 @@ describe("TUI label cleanup", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("R retry · d delete");
+    expect(text).toContain("Shift+R retry · d delete");
     expect(text).toContain("m move · ↵ details");
     expect(text).not.toContain("r run");
     expect(text).not.toContain("k abort");
@@ -451,7 +451,7 @@ describe("TUI label cleanup", () => {
     expect(text).toContain("d delete · m move · ↵ details");
     expect(text).not.toContain("s sync");
     expect(text).not.toContain("r run");
-    expect(text).not.toContain("R retry");
+    expect(text).not.toContain("Shift+R retry");
   });
 
   it("reconciles selected Review state immediately after a successful integrate result", () => {
@@ -488,7 +488,7 @@ describe("TUI label cleanup", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("v diff · R retry · i integrate");
+    expect(text).toContain("v diff · Shift+R retry · i integrate");
     expect(text).toContain("D discard");
   });
 
@@ -504,9 +504,28 @@ describe("TUI label cleanup", () => {
     }));
 
     const text = textOf(app);
-    expect(text).toContain("v diff · R retry");
+    expect(text).toContain("v diff · Shift+R retry");
     expect(text).toContain("x done");
     expect(text).not.toContain("i integrate");
+  });
+
+  it("Shift+R sends an ordinary blocked card directly to retry confirmation", async () => {
+    const blocked = {
+      ...task("review-card", "review"),
+      runState: "error" as const,
+      completionSource: "reported" as const,
+      completion: { outcome: "blocked" as const, summary: "Cannot continue", changedFiles: [], verification: [], residualRisk: "Environment unavailable", reportedAt: 123 },
+    };
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [blocked],
+      selectedTaskId: blocked.id,
+    });
+
+    await handleKeypress({ name: "R", sequence: "R" } as any, s, actions());
+
+    expect(s.blockedAnswer).toBeUndefined();
+    expect(s.pendingConfirmation).toEqual({ action: "retry", taskId: blocked.id });
   });
 
   it("surfaces explicit blocked questions on card, selected details, and Review lane count", () => {
@@ -534,7 +553,25 @@ describe("TUI label cleanup", () => {
     expect(text).toContain("▲ REVIEW · BLOCKED · NEEDS ANSWER");
     expect(text).toContain("QUESTION");
     expect(text).toContain("Which endpoint should I use?");
+    expect(text).toContain("v diff · Shift+R answer");
     expect(text).not.toContain("NEEDS USER INPUT");
+
+    const questionCard = boxesContaining(app, "review-card")
+      .find((node) => node.props?.border === true && node.props?.height === 8);
+    const ordinaryApp = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [{
+        ...task("review-card", "review"),
+        runState: "error",
+        completionSource: "reported" as const,
+        completion: { outcome: "blocked" as const, summary: "Blocked", changedFiles: [], verification: [], residualRisk: "No question", reportedAt: 123 },
+      }],
+      selectedTaskId: "review-card",
+    }));
+    const ordinaryCard = boxesContaining(ordinaryApp, "review-card")
+      .find((node) => node.props?.border === true && node.props?.height === 8);
+    expect(questionCard?.props.backgroundColor).not.toBe(ordinaryCard?.props.backgroundColor);
+    expect(questionCard?.props.borderColor).not.toBe(ordinaryCard?.props.borderColor);
   });
 
   it("budgets the Review NEEDS ANSWER row before windowing lane cards", () => {
@@ -609,12 +646,12 @@ describe("TUI label cleanup", () => {
     s.selectedTaskId = blockedB.id;
 
     const text = textOf(renderApp(fakeUi(), s));
-    expect(text).toContain("Answer Blocked Task · Blocked A");
+    expect(text).toContain("Answer Question · Blocked A");
     expect(text).toContain("Question A?");
     expect(text).not.toContain("Question B?");
   });
 
-  it("blocked-answer submit and empty retry target the draft task, not the current selection", async () => {
+  it("question answers target the draft task and empty answers never fall back to retry", async () => {
     const blockedA = {
       ...task("blocked-a", "review"),
       sessionId: "ses-a",
@@ -627,7 +664,6 @@ describe("TUI label cleanup", () => {
       completion: { outcome: "blocked" as const, summary: "Need B", changedFiles: [], verification: [], residualRisk: "Fallback B", needsInput: "Question B?", reportedAt: 123 },
     };
     const answerBlockedTask = vi.fn(async (id: string) => ({ ...blockedA, id, sessionId: "ses-a", runState: "running" as const, blockedAnswerResumeDecision: { mode: "same-session" as const, evidence: "messages" as const } }));
-    const retryTask = vi.fn(async (id: string) => ({ ...blockedA, id, runState: "running" as const }));
     const s = state({ viewState: { view: "board", previousView: "launch" }, tasks: [blockedA, blockedB], selectedTaskId: blockedA.id });
 
     await handleKeypress({ name: "R", sequence: "R" } as any, s, actions());
@@ -636,15 +672,15 @@ describe("TUI label cleanup", () => {
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { answerBlockedTask } }));
 
     expect(answerBlockedTask).toHaveBeenCalledWith("blocked-a", "Use option A", { blockedReportedAt: 123, answeredBy: "User" });
-    expect(s.status).toBe("blocked answer submitted; resumed session");
+    expect(s.status).toBe("answer submitted; resumed session");
 
     s.selectedTaskId = blockedA.id;
     await handleKeypress({ name: "R", sequence: "R" } as any, s, actions());
     s.selectedTaskId = blockedB.id;
-    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions({ client: { retryTask } }));
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, actions());
 
-    expect(s.pendingConfirmation).toMatchObject({ action: "retry", taskId: "blocked-a" });
-    expect(retryTask).not.toHaveBeenCalled();
+    expect(s.blockedAnswer?.error).toBe("type an answer first");
+    expect(s.pendingConfirmation).toBeUndefined();
   });
 
   it("attempts detail tab renders projected watchdog attempt history", () => {
@@ -3407,7 +3443,7 @@ describe("TUI manual task creation", () => {
     }));
 
     expect(retryTask).not.toHaveBeenCalled();
-    expect(s.status).toBe("retry is only available for error cards or rebase-conflict Review cards");
+    expect(s.status).toBe("retry is only available for error cards, ordinary blocked cards, or rebase-conflict Review cards");
   });
 
   // Production-shaped blocked Review card: the /block route and watchdog
@@ -4730,6 +4766,7 @@ describe("TUI settings diagnostics view", () => {
         instance: { instanceName: "alpha", boardUrl: "http://127.0.0.1:4098", port: 4098, workspace: "/repo/openboard", dbPath: "/data/alpha/board.sqlite", apiTokenPresent: true },
         editor: { resolved: "code -g {file}:{line}", source: "openboard_editor", missing: false },
       },
+      permissionSettings: { timeoutSeconds: 300 },
     }));
 
     const text = textOf(app);
@@ -4744,6 +4781,44 @@ describe("TUI settings diagnostics view", () => {
     expect(text).not.toContain("/repo/.opencode-board-worktrees/task_dirty");
     expect(text).toContain("alpha");
     expect(text).toContain("present");
+    expect(text).toContain("ASK TIMEOUT");
+    expect(text).toContain("300 seconds");
+  });
+
+  it("keeps diagnostics visible when a running legacy server lacks permission settings", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "settings", previousView: "board" },
+      diagnostics: diagnostics(),
+      permissionSettingsError: "Permission timeout editing requires restarting this instance with the updated OpenBoard server.",
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("ASK TIMEOUT");
+    expect(text).toContain("unavailable");
+    expect(text).toContain("reachable 1.0.0");
+    expect(text).toContain("Permission timeout editing requires restarting this instance");
+    expect(text).not.toContain("t edit permission timeout");
+  });
+
+  it("edits and saves the permission timeout from Settings", async () => {
+    const updatePermissionSettings = vi.fn(async ({ timeoutSeconds }: { timeoutSeconds: number }) => ({ timeoutSeconds }));
+    const s = state({
+      viewState: { view: "settings", previousView: "board" },
+      diagnostics: diagnostics(),
+      permissionSettings: { timeoutSeconds: 300 },
+    });
+    const a = actions({ client: { updatePermissionSettings } });
+
+    await handleKeypress({ sequence: "t", name: "t" } as any, s, a);
+    expect(textOf(renderApp(fakeUi(), s))).toContain("TIMEOUT SECONDS ▸ 300");
+    await handleKeypress({ sequence: "u", name: "u", ctrl: true } as any, s, a);
+    for (const digit of "450") await handleKeypress({ sequence: digit, name: digit } as any, s, a);
+    await handleKeypress({ sequence: "\r", name: "return" } as any, s, a);
+
+    expect(updatePermissionSettings).toHaveBeenCalledWith({ timeoutSeconds: 450 });
+    expect(s.permissionSettings).toEqual({ timeoutSeconds: 450 });
+    expect(s.settingsPermissionTimeoutDraft).toBeUndefined();
+    expect(s.status).toBe("permission timeout set to 450 seconds");
   });
 
   it("D opens dirty worktree actions from settings", async () => {

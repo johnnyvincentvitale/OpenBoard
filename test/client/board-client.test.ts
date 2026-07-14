@@ -662,6 +662,23 @@ describe("board client", () => {
     await client.sendSessionMessage("task-1", input);
     expect(fetch).toHaveBeenCalledWith("http://127.0.0.1:4097/api/tasks/task-1/session-messages", expect.objectContaining({ method: "POST", body: JSON.stringify(input) }));
   });
+
+  it("reads and updates the instance permission timeout", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ timeoutSeconds: 300 }))
+      .mockResolvedValueOnce(jsonResponse({ timeoutSeconds: 450 }));
+    const client = createBoardClient(makeOptions([CWD], fetchMock));
+
+    await expect(client.getPermissionSettings()).resolves.toEqual({ timeoutSeconds: 300 });
+    await expect(client.updatePermissionSettings({ timeoutSeconds: 450 })).resolves.toEqual({ timeoutSeconds: 450 });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, `${DEFAULT_BOARD_URL}/api/settings/permissions`, expect.objectContaining({ method: "GET" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, `${DEFAULT_BOARD_URL}/api/settings/permissions`, expect.objectContaining({
+      method: "PATCH",
+      body: JSON.stringify({ timeoutSeconds: 450 }),
+    }));
+  });
 });
 
 describe("streamSessionEvents lifecycle", () => {

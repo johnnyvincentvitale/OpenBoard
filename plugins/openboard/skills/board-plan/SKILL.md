@@ -17,9 +17,12 @@ plan the user approves: workflow shape, waves, card contracts, harness
 choices, agent profiles, model assignments, and a verified-green baseline.
 
 Native vs procedural: OpenBoard natively provides dependency links
-(`link_tasks` / `unlink_tasks`; run/retry return 409 on unmet parents) and
-completion contracts (`/complete`, `/block`). Auto-promotion of ready
-children, per-card retry caps, and role-loop round-trip caps are NOT native —
+(`link_tasks` / `unlink_tasks`; run/retry return 409 on unmet parents),
+completion contracts (MCP `complete_task` / `block_task`), auto-dispatch of
+ready children (`autoRun` chains), and a crash/stall watchdog (bounded
+automatic retries with optional fallback-model escalation, then a
+watchdog-authored blocked report). Role-loop round-trip caps and retry
+budgets for cards that verify badly (as opposed to crashing) are NOT native —
 the orchestrator session enforces them procedurally, and this plan is where
 they get defined.
 
@@ -124,8 +127,8 @@ own agentic-coding instructions; verify a role profile against one real
 dispatch before building a run on it. The loop is orchestrator-mediated —
 you author every hop; workers must not create or move cards. Spawned OpenCode
 workers do receive the injected `openboard` MCP server, but dispatch guidance
-limits its use to `task_diff` inspection and `complete_task`/`block_task`
-reports. Define the loop's exit condition (e.g. the audit card completes with
+limits its use to inspection (`task_diff`, `task_context`, `task_compare`)
+and completion reports (`complete_task` / `block_task`). Define the loop's exit condition (e.g. the audit card completes with
 no findings) and a round-trip cap in the plan; the runtime procedure lives in
 `openboard-orchestrator`.
 
@@ -134,18 +137,28 @@ Cross-provider defaults and mid-run recovery:
 - **Default to cross-provider review** in role loops: coder, auditor, and
   fixer on different providers. Same-provider review rubber-stamps;
   cross-provider audit catches defects the fix wave itself introduced.
+  Specify fallback by failure layer: a provider/account failure (e.g. an
+  HTTP 402) calls for a different provider or harness, while a missing audit
+  report calls for the predeclared fallback auditor — generic retry conflates
+  the two.
 - **Per-card model override is the mid-run escape hatch.** When a profile or
   provider breaks mid-run, re-lane via `agent=<working-profile> +
   model=<working-model>` instead of editing profiles (profile edits need a
   restart, which kills board state). The `fallbackModel` field on the task
-  records the designated recovery model; the `activeModel` field tracks which
-  model the current run actually uses, so inspection of these fields
-  distinguishes planned fallback from provider-death recovery.
+  records the designated recovery model — the watchdog escalates to it on its
+  second automatic retry when it names a different provider — and the
+  `activeModel` field tracks which model the current run actually uses, so
+  inspection of these fields distinguishes planned fallback from
+  provider-death recovery. `fallbackModel` is set in the TUI wizard's
+  FALLBACK field or over REST; MCP `create_task` / `add_tasks` do not accept
+  it.
 - **WIP salvage**: when a worker dies with uncommitted work, commit it on the
   `board/*` branch and have the takeover card merge it, stating "treat merged
   WIP as unreviewed input" in the takeover prompt.
 - **Blocked-answer planning**: declare up front whether blocked workers get
-  fresh answers or are re-dispatched with a revised prompt. The board gates
+  fresh answers or are re-dispatched with a revised prompt. Card prompts for
+  blockable work should demand a direct `needsInput` question in the block
+  report — that is the question `answer_blocked_task` answers. The board gates
   blocked cards on explicit `blockedAcceptance` before Done acceptance, so
   decide per-wave whether the orchestrator answers blocked questions
   (`answer_blocked_task`) or accepts the block as terminal and moves on — a
@@ -156,14 +169,25 @@ Cross-provider defaults and mid-run recovery:
   honest no-git reason). File-disjoint results from concurrent fan-out cards
   are safe to integrate in parallel; overlapping files need serial integration
   order. Not a synthetic verdict — the server computes one real diff.
-- **Permission policy**: every permission ask carries a `deadline`; declare
-  who responds to permission asks (the orchestrator cockpit via
-  `respond_permission`) and the timeout-after-crash recovery posture. An ask
-  that times out with no response is treated as a denial; do not hand-nudge
-  before the threshold — the 45s auto-nudge is the backstop, not an
-  intervention signal. OpenCode history in-memory is lost on session restart;
-  ACP harnesses may also restart without prior permissions preserved, so
-  plan permission responses to land before the watchdog fires.
+- **Permission policy**: every permission ask carries a `deadline` (five
+  minutes by default; editable per instance in board Settings, with
+  `OPENBOARD_PERMISSION_GRACE_MS` as the startup fallback); declare who
+  responds to
+  permission asks (the orchestrator cockpit via `respond_permission`) and the
+  timeout-after-crash recovery posture. Read-class asks (read, glob, grep,
+  list) auto-resolve; every other ask — including one whose tool identity
+  cannot be resolved — raises to the operator fail-closed and times out to
+  denial. Do not hand-nudge before the threshold — the 45s auto-nudge is the
+  backstop, not an intervention signal. OpenCode history in-memory is lost on
+  session restart; ACP harnesses may also restart without prior permissions
+  preserved, so plan permission responses to land before the watchdog fires.
+- **Bash policy per lane**: worktree cards carry a BASH policy — `allow` is
+  unattended compatibility (worktree fence + escape detector still apply),
+  `ask` is interactive-strict (every shell call waits on the operator,
+  timeout denies, and the card cannot auto-run), `deny` disables the shell.
+  In-place OpenCode cards take full `edit`/`bash`/`webfetch` overrides.
+  Declare the policy per lane: interactive-strict lanes need a live operator
+  and cannot join unattended chains.
 
 OpenCode profile hygiene:
 
@@ -298,10 +322,13 @@ child dispatches itself the moment every parent it links to is satisfied
 (`done`, or a `complete` report with `completionSource: "reported"`), with no
 human or orchestrator pressing Run. `autoRun` applies to agent cards
 whose shape makes unattended writes to the live checkout impossible: worktree
-isolation, or in-place OpenCode with `permissionOverrides` `edit` and `bash`
-both `"deny"` — the read-only shape for research/synthesis/audit lanes. The
-create/update APIs reject it on any other shape, and weakening a fenced
-card's overrides clears the flag.
+isolation (with bash policy `allow` or `deny` — an interactive-strict `ask`
+card cannot auto-run), or in-place OpenCode with `permissionOverrides` `edit`
+and `bash` both `"deny"` — the read-only shape for research/synthesis/audit
+lanes. The create/update APIs reject it on any other shape, and weakening a
+fenced card's overrides clears the flag. The fenced in-place shape is
+configured in the TUI wizard or over REST; MCP `create_task` does not accept
+`permissionOverrides`, so MCP-created autoRun cards are worktree-only.
 
 Decide this per child, not per run: a chain of file-disjoint cards meant to
 run start-to-finish on one Review checkpoint is a good `autoRun` candidate; a
@@ -341,13 +368,21 @@ preamble for cwd guidance. Do not paste parent handoffs into child prompts;
 link the parents.
 
 Create cards through MCP `create_task` / `add_tasks`; check `list_tasks` first
-to avoid duplicates.
+to avoid duplicates. The MCP creation schemas are strict: `fallbackModel`,
+`permissionOverrides`, and `parentIds` are TUI/REST-only fields — link
+parents with `link_tasks` after creation, and set fallback models or
+permission overrides in the wizard or over REST.
 
 ## Set The Failure Policy
 
 Decide before dispatch, not mid-thrash:
 
 - Retry a failed card at most twice; then stop and surface it with the error.
+- Crashed or silent sessions are the watchdog's job (`OPENBOARD_WATCHDOG_MS`,
+  default 10 minutes): two automatic same-worktree retries, fallback-model
+  escalation on the second, then a watchdog-blocked Review card. Plan the
+  `fallbackModel` per hard lane and do not hand-retry what it is already
+  retrying.
 - A stalled In-Progress card gets its session inspected, not re-dispatched.
   Distinguish board-state bugs from hung sessions.
 - Integrate is rebase-first: it rebases the task branch onto the target inside

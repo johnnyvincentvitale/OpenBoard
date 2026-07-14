@@ -5,7 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BoardClientError, createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type RosterAgent, type RosterProvider, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, permissionTimeoutSecondsToMs, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type PermissionSettings, type RosterAgent, type RosterProvider, type SessionMessageMode, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, projectWatchdogAttempts, type WatchdogAttemptEntry } from "../shared";
 import { blockedQuestionPresentation } from "../shared/blocked-task";
 import { validateInstanceName } from "../shared/instances";
@@ -96,9 +96,9 @@ import {
 } from "./confirmations";
 import { compactTaskBoardLabel, taskLifecycleDetailRows } from "./lifecycle";
 import { bindPermissionAsk, firstPendingPermissionAsk, permissionInFlightKey, resolveBoundPermissionAsk, type PermissionAskBinding } from "./permission-surface";
-import { applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, descendantSessionLabel, followVisibleEvents, markFollowDisconnected, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, tailFollow, type FollowViewState } from "./follow-view";
+import { applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, followVisibleEvents, markFollowDisconnected, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, tailFollow, type FollowViewState } from "./follow-view";
 import { chatCodeBlocks, cycleChatCodeBlock, parseChatMarkdown, selectedChatCodeBlock } from "./chat-markdown";
-import { backspaceBlockedAnswerDraft, blockedAnswerDraftKey, blockedAnswerSubmitLabel, createBlockedAnswerDraft, editBlockedAnswerDraft, lineDeleteBlockedAnswerDraft, staleBlockedAnswerDraft, type BlockedAnswerDraft } from "./blocked-answer";
+import { backspaceBlockedAnswerDraft, blockedAnswerDraftKey, createBlockedAnswerDraft, editBlockedAnswerDraft, lineDeleteBlockedAnswerDraft, staleBlockedAnswerDraft, type BlockedAnswerDraft } from "./blocked-answer";
 import { createDiffLineageState, diffLineageHeader, fetchSelectedDiffEvidence, moveAncestorSelection, type DiffLineageState } from "./diff-lineage";
 import { fallbackModelOptions, modelRetryLabel } from "./model-fallback";
 import { createRootLifecycle } from "./root-lifecycle";
@@ -575,6 +575,12 @@ interface SettingsDirtyWorktreesState {
   confirmDeletePath?: string;
 }
 
+interface SettingsPermissionTimeoutDraft {
+  text: string;
+  submitting: boolean;
+  error?: string;
+}
+
 /** Detail tabs shown for a selected card via Enter. */
 export type TaskDetailTab = "prompt" | "handoff" | "output" | "files" | "attempts" | "comments";
 
@@ -634,6 +640,7 @@ interface CommentDraftState {
 
 interface SessionChatDraft {
   taskId: string;
+  mode: SessionMessageMode;
   text: string;
   submitting: boolean;
   error?: string;
@@ -653,9 +660,12 @@ interface TuiState {
   health?: BoardHealth;
   healthError?: string;
   diagnostics?: BoardDiagnostics;
+  permissionSettings?: PermissionSettings;
   settingsLoading?: boolean;
   settingsError?: string;
+  permissionSettingsError?: string;
   settingsDirtyWorktrees?: SettingsDirtyWorktreesState;
+  settingsPermissionTimeoutDraft?: SettingsPermissionTimeoutDraft;
   cwd: string;
   overlay: Overlay;
   newTask?: NewTaskDraft;
@@ -1081,19 +1091,32 @@ export async function runOpenBoardTui(
   const refreshSettings = async () => {
     state.settingsLoading = true;
     state.settingsError = undefined;
+    state.permissionSettingsError = undefined;
     state.status = "loading settings...";
     render();
-    try {
-      const diagnostics = await currentClient.getDiagnostics();
-      state.diagnostics = diagnostics;
-      state.status = "settings loaded";
-    } catch (error) {
-      state.settingsError = errorMessage(error);
-      state.status = "settings unavailable";
-    } finally {
-      state.settingsLoading = false;
-      render();
+    const [diagnosticsResult, permissionSettingsResult] = await Promise.allSettled([
+      currentClient.getDiagnostics(),
+      currentClient.getPermissionSettings(),
+    ]);
+    if (diagnosticsResult.status === "fulfilled") {
+      state.diagnostics = diagnosticsResult.value;
+    } else {
+      state.diagnostics = undefined;
+      state.settingsError = errorMessage(diagnosticsResult.reason);
     }
+    if (permissionSettingsResult.status === "fulfilled") {
+      state.permissionSettings = permissionSettingsResult.value;
+    } else {
+      state.permissionSettings = undefined;
+      state.permissionSettingsError = permissionSettingsUnavailableMessage(permissionSettingsResult.reason);
+    }
+    state.status = diagnosticsResult.status === "rejected"
+      ? "settings unavailable"
+      : permissionSettingsResult.status === "rejected"
+        ? "settings loaded; permission timeout unavailable"
+        : "settings loaded";
+    state.settingsLoading = false;
+    render();
   };
 
   const openSettings = async () => {
@@ -1887,15 +1910,27 @@ function renderViewDiffMain(ui: OpenTui, state: TuiState) {
   );
 }
 
+function visibleFollowChatEvents(state: TuiState) {
+  const follow = state.followView;
+  if (!follow) return [];
+  const followedTask = state.tasks.find((task) => task.id === follow.taskId);
+  const hasPendingAsk = Boolean(followedTask && firstPendingPermissionAsk(followedTask));
+  const windowSize = Math.max(1, Math.floor((state.terminalRows - (hasPendingAsk ? 16 : 15)) / 2));
+  return followVisibleEvents(follow, windowSize);
+}
+
+function visibleFollowChatCodeBlocks(state: TuiState) {
+  return chatCodeBlocks(visibleFollowChatEvents(state));
+}
+
 function renderFollowViewMain(ui: OpenTui, state: TuiState) {
   const follow = state.followView;
   const followedTask = follow ? state.tasks.find((task) => task.id === follow.taskId) : undefined;
   const pendingAsk = followedTask ? firstPendingPermissionAsk(followedTask) : undefined;
   const pendingCount = followedTask?.pendingPermissions?.length ?? 0;
   const chatDraft = state.sessionChatDraft?.taskId === follow?.taskId ? state.sessionChatDraft : undefined;
-  const windowSize = Math.max(1, Math.floor((state.terminalRows - (pendingAsk ? 16 : 15)) / 2));
-  const rows = follow ? followVisibleEvents(follow, windowSize) : [];
-  const codeBlocks = follow ? chatCodeBlocks(follow.events) : [];
+  const rows = visibleFollowChatEvents(state);
+  const codeBlocks = chatCodeBlocks(rows);
   const selectedCodeKey = selectedChatCodeBlock(codeBlocks, follow?.selectedCodeBlockKey)?.key;
   return ui.Box(
     {
@@ -1928,8 +1963,9 @@ function renderFollowViewMain(ui: OpenTui, state: TuiState) {
     ...(rows.length
       ? rows.flatMap<VChild>((event) => {
           if (event.kind !== "text") {
+            const role = event.kind === "warning" ? "SYSTEM" : "AGENT";
             return [ui.Text({
-              content: `${descendantSessionLabel(event)} · ${event.kind.toUpperCase()} · ${event.text ?? event.tool?.name ?? ""}`,
+              content: `${role} · ${event.kind.toUpperCase()} · ${event.text ?? event.tool?.name ?? ""}`,
               fg: event.kind === "warning" || event.tool?.status === "error" ? COLORS.bright : event.kind === "tool" ? COLORS.muted : COLORS.text,
               height: 1,
               truncate: true,
@@ -1976,16 +2012,20 @@ function renderFollowViewMain(ui: OpenTui, state: TuiState) {
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     ui.Text({
       content: chatDraft
-        ? `MESSAGE ▸ ${chatDraft.text || " "}▍`
-        : "Press i to message this session · messages continue the same session and worktree",
+        ? `${chatDraft.mode === "interrupt" ? "INTERRUPT" : "MESSAGE"} ▸ ${chatDraft.text || " "}▍`
+        : "Press m to message · i to interrupt the active turn with replacement guidance",
       fg: chatDraft ? COLORS.bright : COLORS.muted,
       height: chatDraft ? 3 : 1,
       ...(chatDraft ? { wrapMode: "word" as const } : { truncate: true }),
     }),
     ui.Text({
       content: chatDraft
-        ? chatDraft.error ?? (chatDraft.submitting ? "sending..." : "enter queue/send · ctrl+enter interrupt & send · esc cancel · ctrl+u clear")
-        : `i compose · ↑/↓ history · f tail${codeBlocks.length ? " · tab select code · c copy" : ""} · y/! permission · b/esc/q return`,
+        ? chatDraft.error ?? (chatDraft.submitting
+          ? "sending..."
+          : chatDraft.mode === "interrupt"
+            ? "enter interrupt & send replacement · esc cancel · ctrl+u clear"
+            : "enter queue/send · esc cancel · ctrl+u clear")
+        : `m message · i interrupt · ↑/↓ history · f tail${codeBlocks.length ? " · tab select visible code · c copy" : ""} · y/! permission · b/esc/q return`,
       fg: chatDraft?.error ? COLORS.bright : COLORS.dim,
       height: 1,
       truncate: true,
@@ -2542,6 +2582,7 @@ function renderSettingsView(ui: OpenTui, state: TuiState) {
   const dirtyCount = worktree?.dirtyOrphans?.length || worktree?.keptDirtyCount || 0;
 
   const rows: MetaRow[] = [
+    { label: "ASK TIMEOUT", value: state.permissionSettings ? `${state.permissionSettings.timeoutSeconds} seconds` : state.permissionSettingsError ? "unavailable" : "unknown", color: state.permissionSettingsError ? COLORS.bright : COLORS.text },
     { label: "OPENCODE", value: opencode ? `${opencode.reachable ? "reachable" : "unreachable"} ${opencode.version ?? ""}`.trim() : "unknown", color: opencode?.reachable ? COLORS.accentBright : COLORS.bright },
     { label: "OC URL", value: opencode?.url ?? "unknown", color: COLORS.text },
     { label: "SWEEP", value: worktree ? `${worktree.removedCleanCount} clean removed · ${worktree.keptDirtyCount} dirty kept` : "unknown", color: COLORS.text },
@@ -2562,8 +2603,15 @@ function renderSettingsView(ui: OpenTui, state: TuiState) {
     ui.Text({ content: state.settingsLoading ? "Loading diagnostics..." : "Instance-scoped controls and diagnostics", fg: COLORS.muted, height: 1, truncate: true }),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     ...bodyRows,
+    ...(state.settingsPermissionTimeoutDraft ? [
+      ui.Text({ content: `TIMEOUT SECONDS ▸ ${state.settingsPermissionTimeoutDraft.text || " "}▍`, fg: COLORS.bright, height: 1, truncate: true }),
+      ui.Text({ content: state.settingsPermissionTimeoutDraft.error ?? "Applies to new OpenCode and ACP asks. 0 uses immediate policy fallback.", fg: state.settingsPermissionTimeoutDraft.error ? COLORS.bright : COLORS.muted, height: 1, truncate: true }),
+    ] : []),
     ...(state.settingsError ? [
       ui.Text({ content: state.settingsError, fg: COLORS.bright, wrapMode: "word", height: 2 }),
+    ] : []),
+    ...(state.permissionSettingsError ? [
+      ui.Text({ content: state.permissionSettingsError, fg: COLORS.bright, wrapMode: "word", height: 2 }),
     ] : []),
   );
 }
@@ -2912,8 +2960,8 @@ function renderLaneOverflow(ui: OpenTui, count: number, arrow: string) {
   });
 }
 
-function blockedTaskNeedsAnswer(task: Task): boolean {
-  return task.completion?.outcome === "blocked" && blockedQuestionPresentation(task.completion).needsAnswer;
+function blockedTaskNeedsAnswer(task: Task | undefined): boolean {
+  return Boolean(task?.column === "review" && task.completion?.outcome === "blocked" && blockedQuestionPresentation(task.completion).needsAnswer);
 }
 
 // Filter mode is global, so the picker lives in the Details panel instead of
@@ -2986,6 +3034,7 @@ function taskStatusText(task: Task): string {
 function renderTask(ui: OpenTui, state: TuiState, task: Task) {
   const selected = task.id === state.selectedTaskId;
   const done = task.column === "done" && !selected;
+  const needsAnswer = blockedTaskNeedsAnswer(task);
   const [metaA, metaB] = taskMetaRows(task);
 
   return ui.Box(
@@ -2993,19 +3042,19 @@ function renderTask(ui: OpenTui, state: TuiState, task: Task) {
       width: "100%",
       height: TUI_LAYOUT.cardHeight,
       flexDirection: "row",
-      ...boxBg(selected ? COLORS.panelRaised : COLORS.panel),
+      ...boxBg(needsAnswer ? COLORS.accent : selected ? COLORS.panelRaised : COLORS.panel),
       border: true,
       borderStyle: "single",
-      borderColor: selected ? COLORS.borderHot : COLORS.border,
+      borderColor: needsAnswer ? COLORS.bright : selected ? COLORS.borderHot : COLORS.border,
     },
-    ui.Box({ width: 1, height: "100%", ...boxBg(laneColor(task)) }),
+    ui.Box({ width: 1, height: "100%", ...boxBg(needsAnswer ? COLORS.accentBright : laneColor(task)) }),
     ui.Box(
       { flexGrow: 1, flexDirection: "column", paddingX: 1 },
       ui.Box(
         { width: "100%", height: 1, flexDirection: "row" },
         ui.Text({
           content: taskStatusText(task),
-          fg: done ? COLORS.dim : taskStatusColor(task),
+          fg: needsAnswer ? COLORS.bright : done ? COLORS.dim : taskStatusColor(task),
           height: 1,
           flexGrow: 1,
           flexShrink: 1,
@@ -3017,7 +3066,7 @@ function renderTask(ui: OpenTui, state: TuiState, task: Task) {
       ),
       ui.Text({
         content: `${selected ? "▸ " : ""}${task.title}`,
-        fg: selected ? COLORS.bright : done ? COLORS.muted : COLORS.text,
+        fg: needsAnswer || selected ? COLORS.bright : done ? COLORS.muted : COLORS.text,
         attributes: ui.TextAttributes.BOLD,
         height: 2,
         wrapMode: "word",
@@ -3875,6 +3924,7 @@ type SelectedCardAction =
   | "run"
   | "git-init"
   | "edit"
+  | "answer"
   | "retry"
   | "abort"
   | "view-diff"
@@ -3896,7 +3946,8 @@ const SELECTED_CARD_SHORTCUTS: Record<SelectedCardAction, SelectedCardShortcut> 
   run: { action: "run", key: "r", label: "run" },
   "git-init": { action: "git-init", key: "g", label: "init git and run" },
   edit: { action: "edit", key: "e", label: "edit" },
-  retry: { action: "retry", key: "R", label: "retry" },
+  answer: { action: "answer", key: "Shift+R", label: "answer" },
+  retry: { action: "retry", key: "Shift+R", label: "retry" },
   abort: { action: "abort", key: "k", label: "abort" },
   "view-diff": { action: "view-diff", key: "v", label: "diff" },
   integrate: { action: "integrate", key: "i", label: "integrate" },
@@ -3922,7 +3973,7 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
   // (src/shared/lifecycle.ts) so this can't diverge from how the card is
   // actually displayed.
   if (dominantTaskState(task) === "blocked") {
-    const actions: SelectedCardAction[] = ["view-diff", "retry"];
+    const actions: SelectedCardAction[] = ["view-diff", blockedTaskNeedsAnswer(task) ? "answer" : "retry"];
     if (task.worktreePath) actions.push("discard-worktree");
     actions.push("done", "delete", "move", "details");
     return shortcutList(...actions);
@@ -3985,8 +4036,10 @@ function selectedCardActionUnavailableMessage(action: SelectedCardAction, task: 
       return "initialize git and run is only available for To Do agent cards awaiting git initialization";
     case "edit":
       return "edit is only available for To Do cards";
+    case "answer":
+      return "answer is only available for blocked cards labeled NEEDS ANSWER";
     case "retry":
-      return "retry is only available for error cards or rebase-conflict Review cards";
+      return "retry is only available for error cards, ordinary blocked cards, or rebase-conflict Review cards";
     case "abort":
       return "abort is only available for In Progress cards";
     case "view-diff":
@@ -4154,15 +4207,15 @@ function renderBlockedAnswerComposer(ui: OpenTui, state: TuiState) {
     : "OpenBoard will verify whether the session can resume";
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    ui.Text({ content: `Answer Blocked Task · ${task.title}`, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
+    ui.Text({ content: `Answer Question · ${task.title}`, fg: COLORS.bright, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true }),
     ui.Text({ content: blockedQuestion(task.completion), fg: COLORS.bright, height: 2, wrapMode: "word" }),
     ui.Text({ content: `Reported: ${task.completion.reportedAt} · ${mode}`, fg: COLORS.muted, height: 1, truncate: true }),
     ui.Box(
       { width: "100%", height: Math.max(5, Math.min(12, state.terminalRows - 18)), border: true, borderStyle: "single", borderColor: COLORS.borderHot, padding: 1, ...boxBg(COLORS.bg) },
-      ui.Text({ content: draft.text || "Type answer. Empty Enter falls back to plain retry confirmation.", fg: draft.text ? COLORS.text : COLORS.dim, height: "100%", wrapMode: "word" }),
+      ui.Text({ content: draft.text || "Type your answer.", fg: draft.text ? COLORS.text : COLORS.dim, height: "100%", wrapMode: "word" }),
     ),
     ...(draft.error ? [ui.Text({ content: draft.error, fg: COLORS.bright, height: 1, truncate: true })] : []),
-    ui.Text({ content: "enter submit · esc cancel · ctrl+u clear line · paste supported", fg: COLORS.dim, height: 1, truncate: true }),
+    ui.Text({ content: "enter submit answer · esc cancel · ctrl+u clear line · paste supported", fg: COLORS.dim, height: 1, truncate: true }),
   );
 }
 
@@ -4178,6 +4231,7 @@ function renderDetail(ui: OpenTui, label: string, value: string, valueColor: Tui
 
 function renderCommandStrip(ui: OpenTui, state: TuiState) {
   const showBoardSummary = state.viewState.view !== "board";
+  const visibleChatCodeHint = visibleFollowChatCodeBlocks(state).length ? " · tab code · c copy" : "";
   const boardKeyHints = state.detailTab
     ? state.detailTab === "comments"
       ? "↑/↓ comments · ←/→ tabs · ↵ close details · c comment · r reply · esc close · q quit"
@@ -4223,12 +4277,16 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? viewDiffKeyHints(state.viewDiff)
             : state.viewState.view === "follow"
             ? state.sessionChatDraft
-              ? "type message · shift+enter newline · enter queue/send · ctrl+enter interrupt/send · esc cancel"
-              : "i message · ↑/↓ history · f tail · tab code · c copy · y/! permission · b/esc/q return · u refresh"
+              ? state.sessionChatDraft.mode === "interrupt"
+                ? "type replacement · shift+enter newline · enter interrupt/send · esc cancel"
+                : "type message · shift+enter newline · enter queue/send · esc cancel"
+              : `m message · i interrupt · ↑/↓ history · f tail${visibleChatCodeHint} · y/! permission · b/esc/q return · u refresh`
             : state.viewState.view === "settings"
-            ? state.settingsDirtyWorktrees
+            ? state.settingsPermissionTimeoutDraft
+              ? "type timeout seconds · enter save · esc cancel · ctrl+u clear"
+              : state.settingsDirtyWorktrees
               ? "↑/↓ dirty worktrees · d delete · u refresh · b/esc back · q quit"
-              : "D dirty worktrees · u refresh · b/esc back · q quit"
+              : `${state.permissionSettings ? "t edit permission timeout · " : ""}D dirty worktrees · u refresh · b/esc back · q quit`
             : boardKeyHints,
         fg: COLORS.text,
         height: 1,
@@ -4271,7 +4329,7 @@ function renderHelpOverlay(ui: OpenTui) {
     ["e", "edit selected To Do card"],
     ["f", "filter selected lane (again to clear)"],
     ["r", "run selected task"],
-    ["R", "retry failed run"],
+    ["Shift+R", "answer NEEDS ANSWER cards; retry ordinary BLOCKED or failed cards"],
     ["k", "abort selected In Progress card"],
     ["y / N", "answer permission allow-once / deny"],
     ["a", "archive task"],
@@ -4292,13 +4350,13 @@ function renderHelpOverlay(ui: OpenTui) {
     ["q", "quit"],
     ["", ""],
     ["SESSION CHAT", ""],
-    ["i", "compose a message"],
-    ["enter", "send now or queue behind the active turn"],
+    ["m", "compose a message"],
+    ["i", "compose replacement guidance that interrupts the active turn"],
+    ["enter", "submit the current message or interrupt replacement"],
     ["shift+enter", "insert a newline in the message"],
-    ["ctrl+enter", "interrupt the active turn and send"],
     ["↑/↓", "manual scroll"],
     ["f", "jump to tail / auto-follow"],
-    ["tab / shift+tab", "select the next / previous code block"],
+    ["tab / shift+tab", "select the next / previous visible code block"],
     ["c", "copy the selected code block"],
     ["b / esc / q", "back to board (does not quit)"],
     ["", ""],
@@ -5391,11 +5449,12 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       await answerSelectedPermission(state, actions, "deny");
       return;
     case "R":
-      if (!canUseSelectedCardAction(state, actions, "retry")) return;
-      if (selectedTask(state)?.completion?.outcome === "blocked") {
+      if (blockedTaskNeedsAnswer(selectedTask(state))) {
+        if (!canUseSelectedCardAction(state, actions, "answer")) return;
         openBlockedAnswerComposer(state, actions);
         return;
       }
+      if (!canUseSelectedCardAction(state, actions, "retry")) return;
       await handleConfirmableCardAction("retry", state, actions, (task) => actions.client.retryTask(task.id), "retry");
       return;
     case "a":
@@ -5529,6 +5588,58 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
 
 async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
   const keyName = key.name || key.sequence;
+  const timeoutDraft = state.settingsPermissionTimeoutDraft;
+  if (timeoutDraft) {
+    if (isEscapeKey(key)) {
+      state.settingsPermissionTimeoutDraft = undefined;
+      state.status = "permission timeout edit cancelled";
+      actions.render();
+      return;
+    }
+    if (timeoutDraft.submitting) return;
+    if (key.ctrl && keyName === "u") {
+      timeoutDraft.text = "";
+      timeoutDraft.error = undefined;
+      actions.render();
+      return;
+    }
+    if (keyName === "backspace" || key.sequence === "\u007f") {
+      timeoutDraft.text = timeoutDraft.text.slice(0, -1);
+      timeoutDraft.error = undefined;
+      actions.render();
+      return;
+    }
+    if (isEnterKey(key)) {
+      const input = timeoutDraft.text.trim();
+      const timeoutSeconds = input === "" ? Number.NaN : Number(input);
+      if (permissionTimeoutSecondsToMs(timeoutSeconds) === undefined) {
+        timeoutDraft.error = "Enter 0-86400 seconds, with up to millisecond precision.";
+        actions.render();
+        return;
+      }
+      timeoutDraft.submitting = true;
+      timeoutDraft.error = undefined;
+      state.status = "saving permission timeout...";
+      actions.render();
+      try {
+        state.permissionSettings = await actions.client.updatePermissionSettings({ timeoutSeconds });
+        state.settingsPermissionTimeoutDraft = undefined;
+        state.status = `permission timeout set to ${timeoutSeconds} seconds`;
+      } catch (error) {
+        timeoutDraft.submitting = false;
+        timeoutDraft.error = errorMessage(error);
+        state.status = "permission timeout update failed";
+      }
+      actions.render();
+      return;
+    }
+    if (!key.ctrl && !key.meta && /^[0-9.]$/.test(key.sequence)) {
+      timeoutDraft.text = `${timeoutDraft.text}${key.sequence}`.slice(0, 12);
+      timeoutDraft.error = undefined;
+      actions.render();
+    }
+    return;
+  }
   if (key.sequence === "q") {
     actions.shutdown();
     return;
@@ -5575,6 +5686,18 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
     await actions.refreshSettings();
     return;
   }
+  if (key.sequence === "t") {
+    const timeoutSeconds = state.permissionSettings?.timeoutSeconds;
+    if (timeoutSeconds === undefined) {
+      state.status = state.permissionSettingsError ?? "permission timeout unavailable; refresh settings";
+      actions.render();
+      return;
+    }
+    state.settingsPermissionTimeoutDraft = { text: String(timeoutSeconds), submitting: false };
+    state.status = "editing permission timeout";
+    actions.render();
+    return;
+  }
   if (key.sequence === "D") {
     const dirty = settingsDirtyOrphans(state);
     if (dirty.length === 0) {
@@ -5586,6 +5709,13 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
     actions.render();
     return;
   }
+}
+
+function permissionSettingsUnavailableMessage(error: unknown): string {
+  if (error instanceof BoardClientError && error.status === 404) {
+    return "Permission timeout editing requires restarting this instance with the updated OpenBoard server.";
+  }
+  return `Permission timeout unavailable: ${errorMessage(error)}`;
 }
 
 function clampSettingsDirtySelection(state: TuiState): void {
@@ -5618,6 +5748,19 @@ async function resolveSettingsDirtyWorktree(
 export function handlePaste(event: PasteEvent, state: TuiState, actions: Pick<TuiActions, "render">): void {
   const text = decodePastedText(event.bytes);
   if (!text) return;
+
+  if (state.viewState.view === "settings" && state.settingsPermissionTimeoutDraft && !state.settingsPermissionTimeoutDraft.submitting) {
+    const paste = normalizeSingleLinePaste(text);
+    if (/^[0-9.]+$/.test(paste)) {
+      state.settingsPermissionTimeoutDraft.text = `${state.settingsPermissionTimeoutDraft.text}${paste}`.slice(0, 12);
+      state.settingsPermissionTimeoutDraft.error = undefined;
+    } else {
+      state.settingsPermissionTimeoutDraft.error = "Timeout accepts seconds only.";
+    }
+    event.preventDefault();
+    actions.render();
+    return;
+  }
 
   if (state.viewState.view === "follow" && state.sessionChatDraft && !state.sessionChatDraft.submitting) {
     state.sessionChatDraft.text = `${state.sessionChatDraft.text}${normalizePastedText(text, "description")}`.slice(0, 12_000);
@@ -5905,7 +6048,7 @@ function openBlockedAnswerComposer(state: TuiState, actions: Pick<TuiActions, "r
   const key = task?.completion?.outcome === "blocked" ? blockedAnswerDraftKey(task.id, task.completion.reportedAt) : undefined;
   const draft = task ? createBlockedAnswerDraft(task, key ? state.blockedAnswerDrafts?.[key] ?? state.blockedAnswer : state.blockedAnswer) : undefined;
   if (!draft) {
-    state.status = "selected task is not waiting on a blocked answer";
+    state.status = "selected task does not have a question waiting for an answer";
     actions.render();
     return;
   }
@@ -5932,7 +6075,7 @@ async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: T
   }
   if (isEscapeKey(key)) {
     state.blockedAnswer = undefined;
-    state.status = "blocked answer cancelled";
+    state.status = "answer cancelled";
     actions.render();
     return;
   }
@@ -5949,9 +6092,10 @@ async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: T
     return;
   }
   if (isEnterKey(key)) {
-    if (blockedAnswerSubmitLabel(draft) === "plain-retry") {
-      state.blockedAnswer = undefined;
-      await handleConfirmableTaskAction("retry", state, actions, task, (item) => actions.client.retryTask(item.id), "retry", "blocked answer target no longer exists");
+    if (!draft.text.trim()) {
+      state.blockedAnswer = { ...draft, error: "type an answer first" };
+      rememberBlockedAnswerDraft(state, state.blockedAnswer);
+      actions.render();
       return;
     }
     if (staleBlockedAnswerDraft(task, draft)) {
@@ -5962,13 +6106,13 @@ async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: T
       return;
     }
     if (draft.submitting) {
-      state.status = "blocked answer already submitting";
+      state.status = "answer already submitting";
       actions.render();
       return;
     }
     state.blockedAnswer = { ...draft, submitting: true, error: undefined };
     rememberBlockedAnswerDraft(state, state.blockedAnswer);
-    state.status = "submitting blocked answer...";
+    state.status = "submitting answer...";
     actions.render();
     const oldSession = task.sessionId ?? task.harnessSessionId;
     try {
@@ -5978,14 +6122,14 @@ async function handleBlockedAnswerKey(key: KeyEvent, state: TuiState, actions: T
       const resumeMode = serverDecision === "same-session" ? "resume" : serverDecision === "fresh-session" ? "restart" : oldSession && newSession === oldSession ? "resume" : "restart";
       state.blockedAnswer = undefined;
       delete state.blockedAnswerDrafts?.[blockedAnswerDraftKey(draft.taskId, draft.blockedReportedAt)];
-      state.status = resumeMode === "resume" ? "blocked answer submitted; resumed session" : "blocked answer submitted; restarted session";
+      state.status = resumeMode === "resume" ? "answer submitted; resumed session" : "answer submitted; restarted session";
       await actions.refresh(true);
     } catch (error) {
       const message = errorMessage(error);
       state.blockedAnswer = { ...draft, submitting: false, error: message.includes("409") ? "blocked question changed; refreshed and kept draft" : message };
       rememberBlockedAnswerDraft(state, state.blockedAnswer);
       if (message.includes("409")) await actions.refresh(true);
-      else state.status = "blocked answer failed";
+      else state.status = "answer submission failed";
     }
     actions.render();
     return;
@@ -6348,7 +6492,7 @@ async function handleFollowViewKey(key: KeyEvent, state: TuiState, actions: TuiA
       try {
         const receipt = await actions.client.sendSessionMessage(task.id, {
           text: draft.text.trim(),
-          mode: key.ctrl ? "interrupt" : "queue",
+          mode: draft.mode,
           sentBy: "User",
           clientMessageId: randomUUID(),
           expectedSessionId: sessionId,
@@ -6392,27 +6536,38 @@ async function handleFollowViewKey(key: KeyEvent, state: TuiState, actions: TuiA
     actions.render();
     return;
   }
-  if (key.sequence === "i") {
+  if (key.sequence === "m") {
     const taskId = state.followView?.taskId;
-    if (taskId) state.sessionChatDraft = { taskId, text: "", submitting: false };
+    if (taskId) state.sessionChatDraft = { taskId, mode: "queue", text: "", submitting: false };
+    actions.render();
+    return;
+  }
+  if (key.sequence === "i") {
+    const task = state.tasks.find((item) => item.id === state.followView?.taskId);
+    if (!task || task.runState !== "running") {
+      state.status = "no active turn to interrupt";
+      actions.render();
+      return;
+    }
+    state.sessionChatDraft = { taskId: task.id, mode: "interrupt", text: "", submitting: false };
     actions.render();
     return;
   }
   if ((keyName === "tab" || key.sequence === "\t") && state.followView) {
-    const blocks = chatCodeBlocks(state.followView.events);
+    const blocks = visibleFollowChatCodeBlocks(state);
     state.followView.selectedCodeBlockKey = cycleChatCodeBlock(
       blocks,
       state.followView.selectedCodeBlockKey,
       key.shift ? -1 : 1,
     );
-    state.status = blocks.length ? "selected code block" : "no code blocks in this session";
+    state.status = blocks.length ? "selected visible code block" : "no visible code blocks";
     actions.render();
     return;
   }
   if (key.sequence === "c" && state.followView) {
-    const block = selectedChatCodeBlock(chatCodeBlocks(state.followView.events), state.followView.selectedCodeBlockKey);
+    const block = selectedChatCodeBlock(visibleFollowChatCodeBlocks(state), state.followView.selectedCodeBlockKey);
     if (!block) {
-      state.status = "no code blocks in this session";
+      state.status = "no visible code blocks";
       actions.render();
       return;
     }

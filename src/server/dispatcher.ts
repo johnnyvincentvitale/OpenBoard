@@ -681,6 +681,7 @@ export class TaskDispatcher implements Dispatcher {
   private readonly permissionResponderPool: PermissionResponderPool;
   /** One board-wide broker shared by OpenCode and every ACP harness. */
   private readonly permissionBroker: PermissionBroker;
+  private readonly permissionGraceMsFallback: number;
   private readonly permissionAskMeta = new Map<string, Pick<PendingPermissionAsk, "raisedAt" | "deadline" | "patterns">>();
   /** Bounded ownership tombstones distinguish stale asks from unknown IDs. */
   private readonly permissionAskOwners = new Map<string, string>();
@@ -692,7 +693,8 @@ export class TaskDispatcher implements Dispatcher {
     // session — see permission-responder.ts. onError surfaces a persistent
     // list/reply failure as a task_warning event instead of retrying forever
     // in silence.
-    const permissionGraceMs = deps.permissionGraceMs ?? loadPermissionConfig().graceMs;
+    this.permissionGraceMsFallback = deps.permissionGraceMs ?? loadPermissionConfig().graceMs;
+    const permissionGraceMs = () => this.getPermissionGraceMs();
     this.permissionBroker = createPermissionBroker({ onEvent: (event) => this.handlePermissionEvent(event) });
     this.permissionResponderPool = createPermissionResponderPool({
       client: this.client,
@@ -790,6 +792,14 @@ export class TaskDispatcher implements Dispatcher {
     this.blockedResumeProbeTimeoutMs = deps.blockedResumeProbeTimeoutMs ?? BLOCKED_RESUME_PROBE_TIMEOUT_MS;
     this.onParentSatisfied = deps.onParentSatisfied;
     this.reconcileInterruptedPermissionAsks();
+  }
+
+  getPermissionGraceMs(): number {
+    return this.store.getPermissionGraceMs() ?? this.permissionGraceMsFallback;
+  }
+
+  setPermissionGraceMs(value: number): void {
+    this.store.setPermissionGraceMs(value);
   }
 
   /**

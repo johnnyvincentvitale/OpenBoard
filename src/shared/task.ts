@@ -663,6 +663,10 @@ export interface TaskStore {
   setSweepResult(result: WorktreeSweepResult): void;
   /** Read the last stored orphan sweep result, or null. */
   getSweepResult(): WorktreeSweepResult | null;
+  /** Persisted instance override for the permission-request grace window. */
+  setPermissionGraceMs(value: number): void;
+  /** Persisted instance override, or null when the configured/default value applies. */
+  getPermissionGraceMs(): number | null;
   addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment;
   listComments(taskId: string): TaskComment[];
   addEvent(input: { taskId: string; type: string; body?: Record<string, unknown> }): TaskEvent;
@@ -702,6 +706,10 @@ export interface Dispatcher {
   listPendingPermissions(taskId: string): PendingPermissionAsk[];
   /** Respond to a pending permission ask for a task. */
   respondPermission(taskId: string, input: RespondPermissionInput): Promise<RespondPermissionOutcome>;
+  /** Effective timeout used when a new OpenCode or ACP permission ask is raised. */
+  getPermissionGraceMs(): number;
+  /** Persist an instance override used by future OpenCode and ACP permission asks. */
+  setPermissionGraceMs(value: number): void;
   /** Send operator input to the card's existing OpenCode/ACP session. */
   sendSessionMessage(taskId: string, input: SessionMessageInput): Promise<SessionMessageReceipt>;
   /** Begin event-driven auto-transitions (running → review on idle, → error on failure). */

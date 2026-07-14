@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyFollowFrame, applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, descendantSessionLabel, followVisibleEvents, FOLLOW_RENDER_INTERVAL_MS, markFollowDisconnected, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, shouldRenderFollowFrame, tailFollow } from "../../src/tui/follow-view";
+import { applyFollowFrame, applyFollowFrameWithRender, cancelFollowTrailingFlush, createFollowViewState, followVisibleEvents, FOLLOW_RENDER_INTERVAL_MS, markFollowDisconnected, markFollowRendered, scheduleFollowTrailingFlush, scrollFollow, shouldRenderFollowFrame, tailFollow } from "../../src/tui/follow-view";
 import type { SessionActivityEvent } from "../../src/shared";
 
 function event(seq: number, sessionId = "root"): SessionActivityEvent {
@@ -59,7 +59,7 @@ describe("follow view state", () => {
     expect(afterTerminal).toBe(state);
   });
 
-  it("tracks manual scroll, tail, render throttling, and descendant labels", () => {
+  it("tracks manual scroll, tail, and render throttling", () => {
     let state = createFollowViewState("task-1");
     state = applyFollowFrame(state, { kind: "snapshot", run: { taskId: "task-1", runStartedAt: 1, sessionId: "root", rootSessionId: "root", harness: "opencode" }, events: [event(1), event(2), event(3), event(4)], lastEventAt: 4, transport: "live" });
     expect(followVisibleEvents(state, 2).map((item) => item.seq)).toEqual([3, 4]);
@@ -73,7 +73,6 @@ describe("follow view state", () => {
     state = markFollowRendered(state, 100);
     expect(shouldRenderFollowFrame(state, 199)).toBe(false);
     expect(shouldRenderFollowFrame(state, 200)).toBe(true);
-    expect(descendantSessionLabel({ sessionId: "child-session", rootSessionId: "root", parentSessionId: "root" })).toBe("child of root");
   });
 });
 

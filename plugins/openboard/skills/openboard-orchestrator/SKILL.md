@@ -24,7 +24,8 @@ before dispatching if not).
 
 Before creating or running cards from a plan that uses custom profiles,
 compare the approved Profile Manifest against the live roster
-(`GET /api/agents` or MCP `list_agents`). For every manifest row verify: `id`
+(`GET /api/agents`, MCP `list_agents`, or `openboard agents <name>`). For
+every manifest row verify: `id`
 present, `mode` as expected (usually `primary`), `model` matches, and
 lifecycle declared (`ephemeral` or `durable`). If any profile is missing or
 has a wrong/null model, stop: return to `create-profile`, repair, restart the
@@ -81,13 +82,18 @@ window:
 - Worktree metadata appears when isolation is enabled.
 - The session is producing real messages or tool activity.
 
-Workers end their turn through the completion contract: `POST
-/api/tasks/:id/complete` or `/block` (MCP `complete_task` / `block_task`) with
-`{ summary, changedFiles, verification: [{ command, result }], residualRisk }`.
-The server stamps the outcome and moves the card to Review with
-`completionSource: "reported"`; a session that goes idle without reporting
-still advances, but stamped `completionSource: "idle-fallback"` with no
-completion data — treat those cards with extra suspicion.
+Workers end their turn through the injected MCP completion contract:
+`complete_task` or `block_task` with `{ summary, changedFiles, verification:
+[{ command, result }], residualRisk }`; blocked reports also carry
+`needsInput` — the direct question the operator must answer. Dispatched
+prompts contain no board URLs or tokens, and a worker whose MCP reporting is
+unavailable is told to end its turn normally instead (the REST
+`/complete`/`/block` routes exist for API clients, not workers). The server
+stamps the outcome and moves the card to Review with `completionSource:
+"reported"`; a session that goes idle without reporting still advances, but
+stamped `completionSource: "idle-fallback"` with no completion data — treat
+those cards with extra suspicion. A third source, `"watchdog"`, marks cards
+the watchdog system-blocked after exhausting its automatic retries (below).
 
 If a card reaches Review suspiciously fast, read the session messages —
 intermediate tool calls are not completion. Idle cards in To-Do are not work
@@ -101,7 +107,9 @@ A card marked `autoRun: true` dispatches itself the instant its parents are
 satisfied — do not Run it by hand, and do not treat its self-dispatch as
 unverified just because no one pressed the button. Your role on an autoRun
 chain is monitoring and handling blocks or warnings, not advancing cards:
-watch for `task_auto_dispatched` events confirming the chain moved, and treat
+watch for `task_auto_dispatched` events confirming the chain moved
+(`GET /api/tasks/causality` and `openboard tasks <name>` show which parent
+fired each auto-dispatch), and treat
 a `task_warning` event on a child (a failed auto-dispatch) as a stop —
 auto-dispatch never retries itself, so a warned child sits in To-Do until you
 or the user re-run it. A blocked or errored parent halts its whole downstream
@@ -130,6 +138,17 @@ for the stall shapes the auto-nudge cannot fix:
    session export. `/api/health` reports adapter build info (so a stale live
    instance is visible), not worker liveness.
 
+Above the nudge sits the no-progress watchdog (`OPENBOARD_WATCHDOG_MS`,
+default 10 minutes; `0` disables). It probes OpenCode's REST status rather
+than the `/event` stream, re-arms while a session is genuinely busy or a
+permission ask is pending, then makes at most two automatic same-worktree
+fresh-session retries — escalating to the card's `fallbackModel` on the
+second when it names a different provider, with `activeModel` recording what
+actually ran — and finally stamps a watchdog-authored blocked report
+(`completionSource: "watchdog"`) and moves the card to Review for triage.
+Do not hand-retry a card the watchdog is mid-recovery on; the
+`task_watchdog_*` events narrate each step.
+
 ## Review Worktrees
 
 For each Review card:
@@ -137,10 +156,13 @@ For each Review card:
 1. Check `pending` first. `base-checkout-escape` (+ `escapeDetectedPaths`)
    means the card wrote outside its worktree — investigate, never integrate.
    `git-init` and `rebase-conflict` are likewise blocks, not ordinary Review
-   state.
+   state (a To Do card pending `git-init` exposes the TUI `g` "init git and
+   run" action, two-press confirmed and server-preflighted).
 2. Inspect `git status --short` in the worktree.
 3. Confirm changed files respect the card boundary.
-4. Read or diff the changed files (`task_diff` / View Diff).
+4. Read or diff the changed files (`task_diff` / View Diff — `a` cycles the
+   evidence source between the card's baseline diff and each code ancestor's
+   `task_compare` delta; Done-card views are historical and read-only).
 5. Run the required build/test command in that worktree.
 6. Judge the acceptance criteria.
 7. Only then consider Sync or Integrate.
@@ -161,15 +183,24 @@ environment.
 Integrate is rebase-first: it rebases the task branch onto the target branch
 inside the worktree, fast-forwards the base checkout (`--ff-only`), removes
 the worktree, and keeps the `board/*` branch. The base checkout is never
-merged into directly, so a conflict cannot dirty it. Over MCP:
-`integrate_task` with `confirmReviewed: true` (optional `targetBranch`); there
-is no force/keep option.
+merged into directly, so a conflict cannot dirty it. Integrate refuses while
+the session is still running, re-runs the base-checkout escape detector
+first, and — when the worktree holds uncommitted files — returns a
+`needsCommit` refusal listing committed vs uncommitted paths; pass
+`commitRemaining: true` after reviewing them to sweep the remainder onto the
+task branch. On success the card itself moves to Done with `completedBy:
+"Integrated by User"` — integrate is the acceptance; no separate Done move
+follows. Over MCP: `integrate_task` with `confirmReviewed: true` (optional
+`targetBranch`, `commitRemaining`); there is no force/keep option.
 
 ### Blocked-Answer Retry And Evidence Comparison
 
-When a card blocks (completion `outcome: "blocked"`), the operator answers its
-question through `answer_blocked_task`, which submits the answer as bounded
-retry feedback with the blocking context. The board enforces:
+When a card blocks (completion `outcome: "blocked"`), the worker's block
+report carries the direct question in `needsInput`; the operator answers it
+through `answer_blocked_task` (TUI: `Shift+R` opens the answer composer when
+a question exists, ordinary Retry confirmation otherwise), which submits the
+answer as bounded retry feedback with the blocking context. The board
+enforces:
 
 - **Current-block-only.** The `blockedReportedAt` must match the card's most
   recent block timestamp — stale answers are rejected.
@@ -194,6 +225,10 @@ relative to the base's branch/commit?" Useful for confirming that a fix card
 actually covered the files an auditor flagged, or that a downstream build
 inherited upstream changes cleanly. Independent diffs (file-disjoint) are safe
 to integrate in parallel; overlapping files need serial integration order.
+`task_compare` refuses to fake evidence: a diverged base (merge-base no
+longer the base tip) or a dirty/unverifiable live base returns an honest
+no-git reason instead of a generic two-ref diff — read that as "evidence
+unavailable", not breakage.
 
 ### Worker-Side Tools And Permissions
 
@@ -210,14 +245,21 @@ states:
   they may call; any board tool not in that list is out of scope.
 
 `respond_permission` is for the orchestrator cockpit, not workers. When a
-permission ask appears on a task (visible in `taskSummary.pendingPermissionCount`
-and `list_tasks` projection), the orchestrator responds through
-`respond_permission` with `action: "allow_once"` (grant this request, permission
-returns to ask on the next matching call) or `"deny"` (block this request), each
-with an explicit `answeredBy` attribution for the audit trail. `allow_once` is
-not `allow` — it does not persist; the permission layer re-asks on the next
-matching tool call. Each ask carries a deadline (60s by default) and
-auto-resolves to deny on timeout, so respond promptly when an ask appears.
+permission ask appears on a task (the task projection carries
+`pendingPermissions` — ask id, tool, resource patterns, deadline — on
+`list_tasks` and every task-returning route), the orchestrator responds
+through `respond_permission` with the ask's `askId` and `action:
+"allow_once"` (grant this request, permission returns to ask on the next
+matching call) or `"deny"` (block this request), each with an explicit
+`answeredBy` attribution for the audit trail. `allow_once` is not `allow` —
+it does not persist; the permission layer re-asks on the next matching tool
+call. Read-class asks (read, glob, grep, list) auto-resolve without an
+operator; everything else raises fail-closed. Each ask carries a deadline —
+five minutes by default, editable per instance in board Settings, with
+`OPENBOARD_PERMISSION_GRACE_MS` as the startup fallback — and auto-resolves
+to deny on timeout, so respond before it lapses. A response can come back
+`stale`, `already_claimed`, or `not_found` — re-read `pendingPermissions`
+instead of retrying blind.
 
 ### Session Diagnostics
 
@@ -237,6 +279,8 @@ requires the SSE endpoint directly.
 Use `send_session_message` when an engaged operator or cockpit needs to clarify,
 redirect, or converse with an existing session. On an active card it guides the
 current task; on a Review card it is chat-only and preserves the Review completion.
+Archived and Done cards refuse chat — Done is historical; move the card out of
+Done first.
 Use `retry_task` or `answer_blocked_task` to resume task execution. Supply `sentBy`, a unique
 `clientMessageId`, and the exact current `expectedSessionId`. Use `mode: "queue"`
 for a normal follow-up and `mode: "interrupt"` only when the current turn should
@@ -260,9 +304,9 @@ retry so the session knows to resolve the listed paths, stage, and run
 that discards the in-progress rebase. Budget these retries like any loop.
 
 After Integrate: confirm the target branch fast-forwarded (not rewrote), the
-worktree was removed and the `board/*` branch kept, and run final build/tests
-in the integrated repo. Use Sync only when a worktree needs upstream changes
-before integration.
+worktree was removed, the `board/*` branch was kept, and the card landed in
+Done; then run final build/tests in the integrated repo. Use Sync only when a
+worktree needs upstream changes before integration.
 
 ## Run Role Loops
 
@@ -346,7 +390,11 @@ Close the loop — do not leave the user guessing whether the run finished:
 - Moving a card to Done is the human's sign-off. Surface the verified state
   and let the user decide; never move cards to Done to manufacture completion.
   MCP `move_task` to Done requires an explicit `completedBy` naming the
-  acceptor — never silently default it.
+  acceptor — never silently default it. The server also refuses Done while a
+  card's live worktree has unintegrated changes or a running session (409
+  `unintegrated_worktree_changes` with the file evidence,
+  `worktree_session_running`, or `worktree_status_unavailable`) — integrate,
+  commit, or discard first.
 - For long or async runs, lead with a short done / not-done line before the
   evidence.
 - After each wave, integration, role-loop round, or final verification, close
@@ -367,9 +415,11 @@ Custom profiles created for a run are config side effects, not fixtures:
   the plan marked **ephemeral** from the OpenCode config
   (`~/.config/opencode/agents/<name>.md`, or the inline `agent.<name>` block)
   and restore any backed-up originals.
-- Restart the same instance/server that was roster-proofed, then verify
-  `GET /api/agents` (or `list_agents`) no longer lists them. Confirm against
-  the Profile Manifest; do not assume.
+- Restart the same instance/server that was roster-proofed (`openboard
+  restart <name>` stops, starts, waits for health, and flags unsafe RUNNING
+  cards), then verify `GET /api/agents` (or `list_agents`, or `openboard
+  agents <name>`) no longer lists them. Confirm against the Profile Manifest;
+  do not assume.
 - Keep only profiles marked **durable**. If lifecycle was not declared, ask —
   do not silently delete or silently accumulate.
 - For role loops, clean up only after the exit condition or cap is reached and
@@ -382,13 +432,18 @@ responsibility — orphaned worktrees are a real day-one failure:
 
 - Audit/QA Review cards that will never integrate: **discard** (Review cards
   only) removes the checkout, keeps the `board/*` branch and the card. REST
-  `POST /api/tasks/:id/discard` (`force` in body) or the TUI `D` key — not an
-  MCP tool.
+  `POST /api/tasks/:id/discard-worktree` (`force` in body) or the TUI `D`
+  key — not an MCP tool.
 - Deleting a card removes its worktree: REST `DELETE /api/tasks/:id` with
   `forceWorktree` / `keepWorktree` query params. Also not exposed over MCP.
 - A dirty worktree blocks removal unless explicitly forced or kept. Decide
   whether partial work should be salvaged first (a manual git commit inside
   the worktree — standalone commit is not a product action).
+- Audit leftovers with `openboard worktrees <name>` (flags orphan candidates
+  and dirty state) and `openboard doctor <name>`; `GET /api/diagnostics`
+  reports the startup sweep's kept dirty orphans, resolvable via
+  `POST /api/worktrees/orphans/resolve`. The TUI Settings view has a
+  dirty-worktrees pane for the same cleanup.
 - Startup's best-effort orphan sweep is a backstop, not a plan — clean up the
   run you dispatched.
 
@@ -400,6 +455,10 @@ responsibility — orphaned worktrees are a real day-one failure:
   persists.
 - Treating Review as Done; reporting a run finished without saying so, or
   leaving completion ambiguous.
+- Hand-retrying a stalled card the watchdog is already recovering, or
+  treating a watchdog-blocked Review card as worker-reported evidence.
+- Trying to move a Review card with a live worktree straight to Done instead
+  of integrating, committing, or discarding first.
 - Dispatching before rechecking the Profile Manifest against the live roster;
   running a card whose agent did not materialize the expected `task.model`.
 - Cleaning up ephemeral profiles without restarting and proving they left

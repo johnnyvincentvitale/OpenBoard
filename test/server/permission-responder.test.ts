@@ -425,6 +425,35 @@ describe("createPermissionResponderPool", () => {
     expect(client.replyCalls[0]).toMatchObject({ requestID: "req_9", reply: "reject" });
   });
 
+  it("reads the live timeout supplier when each new OpenCode ask is raised", async () => {
+    let timeoutMs = 10_000;
+    client.messagesResponse = [
+      toolMessage("msg_1", "call_1", "apply_patch"),
+      toolMessage("msg_2", "call_2", "apply_patch"),
+    ];
+    client.listResponses = [[
+      { id: "req_live_1", sessionID: "ses_1", tool: { messageID: "msg_1", callID: "call_1" } },
+      { id: "req_live_2", sessionID: "ses_2", tool: { messageID: "msg_2", callID: "call_2" } },
+    ]];
+    const pool = createPermissionResponderPool({
+      client: client as never,
+      pollIntervalMs: 5,
+      interactiveTimeoutMs: () => timeoutMs,
+    });
+    pool.register("ses_1", "/wt");
+    await waitFor(() => pool.listPending("ses_1").length === 1);
+    const first = pool.listPending("ses_1")[0];
+    expect(first.deadline - first.raisedAt).toBeGreaterThanOrEqual(9_990);
+
+    timeoutMs = 20_000;
+    pool.register("ses_2", "/wt");
+    await waitFor(() => pool.listPending("ses_2").length === 1);
+    const second = pool.listPending("ses_2")[0];
+    pool.stop();
+
+    expect(second.deadline - second.raisedAt).toBeGreaterThanOrEqual(19_990);
+  });
+
   it("surfaces a broker provider-reply failure through onError under the 'reply' context", async () => {
     client.messagesResponse = [toolMessage("msg_1", "call_1", "apply_patch")];
     client.listResponses = [

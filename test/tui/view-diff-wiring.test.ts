@@ -125,6 +125,9 @@ describe("TUI diff view entry (v)", () => {
     expect(text).toContain("refresh/reconcile board");
     expect(text).toContain("new comment (Comments tab)");
     expect(text).toContain("copy selected code block in Session Chat");
+    expect(text).toContain("answer NEEDS ANSWER cards; retry ordinary BLOCKED or failed cards");
+    expect(text).toContain("compose replacement guidance that interrupts the active turn");
+    expect(text).not.toContain("ctrl+enter");
   });
 
 
@@ -233,20 +236,63 @@ describe("TUI diff view entry (v)", () => {
     const sendSessionMessage = vi.fn(async (_id: string, input: any) => ({ messageId: input.clientMessageId, taskId: chatTask.id, sessionId: "ses-1", status: "queued", mode: input.mode, sentAt: 456, sentBy: "User", task: chatTask }));
     const a = actions({ client: { sendSessionMessage, streamSessionEvents: vi.fn(async () => ({ active: true, close: vi.fn() })) } });
 
-    await handleKeypress({ name: "i", sequence: "i" } as any, s, a);
-    for (const char of "hello") await handleKeypress({ name: char, sequence: char } as any, s, a);
+    await handleKeypress({ name: "m", sequence: "m" } as any, s, a);
+    for (const char of "hi") await handleKeypress({ name: char, sequence: char } as any, s, a);
     await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
 
-    expect(sendSessionMessage).toHaveBeenCalledWith("task-1", expect.objectContaining({ text: "hello", mode: "queue", expectedSessionId: "ses-1", expectedRunStartedAt: 123 }));
+    expect(sendSessionMessage).toHaveBeenCalledWith("task-1", expect.objectContaining({ text: "hi", mode: "queue", expectedSessionId: "ses-1", expectedRunStartedAt: 123 }));
     expect(s.sessionChatDraft).toBeUndefined();
     expect(s.status).toContain("queued");
+  });
+
+  it("i opens replacement guidance that interrupts the active turn on submit", async () => {
+    const chatTask = task("task-1", "in_progress", { sessionId: "ses-1", runStartedAt: 123, runState: "running" });
+    const followView = { taskId: "task-1", events: [], connection: "LIVE", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 };
+    const s = state({ tasks: [chatTask], selectedTaskId: chatTask.id, viewState: { view: "follow", previousView: "board" }, followView });
+    const sendSessionMessage = vi.fn(async (_id: string, input: any) => ({ messageId: input.clientMessageId, taskId: chatTask.id, sessionId: "ses-1", status: "accepted", mode: input.mode, sentAt: 456, sentBy: "User", task: chatTask }));
+    const a = actions({ client: { sendSessionMessage, streamSessionEvents: vi.fn(async () => ({ active: true, close: vi.fn() })) } });
+
+    await handleKeypress({ name: "i", sequence: "i" } as any, s, a);
+    expect(s.sessionChatDraft?.mode).toBe("interrupt");
+    for (const char of "change direction") await handleKeypress({ name: char, sequence: char } as any, s, a);
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+
+    expect(sendSessionMessage).toHaveBeenCalledWith("task-1", expect.objectContaining({ text: "change direction", mode: "interrupt" }));
+    expect(s.sessionChatDraft).toBeUndefined();
   });
 
   it("renders the Follow surface as Session Chat", () => {
     const chatTask = task("task-1", "in_progress", { sessionId: "ses-1", runState: "running" });
     const s = state({ tasks: [chatTask], selectedTaskId: chatTask.id, viewState: { view: "follow", previousView: "board" }, followView: { taskId: "task-1", events: [], connection: "LIVE", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 } });
     expect(textOf(renderApp(fakeUi(), s))).toContain("Session Chat");
-    expect(textOf(renderApp(fakeUi(), s))).toContain("Press i to message this session");
+    expect(textOf(renderApp(fakeUi(), s))).toContain("Press m to message");
+    expect(textOf(renderApp(fakeUi(), s))).toContain("i to interrupt");
+  });
+
+  it("renders activity without internal root or descendant session labels", () => {
+    const chatTask = task("task-1", "in_progress", { sessionId: "ses-1", runState: "running" });
+    const toolEvent = {
+      seq: 1,
+      taskId: "task-1",
+      runStartedAt: 1,
+      sessionId: "ses-1",
+      rootSessionId: "ses-1",
+      harness: "opencode",
+      occurredAt: 1,
+      kind: "tool",
+      tool: { name: "bash", status: "running" },
+    };
+    const s = state({
+      tasks: [chatTask],
+      viewState: { view: "follow", previousView: "board" },
+      followView: { taskId: "task-1", events: [toolEvent], connection: "LIVE", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 },
+    });
+
+    const text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("AGENT · TOOL · bash");
+    expect(text).not.toContain("root · TOOL");
+    expect(text).not.toContain("child of");
+    expect(text).not.toContain("descendant");
   });
 
   it("renders fenced code as a labelled copy box and copies the selected source", async () => {
@@ -279,6 +325,34 @@ describe("TUI diff view entry (v)", () => {
     await handleKeypress({ name: "c", sequence: "c" } as any, s, actions({ copyToClipboard }));
     expect(copyToClipboard).toHaveBeenCalledWith("openboard attach qa-wave");
     expect(s.status).toBe("copied sh block to clipboard");
+  });
+
+  it("cycles only the two visible code blocks and returns after two Tab presses", async () => {
+    const chatTask = task("task-1", "review", { sessionId: "ses-1", runState: "idle" });
+    const events = [1, 2, 3, 4, 5].map((seq) => ({
+      seq,
+      taskId: "task-1",
+      runStartedAt: 1,
+      sessionId: "ses-1",
+      rootSessionId: "ses-1",
+      harness: "opencode",
+      occurredAt: seq,
+      kind: "text",
+      role: "assistant",
+      text: `\`\`\`text\nblock-${seq}\n\`\`\``,
+    }));
+    const s = state({
+      tasks: [chatTask],
+      terminalRows: 19,
+      viewState: { view: "follow", previousView: "board" },
+      followView: { taskId: "task-1", events, connection: "STATIC", autoFollow: true, scrollOffset: 0, lastRenderAt: 0, maxEvents: 100 },
+    });
+    const a = actions();
+
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
+    expect(s.followView.selectedCodeBlockKey).toBe("4:0");
+    await handleKeypress({ name: "tab", sequence: "\t" } as any, s, a);
+    expect(s.followView.selectedCodeBlockKey).toBe("5:0");
   });
 
   it("opens the full-screen diff view for a selected Review card and fetches its diff", async () => {

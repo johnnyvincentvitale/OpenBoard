@@ -440,9 +440,9 @@ describe("loadWatchdogConfig", () => {
 });
 
 describe("loadPermissionConfig", () => {
-  it("defaults OPENBOARD_PERMISSION_GRACE_MS to 60000", () => {
+  it("defaults OPENBOARD_PERMISSION_GRACE_MS to five minutes", () => {
     expect(loadPermissionConfig({})).toEqual(PERMISSION_DEFAULTS);
-    expect(loadPermissionConfig({}).graceMs).toBe(60_000);
+    expect(loadPermissionConfig({}).graceMs).toBe(300_000);
   });
 
   it("honors OPENBOARD_PERMISSION_GRACE_MS=0 as immediate policy fallback", () => {

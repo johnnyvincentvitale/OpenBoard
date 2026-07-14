@@ -147,7 +147,7 @@ export interface PermissionResponderPoolOptions {
    * Default 0 preserves pre-broker behavior (deny almost immediately, no
    * wait) — raise this once a caller actually wires an operator reply path.
    */
-  interactiveTimeoutMs?: number;
+  interactiveTimeoutMs?: number | (() => number);
   /**
    * Called on the first consecutive `list`/`reply` failure for a registered
    * session (not on every failing tick, to avoid spamming a caller that logs
@@ -244,7 +244,10 @@ function nativeRequestKey(sessionID: string, requestID: string): string {
 export function createPermissionResponderPool(options: PermissionResponderPoolOptions): PermissionResponderPool {
   const { client, onError, onPermissionEvent } = options;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const interactiveTimeoutMs = options.interactiveTimeoutMs ?? DEFAULT_INTERACTIVE_TIMEOUT_MS;
+  const configuredInteractiveTimeoutMs = options.interactiveTimeoutMs;
+  const interactiveTimeoutMs = typeof configuredInteractiveTimeoutMs === "function"
+    ? configuredInteractiveTimeoutMs
+    : () => configuredInteractiveTimeoutMs ?? DEFAULT_INTERACTIVE_TIMEOUT_MS;
   const targets = new Map<string, TargetState>();
   let stopped = false;
 
@@ -363,7 +366,7 @@ export function createPermissionResponderPool(options: PermissionResponderPoolOp
         continue;
       }
 
-      const deadline = state.nativeDeadlines.get(requestKey) ?? (Date.now() + interactiveTimeoutMs);
+      const deadline = state.nativeDeadlines.get(requestKey) ?? (Date.now() + Math.max(0, interactiveTimeoutMs()));
       state.nativeDeadlines.set(requestKey, deadline);
       const askSource: PermissionAskSource = request.permission === "bash" && state.interactiveBash
         ? "interactive-strict"

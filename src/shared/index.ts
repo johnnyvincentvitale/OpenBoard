@@ -15,3 +15,4 @@ export * from "./blocked-task";
 export * from "./lineage-context";
 export * from "./lifecycle";
 export * from "./watchdog-attempts";
+export * from "./permission-settings";

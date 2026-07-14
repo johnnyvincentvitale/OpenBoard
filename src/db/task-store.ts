@@ -160,6 +160,7 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
 
 const WORKTREE_REPO_ROOTS_SETTING = "worktreeRepoRoots";
 const LAST_SWEEP_SETTING = "lastSweep";
+const PERMISSION_GRACE_MS_SETTING = "permissionGraceMs";
 
 interface TaskRowRecord {
   id: string;
@@ -766,6 +767,20 @@ export class SqliteTaskStore implements TaskStore {
     } catch {
       return null;
     }
+  }
+
+  setPermissionGraceMs(value: number): void {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error("permission grace must be a non-negative integer number of milliseconds");
+    }
+    this.stmts.putSetting.run({ key: PERMISSION_GRACE_MS_SETTING, value: String(value) });
+  }
+
+  getPermissionGraceMs(): number | null {
+    const row = this.stmts.getSetting.get(PERMISSION_GRACE_MS_SETTING) as { value: string } | undefined;
+    if (!row) return null;
+    const value = Number(row.value);
+    return Number.isInteger(value) && value >= 0 ? value : null;
   }
 
   addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment {
