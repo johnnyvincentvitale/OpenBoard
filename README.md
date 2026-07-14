@@ -77,11 +77,10 @@ you never see a harness you can't run. Model IDs can also be entered freeform pe
 
 **Adapter resolution** (per harness, in order): an explicit
 `OPENBOARD_<HARNESS>_ACP_COMMAND` override → a bundled `@agentclientprotocol/*` adapter
-package if installed (Claude, Codex, Gemini) → the adapter binary on `PATH`
-(`claude-agent-acp`, `codex-acp`, `gemini-agent-acp`, `hermes-agent-acp`,
-`pi-coding-agent-acp`, `cursor-agent-acp`). Mode IDs and configuration options come
-from each adapter's live discovery; Codex configuration is applied through ACP's
-`session/set_mode` and `session/set_config_option` methods.
+package if installed (Claude, Codex) → the adapter binary on `PATH`. Gemini uses Gemini
+CLI's native `gemini --acp` mode. Mode IDs and models come from each adapter's live
+discovery; Codex options use `session/set_config_option`, while Gemini model selection
+uses `session/set_model`.
 
 ## Install
 

@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_ACP_PERMISSION_MODE, type AcpPermissionMode } from "../shared";
 import type { AcpConfigOption, AcpConfigValueOption, AcpHarnessConfig, AcpModelOption, AcpOptionValue, AcpTaskHarness, PendingPermissionAsk, RespondPermissionInput, SessionActivityToolStatus } from "../shared";
 import type {
@@ -60,6 +61,7 @@ interface AcpSessionState {
 
 interface AcpRunnerServiceConfig {
   envCommand: string;
+  commandArgs?: string[];
   permissionModeEnv?: string;
   defaultMode?: AcpPermissionMode;
   fallbackCommand: string;
@@ -72,6 +74,7 @@ interface AcpRunnerServiceConfig {
   omitModelIds?: readonly string[];
   extraMeta?: Record<string, unknown>;
   configOptions?: boolean;
+  setModel?: boolean;
 }
 
 export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
@@ -97,6 +100,7 @@ const OPENBOARD_REPORT_TOOLS = new Set([
 const OPENBOARD_REPORT_TOOL_NAMES = new Set(["complete_task", "block_task"]);
 
 const requireFromHere = createRequire(import.meta.url);
+const DEFAULT_MCP_COMMAND = fileURLToPath(new URL("../../dist/cli/openboard.mjs", import.meta.url));
 
 const CLAUDE_ACP_SERVICE: AcpRunnerServiceConfig = {
   envCommand: "OPENBOARD_CLAUDE_ACP_COMMAND",
@@ -123,12 +127,17 @@ const CODEX_ACP_SERVICE: AcpRunnerServiceConfig = {
 
 const GEMINI_ACP_SERVICE: AcpRunnerServiceConfig = {
   envCommand: "OPENBOARD_GEMINI_ACP_COMMAND",
-  fallbackCommand: "gemini-agent-acp",
-  packageName: "@agentclientprotocol/gemini-agent-acp",
-  metaKeys: ["gemini"],
+  // OpenBoard already provides the isolation and permission boundary. Gemini's
+  // folder-trust gate otherwise blocks injected stdio MCP servers and refuses
+  // autoEdit/yolo in managed task worktrees.
+  commandArgs: ["--acp", "--skip-trust"],
+  defaultMode: "default",
+  fallbackCommand: "gemini",
+  metaKeys: [],
   contractName: "OPENBOARD GEMINI ACP WORKER CONTRACT",
   sessionLabel: "Gemini ACP",
   displayName: "Gemini ACP",
+  setModel: true,
 };
 
 const HERMES_ACP_SERVICE: AcpRunnerServiceConfig = {
@@ -180,20 +189,20 @@ function acpServiceForHarness(harness: AcpTaskHarness): AcpRunnerServiceConfig {
 
 function defaultCommand(service: AcpRunnerServiceConfig, env: NodeJS.ProcessEnv): { command: string; args: string[] } {
   const configured = env[service.envCommand]?.trim();
-  if (configured) return { command: configured, args: [] };
+  if (configured) return { command: configured, args: service.commandArgs ?? [] };
 
   if (service.packageName) {
     try {
       const packageJsonPath = requireFromHere.resolve(`${service.packageName}/package.json`);
       return {
         command: process.execPath,
-        args: [join(dirname(packageJsonPath), "dist/index.js")],
+        args: [join(dirname(packageJsonPath), "dist/index.js"), ...(service.commandArgs ?? [])],
       };
     } catch {
       // Fall through to the adapter binary name.
     }
   }
-  return { command: service.fallbackCommand, args: [] };
+  return { command: service.fallbackCommand, args: service.commandArgs ?? [] };
 }
 
 function normalizeMode(mode: AcpPermissionMode): string {
@@ -230,6 +239,10 @@ function toolName(toolCall: AcpToolCall): string | undefined {
   // Trust that surface solely for the two exact OpenBoard report tools; never
   // treat an arbitrary human-readable title as a privileged tool identity.
   if (typeof toolCall.title === "string" && OPENBOARD_REPORT_TOOLS.has(toolCall.title)) return toolCall.title;
+  const geminiOpenBoardTool = typeof toolCall.title === "string"
+    ? /^(complete_task|block_task) \(openboard MCP Server\)$/.exec(toolCall.title)
+    : null;
+  if (geminiOpenBoardTool) return `openboard.${geminiOpenBoardTool[1]}`;
   return undefined;
 }
 
@@ -246,7 +259,7 @@ export function decideClaudeAcpPermission(
   cwd: string,
   permissionMode: AcpPermissionMode,
 ): "allow" | "ask" | "deny" {
-  if (permissionMode === "bypassPermissions") return "allow";
+  if (permissionMode === "bypassPermissions" || permissionMode === "yolo") return "allow";
 
   const call = params.toolCall;
   const name = toolName(call);
@@ -260,6 +273,7 @@ export function decideClaudeAcpPermission(
   // them. Autonomous modes remain explicit compatibility choices. Manual is
   // interactive-strict; dontAsk/plan fail closed for every mutating or unknown
   // operation.
+  if (permissionMode === "autoEdit" && kind === "edit") return "allow";
   if (permissionMode === "acceptEdits" || permissionMode === "auto") return "allow";
   if (permissionMode === "dontAsk" || permissionMode === "plan") return "deny";
   return "ask";
@@ -311,7 +325,25 @@ function flattenConfigSelectOptions(options: unknown): AcpConfigValueOption[] {
 
 function modelOptionsFromSessionNew(value: unknown, omitModelIds: readonly string[] = []): AcpModelOption[] {
   if (value === null || typeof value !== "object") return [];
-  const configOptions = (value as Record<string, unknown>).configOptions;
+  const record = value as Record<string, unknown>;
+  const omit = new Set(["default", ...omitModelIds]);
+  const modelsRecord = record.models;
+  const standardModels = modelsRecord !== null && typeof modelsRecord === "object"
+    ? (modelsRecord as Record<string, unknown>).availableModels
+    : undefined;
+  if (Array.isArray(standardModels)) {
+    return standardModels.flatMap((item) => {
+      if (item === null || typeof item !== "object") return [];
+      const model = item as Record<string, unknown>;
+      const id = typeof model.modelId === "string" ? model.modelId.trim() : "";
+      return id && !omit.has(id) ? [{
+        id,
+        ...(typeof model.name === "string" ? { name: model.name } : {}),
+        ...(typeof model.description === "string" ? { description: model.description } : {}),
+      }] : [];
+    });
+  }
+  const configOptions = record.configOptions;
   if (!Array.isArray(configOptions)) return [];
   const modelOption = configOptions.find((option) => {
     if (option === null || typeof option !== "object") return false;
@@ -319,7 +351,6 @@ function modelOptionsFromSessionNew(value: unknown, omitModelIds: readonly strin
     return record.category === "model" || record.id === "model";
   });
   if (modelOption === null || typeof modelOption !== "object") return [];
-  const omit = new Set(["default", ...omitModelIds]);
   const seen = new Set<string>();
   const models: AcpModelOption[] = [];
   for (const option of flattenConfigSelectOptions((modelOption as Record<string, unknown>).options)) {
@@ -396,10 +427,12 @@ async function withDiscoverySession<T>(
   const env = options.env ?? process.env;
   const spawn = options.spawn ?? nodeSpawn;
   const command = defaultCommand(service, env);
+  const detached = process.platform !== "win32";
   const child = spawn(command.command, command.args, {
     cwd: options.cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
+    detached,
   });
   let buffer = "";
   let nextId = 1;
@@ -408,6 +441,14 @@ async function withDiscoverySession<T>(
 
   const cleanup = (): void => {
     child.stdout.off("data", onStdout);
+    if (detached && child.pid) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+        return;
+      } catch {
+        // The wrapper may already have exited; fall back to the direct handle.
+      }
+    }
     child.kill();
   };
 
@@ -509,7 +550,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     const command = deps.command ? { command: deps.command, args: deps.commandArgs ?? [] } : defaultCommand(this.service, this.env);
     this.command = command.command;
     this.commandArgs = command.args;
-    this.mcpCommand = (deps.mcpCommand ?? (this.service.mcpCommandEnv ? this.env[this.service.mcpCommandEnv]?.trim() : undefined)) || "openboard";
+    this.mcpCommand = (deps.mcpCommand ?? (this.service.mcpCommandEnv ? this.env[this.service.mcpCommandEnv]?.trim() : undefined)) || DEFAULT_MCP_COMMAND;
     const envPermissionMode = this.service.permissionModeEnv ? this.env[this.service.permissionModeEnv]?.trim() : undefined;
     this.permissionMode = deps.permissionMode ?? envPermissionMode ?? this.service.defaultMode ?? DEFAULT_ACP_PERMISSION_MODE;
     const configuredPermissionGraceMs = deps.permissionGraceMs;
@@ -656,6 +697,12 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     state.sessionId = sessionId;
 
     await this.trySetMode(state, permissionMode);
+    if (this.service.setModel && input.task.model?.id) {
+      await this.request(state, "session/set_model", {
+        sessionId: state.sessionId,
+        modelId: input.task.model.id,
+      });
+    }
     if (this.service.configOptions) await this.setConfigOptions(state, input);
 
     state.status = "running";

@@ -1,10 +1,13 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, decideClaudeAcpPermission } from "../../src/server/claude-acp-runner";
+import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, GeminiAcpRunner, decideClaudeAcpPermission, discoverAcpConfig } from "../../src/server/claude-acp-runner";
 import type { Task } from "../../src/shared";
 import type { PermissionAskEvent, PermissionBrokerClock } from "../../src/server/permission-broker";
 import type { SessionActivityEventInput } from "../../src/server/session-activity";
+
+const DEFAULT_MCP_COMMAND = fileURLToPath(new URL("../../dist/cli/openboard.mjs", import.meta.url));
 
 const task: Task = {
   id: "task_1",
@@ -209,7 +212,7 @@ describe("ClaudeAcpRunner", () => {
       mcpServers: [
         {
           name: "openboard",
-          command: "openboard",
+          command: DEFAULT_MCP_COMMAND,
           args: ["mcp", "--instance", "alpha"],
           env: [],
         },
@@ -545,6 +548,9 @@ describe("ClaudeAcpRunner", () => {
     expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "cat /tmp/secret" } }), "/repo", "manual")).toBe("ask");
     expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "acceptEdits")).toBe("allow");
     expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "auto")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "autoEdit")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "autoEdit")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "yolo")).toBe("allow");
     expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "dontAsk")).toBe("deny");
     expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "plan")).toBe("deny");
     expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "mcp__openboard__complete_task" } }, rawInput: {} }), "/repo", "manual")).toBe("allow");
@@ -625,7 +631,7 @@ describe("CodexAcpRunner", () => {
     });
     expect(sessionNew.params).toEqual({
       cwd: "/repo",
-      mcpServers: [{ name: "openboard", command: "openboard", args: ["mcp", "--instance", "alpha"], env: [] }],
+      mcpServers: [{ name: "openboard", command: DEFAULT_MCP_COMMAND, args: ["mcp", "--instance", "alpha"], env: [] }],
       _meta: {
         openboard: { permissionMode: "agent-full-access", acpOptions: { reasoning_effort: "high", "fast-mode": "on" } },
       },
@@ -650,6 +656,9 @@ describe("CodexAcpRunner", () => {
     expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "complete_task" } }), "/repo", "manual")).toBe("allow");
     expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "openboard.block_task" } }), "/repo", "manual")).toBe("allow");
     expect(decideClaudeAcpPermission(request({ title: "mcp__openboard__block_task" }), "/repo", "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ title: "complete_task (openboard MCP Server)" }), "/repo", "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ title: "block_task (openboard MCP Server)" }), "/repo", "plan")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ title: "complete_task (other MCP Server)" }), "/repo", "manual")).toBe("ask");
     expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "other.complete_task" } }), "/repo", "manual")).toBe("ask");
   });
 
@@ -679,5 +688,74 @@ describe("CodexAcpRunner", () => {
     expect(runner.listPendingPermissions(result.sessionName)).toEqual([expect.objectContaining({ harness: "cursor-acp", source: "acp" })]);
     harness.notify("session/update", { sessionId: "cursor-session-1", status: "working" });
     expect(activity).toEqual([expect.objectContaining({ taskId: "task_1", runStartedAt: 789, input: expect.objectContaining({ harness: "cursor-acp", kind: "status", text: "working" }) })]);
+  });
+});
+
+describe("GeminiAcpRunner", () => {
+  it("uses Gemini CLI's native ACP mode, permissions, and model control", async () => {
+    const harness = makeAcpHarness();
+    const runner = new GeminiAcpRunner({
+      adapterBaseUrl: "http://127.0.0.1:4097",
+      boardToken: "token",
+      instanceName: "alpha",
+      spawn: harness.spawn as never,
+      env: {},
+    });
+    const geminiTask: Task = {
+      ...task,
+      harness: "gemini-acp",
+      model: { providerID: "gemini-acp", id: "gemini-3.1-pro-preview" },
+    };
+
+    const runPromise = runner.run({ task: geminiTask, directory: "/repo", prompt: "Do Gemini work", runStartedAt: 789 });
+    harness.respond(await harness.nextMessage("initialize"), { protocolVersion: 1 });
+    const sessionNew = await harness.nextMessage("session/new");
+    harness.respond(sessionNew, { sessionId: "gemini-session-1" });
+    const setMode = await harness.nextMessage("session/set_mode");
+    harness.respond(setMode, {});
+    const setModel = await harness.nextMessage("session/set_model");
+    harness.respond(setModel, {});
+    const prompt = await harness.nextMessage("session/prompt");
+    await runPromise;
+
+    expect(harness.spawn).toHaveBeenCalledWith("gemini", ["--acp", "--skip-trust"], {
+      cwd: "/repo",
+      env: {},
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    expect(sessionNew.params).toEqual({
+      cwd: "/repo",
+      mcpServers: [{ name: "openboard", command: DEFAULT_MCP_COMMAND, args: ["mcp", "--instance", "alpha"], env: [] }],
+      _meta: {},
+    });
+    expect(setMode.params).toEqual({ sessionId: "gemini-session-1", modeId: "default" });
+    expect(setModel.params).toEqual({ sessionId: "gemini-session-1", modelId: "gemini-3.1-pro-preview" });
+    expect(((prompt.params?.prompt as Array<{ text?: string }>)[0]?.text) ?? "").toContain("OPENBOARD GEMINI ACP WORKER CONTRACT");
+    runner.shutdown();
+  });
+
+  it("discovers standard ACP modes and models from Gemini CLI", async () => {
+    const harness = makeAcpHarness();
+    const discovery = discoverAcpConfig("gemini-acp", { cwd: "/repo", env: {}, spawn: harness.spawn as never });
+
+    harness.respond(await harness.nextMessage("initialize"), { protocolVersion: 1 });
+    harness.respond(await harness.nextMessage("session/new"), {
+      sessionId: "gemini-discovery-1",
+      modes: { availableModes: [{ id: "default", name: "Default" }, { id: "yolo", name: "YOLO" }] },
+      models: { availableModels: [{ modelId: "auto-gemini-3", name: "Auto" }, { modelId: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro" }] },
+    });
+
+    await expect(discovery).resolves.toMatchObject({
+      available: true,
+      modes: [{ value: "default", name: "Default" }, { value: "yolo", name: "YOLO" }],
+      models: [{ id: "auto-gemini-3", name: "Auto" }, { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro" }],
+    });
+    expect(harness.spawn).toHaveBeenCalledWith("gemini", ["--acp", "--skip-trust"], {
+      cwd: "/repo",
+      env: {},
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    expect(harness.child.kill).toHaveBeenCalledOnce();
   });
 });
