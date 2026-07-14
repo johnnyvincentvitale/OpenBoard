@@ -16,7 +16,6 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**"],
       exclude: [
-        "src/index.ts",
         "src/server/serve.ts",
         "src/server/routes/task-events.ts",
         "src/mcp/server.ts",

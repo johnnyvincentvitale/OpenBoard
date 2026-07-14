@@ -1721,7 +1721,7 @@ describe("TUI board view command strip", () => {
 
 describe("TUI move-to-Done confirmation sizes body text to content, not a fixed height", () => {
   const LONG_RESIDUAL_RISK =
-    "The target working tree at /Users/johnnyvitale/code/openboard-content-planner-test had an uncommitted change to a config file that was left untouched, so a manual review of that file is still recommended before this is treated as fully verified.";
+    "The task worktree contains an uncommitted configuration change that was intentionally left untouched. Review that change manually before treating this result as fully verified.";
 
   function reportedTask(id: string, column: Column): Task {
     return {
