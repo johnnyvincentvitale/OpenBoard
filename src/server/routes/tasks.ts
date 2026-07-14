@@ -29,8 +29,9 @@ import {
   type BlockedAcceptance,
   type BlockedAnswerContext,
   isColumn,
+  isAcpPermissionMode,
 } from "../../shared";
-import type { AcpOptions, AcpPermissionMode, ClaudeCodePermissionMode, CompletionReport, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, SessionMessageInput, SessionMessageReceipt, Task, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
+import type { AcpOptions, ClaudeCodePermissionMode, CompletionReport, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, SessionMessageInput, SessionMessageReceipt, Task, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
 import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
@@ -109,10 +110,6 @@ function isTaskHarness(value: unknown): value is TaskHarness {
 
 function isClaudePermissionMode(value: unknown): value is ClaudeCodePermissionMode {
   return typeof value === "string" && (CLAUDE_CODE_PERMISSION_MODES as readonly string[]).includes(value);
-}
-
-function isAcpPermissionMode(value: unknown): value is AcpPermissionMode {
-  return isClaudePermissionMode(value);
 }
 
 function isAcpHarness(harness: TaskHarness): boolean {
@@ -308,6 +305,9 @@ export function registerTaskRoutes(
       }
       if (permissionMode !== undefined && !isAcpPermissionMode(permissionMode)) {
         throw AdapterError.validation("permissionMode must be a supported ACP permission mode");
+      }
+      if (harness === "claude-code" && permissionMode !== undefined && !isClaudePermissionMode(permissionMode)) {
+        throw AdapterError.validation("permissionMode must be a supported Claude Code permission mode for claude-code tasks");
       }
       if (permissionMode !== undefined && (taskType !== "agent" || !isAcpHarness(harness))) {
         throw AdapterError.validation("permissionMode can only be set for ACP agent tasks");
@@ -877,6 +877,9 @@ export function registerTaskRoutes(
       if (patch.harness === "claude-code") {
         const nextMode = patch.permissionMode ?? patch.claudePermissionMode;
         if (nextMode !== undefined) {
+          if (nextMode !== null && !isClaudePermissionMode(nextMode)) {
+            throw AdapterError.validation("permissionMode must be a supported Claude Code permission mode for claude-code tasks");
+          }
           patch.permissionMode = nextMode;
           patch.claudePermissionMode = nextMode;
         }

@@ -583,7 +583,7 @@ describe("ClaudeAcpRunner", () => {
 });
 
 describe("CodexAcpRunner", () => {
-  it("starts a Codex ACP session with OpenBoard MCP and Codex/OpenAI model metadata", async () => {
+  it("configures a Codex ACP session through the adapter's native protocol", async () => {
     const harness = makeAcpHarness();
     const runner = new CodexAcpRunner({
       adapterBaseUrl: "http://127.0.0.1:4097",
@@ -597,9 +597,9 @@ describe("CodexAcpRunner", () => {
     const codexTask: Task = {
       ...task,
       harness: "codex",
-      permissionMode: "manual",
-      acpOptions: { reasoningEffort: "low" },
-      model: { providerID: "codex", id: "gpt-5-codex" },
+      permissionMode: "agent-full-access",
+      acpOptions: { reasoning_effort: "high", "fast-mode": "on" },
+      model: { providerID: "codex", id: "gpt-5.4" },
     };
 
     const runPromise = runner.run({ task: codexTask, directory: "/repo", prompt: "Do Codex work", runStartedAt: 456 });
@@ -608,6 +608,12 @@ describe("CodexAcpRunner", () => {
     harness.respond(sessionNew, { sessionId: "codex-session-1" });
     const setMode = await harness.nextMessage("session/set_mode");
     harness.respond(setMode, {});
+    const setModel = await harness.nextMessage("session/set_config_option");
+    harness.respond(setModel, { configOptions: [] });
+    const setReasoning = await harness.nextMessage("session/set_config_option");
+    harness.respond(setReasoning, { configOptions: [] });
+    const setFastMode = await harness.nextMessage("session/set_config_option");
+    harness.respond(setFastMode, { configOptions: [] });
     const prompt = await harness.nextMessage("session/prompt");
     const result = await runPromise;
 
@@ -621,15 +627,16 @@ describe("CodexAcpRunner", () => {
       cwd: "/repo",
       mcpServers: [{ name: "openboard", command: "openboard", args: ["mcp", "--instance", "alpha"], env: [] }],
       _meta: {
-        openboard: { permissionMode: "manual", acpOptions: { reasoningEffort: "low" } },
-        codex: { options: { model: "gpt-5-codex", reasoningEffort: "low" } },
-        openai: { options: { model: "gpt-5-codex", reasoningEffort: "low" } },
+        openboard: { permissionMode: "agent-full-access", acpOptions: { reasoning_effort: "high", "fast-mode": "on" } },
       },
     });
-    expect(setMode.params).toEqual({ sessionId: "codex-session-1", modeId: "default" });
+    expect(setMode.params).toEqual({ sessionId: "codex-session-1", modeId: "agent-full-access" });
+    expect(setModel.params).toEqual({ sessionId: "codex-session-1", configId: "model", value: "gpt-5.4" });
+    expect(setReasoning.params).toEqual({ sessionId: "codex-session-1", configId: "reasoning_effort", value: "high" });
+    expect(setFastMode.params).toEqual({ sessionId: "codex-session-1", configId: "fast-mode", value: "on" });
     const promptText = ((prompt.params?.prompt as Array<{ text?: string }> | undefined)?.[0]?.text) ?? "";
     expect(promptText).toContain("OPENBOARD CODEX ACP WORKER CONTRACT");
-    expect(promptText).not.toContain("reasoningEffort");
+    expect(promptText).not.toContain("reasoning_effort");
     expect(promptText).toContain('complete_task with { taskId: "task_1", runStartedAt: 456');
   });
 

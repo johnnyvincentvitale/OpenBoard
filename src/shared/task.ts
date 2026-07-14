@@ -128,9 +128,12 @@ export const CURSOR_ACP_MODEL_PROVIDER = "cursor-acp" as const;
 export const CLAUDE_CODE_PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"] as const;
 export type ClaudeCodePermissionMode = (typeof CLAUDE_CODE_PERMISSION_MODES)[number];
 export const DEFAULT_CLAUDE_CODE_PERMISSION_MODE: ClaudeCodePermissionMode = "bypassPermissions";
-export const ACP_PERMISSION_MODES = CLAUDE_CODE_PERMISSION_MODES;
-export type AcpPermissionMode = ClaudeCodePermissionMode;
+export type AcpPermissionMode = string;
 export const DEFAULT_ACP_PERMISSION_MODE: AcpPermissionMode = DEFAULT_CLAUDE_CODE_PERMISSION_MODE;
+
+export function isAcpPermissionMode(value: unknown): value is AcpPermissionMode {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 && value === value.trim();
+}
 
 export type AcpOptionValue = string | number | boolean;
 export type AcpOptions = Record<string, AcpOptionValue>;

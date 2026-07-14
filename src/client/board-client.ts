@@ -55,6 +55,7 @@ import {
   CURSOR_ACP_MODEL_PROVIDER,
   GEMINI_ACP_MODEL_PROVIDER,
   HERMES_MODEL_PROVIDER,
+  isAcpPermissionMode,
   PERMISSION_OVERRIDE_ACTIONS,
   PERMISSION_OVERRIDE_CATEGORIES,
   PI_CODING_AGENT_MODEL_PROVIDER,
@@ -521,7 +522,7 @@ function normalizeUpdateTaskInput(task: UpdateBoardTaskInput, cwd: string): Upda
     payload.claudePermissionMode = task.claudePermissionMode as ClaudeCodePermissionMode | null;
   }
   if (task.permissionMode !== undefined) {
-    if (task.permissionMode !== null && !VALID_CLAUDE_PERMISSION_MODE.has(task.permissionMode as AcpPermissionMode)) {
+    if (task.permissionMode !== null && !isAcpPermissionMode(task.permissionMode)) {
       throw new Error("permissionMode must be a supported ACP permission mode");
     }
     payload.permissionMode = task.permissionMode as AcpPermissionMode | null;
@@ -683,7 +684,7 @@ function normalizeTaskInput(task: CreateBoardTaskInput, cwd: string): CreateTask
     if (payload.type !== "agent" || payload.harness === undefined || payload.harness === "opencode") {
       throw new Error("permissionMode can only be set for ACP agent tasks");
     }
-    if (!VALID_CLAUDE_PERMISSION_MODE.has(permissionMode as AcpPermissionMode)) {
+    if (!isAcpPermissionMode(permissionMode)) {
       throw new Error("permissionMode must be a supported ACP permission mode");
     }
     payload.permissionMode = permissionMode as AcpPermissionMode;

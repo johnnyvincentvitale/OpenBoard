@@ -39,6 +39,7 @@ import type {
   SessionActivityRun,
   SessionActivityToolStatus,
   SessionActivityTransport,
+  Task,
   TaskStore,
 } from "../../shared";
 import { TASK_ROUTE_PATTERNS } from "../../shared";
@@ -55,6 +56,12 @@ const SESSION_TREE_MAX_SESSIONS = 32;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const SLOW_VIEWER_QUEUE_SIZE = 16;
 const MAX_TEXT_LENGTH = 10_000;
+
+function terminalStatusForTask(task: Task): "complete" | "error" | "aborted" {
+  if (task.runState === "error") return "error";
+  if (task.completion?.outcome === "complete" || task.column === "done") return "complete";
+  return "aborted";
+}
 
 export interface SessionEventsRouteDeps {
   store: TaskStore;
@@ -179,9 +186,7 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
         // For Done/Review OpenCode tasks, attempt backfill from the
         // OpenCode client so reconstructed text is available.
         if (isTerminal && hasOpenCode && "children" in client.session) {
-          const status = task.runState === "error" ? "error"
-            : task.column === "done" ? "complete"
-            : "aborted";
+          const status = terminalStatusForTask(task);
           const sessionClient = client.session as unknown as SessionClientLike;
           const backfill: (SessionActivityEvent & { _identity: string })[] = [];
           const budget: ByteBudget = { used: 0, truncated: false };
@@ -216,9 +221,7 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
           return;
         }
         if (isTerminal) {
-          const status = task.runState === "error" ? "error"
-            : task.column === "done" ? "complete"
-            : "aborted";
+          const status = terminalStatusForTask(task);
           await writeFrame({ kind: "terminal", status });
         }
         await emitHeartbeat(null, "static");
@@ -241,9 +244,7 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
         // If the task is terminal, close after delivering what's
         // available from the ring (or a gap if unavailable).
         if (isTerminal) {
-          const status = task.runState === "error" ? "error"
-            : task.column === "done" ? "complete"
-            : "aborted";
+          const status = terminalStatusForTask(task);
           const deliverFrames: SessionActivityFrame[] = [];
           const unsubscribe = activity.subscribe(taskId, cursor, (frame) => {
             if (acpClosed || closed) return;
@@ -513,9 +514,7 @@ export function registerSessionEventsRoutes(app: Hono, deps: SessionEventsRouteD
 
         // Terminal path for Review/Done: emit terminal and close.
         if (isTerminal) {
-          const status = task.runState === "error" ? "error"
-            : task.column === "done" ? "complete"
-            : "aborted";
+          const status = terminalStatusForTask(task);
           await writeFrame({ kind: "terminal", status });
           await emitHeartbeat(lastEventAt ?? task.updatedAt, "static");
           return;

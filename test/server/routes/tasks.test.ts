@@ -409,7 +409,7 @@ describe("POST /api/tasks", () => {
         description: "Use Gemini ACP",
         directory: repoDir,
         agent: "stale-opencode-profile",
-        permissionMode: "manual",
+        permissionMode: "agent",
         acpOptions: { thinkingBudget: "low" },
         model,
       }),
@@ -419,7 +419,7 @@ describe("POST /api/tasks", () => {
     const body = (await res.json()) as Task;
     expect(body.harness).toBe("gemini-acp");
     expect(body.agent).toBeUndefined();
-    expect(body.permissionMode).toBe("manual");
+    expect(body.permissionMode).toBe("agent");
     expect(body.acpOptions).toEqual({ thinkingBudget: "low" });
     expect(body.model).toEqual(model);
   });

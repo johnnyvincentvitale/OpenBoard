@@ -60,6 +60,8 @@ interface AcpSessionState {
 
 interface AcpRunnerServiceConfig {
   envCommand: string;
+  permissionModeEnv?: string;
+  defaultMode?: AcpPermissionMode;
   fallbackCommand: string;
   packageName?: string;
   metaKeys: string[];
@@ -69,6 +71,7 @@ interface AcpRunnerServiceConfig {
   mcpCommandEnv?: string;
   omitModelIds?: readonly string[];
   extraMeta?: Record<string, unknown>;
+  configOptions?: boolean;
 }
 
 export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
@@ -97,6 +100,7 @@ const requireFromHere = createRequire(import.meta.url);
 
 const CLAUDE_ACP_SERVICE: AcpRunnerServiceConfig = {
   envCommand: "OPENBOARD_CLAUDE_ACP_COMMAND",
+  permissionModeEnv: "OPENBOARD_CLAUDE_PERMISSION_MODE",
   fallbackCommand: "claude-agent-acp",
   packageName: "@agentclientprotocol/claude-agent-acp",
   metaKeys: ["claudeCode"],
@@ -107,12 +111,14 @@ const CLAUDE_ACP_SERVICE: AcpRunnerServiceConfig = {
 
 const CODEX_ACP_SERVICE: AcpRunnerServiceConfig = {
   envCommand: "OPENBOARD_CODEX_ACP_COMMAND",
+  defaultMode: "agent",
   fallbackCommand: "codex-acp",
-  packageName: "@agentclientprotocol/codex-agent-acp",
-  metaKeys: ["codex", "openai"],
+  packageName: "@agentclientprotocol/codex-acp",
+  metaKeys: [],
   contractName: "OPENBOARD CODEX ACP WORKER CONTRACT",
   sessionLabel: "Codex ACP",
   displayName: "Codex ACP",
+  configOptions: true,
 };
 
 const GEMINI_ACP_SERVICE: AcpRunnerServiceConfig = {
@@ -504,8 +510,8 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     this.command = command.command;
     this.commandArgs = command.args;
     this.mcpCommand = (deps.mcpCommand ?? (this.service.mcpCommandEnv ? this.env[this.service.mcpCommandEnv]?.trim() : undefined)) || "openboard";
-    const envPermissionMode = this.env.OPENBOARD_CLAUDE_PERMISSION_MODE?.trim();
-    this.permissionMode = (deps.permissionMode as AcpPermissionMode | undefined) ?? (envPermissionMode as AcpPermissionMode | undefined) ?? DEFAULT_ACP_PERMISSION_MODE;
+    const envPermissionMode = this.service.permissionModeEnv ? this.env[this.service.permissionModeEnv]?.trim() : undefined;
+    this.permissionMode = deps.permissionMode ?? envPermissionMode ?? this.service.defaultMode ?? DEFAULT_ACP_PERMISSION_MODE;
     const configuredPermissionGraceMs = deps.permissionGraceMs;
     this.permissionGraceMs = typeof configuredPermissionGraceMs === "function"
       ? configuredPermissionGraceMs
@@ -650,6 +656,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     state.sessionId = sessionId;
 
     await this.trySetMode(state, permissionMode);
+    if (this.service.configOptions) await this.setConfigOptions(state, input);
 
     state.status = "running";
     const result = { sessionId, sessionName, status: "running" };
@@ -721,6 +728,21 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     } catch {
       // Older adapters or unavailable modes should not prevent dispatch. The
       // adapter still runs with its configured default mode.
+    }
+  }
+
+  private async setConfigOptions(state: AcpSessionState, input: ClaudeCodeRunInput): Promise<void> {
+    const options = {
+      ...(input.task.model?.id ? { model: input.task.model.id } : {}),
+      ...(input.task.acpOptions ?? {}),
+    };
+    for (const [configId, value] of Object.entries(options)) {
+      await this.request(state, "session/set_config_option", {
+        sessionId: state.sessionId,
+        configId,
+        value,
+        ...(typeof value === "boolean" ? { type: "boolean" } : {}),
+      });
     }
   }
 

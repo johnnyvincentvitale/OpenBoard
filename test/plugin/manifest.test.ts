@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +12,8 @@ function readPluginJson(...parts: string[]) {
 }
 
 function collectFiles(root: string, files: string[] = []) {
+  if (!existsSync(root)) return files;
+
   for (const entry of readdirSync(root)) {
     const path = join(root, entry);
     const stat = statSync(path);

@@ -79,8 +79,9 @@ you never see a harness you can't run. Model IDs can also be entered freeform pe
 `OPENBOARD_<HARNESS>_ACP_COMMAND` override → a bundled `@agentclientprotocol/*` adapter
 package if installed (Claude, Codex, Gemini) → the adapter binary on `PATH`
 (`claude-agent-acp`, `codex-acp`, `gemini-agent-acp`, `hermes-agent-acp`,
-`pi-coding-agent-acp`, `cursor-agent-acp`). All ACP harnesses share Claude Code's
-write-fence permission model and `permissionMode` set.
+`pi-coding-agent-acp`, `cursor-agent-acp`). Mode IDs and configuration options come
+from each adapter's live discovery; Codex configuration is applied through ACP's
+`session/set_mode` and `session/set_config_option` methods.
 
 ## Install
 
@@ -579,9 +580,7 @@ Done-card View Diff screens are historical and read-only. They omit edit/commit 
   non-overlapping work, or enable worktree isolation (above).
 - Available models depend on your local OpenCode auth/config and enabled providers.
 - ACP harnesses beyond Claude Code (Codex, Gemini, Hermes, Pi, Cursor) are wired and
-  discovered live but **not yet verified end-to-end**; persisted `permissionMode`
-  validation is still shaped around the Claude mode set, so a non-Claude adapter reporting
-  a mode outside that set may be rejected.
+  discovered live but **not yet verified end-to-end**.
 
 ## Roadmap
 - V1 TUI + named-instance CLI — **ship target**.

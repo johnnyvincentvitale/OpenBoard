@@ -286,9 +286,9 @@ describe("MCP add_tasks", () => {
             description: "Launch Codex ACP",
             directory: `${CWD}/app`,
             harness: "codex",
-            permissionMode: "manual",
-            acpOptions: { reasoningEffort: "low" },
-            model: "codex/gpt-5-codex",
+            permissionMode: "agent",
+            acpOptions: { reasoning_effort: "low" },
+            model: "codex/gpt-5.4",
             isolation: "worktree",
           },
         ],
@@ -301,9 +301,9 @@ describe("MCP add_tasks", () => {
       type: "agent",
       harness: "codex",
       title: "Codex worker",
-      permissionMode: "manual",
-      acpOptions: { reasoningEffort: "low" },
-      model: { providerID: "codex", id: "gpt-5-codex" },
+      permissionMode: "agent",
+      acpOptions: { reasoning_effort: "low" },
+      model: { providerID: "codex", id: "gpt-5.4" },
       isolation: "worktree",
     });
     expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toEqual({
@@ -312,9 +312,9 @@ describe("MCP add_tasks", () => {
       title: "Codex worker",
       description: "Launch Codex ACP",
       directory: `${CWD}/app`,
-      permissionMode: "manual",
-      acpOptions: { reasoningEffort: "low" },
-      model: { providerID: "codex", id: "gpt-5-codex" },
+      permissionMode: "agent",
+      acpOptions: { reasoning_effort: "low" },
+      model: { providerID: "codex", id: "gpt-5.4" },
       isolation: "worktree",
     });
   });

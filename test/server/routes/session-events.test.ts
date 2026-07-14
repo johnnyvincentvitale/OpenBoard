@@ -224,6 +224,69 @@ describe("session-events route", () => {
     expect(staticHb).toBeDefined();
   });
 
+  it("completed Review ACP card emits complete without an activity collector", async () => {
+    const task = makeAcpTask(store);
+    store.update(task.id, {
+      column: "review",
+      runState: "idle",
+      completion: {
+        outcome: "complete",
+        summary: "finished",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "none",
+        reportedAt: 500,
+      },
+    });
+    const app = appFor(store, makeFakeOpenCodeClient());
+
+    const res = await app.request(`/api/tasks/${task.id}/session-events`);
+    const frames = parseSSE(await readStreamBody(res, 3000));
+    const terminal = frames.find((frame) => frame._event === "terminal");
+
+    expect(terminal?.status).toBe("complete");
+  });
+
+  it("completed Review ACP card overrides an obsolete aborted collector terminal", async () => {
+    const task = makeAcpTask(store);
+    store.update(task.id, {
+      column: "review",
+      runState: "idle",
+      completion: {
+        outcome: "complete",
+        summary: "finished after interrupt",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "none",
+        reportedAt: 600,
+      },
+    });
+    const activity = new SessionActivityCollector();
+    activity.startRun({
+      taskId: task.id,
+      runStartedAt: task.runStartedAt!,
+      sessionId: task.harnessSessionId!,
+      rootSessionId: task.harnessSessionId!,
+      harness: "claude-code",
+    });
+    activity.recordEvent(task.id, task.runStartedAt!, {
+      sessionId: task.harnessSessionId!,
+      rootSessionId: task.harnessSessionId!,
+      harness: "claude-code",
+      kind: "text",
+      text: "replacement turn completed",
+    });
+    activity.endRun(task.id, task.runStartedAt!, "aborted");
+    const app = appFor(store, makeFakeOpenCodeClient(), activity);
+
+    const res = await app.request(`/api/tasks/${task.id}/session-events`);
+    const frames = parseSSE(await readStreamBody(res, 3000));
+    const terminal = frames.find((frame) => frame._event === "terminal");
+
+    expect(terminal?.status).toBe("complete");
+    activity.reset();
+  });
+
   // ── Session tree: rootSessionId and traversal parent chain ───────────
 
   it("root->child session tree preserves rootSessionId and traversal parent chain", async () => {
