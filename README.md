@@ -497,7 +497,7 @@ npm run test:integration  # integration vs a real ephemeral opencode (local)
 npm run typecheck
 npm run build:app         # build server, MCP, TUI, and CLI
 ```
-Branches: `main` (trusted) / `dev` (work). Husky runs the unit suite before every commit.
+Release branch: `main`. Feature development lives in a separate private repository and is promoted here only after verification. Husky runs the unit suite before every commit.
 
 For tester handoff, run `npm run verify` from a clean checkout before sharing
 the repo or asking someone to retry a bug. Integration tests self-skip only
