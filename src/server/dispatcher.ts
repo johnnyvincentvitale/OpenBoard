@@ -12,7 +12,7 @@
  * moves the task back to `in_progress`. `abort()` stops the task's session.
  * `shutdown()` stops consuming the event stream.
  */
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
 import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, DiffResponse, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskEvent, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
@@ -1385,7 +1385,7 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   async resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome> {
-    if (!worktreePath || !worktreePath.startsWith("/")) {
+    if (!worktreePath || !isAbsolute(worktreePath)) {
       throw AdapterError.validation("worktreePath must be an absolute path");
     }
 
@@ -1403,7 +1403,7 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   async getOrphanWorktreeDiff(worktreePath: string): Promise<DiffResponse> {
-    if (!worktreePath || !worktreePath.startsWith("/")) {
+    if (!worktreePath || !isAbsolute(worktreePath)) {
       throw AdapterError.validation("worktreePath must be an absolute path");
     }
 

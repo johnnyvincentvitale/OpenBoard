@@ -10,6 +10,7 @@
  * layout, lifecycle types, a CLI command surface, and pure validation helpers.
  */
 
+import { join } from "node:path";
 import type { InstanceConfig } from "./task";
 
 // ── Registry file schema ─────────────────────────────────────────────────────
@@ -24,7 +25,7 @@ import type { InstanceConfig } from "./task";
  * @returns `~/.config/openboard/instances.json`
  */
 export function instancesFilePath(homeDir: string): string {
-  return `${homeDir}/.config/openboard/instances.json`;
+  return join(homeDir, ".config", "openboard", "instances.json");
 }
 
 /**
@@ -80,11 +81,11 @@ export interface InstanceDataDir {
  * @param name    The instance's kebab-case name.
  */
 export function instanceDataDir(homeDir: string, name: string): InstanceDataDir {
-  const dataDir = `${homeDir}/.local/share/openboard/${name}`;
+  const dataDir = join(homeDir, ".local", "share", "openboard", name);
   return {
     dataDir,
-    pidFile: `${dataDir}/openboard.pid`,
-    logFile: `${dataDir}/openboard.log`,
+    pidFile: join(dataDir, "openboard.pid"),
+    logFile: join(dataDir, "openboard.log"),
   };
 }
 

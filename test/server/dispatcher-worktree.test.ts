@@ -75,7 +75,7 @@ describe("TaskDispatcher — worktree isolation", () => {
   }
 
   beforeEach(() => {
-    tmp = realpathSync(mkdtempSync(join(tmpdir(), "ocb-disp-")));
+    tmp = realpathSync.native(mkdtempSync(join(tmpdir(), "ocb-disp-")));
     process.env.BOARD_WORKSPACE = tmp;
     store = new SqliteTaskStore(":memory:");
   });

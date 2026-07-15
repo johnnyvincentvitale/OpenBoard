@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "../../src/server/escape-detector";
@@ -37,7 +37,7 @@ describe("detectBaseCheckoutEscape", () => {
   let repo: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "ocb-escape-"));
+    tmp = realpathSync.native(mkdtempSync(join(tmpdir(), "ocb-escape-")));
     repo = join(tmp, "repo");
     makeRepo(repo);
   });
@@ -131,7 +131,7 @@ describe("detectBaseCheckoutEscape", () => {
     expect(result.changedPaths).toEqual(["renamed.txt"]);
   });
 
-  it("correctly splits rename old/new paths when a filename contains a literal ' -> '", async () => {
+  it.skipIf(process.platform === "win32")("correctly splits rename old/new paths when a filename contains a literal ' -> '", async () => {
     writeFileSync(join(repo, "weird -> name.txt"), "hi\n");
     g(repo, ["add", "-A"]);
     g(repo, ["commit", "--no-gpg-sign", "-m", "add weird file"]);

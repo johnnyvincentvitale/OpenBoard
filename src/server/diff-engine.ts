@@ -161,7 +161,7 @@ export async function computeDiffBetweenRefs(
 export async function resolveGitRepoRoot(cwd: string): Promise<string | null> {
   const result = await git(cwd, ["rev-parse", "--show-toplevel"]);
   if (result.code !== 0 || !result.stdout.trim()) return null;
-  return realpathSync(result.stdout.trim());
+  return realpathSync.native(result.stdout.trim());
 }
 
 /**
@@ -175,7 +175,7 @@ export async function resolveGitCommonDir(cwd: string): Promise<string | null> {
   if (result.code !== 0 || !result.stdout.trim()) return null;
   const common = result.stdout.trim();
   const resolved = isAbsolute(common) ? common : resolve(cwd, common);
-  return realpathSync(resolved);
+  return realpathSync.native(resolved);
 }
 
 /**

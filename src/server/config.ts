@@ -11,7 +11,7 @@
  * README's "Running multiple instances" section for a worked example.
  */
 import { createServer } from "node:net";
-import { format, parse } from "node:path";
+import { posix, win32 } from "node:path";
 import { OPENCODE_DEFAULTS, BOARD_SERVER_DEFAULTS } from "../shared/opencode-defaults";
 import { DEFAULT_PERMISSION_TIMEOUT_MS } from "../shared/permission-settings";
 import type { InstanceConfig } from "../shared/task";
@@ -260,8 +260,9 @@ export interface StorePaths {
  * the same underlying file.
  */
 function siblingPath(dbPath: string, suffix: string): string {
-  const parsed = parse(dbPath);
-  return format({ ...parsed, base: undefined, name: `${parsed.name}${suffix}` });
+  const pathApi = /^[A-Za-z]:[\\/]/.test(dbPath) || dbPath.includes("\\") ? win32 : posix;
+  const parsed = pathApi.parse(dbPath);
+  return pathApi.format({ ...parsed, base: undefined, name: `${parsed.name}${suffix}` });
 }
 
 /**

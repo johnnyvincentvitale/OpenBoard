@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   BOARD_UNAVAILABLE_MESSAGE,
   BOARD_URL_REQUIRED_MESSAGE,
@@ -10,7 +12,8 @@ import {
 import type { BoardClientOptions, BoardHealth } from "../../src/client/board-client";
 import type { DiffResponse, MergeOutcome, RosterAgent, RosterProvider, Task } from "../../src/shared";
 
-const CWD = "/tmp/openboard-project";
+const CWD = join(tmpdir(), "openboard-project");
+const cwdPath = (...parts: string[]): string => join(CWD, ...parts);
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -92,7 +95,7 @@ describe("board client", () => {
       const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       return jsonResponse(createdTask(`task-${nextId++}`, input), 201);
     });
-    const options = makeOptions([`${CWD}/app`, `${CWD}/packages/api`], fetchMock);
+    const options = makeOptions([cwdPath("app"), cwdPath("packages", "api")], fetchMock);
     const client = createBoardClient(options);
 
     const created = await client.createTasks([
@@ -119,7 +122,7 @@ describe("board client", () => {
 	      taskKind: "build",
 	      title: "Build TUI",
       description: "Shared client first",
-      directory: `${CWD}/app`,
+      directory: cwdPath("app"),
       agent: "build",
       model: { providerID: "opencode", id: "north-mini-code-free" },
       fallbackModel: { providerID: "anthropic", id: "claude-sonnet-5" },
@@ -132,7 +135,7 @@ describe("board client", () => {
       const input = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       return jsonResponse(createdTask("task-claude", input), 201);
     });
-    const options = makeOptions([`${CWD}/app`], fetchMock);
+    const options = makeOptions([cwdPath("app")], fetchMock);
     const client = createBoardClient(options);
 
     const created = await client.createTask({
@@ -156,7 +159,7 @@ describe("board client", () => {
       harness: "claude-code",
       title: "Claude task",
       description: "Use Claude Code",
-      directory: `${CWD}/app`,
+      directory: cwdPath("app"),
       permissionMode: "auto",
       claudePermissionMode: "auto",
       acpOptions: { profile: "audit", maxTurns: 3, readOnly: true },
@@ -325,7 +328,7 @@ describe("board client", () => {
       client.createTask({ title: "Half fenced", isolation: "in-place", permissionOverrides: { edit: "deny", bash: "ask" }, autoRun: true }),
     ).rejects.toThrow("autoRun requires worktree isolation");
     await expect(client.createTask({ title: "Missing dir", directory: "missing" })).rejects.toThrow(
-      `directory does not exist: ${CWD}/missing`,
+      `directory does not exist: ${cwdPath("missing")}`,
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });

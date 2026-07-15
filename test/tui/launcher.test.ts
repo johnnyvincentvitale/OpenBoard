@@ -46,7 +46,7 @@ describe("TUI launcher", () => {
       "/config/OpenBoard",
     );
     expect(defaultOpenBoardDataDir("win32", { APPDATA: "C:\\Users\\Example\\AppData\\Roaming" }, "C:\\Users\\Example")).toBe(
-      "C:\\Users\\Example\\AppData\\Roaming/OpenBoard",
+      "C:\\Users\\Example\\AppData\\Roaming\\OpenBoard",
     );
   });
 

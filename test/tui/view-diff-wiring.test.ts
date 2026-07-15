@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
 import { applyDiffScrollTop, captureDiffScrollTop, handleKeypress, renderApp, shouldAutoRefresh } from "../../src/tui/index";
 import { createMockInstanceProvider, openViewDiff } from "../../src/tui/model";
 import type { Column, RespondPermissionOutcome, Task } from "../../src/shared";
@@ -804,7 +805,7 @@ describe("TUI diff view open-in-editor (e)", () => {
 
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
-    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+10", "/repo/a.ts"], "/repo");
+    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+10", join("/repo", "a.ts")], "/repo");
     expect(getTaskDiff).toHaveBeenCalledWith("review-1");
     expect(s.viewDiff.files).toHaveLength(1);
     expect(s.status).toContain("editor closed");
@@ -822,7 +823,7 @@ describe("TUI diff view open-in-editor (e)", () => {
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
     // hunk 0 new-start line 10 + body offset 1 (clamped into body length 3) = 11
-    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+11", "/repo/a.ts"], "/repo");
+    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+11", join("/repo", "a.ts")], "/repo");
   });
 
   it("GUI editor happy path: no suspend, detached spawn, diff re-fetched", async () => {
@@ -836,7 +837,7 @@ describe("TUI diff view open-in-editor (e)", () => {
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
     expect(runTerminalEditor).not.toHaveBeenCalled();
-    expect(spawnGuiEditor).toHaveBeenCalledWith(["code", "-g", "/repo/a.ts:10"], "/repo", expect.any(Function));
+    expect(spawnGuiEditor).toHaveBeenCalledWith(["code", "-g", `${join("/repo", "a.ts")}:10`], "/repo", expect.any(Function));
     expect(getTaskDiff).toHaveBeenCalledWith("review-1");
   });
 
@@ -964,7 +965,7 @@ describe("TUI diff view open-in-editor (e)", () => {
     // b.ts is selected, so the editor should open b.ts, not a.ts.
     await handleKeypress({ sequence: "e", name: "e" } as any, s, a);
 
-    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+1", "/repo/b.ts"], "/repo");
+    expect(runTerminalEditor).toHaveBeenCalledWith(["vim", "+1", join("/repo", "b.ts")], "/repo");
     expect(s.viewDiff.selectedFileIndex).toBe(0);
     expect(s.viewDiff.files[s.viewDiff.selectedFileIndex].file).toBe("b.ts");
   });

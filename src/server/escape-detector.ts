@@ -130,7 +130,7 @@ function isInsideWorktree(absolutePath: string, worktreeDir: string): boolean {
  */
 function realOrResolved(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }

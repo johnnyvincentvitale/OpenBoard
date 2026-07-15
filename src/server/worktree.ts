@@ -21,6 +21,7 @@
  */
 import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -274,7 +275,7 @@ export class GitWorktreeManager implements WorktreeManager {
   }
 
   async commitFile(worktreePath: string, file: string, message = defaultCommitMessage(file)): Promise<FileCommitResult> {
-    if (!file || file.startsWith("/") || file.includes("\0")) {
+    if (!file || isAbsolute(file) || file.includes("\0")) {
       return { ok: false, file, message: "file must be a repo-relative path" };
     }
 
@@ -462,7 +463,7 @@ export class GitWorktreeManager implements WorktreeManager {
     }
     return entries
       .filter((entry) => entry.isDirectory() && entry.name.startsWith("task_"))
-      .map((entry) => `${worktreeBaseDir}/${entry.name}`)
+      .map((entry) => join(worktreeBaseDir, entry.name))
       .sort();
   }
 

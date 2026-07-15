@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   BOARD_UNAVAILABLE_MESSAGE,
   DEFAULT_BOARD_URL,
@@ -33,7 +35,8 @@ import type { McpToolOptions } from "../../src/mcp/tools";
 import type { DiffResponse, PendingPermissionAsk, RosterAgent, SessionActivityEvent, SessionActivityRun, Task } from "../../src/shared";
 import { toTaskSummary } from "../../src/client/board-client";
 
-const CWD = "/tmp/openboard-project";
+const CWD = join(tmpdir(), "openboard-project");
+const cwdPath = (...parts: string[]): string => join(CWD, ...parts);
 const NO_AUTH_ENV = { OPENBOARD_API_TOKEN: "" };
 const SELECTED_ENV = {
   OPENCODE_BOARD_URL: "http://127.0.0.1:4999",
@@ -176,7 +179,7 @@ describe("MCP add_tasks", () => {
   });
 
   it("creates one task through POST /api/tasks with parsed model and valid isolation", async () => {
-    const options = makeOptions([`${CWD}/app`]);
+    const options = makeOptions([cwdPath("app")]);
 
     const result = await addTasks(
       {
@@ -184,7 +187,7 @@ describe("MCP add_tasks", () => {
           {
             title: " Ship the MCP intake ",
             description: "Create cards only",
-            directory: `${CWD}/app`,
+            directory: cwdPath("app"),
             agent: " build ",
             model: "opencode/north-mini-code-free",
             isolation: "worktree",
@@ -202,7 +205,7 @@ describe("MCP add_tasks", () => {
           id: "task-1",
           type: "agent",
           title: "Ship the MCP intake",
-          directory: `${CWD}/app`,
+          directory: cwdPath("app"),
           column: "todo",
           runState: "unstarted",
           agent: "build",
@@ -223,7 +226,7 @@ describe("MCP add_tasks", () => {
           type: "agent",
           title: "Ship the MCP intake",
           description: "Create cards only",
-          directory: `${CWD}/app`,
+          directory: cwdPath("app"),
           agent: "build",
           model: { providerID: "opencode", id: "north-mini-code-free" },
           isolation: "worktree",
@@ -233,7 +236,7 @@ describe("MCP add_tasks", () => {
   });
 
   it("creates claude-code tasks through POST /api/tasks", async () => {
-    const options = makeOptions([`${CWD}/app`]);
+    const options = makeOptions([cwdPath("app")]);
 
     const result = await addTasks(
       {
@@ -241,7 +244,7 @@ describe("MCP add_tasks", () => {
           {
             title: " Claude worker ",
             description: "Launch Claude Code",
-            directory: `${CWD}/app`,
+            directory: cwdPath("app"),
             harness: "claude-code",
             agent: "plan",
             claudePermissionMode: "bypassPermissions",
@@ -267,7 +270,7 @@ describe("MCP add_tasks", () => {
       harness: "claude-code",
       title: "Claude worker",
       description: "Launch Claude Code",
-      directory: `${CWD}/app`,
+      directory: cwdPath("app"),
       claudePermissionMode: "bypassPermissions",
       model: { providerID: "claude-code", id: "sonnet" },
       isolation: "worktree",
@@ -275,7 +278,7 @@ describe("MCP add_tasks", () => {
   });
 
   it("creates Codex ACP tasks through POST /api/tasks", async () => {
-    const options = makeOptions([`${CWD}/app`]);
+    const options = makeOptions([cwdPath("app")]);
 
     const result = await addTasks(
       {
@@ -283,7 +286,7 @@ describe("MCP add_tasks", () => {
           {
             title: " Codex worker ",
             description: "Launch Codex ACP",
-            directory: `${CWD}/app`,
+            directory: cwdPath("app"),
             harness: "codex",
             permissionMode: "agent",
             acpOptions: { reasoning_effort: "low" },
@@ -310,7 +313,7 @@ describe("MCP add_tasks", () => {
       harness: "codex",
       title: "Codex worker",
       description: "Launch Codex ACP",
-      directory: `${CWD}/app`,
+      directory: cwdPath("app"),
       permissionMode: "agent",
       acpOptions: { reasoning_effort: "low" },
       model: { providerID: "codex", id: "gpt-5.4" },
@@ -319,7 +322,7 @@ describe("MCP add_tasks", () => {
   });
 
   it("creates multiple tasks without calling any run endpoint", async () => {
-    const options = makeOptions([`${CWD}/one`, `${CWD}/two`]);
+    const options = makeOptions([cwdPath("one"), cwdPath("two")]);
 
     const result = await addTasks(
       {
@@ -352,13 +355,13 @@ describe("MCP add_tasks", () => {
   });
 
   it("resolves relative directories against cwd", async () => {
-    const options = makeOptions([`${CWD}/packages/api`]);
+    const options = makeOptions([cwdPath("packages", "api")]);
 
     await addTasks({ tasks: [{ title: "Relative", directory: "packages/api" }] }, options);
 
-    expect(options.statMock).toHaveBeenCalledWith(`${CWD}/packages/api`);
+    expect(options.statMock).toHaveBeenCalledWith(cwdPath("packages", "api"));
     expect(JSON.parse(String(options.fetchMock.mock.calls[0][1]?.body))).toMatchObject({
-      directory: `${CWD}/packages/api`,
+      directory: cwdPath("packages", "api"),
     });
   });
 
@@ -375,7 +378,7 @@ describe("MCP add_tasks", () => {
     const options = makeOptions([]);
 
     await expect(addTasks({ tasks: [{ title: "Missing dir", directory: "missing" }] }, options)).rejects.toThrow(
-      `directory does not exist: ${CWD}/missing`,
+      `directory does not exist: ${cwdPath("missing")}`,
     );
     expect(options.fetchMock).not.toHaveBeenCalled();
   });
@@ -491,14 +494,14 @@ it("forwards taskKind through addTasks POST body", async () => {
   });
 
   it("forwards autoRun through addTasks POST body for a worktree-isolated task", async () => {
-    const options = makeOptions([`${CWD}/app`]);
+    const options = makeOptions([cwdPath("app")]);
 
     const result = await addTasks(
       {
         tasks: [
           {
             title: "Chain child",
-            directory: `${CWD}/app`,
+            directory: cwdPath("app"),
             isolation: "worktree",
             autoRun: true,
           },
@@ -515,10 +518,10 @@ it("forwards taskKind through addTasks POST body", async () => {
   });
 
   it("forwards autoRun through createTask POST body", async () => {
-    const options = makeOptions([`${CWD}/app`]);
+    const options = makeOptions([cwdPath("app")]);
 
     await createTask(
-      { title: "Chain root", directory: `${CWD}/app`, isolation: "worktree", autoRun: false },
+      { title: "Chain root", directory: cwdPath("app"), isolation: "worktree", autoRun: false },
       options,
     );
 
@@ -1234,7 +1237,7 @@ describe("MCP integrate_task with blockedAcceptance", () => {
       dirtyAtDispatch: false,
       createdAt: 1,
       updatedAt: 1,
-      worktreePath: `${CWD}/worktrees/task-1`,
+      worktreePath: cwdPath("worktrees", "task-1"),
     };
     const outcome = { task, ok: true, conflict: false, message: "integrated" };
     const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => jsonResponse(outcome));

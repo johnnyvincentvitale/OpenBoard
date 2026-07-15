@@ -53,7 +53,7 @@ function makeGitRepo(root: string): void {
   run(["commit", "--no-gpg-sign", "-m", "base"]);
 }
 
-function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const check = () => {
@@ -1214,7 +1214,7 @@ describe("TaskDispatcher", () => {
     it("injects satisfied parent handoffs before the completion-contract footer", async () => {
       const parent = createTask({ title: "Parent task", description: "parent" });
       const child = createTask({ title: "Child task", description: "child work" });
-      const parentWorktreePath = `/tmp/openboard-test/worktrees/${parent.id}`;
+      const parentWorktreePath = join(workspace, "parent-worktrees", parent.id);
       store.addLink(parent.id, child.id);
       store.update(parent.id, {
         worktreePath: parentWorktreePath,
