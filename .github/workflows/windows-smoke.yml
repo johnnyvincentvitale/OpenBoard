@@ -3,7 +3,10 @@ name: Windows compatibility smoke
 on:
   push:
     branches:
-      - codex/windows-ci-smoke
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
