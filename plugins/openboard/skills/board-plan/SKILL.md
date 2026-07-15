@@ -42,6 +42,10 @@ of existing board state.
 
 ## Pick The Workflow Shape
 
+Before choosing a shape, actively look for parallelizable, file-disjoint work
+that separate agents can own concurrently, and express the information flow
+between cards as parent/child links rather than duplicated prose.
+
 Offer the user named shapes rather than a blank page:
 
 - **Solo pipeline** — one agent, sequential cards. No isolation needed.
