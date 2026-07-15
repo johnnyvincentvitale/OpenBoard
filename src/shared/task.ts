@@ -705,6 +705,8 @@ export interface Dispatcher {
   sweepOrphanedWorktrees(): Promise<WorktreeCleanupOutcome[]>;
   /** Delete a dirty orphan worktree surfaced by the startup sweep. */
   resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome>;
+  /** Read the live dirty diff for a managed orphan worktree without modifying it. */
+  getOrphanWorktreeDiff(worktreePath: string): Promise<DiffResponse>;
   /** List pending permission asks for a task. */
   listPendingPermissions(taskId: string): PendingPermissionAsk[];
   /** Respond to a pending permission ask for a task. */

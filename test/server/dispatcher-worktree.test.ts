@@ -507,4 +507,27 @@ describe("TaskDispatcher — worktree isolation", () => {
     expect(store.getSweepResult()?.keptDirtyCount).toBe(0);
     expect(store.getSweepResult()?.dirtyOrphans).toEqual([]);
   });
+
+  it("getOrphanWorktreeDiff returns tracked and untracked changes without deleting the orphan", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const dispatcher = buildDispatcher(makeFakeClient());
+    const orphanPath = join(tmp, "worktrees", "task_inspect");
+    store.rememberWorktreeRepoRoot(repo);
+    await new GitWorktreeManager().createWorktree(repo, "board/task_inspect", orphanPath);
+    writeFileSync(join(orphanPath, "file.txt"), "changed\n");
+    writeFileSync(join(orphanPath, "new.txt"), "new file\n");
+
+    const diff = await dispatcher.getOrphanWorktreeDiff(orphanPath);
+
+    expect(diff.kind).toBe("diff");
+    if (diff.kind === "diff") {
+      expect(diff.root).toBe(orphanPath);
+      expect(diff.files.map((file) => file.file)).toEqual(["file.txt", "new.txt"]);
+      expect(diff.files[0]?.patch).toContain("-base");
+      expect(diff.files[0]?.patch).toContain("+changed");
+      expect(diff.files[1]?.patch).toContain("+new file");
+    }
+    expect(existsSync(orphanPath)).toBe(true);
+  });
 });

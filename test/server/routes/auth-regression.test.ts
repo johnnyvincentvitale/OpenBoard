@@ -156,6 +156,7 @@ function makeAuthedApp(sessions: OpencodeSessions = []) {
       message: "resolved",
       worktreePath,
     })),
+    getOrphanWorktreeDiff: vi.fn(async () => ({ kind: "diff", files: [], capped: false })),
     start: vi.fn(),
     listPendingPermissions: vi.fn(() => []),
     respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
@@ -1034,6 +1035,32 @@ describe("auth regression — route categories", () => {
       });
       expect(res.status).toBe(200);
       expect(dispatcher.resolveOrphanWorktree).toHaveBeenCalledWith("/repo/.opencode-board-worktrees/task_dirty");
+    });
+  });
+
+  describe("POST /api/worktrees/orphans/diff", () => {
+    const body = JSON.stringify({ worktreePath: "/repo/.opencode-board-worktrees/task_dirty" });
+
+    it("rejects with 401 when no token is provided", async () => {
+      const { app } = makeAuthedApp();
+      const res = await app.request("/api/worktrees/orphans/diff", {
+        method: "POST",
+        headers: jsonHeaders(),
+        body,
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("delegates read-only inspection with 200 when the token is correct", async () => {
+      const { app, dispatcher } = makeAuthedApp();
+      const res = await app.request("/api/worktrees/orphans/diff", {
+        method: "POST",
+        headers: jsonHeaders("correct"),
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(dispatcher.getOrphanWorktreeDiff).toHaveBeenCalledWith("/repo/.opencode-board-worktrees/task_dirty");
+      expect(dispatcher.resolveOrphanWorktree).not.toHaveBeenCalled();
     });
   });
 

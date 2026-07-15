@@ -5,7 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BoardClientError, createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, permissionTimeoutSecondsToMs, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type PermissionSettings, type RosterAgent, type RosterProvider, type SessionMessageMode, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, permissionTimeoutSecondsToMs, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffFile, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type PermissionSettings, type RosterAgent, type RosterProvider, type SessionMessageMode, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, projectWatchdogAttempts, type WatchdogAttemptEntry } from "../shared";
 import { blockedQuestionPresentation } from "../shared/blocked-task";
 import { validateInstanceName } from "../shared/instances";
@@ -131,6 +131,8 @@ const SAFE_COLOR_MODE = process.env.OPENBOARD_TUI_SAFE === "1";
 const SCREEN_MODE = IS_TMUX ? "main-screen" : "alternate-screen";
 const ARCHIVE_READER_MAX_BUFFER = 16 * 1024 * 1024;
 const DETAIL_SCROLL_STEP_ROWS = 3;
+const HELP_SCROLL_ID = "selected-help";
+const HELP_KEY_WIDTH = 12;
 
 export function shouldAutoRefresh(viewState: ViewState): boolean {
   // "follow" stays in the poll loop deliberately: permission asks raised while
@@ -319,7 +321,7 @@ function textBg(color: TuiColor): { bg: TuiColor } | Record<string, never> {
 type WizardStep = "identity" | "harness" | "agentProfile" | "isolation" | "dependencies" | "confirm";
 
 const IDENTITY_FIELDS_AGENT = ["type", "title", "description", "directory"] as const;
-const IDENTITY_FIELDS_MANUAL = ["type", "title", "description", "assignedTo", "directory"] as const;
+const IDENTITY_FIELDS_MANUAL = ["type", "taskKind", "title", "description", "assignedTo", "directory"] as const;
 const HARNESS_FIELDS_OPENCODE = ["taskKind", "harness", "provider", "model", "fallbackModel"] as const;
 /** MODEL is locked out while PROVIDER is "Use Agent Profile Default" (draft.providerId === "") — nothing to pick. */
 const HARNESS_FIELDS_OPENCODE_LOCKED = ["taskKind", "harness", "provider"] as const;
@@ -491,6 +493,7 @@ interface GlobalArchiveRecord {
   completion_source: string | null;
   comments?: string | null;
   completed_by?: string | null;
+  diff_snapshot?: string | null;
   archived_at: number;
   task_created_at: number;
   task_updated_at: number;
@@ -573,6 +576,13 @@ interface ArchiveState {
 interface SettingsDirtyWorktreesState {
   selectedIndex: number;
   confirmDeletePath?: string;
+  inspection?: {
+    worktreePath: string;
+    taskId: string;
+    loading: boolean;
+    response?: DiffResponse;
+    error?: string;
+  };
 }
 
 interface SettingsPermissionTimeoutDraft {
@@ -1630,7 +1640,6 @@ export function renderApp(ui: OpenTui, state: TuiState) {
   const children = state.viewState.view === "board"
     ? [mainView, renderCommandStrip(ui, state), renderHeader(ui, state)]
     : [renderHeader(ui, state), mainView, renderCommandStrip(ui, state)];
-  if (state.overlay === "help") children.push(renderHelpOverlay(ui));
   if (state.overlay === "addInstance") children.push(renderAddInstanceOverlay(ui, state));
   if (state.overlay === "renameInstance") children.push(renderRenameInstanceOverlay(ui, state));
   if (state.viewState.view === "switcher") children.push(renderSwitcherOverlay(ui, state));
@@ -2180,7 +2189,7 @@ function archiveDetailRows(record: GlobalArchiveRecord, model: ModelRef | null):
   return [
     { label: "STATE", value: `${state.glyph} ${state.label}`, color: COLORS.text },
     { label: "INSTANCE", value: `${record.source_instance_name ?? "unknown"}:${record.source_port}`, color: COLORS.text },
-    { label: "TYPE", value: taskType, color: COLORS.text },
+    { label: "TASK", value: taskKindLabel(record.task_kind), color: COLORS.text },
     ...(record.completed_by ? [{ label: "ACCEPTED BY", value: record.completed_by, color: COLORS.text }] : []),
     { label: "LANE", value: TUI_COLUMN_LABELS[archiveColumn(record.column_name)], color: COLORS.text },
     ...(taskType === "manual"
@@ -2324,17 +2333,59 @@ function renderHandoffTab(ui: OpenTui, state: TuiState, completion: CompletionRe
 }
 
 function renderArchiveFilesTab(ui: OpenTui, state: TuiState, record: GlobalArchiveRecord, completion: CompletionReport | null) {
-  const files = completion?.changedFiles ?? [];
+  const snapshot = parseDiffSnapshot(record.diff_snapshot);
   const scrollId = `archive-detail-files-${record.task_id}`;
-  if (files.length === 0) {
-    return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "No changed files recorded", fg: COLORS.muted, height: 1 }));
+  if (snapshot?.kind === "diff") {
+    const files = snapshot.files;
+    const header = ui.Text({
+      content: `TASK_DIFF SNAPSHOT · ${files.length} file${files.length === 1 ? "" : "s"}${snapshot.capped ? " · capped" : ""}`,
+      fg: COLORS.accentBright,
+      height: 1,
+      truncate: true,
+    });
+    if (files.length === 0) {
+      return renderDetailViewport(ui, state, scrollId, header, ui.Text({ content: "No changes.", fg: COLORS.muted, height: 1 }));
+    }
+    const detail = filesDetailState(state, archiveFilesOwnerId(record), files.length);
+    const selectedFile = files[detail.selectedIndex];
+    if (detail.mode === "patch") {
+      return renderDetailViewport(
+        ui,
+        state,
+        scrollId,
+        header,
+        renderChangedFileListRow(ui, selectedFile, true),
+        ...renderPatchLines(ui, selectedFile.patch),
+      );
+    }
+    return renderDetailViewport(
+      ui,
+      state,
+      scrollId,
+      header,
+      ...files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex)),
+    );
   }
-  const detail = filesDetailState(state, archiveFilesOwnerId(record.task_id), files.length);
+
+  const reportedFiles = completion?.changedFiles ?? [];
+  const reason = snapshot?.kind === "no-git" ? snapshot.reason : "No archive-time task_diff snapshot is available for this older record.";
+  if (reportedFiles.length === 0) {
+    return renderDetailViewport(
+      ui,
+      state,
+      scrollId,
+      ui.Text({ content: "TASK_DIFF UNAVAILABLE", fg: COLORS.bright, height: 1 }),
+      ui.Text({ content: reason, fg: COLORS.muted, wrapMode: "word" }),
+      ui.Text({ content: "No reported changed files.", fg: COLORS.muted, height: 1 }),
+    );
+  }
   return renderDetailViewport(
     ui,
     state,
     scrollId,
-    ...files.map((file, index) => renderChangedFileListRow(ui, { file, additions: null, deletions: null }, index === detail.selectedIndex)),
+    ui.Text({ content: "REPORTED FILES · TASK_DIFF UNAVAILABLE", fg: COLORS.bright, height: 1, truncate: true }),
+    ui.Text({ content: reason, fg: COLORS.muted, wrapMode: "word" }),
+    ...reportedFiles.map((file) => ui.Text({ content: file, fg: COLORS.text, height: 1, truncate: true })),
   );
 }
 
@@ -2617,14 +2668,17 @@ function renderSettingsView(ui: OpenTui, state: TuiState) {
 }
 
 function renderSettingsDirtyWorktreesView(ui: OpenTui, state: TuiState) {
+  const panel = state.settingsDirtyWorktrees;
+  if (panel?.inspection) return renderSettingsDirtyWorktreeInspection(ui, state, panel.inspection);
+
   const dirty = settingsDirtyOrphans(state);
-  const selectedIndex = clampIndex(state.settingsDirtyWorktrees?.selectedIndex ?? 0, dirty.length);
+  const selectedIndex = clampIndex(panel?.selectedIndex ?? 0, dirty.length);
   const selectedPath = dirty[selectedIndex]?.worktreePath;
   const rows = dirty.length === 0
     ? [ui.Text({ content: "No dirty orphan worktrees", fg: COLORS.muted, height: 1, truncate: true })]
     : dirty.map((item, index) => {
         const selected = index === selectedIndex;
-        const armed = state.settingsDirtyWorktrees?.confirmDeletePath === item.worktreePath;
+        const armed = panel?.confirmDeletePath === item.worktreePath;
         return ui.Box(
           { width: "100%", height: 2, flexDirection: "column", gap: 0, ...boxBg(selected ? COLORS.panelRaised : COLORS.panel) },
           ui.Text({ content: `${selected ? "▸ " : "  "}${item.taskId}  ${dirtyFileCountLabel(item.dirtyFileCount)}${armed ? "  delete?" : ""}`, fg: selected ? COLORS.bright : COLORS.text, height: 1, truncate: true }),
@@ -2639,10 +2693,103 @@ function renderSettingsDirtyWorktreesView(ui: OpenTui, state: TuiState) {
       ui.Text({ content: "Dirty Worktrees", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, flexGrow: 1, truncate: true }),
       ui.Text({ content: `${dirty.length}`, fg: dirty.length ? COLORS.bright : COLORS.muted, height: 1, truncate: true }),
     ),
-    ui.Text({ content: selectedPath ? "Delete force-removes the worktree and keeps the branch for manual salvage." : "No action needed.", fg: COLORS.muted, height: 2, wrapMode: "word" }),
+    ui.Text({ content: selectedPath ? "Enter inspects changed files. Delete force-removes the worktree and keeps its branch." : "No action needed.", fg: COLORS.muted, height: 2, wrapMode: "word" }),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
-    ...rows,
+    renderDetailViewport(ui, state, SETTINGS_DIRTY_WORKTREES_SCROLL_ID, ...rows),
   );
+}
+
+function renderSettingsDirtyWorktreeInspection(
+  ui: OpenTui,
+  state: TuiState,
+  inspection: NonNullable<SettingsDirtyWorktreesState["inspection"]>,
+) {
+  const response = inspection.response;
+  const files = response?.kind === "diff" ? response.files : [];
+  const ownerId = settingsDirtyWorktreeFilesOwnerId(inspection.worktreePath);
+  const scrollId = settingsDirtyWorktreeFilesScrollId(inspection.worktreePath);
+  let content: VChild;
+
+  if (inspection.loading) {
+    content = renderDetailViewport(ui, state, scrollId, ui.Text({ content: "Loading changed files...", fg: COLORS.muted, height: 1 }));
+  } else if (inspection.error) {
+    content = renderDetailViewport(ui, state, scrollId, ui.Text({ content: inspection.error, fg: COLORS.bright, wrapMode: "word" }));
+  } else if (!response) {
+    content = renderDetailViewport(ui, state, scrollId, ui.Text({ content: "Diff unavailable", fg: COLORS.muted, height: 1 }));
+  } else if (response.kind === "no-git") {
+    content = renderDetailViewport(ui, state, scrollId, ui.Text({ content: response.reason, fg: COLORS.bright, wrapMode: "word" }));
+  } else if (files.length === 0) {
+    content = renderDetailViewport(ui, state, scrollId, ui.Text({ content: "No changed files remain in this worktree.", fg: COLORS.muted, height: 1 }));
+  } else {
+    const detail = filesDetailState(state, ownerId, files.length);
+    const selectedFile = files[detail.selectedIndex];
+    content = detail.mode === "patch"
+      ? renderDetailViewport(
+          ui,
+          state,
+          scrollId,
+          renderChangedFileListRow(ui, selectedFile, true),
+          ...renderPatchLines(ui, selectedFile.patch),
+        )
+      : renderDetailViewport(
+          ui,
+          state,
+          scrollId,
+          ...files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex)),
+        );
+  }
+
+  return ui.Box(
+    { flexGrow: 1, flexDirection: "column", border: true, borderStyle: "single", borderColor: COLORS.border, paddingX: 2, paddingY: 1, gap: 1, ...boxBg(COLORS.panel) },
+    ui.Box(
+      { width: "100%", flexDirection: "row", height: 1 },
+      ui.Text({ content: "Dirty Worktree Files", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, flexGrow: 1, truncate: true }),
+      ui.Text({ content: inspection.loading ? "…" : `${files.length}`, fg: files.length ? COLORS.bright : COLORS.muted, height: 1, truncate: true }),
+    ),
+    ui.Text({ content: inspection.taskId, fg: COLORS.bright, height: 1, truncate: true }),
+    ui.Text({ content: shortPath(inspection.worktreePath), fg: COLORS.muted, height: 1, truncate: true }),
+    ...(response?.kind === "diff" && response.capped
+      ? [ui.Text({ content: "Diff capped at the safety limit.", fg: COLORS.bright, height: 1, truncate: true })]
+      : []),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    content,
+  );
+}
+
+const SETTINGS_DIRTY_WORKTREES_SCROLL_ID = "settings-dirty-worktrees";
+
+function settingsDirtyWorktreeFilesOwnerId(worktreePath: string): string {
+  return `settings-dirty:${worktreePath}`;
+}
+
+function settingsDirtyWorktreeFilesScrollId(worktreePath: string): string {
+  return `settings-dirty-files:${worktreePath}`;
+}
+
+function settingsDirtyWorktreesVisibleRows(state: TuiState): number {
+  return Math.max(3, laneInnerHeight(state.terminalRows) - 8);
+}
+
+function settingsDirtyFilesVisibleRows(state: TuiState): number {
+  return Math.max(2, laneInnerHeight(state.terminalRows) - 9);
+}
+
+function settingsDirtyWorktreeScrollForSelection(
+  selectedIndex: number,
+  itemCount: number,
+  currentScrollTop: number,
+  visibleRows: number,
+): number {
+  const rowHeight = 3;
+  const rowStart = selectedIndex * rowHeight;
+  const rowEnd = rowStart + 1;
+  const contentRows = Math.max(0, itemCount * rowHeight - 1);
+  const viewportRows = Math.max(2, Math.trunc(visibleRows));
+  const maxScroll = Math.max(0, contentRows - viewportRows);
+  let next = clampDetailScrollOffset(currentScrollTop, maxScroll);
+  if (rowStart < next) next = rowStart;
+  else if (rowEnd >= next + viewportRows) next = rowEnd - viewportRows + 1;
+  return clampDetailScrollOffset(next, maxScroll);
 }
 
 function settingsDirtyOrphans(state: TuiState) {
@@ -3018,6 +3165,7 @@ interface MetaRow {
   value: string;
   color: TuiColor;
   valueParts?: MetaValuePart[];
+  wrap?: boolean;
 }
 
 interface MetaValuePart {
@@ -3098,14 +3246,14 @@ function taskMetaRows(task: Task): [MetaRow, MetaRow] {
     value: isAcpHarness(task.harness) ? task.model?.id ?? "default" : modelLabel(task.model ?? undefined),
     color: COLORS.muted,
   };
-  const type: MetaRow = { label: "TYPE", value: task.type ?? "agent", color: COLORS.muted };
+  const kind: MetaRow = { label: "TASK", value: taskKindLabel(task.taskKind), color: COLORS.muted };
   const assigned: MetaRow = { label: "ASSIGN", value: task.assignedTo ?? "unassigned", color: COLORS.muted };
 
   if (task.runState === "error" && task.completion?.outcome !== "blocked") {
     return [dir, { label: "ERR", value: task.error ?? "run failed", color: COLORS.text }];
   }
   if (task.type === "manual") {
-    return [type, assigned];
+    return [kind, assigned];
   }
   if (isAcpHarness(task.harness)) {
     return [{ label: "MODE", value: task.permissionMode ?? task.claudePermissionMode ?? DEFAULT_ACP_PERMISSION_MODE, color: COLORS.muted }, model];
@@ -3158,6 +3306,19 @@ function renderInlineMetaValue(ui: OpenTui, parts: MetaValuePart[], fallbackColo
 
 function renderSidebar(ui: OpenTui, state: TuiState) {
   const task = selectedTask(state);
+  const content = state.overlay === "help"
+    ? renderInlineHelp(ui, state)
+    : state.filterMode
+      ? renderDetailsFilterPicker(ui, state, state.filterMode)
+      : state.instanceSwitcher
+        ? renderInstanceSwitcherPanel(ui, state)
+        : state.newTask
+          ? renderInlineNewTask(ui, state)
+          : state.blockedAnswer
+            ? renderBlockedAnswerComposer(ui, state)
+            : task
+              ? renderTaskDetails(ui, state, task)
+              : renderEmptyDetails(ui);
   return ui.Box(
     {
       width: selectedPanelWidth(state.terminalCols),
@@ -3172,18 +3333,18 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
       title: "Selected",
       titleColor: COLORS.text,
     },
-    state.filterMode
-      ? renderDetailsFilterPicker(ui, state, state.filterMode)
-      : state.instanceSwitcher
-        ? renderInstanceSwitcherPanel(ui, state)
-        : state.newTask
-          ? renderInlineNewTask(ui, state)
-          : state.blockedAnswer
-            ? renderBlockedAnswerComposer(ui, state)
-          : task
-            ? renderTaskDetails(ui, state, task)
-            : renderEmptyDetails(ui),
+    renderDetailViewport(ui, state, selectedColumnScrollId(state, task), content),
   );
+}
+
+function selectedColumnScrollId(state: TuiState, task: Task | undefined): string {
+  if (state.overlay === "help") return HELP_SCROLL_ID;
+  if (state.filterMode) return `selected-filter-${state.filterMode}`;
+  if (state.instanceSwitcher) return "selected-instance-switcher";
+  if (state.newTask) return wizardScrollId(state.newTask);
+  if (state.blockedAnswer) return `selected-answer-${state.blockedAnswer.taskId}`;
+  if (task) return `selected-card-${task.id}-${state.detailTab ?? "summary"}`;
+  return "selected-empty";
 }
 
 function selectedPanelWidth(terminalCols: number): number {
@@ -3192,18 +3353,17 @@ function selectedPanelWidth(terminalCols: number): number {
 }
 
 function selectedDetailRows(state: TuiState, task: Task): MetaRow[] {
-  const instance = currentInstanceItem(state);
   const lifecycleRows: MetaRow[] = taskLifecycleDetailRows(task).map((row) => ({
     label: row.label,
     value: row.value,
     color: lifecycleRowColor(row.role, task),
+    ...(row.role === "error" ? { wrap: true } : {}),
   }));
   const stateRow = lifecycleRows.find((row) => row.label === "STATE");
   const secondaryLifecycleRows = lifecycleRows.filter((row) => row.label !== "STATE");
   const rows: MetaRow[] = [
     ...(stateRow ? [stateRow] : []),
-    { label: "INSTANCE", value: instance ? `${instance.definition.name}:${instance.definition.port}` : boardHost(state.boardUrl), color: COLORS.text },
-    { label: "TYPE", value: task.type ?? "agent", color: COLORS.text },
+    { label: "TASK", value: taskKindLabel(task.taskKind), color: COLORS.text },
     ...secondaryLifecycleRows,
     { label: "LANE", value: TUI_COLUMN_LABELS[task.column], color: COLORS.muted },
     ...(task.type === "manual"
@@ -3224,7 +3384,6 @@ function selectedDetailRows(state: TuiState, task: Task): MetaRow[] {
               ]
             : []),
           { label: "MODEL", value: modelLabel(task.activeModel ?? task.model ?? undefined), color: task.activeModel ? COLORS.accentBright : COLORS.text },
-          ...(task.model ? [{ label: "PRIMARY", value: modelLabel(task.model), color: COLORS.text }] : []),
           { label: "FALLBACK", value: task.fallbackModel ? modelLabel(task.fallbackModel) : "none", color: task.fallbackModel ? COLORS.text : COLORS.muted },
           ...(task.autoRetries !== undefined ? [{ label: "AUTO-RETRY", value: modelRetryLabel(task.autoRetries).replace("AUTO-RETRY ", ""), color: task.autoRetries > 0 ? COLORS.bright : COLORS.muted }] : []),
           { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
@@ -3258,6 +3417,14 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
     return renderInlineTaskDetail(ui, state, task, rows);
   }
 
+  if (task.pendingPermissions?.length) {
+    return renderPermissionAttentionDetails(ui, state, task, rows);
+  }
+
+  if (blockedTaskNeedsAnswer(task)) {
+    return renderQuestionAttentionDetails(ui, state, task, rows);
+  }
+
   // The sidebar shares the lane chrome (border + padding), so lane inner height
   // is its inner height too. When the two-line detail style can't fit, fall back
   // to single-line card-meta rows instead of letting labels and values collide.
@@ -3268,8 +3435,66 @@ function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
     .reduce((count, row) => count + (row.label === "REQUEST" ? 2 : 1), 0);
   const mode = sidebarDetailMode(laneInnerHeight(state.terminalRows), modeRows, false);
   return mode === "expanded"
-    ? renderExpandedDetails(ui, task, rows)
-    : renderCompactDetails(ui, task, rows);
+    ? renderExpandedDetails(ui, state, task, rows)
+    : renderCompactDetails(ui, state, task, rows);
+}
+
+function renderPermissionAttentionDetails(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
+  const ask = firstPendingPermissionAsk(task);
+  if (!ask) return renderCompactDetails(ui, state, task, rows);
+  const count = task.pendingPermissions?.length ?? 1;
+  const primaryRows: MetaRow[] = [
+    attentionRow(rows, "STATE", taskStatusText(task)),
+    { label: "INPUT", value: `1 of ${count} pending permission ${count === 1 ? "ask" : "asks"}`, color: COLORS.bright },
+    { label: "TOOL", value: ask.tool ?? ask.permission, color: COLORS.bright },
+    { label: "REQUEST", value: ask.summary, color: COLORS.bright, wrap: true },
+    ...(ask.patterns?.length ? [{ label: "RESOURCE", value: ask.patterns.join(", "), color: COLORS.bright, wrap: true }] : []),
+    ...(ask.source === "worktree-fence"
+      ? [{ label: "WARNING", value: "request is outside the task worktree", color: COLORS.bright, wrap: true }]
+      : []),
+    { label: "COUNTDOWN", value: `${Math.ceil(Math.max(0, ask.deadline - Date.now()) / 1000)}s`, color: COLORS.bright },
+    { label: "TIMEOUT", value: "deny", color: COLORS.bright },
+    { label: "ANSWER", value: "y allow once · ! deny", color: COLORS.accentBright },
+  ];
+
+  return renderAttentionDetails(ui, state, task, primaryRows, selectedCardContextRows(state, task));
+}
+
+function renderQuestionAttentionDetails(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
+  const completion = task.completion;
+  if (!completion) return renderCompactDetails(ui, state, task, rows);
+  const presentation = blockedQuestionPresentation(completion);
+  const primaryRows: MetaRow[] = [
+    attentionRow(rows, "STATE", taskStatusText(task)),
+    attentionRow(rows, "OUTCOME", "BLOCKED · NEEDS ANSWER"),
+    { label: "QUESTION", value: presentation.question, color: COLORS.bright, wrap: true },
+    ...(task.error ? [{ label: "ERR", value: task.error, color: COLORS.bright, wrap: true }] : []),
+    attentionRow(rows, "SOURCE", task.completionSource ?? "reported"),
+  ];
+
+  return renderAttentionDetails(ui, state, task, primaryRows, selectedCardContextRows(state, task));
+}
+
+function attentionRow(rows: MetaRow[], label: string, fallback: string): MetaRow {
+  return rows.find((row) => row.label === label) ?? { label, value: fallback, color: COLORS.bright };
+}
+
+function selectedCardContextRows(state: TuiState, task: Task): MetaRow[] {
+  const rows: MetaRow[] = task.type === "manual"
+    ? [{ label: "ASSIGNED TO", value: task.assignedTo ?? "unassigned", color: COLORS.text }]
+    : isAcpHarness(task.harness)
+      ? [
+          { label: "HARNESS", value: harnessDisplayName(task.harness), color: COLORS.text },
+          { label: "MODE", value: task.permissionMode ?? task.claudePermissionMode ?? DEFAULT_ACP_PERMISSION_MODE, color: COLORS.text },
+        ]
+      : [{ label: "AGENT", value: agentLabel(task, state.agents), color: COLORS.text }];
+  rows.push(
+    { label: "DIR", value: shortPath(task.directory), color: COLORS.muted },
+    { label: "ISO", value: task.isolation ?? "in-place", color: COLORS.text },
+  );
+  const diff = reviewDiffStatRow(state, task);
+  if (diff) rows.push(diff);
+  return rows;
 }
 
 function reviewDiffStatRow(state: TuiState, task: Task): MetaRow | undefined {
@@ -3448,7 +3673,7 @@ function renderInlineTaskDetail(ui: OpenTui, state: TuiState, task: Task, rows: 
             : tab === "attempts"
               ? renderAttemptsTab(ui, state, task)
               : renderCommentsTab(ui, state, task);
-  const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label));
+  const inlineRows = rows.filter((row) => ["STATE", "TASK ID", "TASK", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label));
   const footer = tab === "comments"
     ? (state.commentDraft ? "enter submit · esc cancel" : "esc details · ←/→ tabs · c comment · r reply")
     : tab === "files"
@@ -3657,8 +3882,8 @@ function diffPatchLineColor(line: string): TuiColor {
   return COLORS.muted;
 }
 
-function archiveFilesOwnerId(taskId: string): string {
-  return `archive:${taskId}`;
+function archiveFilesOwnerId(record: Pick<GlobalArchiveRecord, "source_db_path" | "task_id">): string {
+  return `archive:${record.source_db_path}:${record.task_id}`;
 }
 
 function filesDetailState(state: TuiState, ownerId: string, fileCount: number): FilesDetailState {
@@ -3849,8 +4074,12 @@ function renderIntegrateCommitConfirmation(ui: OpenTui, task: Task, status: Work
   );
 }
 
-function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
-  const details: VChild[] = rows.map((row) => renderDetail(ui, row.label, row.value, COLORS.bright, row.valueParts, row.label === "REQUEST"));
+function renderExpandedDetails(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
+  const details: VChild[] = rows.map((row) =>
+    row.wrap
+      ? renderAttentionRow(ui, state, row)
+      : renderDetail(ui, row.label, row.value, COLORS.bright, row.valueParts, row.label === "REQUEST"),
+  );
 
   return ui.Box(
     {
@@ -3872,10 +4101,10 @@ function renderExpandedDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
   );
 }
 
-function renderCompactDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
+function renderCompactDetails(ui: OpenTui, state: TuiState, task: Task, rows: MetaRow[]) {
   const compactRows = [...rows];
   if (task.error && !compactRows.some((row) => row.label === "ERROR")) {
-    compactRows.push({ label: "ERR", value: task.error, color: COLORS.text });
+    compactRows.push({ label: "ERR", value: task.error, color: COLORS.bright, wrap: true });
   }
 
   return ui.Box(
@@ -3894,10 +4123,55 @@ function renderCompactDetails(ui: OpenTui, task: Task, rows: MetaRow[]) {
     }),
     ui.Box(
       { width: "100%", flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
-      ...compactRows.map((row) => renderSelectedCompactRow(ui, row)),
+      ...compactRows.map((row) => row.wrap ? renderAttentionRow(ui, state, row) : renderSelectedCompactRow(ui, row)),
     ),
     ui.Box({ flexGrow: 1 }),
     ...renderDetailHints(ui, task),
+  );
+}
+
+function renderAttentionDetails(ui: OpenTui, state: TuiState, task: Task, primaryRows: MetaRow[], contextRows: MetaRow[]) {
+  return ui.Box(
+    {
+      flexGrow: 1,
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
+    },
+    ui.Text({
+      content: task.title,
+      fg: COLORS.text,
+      attributes: ui.TextAttributes.BOLD,
+      wrapMode: "word",
+      height: 2,
+    }),
+    ui.Box(
+      { width: "100%", flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
+      ...primaryRows.map((row) => renderAttentionRow(ui, state, row)),
+    ),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ui.Box(
+      { width: "100%", flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
+      ...contextRows.map((row) => renderSelectedCompactRow(ui, row)),
+    ),
+    ui.Box({ flexGrow: 1 }),
+    ...renderDetailHints(ui, task),
+  );
+}
+
+function renderAttentionRow(ui: OpenTui, state: TuiState, row: MetaRow) {
+  if (!row.wrap) return renderSelectedCompactRow(ui, row);
+  const columns = Math.max(20, selectedPanelWidth(state.terminalCols) - 4);
+  const maxRows = row.label === "ERR" || row.label === "ERROR" ? 5 : Number.POSITIVE_INFINITY;
+  return ui.Box(
+    { width: "100%", flexDirection: "column", gap: 0 },
+    ui.Text({ content: row.label, fg: COLORS.dim, height: 1 }),
+    ui.Text({
+      content: row.value,
+      fg: row.color,
+      height: wrappedTextHeight(row.value, maxRows, columns),
+      wrapMode: "word",
+    }),
   );
 }
 
@@ -4088,7 +4362,10 @@ function inlineErrorMode(terminalRows: number): "compact" | "full" {
  * silently clipped mid-sentence even though there was room to grow.
  */
 function wrappedTextHeight(text: string, maxRows: number, columns = TEXT_INPUT_COLUMNS): number {
-  return Math.min(maxRows, Math.max(1, Math.ceil(text.length / columns)));
+  const rows = text
+    .split("\n")
+    .reduce((total, line) => total + Math.max(1, Math.ceil(Math.max(1, line.length) / columns)), 0);
+  return Math.min(maxRows, rows);
 }
 
 function renderErrorBox(ui: OpenTui, error: string, mode: "compact" | "full" = "full") {
@@ -4233,10 +4510,14 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
   const showBoardSummary = state.viewState.view !== "board";
   const visibleChatCodeHint = visibleFollowChatCodeBlocks(state).length ? " · tab code · c copy" : "";
   const boardKeyHints = state.detailTab
-    ? state.detailTab === "comments"
+    ? state.overlay === "help"
+      ? "↑/↓ scroll help · mouse wheel · ?/esc/b close"
+      : state.detailTab === "comments"
       ? "↑/↓ comments · ←/→ tabs · ↵ close details · c comment · r reply · esc close · q quit"
       : "↑/↓ scroll detail · ←/→ tabs · ↵ close details · m move · esc close · q quit"
-    : "↑/↓ cards · ←/→ lanes · b switch board · n new task · y/! permission · w chat · f filter · p settings · u refresh · ? help · q quit · A global archive";
+    : state.overlay === "help"
+      ? "↑/↓ scroll help · mouse wheel · ?/esc/b close"
+      : "↑/↓ cards · ←/→ lanes · b switch board · n new task · w chat · f filter · p settings · u refresh · ? help · q quit · A global archive";
 
   return ui.Box(
     {
@@ -4267,7 +4548,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
         content:
           state.viewState.view === "archive"
             ? state.archive?.focused
-              ? "↑/↓ scroll detail · ←/→ tabs · e collapse · ↵ esc back to records · u refresh · b back · q quit"
+              ? archiveFocusedKeyHints(state)
               : "↑/↓ records · ↵ focus detail · e expand · ←/→ tabs · / search · i instance · l lane · u refresh · b back · q quit"
             : state.viewState.view === "workspaceGate"
             ? "type absolute path · enter confirm · esc quit"
@@ -4285,7 +4566,7 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
             ? state.settingsPermissionTimeoutDraft
               ? "type timeout seconds · enter save · esc cancel · ctrl+u clear"
               : state.settingsDirtyWorktrees
-              ? "↑/↓ dirty worktrees · d delete · u refresh · b/esc back · q quit"
+              ? settingsDirtyWorktreeKeyHints(state)
               : `${state.permissionSettings ? "t edit permission timeout · " : ""}D dirty worktrees · u refresh · b/esc back · q quit`
             : boardKeyHints,
         fg: COLORS.text,
@@ -4308,6 +4589,32 @@ function renderCommandStrip(ui: OpenTui, state: TuiState) {
   );
 }
 
+function settingsDirtyWorktreeKeyHints(state: TuiState): string {
+  const inspection = state.settingsDirtyWorktrees?.inspection;
+  if (!inspection) return "↑/↓ worktrees · enter files · d delete · u refresh · b/esc back · q quit";
+  const files = inspection.response?.kind === "diff" ? inspection.response.files : [];
+  const detail = filesDetailState(state, settingsDirtyWorktreeFilesOwnerId(inspection.worktreePath), files.length);
+  return detail.mode === "patch"
+    ? "↑/↓ scroll patch · enter/b/esc files · u refresh · q quit"
+    : "↑/↓ files · enter patch · b/esc worktrees · u refresh · q quit";
+}
+
+function archiveFocusedKeyHints(state: TuiState): string {
+  const archive = state.archive;
+  const record = archive ? filteredArchiveRecords(archive)[archive.selectedIndex] : undefined;
+  if (archive?.detailTab === "files" && record) {
+    const snapshot = parseDiffSnapshot(record.diff_snapshot);
+    if (snapshot?.kind === "diff" && snapshot.files.length > 0) {
+      const detail = filesDetailState(state, archiveFilesOwnerId(record), snapshot.files.length);
+      return detail.mode === "patch"
+        ? "↑/↓ scroll patch · ↵/esc files · ←/→ tabs · b records · q quit"
+        : "↑/↓ files · ↵ patch · ←/→ tabs · esc/b records · q quit";
+    }
+    return "↑/↓ scroll reported fallback · ←/→ tabs · esc/b records · q quit";
+  }
+  return "↑/↓ scroll detail · ←/→ tabs · e collapse · ↵/esc records · b back · q quit";
+}
+
 function commandStripStatus(state: TuiState): string {
   if (state.error) return state.error;
   if (state.viewState.view === "board") {
@@ -4317,8 +4624,7 @@ function commandStripStatus(state: TuiState): string {
   return state.status;
 }
 
-function renderHelpOverlay(ui: OpenTui) {
-  const rows = [
+const HELP_ROWS = [
     ["↑/↓", "move between cards"],
     ["←/→", "jump between lanes"],
     ["enter", "open Prompt/Handoff/Output/Comments"],
@@ -4377,55 +4683,54 @@ function renderHelpOverlay(ui: OpenTui) {
     ["t", "toggle split/inline"],
     ["b / esc", "back to board"],
     ["q", "quit"],
-  ];
+  ] as const;
 
+function renderInlineHelp(ui: OpenTui, state: TuiState) {
   return ui.Box(
     {
-      position: "absolute",
-      top: 0,
-      left: 0,
       width: "100%",
-      height: "100%",
-      zIndex: 50,
-      ...boxBg("#000000"),
-      alignItems: "center",
-      justifyContent: "center",
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
     },
+    ui.Text({ content: "Help", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1 }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     ui.Box(
-      {
-        width: 52,
-        height: 45,
-        flexDirection: "column",
-        border: true,
-        borderStyle: "single",
-        borderColor: COLORS.border,
-        ...boxBg(COLORS.bg),
-        padding: 1,
-        gap: 0,
-      },
-      ui.Box(
-        { width: "100%", flexDirection: "row" },
-        ui.Text({
-          content: "Keys",
-          fg: COLORS.text,
-          attributes: ui.TextAttributes.BOLD,
-          height: 1,
-          flexGrow: 1,
-        }),
-        ui.Text({ content: "✕", fg: COLORS.dim, height: 1, width: 2 }),
-      ),
-      ui.Text({ content: "────────────────────────────────────────────", fg: COLORS.hairline, height: 1 }),
-      ...rows.map(([key, description]) =>
-        ui.Box(
-          { width: "100%", flexDirection: "row", height: 1 },
-          ui.Text({ content: key, fg: COLORS.text, width: 10, height: 1 }),
-          ui.Text({ content: description, fg: COLORS.muted, flexGrow: 1, height: 1 }),
-        ),
-      ),
-      ui.Text({ content: "────────────────────────────────────────────", fg: COLORS.hairline, height: 1 }),
-      ui.Text({ content: "esc close", fg: COLORS.dim, height: 1 }),
+      { width: "100%", flexDirection: "column", gap: 0, ...boxBg(COLORS.panel) },
+      ...HELP_ROWS.map(([key, description]) => renderHelpRow(ui, state, key, description)),
     ),
+    ui.Text({ content: "↑/↓ scroll · mouse wheel · ?/esc/b close", fg: COLORS.dim, height: 1, truncate: true }),
   );
+}
+
+function renderHelpRow(ui: OpenTui, state: TuiState, key: string, description: string) {
+  if (!key && !description) return ui.Box({ width: "100%", height: 1 });
+  if (!description) {
+    return ui.Text({ content: key, fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1, truncate: true });
+  }
+  const height = helpRowHeight(state, description);
+  return ui.Box(
+    { width: "100%", flexDirection: "row", height },
+    ui.Text({ content: key, fg: COLORS.text, width: HELP_KEY_WIDTH, height: 1, truncate: true }),
+    ui.Text({ content: description, fg: COLORS.muted, flexGrow: 1, minWidth: 0, height, wrapMode: "word" }),
+  );
+}
+
+function helpRowHeight(state: TuiState, description: string): number {
+  const columns = Math.max(16, selectedPanelWidth(state.terminalCols) - HELP_KEY_WIDTH - 4);
+  return wrappedTextHeight(description, Number.POSITIVE_INFINITY, columns);
+}
+
+function helpScrollMax(state: TuiState): number {
+  const contentRows = HELP_ROWS.reduce((total, [key, description]) =>
+    total + (!key && !description ? 1 : description ? helpRowHeight(state, description) : 1), 0);
+  const visibleRows = Math.max(1, laneInnerHeight(state.terminalRows) - 5);
+  return Math.max(0, contentRows - visibleRows);
+}
+
+function openInlineHelp(state: TuiState): void {
+  state.overlay = "help";
+  state.detailScrollTop[HELP_SCROLL_ID] = 0;
 }
 
 /** Human-facing step title shown in the wizard header, e.g. "Step 2/5 · HARNESS & MODEL". */
@@ -4445,7 +4750,6 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
   return ui.Box(
     {
       width: "100%",
-      height: "100%",
       flexDirection: "column",
       gap: 1,
       ...boxBg(COLORS.panel),
@@ -4454,8 +4758,20 @@ function renderInlineNewTask(ui: OpenTui, state: TuiState) {
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
     renderWizardBody(ui, state, draft),
     ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
-    renderWizardFooter(ui, draft, isEditing),
+    renderWizardFooter(ui, state, draft, isEditing),
   );
+}
+
+function wizardScrollId(draft: NewTaskDraft): string {
+  return `new-task-${draft.step}`;
+}
+
+function wizardContentColumns(state: TuiState): number {
+  return Math.max(20, selectedPanelWidth(state.terminalCols) - 6);
+}
+
+function wizardTextHeight(state: TuiState, text: string, maxRows = Number.POSITIVE_INFINITY): number {
+  return wrappedTextHeight(text, maxRows, wizardContentColumns(state));
 }
 
 function renderWizardHeader(ui: OpenTui, draft: NewTaskDraft, isEditing: boolean) {
@@ -4490,7 +4806,7 @@ function renderWizardBody(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
     case "agentProfile":
       return renderAgentProfileStep(ui, state, draft);
     case "isolation":
-      return renderIsolationStep(ui, draft);
+      return renderIsolationStep(ui, state, draft);
     case "dependencies":
       return renderDependenciesStep(ui, state, draft);
     case "confirm":
@@ -4498,9 +4814,9 @@ function renderWizardBody(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   }
 }
 
-function renderDraftErrorRow(ui: OpenTui, draft: NewTaskDraft) {
+function renderDraftErrorRow(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   return draft.error
-    ? ui.Text({ content: draft.error, fg: COLORS.bright, wrapMode: "word", height: 2 })
+    ? ui.Text({ content: draft.error, fg: COLORS.bright, wrapMode: "word", height: wizardTextHeight(state, draft.error) })
     : ui.Box({ height: 2 });
 }
 
@@ -4509,6 +4825,7 @@ function renderIdentityStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
     renderSelectField(ui, "CARD TYPE", draft.type, draft.field === "type"),
+    ...(draft.type === "manual" ? [renderTaskKindField(ui, state, draft)] : []),
     renderInputField(ui, "TITLE", draft.title, draft.field === "title", "", 1, COLORS.text, draft, "title"),
     renderInputField(
       ui,
@@ -4535,7 +4852,7 @@ function renderIdentityStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
       draft,
       "directory",
     ),
-    renderDraftErrorRow(ui, draft),
+    renderDraftErrorRow(ui, state, draft),
   );
 }
 
@@ -4544,14 +4861,14 @@ function renderIdentityStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
 function renderHarnessStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    renderTaskKindField(ui, draft),
+    renderTaskKindField(ui, state, draft),
     renderSelectField(ui, "HARNESS", currentHarnessLabel(draft), draft.field === "harness"),
     ...(draft.harness === "opencode"
       ? [renderSelectField(ui, "PROVIDER", currentProviderLabel(draft, state.providers), draft.field === "provider")]
       : []),
     renderModelField(ui, draft, state.agents, state.providers, state.acpConfig),
     ...(draft.harness === "opencode" && draftHasFallbackOptions(draft, state.providers, state.agents) ? [renderFallbackModelField(ui, draft, state.providers, state.agents)] : []),
-    renderDraftErrorRow(ui, draft),
+    renderDraftErrorRow(ui, state, draft),
   );
 }
 
@@ -4643,7 +4960,7 @@ function renderAgentProfileStep(ui: OpenTui, state: TuiState, draft: NewTaskDraf
     ...specs.map((spec, index) =>
       renderSelectField(ui, acpConfigLabel(spec), acpConfigValueLabel(spec, draft.acpOptions[spec.id]), draft.field === ACP_OPTION_FIELDS[index]),
     ),
-    renderDraftErrorRow(ui, draft),
+    renderDraftErrorRow(ui, state, draft),
   );
 }
 
@@ -4652,23 +4969,28 @@ function renderAgentProfileStep(ui: OpenTui, state: TuiState, draft: NewTaskDraf
 // write-fenced + escape-detector safety stack must never be
 // weakened by a per-task override), or an editable allow/ask/deny control
 // under in-place isolation, the only mode a permission override ever applies to.
-function renderIsolationStep(ui: OpenTui, draft: NewTaskDraft) {
+function renderIsolationStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
   const editable = draft.harness === "opencode" && draft.isolation === "in-place";
   const interactiveStrictWorktree = draft.harness === "opencode" && draft.isolation === "worktree" && draft.permissionOverrides.bash === "ask";
   const autoRunAvailable = (draft.isolation === "worktree" && !interactiveStrictWorktree) || (editable && draftInPlaceFenced(draft));
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
     renderIsolationField(ui, draft),
-    ui.Text({ content: isolationDescription(draft.isolation), fg: COLORS.muted, wrapMode: "word", height: 2 }),
+    ui.Text({
+      content: isolationDescription(draft.isolation),
+      fg: COLORS.muted,
+      wrapMode: "word",
+      height: wizardTextHeight(state, isolationDescription(draft.isolation)),
+    }),
     ...(draft.harness === "opencode"
-      ? [editable ? renderPermissionOverrideControl(ui, draft) : renderWorktreePermissionControl(ui, draft)]
+      ? [editable ? renderPermissionOverrideControl(ui, draft) : renderWorktreePermissionControl(ui, state, draft)]
       : []),
     ...(autoRunAvailable
-      ? [renderAutoRunField(ui, draft), ...(draft.autoRun ? [renderAutoRunWarning(ui)] : [])]
+      ? [renderAutoRunField(ui, draft), ...(draft.autoRun ? [renderAutoRunWarning(ui, state)] : [])]
       : editable
-        ? [renderAutoRunHint(ui)]
+        ? [renderAutoRunHint(ui, state)]
         : []),
-    renderDraftErrorRow(ui, draft),
+    renderDraftErrorRow(ui, state, draft),
   );
 }
 
@@ -4681,9 +5003,9 @@ function draftInPlaceFenced(draft: NewTaskDraft): boolean {
   return draft.permissionOverrides.edit === "deny" && draft.permissionOverrides.bash === "deny";
 }
 
-function renderAutoRunHint(ui: OpenTui) {
+function renderAutoRunHint(ui: OpenTui, state: TuiState) {
   const hint = 'AUTO-RUN: available for in_place cards when EDIT and BASH are "deny" (write-fenced, read-only work).';
-  return ui.Text({ content: hint, fg: COLORS.dim, wrapMode: "word", height: wrappedTextHeight(hint, 3) });
+  return ui.Text({ content: hint, fg: COLORS.dim, wrapMode: "word", height: wizardTextHeight(state, hint) });
 }
 
 /**
@@ -4696,12 +5018,12 @@ function renderAutoRunHint(ui: OpenTui) {
 const AUTO_RUN_WARNING_TEXT =
   "Auto-run dispatches this card as soon as its parents report complete — the whole chain finishes before any human reviews a diff. Downstream worktrees branch from base before parents are integrated, so later diffs can duplicate parent changes, blurring which card made which edit.";
 
-function renderAutoRunWarning(ui: OpenTui) {
+function renderAutoRunWarning(ui: OpenTui, state: TuiState) {
   return ui.Text({
     content: AUTO_RUN_WARNING_TEXT,
     fg: COLORS.bright,
     wrapMode: "word",
-    height: wrappedTextHeight(AUTO_RUN_WARNING_TEXT, 6),
+    height: wizardTextHeight(state, AUTO_RUN_WARNING_TEXT),
   });
 }
 
@@ -4742,10 +5064,15 @@ function renderDependenciesStep(ui: OpenTui, state: TuiState, draft: NewTaskDraf
   const candidates = dependencyCandidates(state, draft);
   return ui.Box(
     { flexGrow: 1, flexDirection: "column", gap: 1, ...boxBg(COLORS.panel) },
-    ui.Text({ content: "Choose zero or more parent tasks that must complete first.", fg: COLORS.muted, wrapMode: "word", height: 2 }),
+    ui.Text({
+      content: "Choose zero or more parent tasks that must complete first.",
+      fg: COLORS.muted,
+      wrapMode: "word",
+      height: wizardTextHeight(state, "Choose zero or more parent tasks that must complete first."),
+    }),
     renderDependencyField(ui, state, draft),
     ui.Text({ content: candidates.length === 0 ? "No existing tasks available." : "↑/↓ select · space toggle · enter continue", fg: COLORS.dim, height: 1, truncate: true }),
-    renderDraftErrorRow(ui, draft),
+    renderDraftErrorRow(ui, state, draft),
   );
 }
 
@@ -4786,32 +5113,19 @@ function isolationDescription(mode: TaskIsolationMode): string {
     : "Runs directly in DIR — no isolation. Concurrent agents sharing this directory can clobber each other; there is no file locking.";
 }
 
-function renderLockedPermissionsNote(ui: OpenTui) {
-  return ui.Box(
-    { width: "100%", flexDirection: "column", gap: 0 },
-    ui.Text({ content: "PERMISSIONS", fg: COLORS.dim, height: 1 }),
-    ui.Text({
-      content:
-        "Automatic for worktree isolation — write-fenced edits and the base-checkout escape detector apply and are not configurable here. Select ISOLATION \"none\" to set permissions directly.",
-      fg: COLORS.muted,
-      wrapMode: "word",
-      height: 3,
-    }),
-  );
-}
-
-function renderWorktreePermissionControl(ui: OpenTui, draft: NewTaskDraft) {
+function renderWorktreePermissionControl(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  const description = draft.permissionOverrides.bash === "ask"
+    ? "Interactive strict: every bash request waits for allow once / deny; timeout denies."
+    : "Unattended compatibility: the worktree fence and post-run escape detector apply; bash is not claimed to be contained.";
   return ui.Box(
     { width: "100%", flexDirection: "column", gap: 0 },
     ui.Text({ content: "PERMISSIONS", fg: COLORS.dim, height: 1 }),
     renderSelectField(ui, "BASH", draft.permissionOverrides.bash, draft.field === "permBash"),
     ui.Text({
-      content: draft.permissionOverrides.bash === "ask"
-        ? "Interactive strict: every bash request waits for allow once / deny; timeout denies."
-        : "Unattended compatibility: the worktree fence and post-run escape detector apply; bash is not claimed to be contained.",
+      content: description,
       fg: COLORS.muted,
       wrapMode: "word",
-      height: 2,
+      height: wizardTextHeight(state, description),
     }),
   );
 }
@@ -4859,13 +5173,13 @@ function renderConfirmStep(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
         ...group.map((row) => renderTaskMeta(ui, row, false, SIDEBAR_META_LABEL_WIDTH, COLORS.text)),
       ),
     ),
-    renderDraftErrorRow(ui, draft),
+    renderDraftErrorRow(ui, state, draft),
   );
 }
 
 function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][] {
   const identity: MetaRow[] = [
-    { label: "TYPE", value: draft.type === "manual" ? "Manual" : "Agent", color: COLORS.text },
+    ...(draft.type === "manual" ? [{ label: "TASK", value: currentTaskKindLabel(draft), color: COLORS.text }] : []),
     { label: "TITLE", value: draft.title || "(untitled)", color: COLORS.text },
     { label: draft.type === "manual" ? "NOTES" : "PROMPT", value: draft.description || "(empty)", color: COLORS.text },
     ...(draft.type === "manual" ? [{ label: "ASSIGNED TO", value: draft.assignedTo || "(unassigned)", color: COLORS.text }] : []),
@@ -4875,7 +5189,7 @@ function confirmSummaryGroups(draft: NewTaskDraft, state: TuiState): MetaRow[][]
   if (draft.type === "manual") return [identity, dependencySummaryRows(draft, state)];
 
   const harnessModel: MetaRow[] = [
-    { label: "TASK TYPE", value: currentTaskKindLabel(draft), color: COLORS.text },
+    { label: "TASK", value: currentTaskKindLabel(draft), color: COLORS.text },
     { label: "HARNESS", value: currentHarnessLabel(draft), color: COLORS.text },
     ...(draft.harness === "opencode"
       ? [{ label: "PROVIDER", value: currentProviderLabel(draft, state.providers), color: COLORS.text }]
@@ -4953,7 +5267,8 @@ function currentProviderLabel(draft: NewTaskDraft, providers: RosterProvider[]):
   return providers.find((provider) => provider.id === draft.providerId)?.name ?? draft.providerId;
 }
 
-function renderWizardFooter(ui: OpenTui, draft: NewTaskDraft, isEditing: boolean) {
+function renderWizardFooter(ui: OpenTui, state: TuiState, draft: NewTaskDraft, isEditing: boolean) {
+  const hint = `${wizardFooterHint(draft, isEditing)} · mouse wheel scroll`;
   const onConfirm = draft.step === "confirm";
   return ui.Box(
     { width: "100%", flexDirection: "column", gap: 0 },
@@ -4978,10 +5293,10 @@ function renderWizardFooter(ui: OpenTui, draft: NewTaskDraft, isEditing: boolean
       ui.Text({ content: "esc cancel", fg: COLORS.muted, height: 1, flexGrow: 1, truncate: true }),
     ),
     ui.Text({
-      content: wizardFooterHint(draft, isEditing),
+      content: hint,
       fg: COLORS.dim,
-      height: 1,
-      truncate: true,
+      height: wizardTextHeight(state, hint),
+      wrapMode: "word",
     }),
   );
 }
@@ -5069,12 +5384,14 @@ function renderSelectField(ui: OpenTui, label: string, value: string, focused: b
   );
 }
 
-function renderTaskKindField(ui: OpenTui, draft: NewTaskDraft) {
+function renderTaskKindField(ui: OpenTui, state: TuiState, draft: NewTaskDraft) {
+  const description = taskKindUseFor(draft.taskKind);
+  const descriptionHeight = wizardTextHeight(state, description);
   return renderFieldShell(
     ui,
     "TASK TYPE",
     draft.field === "taskKind",
-    4,
+    descriptionHeight + 3,
     ui.Box(
       { flexDirection: "column", gap: 0 },
       ui.Box(
@@ -5082,7 +5399,7 @@ function renderTaskKindField(ui: OpenTui, draft: NewTaskDraft) {
         ui.Text({ content: currentTaskKindLabel(draft), fg: COLORS.text, flexGrow: 1, height: 1, truncate: true }),
         ui.Text({ content: "▾", fg: COLORS.dim, width: 2, height: 1 }),
       ),
-      ui.Text({ content: taskKindUseFor(draft.taskKind), fg: COLORS.muted, height: 1, truncate: true }),
+      ui.Text({ content: description, fg: COLORS.muted, height: descriptionHeight, wrapMode: "word" }),
     ),
   );
 }
@@ -5218,8 +5535,17 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
   }
 
   if (state.overlay === "help") {
-    if (isEscapeKey(key) || key.sequence === "?") {
+    if (isEscapeKey(key) || key.sequence === "?" || key.sequence === "b") {
       state.overlay = "none";
+      actions.render();
+      return;
+    }
+    if (keyName === "down" || keyName === "up") {
+      const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+      state.detailScrollTop[HELP_SCROLL_ID] = clampDetailScrollOffset(
+        detailScrollOffset(state, HELP_SCROLL_ID) + delta,
+        helpScrollMax(state),
+      );
       actions.render();
     }
     return;
@@ -5305,7 +5631,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     const files = reviewDiffFiles(state, task);
     const ownerId = task?.id ?? "";
     const scrollId = task ? `board-detail-files-${task.id}` : "";
-    const inlineRowsCount = task ? selectedDetailRows(state, task).filter((row) => ["STATE", "TASK ID", "TYPE", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label)).length : 0;
+    const inlineRowsCount = task ? selectedDetailRows(state, task).filter((row) => ["STATE", "TASK ID", "TASK", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label)).length : 0;
     if (isEscapeKey(key)) {
       if (task && closeFilesPatch(state, ownerId, files.length, scrollId)) {
         actions.render();
@@ -5408,7 +5734,7 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       return;
     case "?":
       clearPendingConfirmation(state);
-      state.overlay = "help";
+      openInlineHelp(state);
       actions.render();
       return;
     case "n":
@@ -5645,7 +5971,50 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
   if (state.settingsDirtyWorktrees) {
+    const panel = state.settingsDirtyWorktrees;
     const dirty = settingsDirtyOrphans(state);
+    const inspection = panel.inspection;
+    if (inspection) {
+      const response = inspection.response;
+      const files = response?.kind === "diff" ? response.files : [];
+      const ownerId = settingsDirtyWorktreeFilesOwnerId(inspection.worktreePath);
+      const scrollId = settingsDirtyWorktreeFilesScrollId(inspection.worktreePath);
+      if (key.sequence === "b" || isEscapeKey(key)) {
+        if (files.length > 0 && closeFilesPatch(state, ownerId, files.length, scrollId)) {
+          actions.render();
+          return;
+        }
+        panel.inspection = undefined;
+        state.filesDetail = undefined;
+        state.status = "dirty worktrees";
+        actions.render();
+        return;
+      }
+      if (key.sequence === "u") {
+        await inspectSettingsDirtyWorktree(state, actions, inspection.worktreePath, inspection.taskId);
+        return;
+      }
+      if (files.length > 0 && (keyName === "down" || keyName === "up")) {
+        const detail = filesDetailState(state, ownerId, files.length);
+        if (detail.mode === "patch") {
+          const patchRows = normalizedPatchLines(files[detail.selectedIndex]?.patch).length + 3;
+          const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+          state.detailScrollTop[scrollId] = clampDetailScrollOffset(detailScrollOffset(state, scrollId) + delta, patchRows);
+        } else {
+          moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, settingsDirtyFilesVisibleRows(state));
+        }
+        actions.render();
+        return;
+      }
+      if (files.length > 0 && isEnterKey(key)) {
+        const detail = filesDetailState(state, ownerId, files.length);
+        if (detail.mode === "patch") closeFilesPatch(state, ownerId, files.length, scrollId);
+        else openFilesPatch(state, ownerId, files.length, scrollId);
+        actions.render();
+        return;
+      }
+      return;
+    }
     if (key.sequence === "b" || isEscapeKey(key)) {
       state.settingsDirtyWorktrees = undefined;
       actions.render();
@@ -5657,17 +6026,27 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
       return;
     }
     if (keyName === "down" || keyName === "up") {
-      const current = clampIndex(state.settingsDirtyWorktrees.selectedIndex, dirty.length);
-      state.settingsDirtyWorktrees.selectedIndex = clampIndex(current + (keyName === "down" ? 1 : -1), dirty.length);
-      state.settingsDirtyWorktrees.confirmDeletePath = undefined;
+      const current = clampIndex(panel.selectedIndex, dirty.length);
+      panel.selectedIndex = clampIndex(current + (keyName === "down" ? 1 : -1), dirty.length);
+      panel.confirmDeletePath = undefined;
+      state.detailScrollTop[SETTINGS_DIRTY_WORKTREES_SCROLL_ID] = settingsDirtyWorktreeScrollForSelection(
+        panel.selectedIndex,
+        dirty.length,
+        detailScrollOffset(state, SETTINGS_DIRTY_WORKTREES_SCROLL_ID),
+        settingsDirtyWorktreesVisibleRows(state),
+      );
       actions.render();
       return;
     }
-    const selected = dirty[clampIndex(state.settingsDirtyWorktrees.selectedIndex, dirty.length)];
+    const selected = dirty[clampIndex(panel.selectedIndex, dirty.length)];
     if (!selected) return;
+    if (isEnterKey(key)) {
+      await inspectSettingsDirtyWorktree(state, actions, selected.worktreePath, selected.taskId);
+      return;
+    }
     if (key.sequence === "d") {
-      if (state.settingsDirtyWorktrees.confirmDeletePath !== selected.worktreePath) {
-        state.settingsDirtyWorktrees.confirmDeletePath = selected.worktreePath;
+      if (panel.confirmDeletePath !== selected.worktreePath) {
+        panel.confirmDeletePath = selected.worktreePath;
         state.status = `Press d again to delete ${selected.taskId}`;
         actions.render();
         return;
@@ -5709,6 +6088,39 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
     actions.render();
     return;
   }
+}
+
+async function inspectSettingsDirtyWorktree(
+  state: TuiState,
+  actions: TuiActions,
+  worktreePath: string,
+  taskId: string,
+): Promise<void> {
+  const panel = state.settingsDirtyWorktrees;
+  if (!panel) return;
+  panel.inspection = { worktreePath, taskId, loading: true };
+  panel.confirmDeletePath = undefined;
+  state.filesDetail = undefined;
+  state.detailScrollTop[settingsDirtyWorktreeFilesScrollId(worktreePath)] = 0;
+  state.status = `loading changed files for ${taskId}...`;
+  actions.render();
+  try {
+    const response = await actions.client.getOrphanWorktreeDiff(worktreePath);
+    const current = state.settingsDirtyWorktrees?.inspection;
+    if (!current || current.worktreePath !== worktreePath) return;
+    current.loading = false;
+    current.response = response;
+    state.status = response.kind === "diff"
+      ? `${response.files.length} changed file${response.files.length === 1 ? "" : "s"}`
+      : "worktree diff unavailable";
+  } catch (error) {
+    const current = state.settingsDirtyWorktrees?.inspection;
+    if (!current || current.worktreePath !== worktreePath) return;
+    current.loading = false;
+    current.error = `Could not inspect dirty worktree: ${errorMessage(error)}`;
+    state.status = "dirty worktree inspection failed";
+  }
+  actions.render();
 }
 
 function permissionSettingsUnavailableMessage(error: unknown): string {
@@ -6275,7 +6687,10 @@ async function handleViewDiffKey(key: KeyEvent, state: TuiState, actions: TuiAct
     return;
   }
   if (key.sequence === "?") {
-    state.overlay = "help";
+    state.viewState = closeViewDiff(state.viewState);
+    state.viewDiff = undefined;
+    state.diffLineage = undefined;
+    openInlineHelp(state);
     actions.render();
     return;
   }
@@ -8472,6 +8887,15 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
   }
   if (key.sequence === "b" || isEscapeKey(key)) {
     if (archive.focused) {
+      const record = filteredArchiveRecords(archive)[archive.selectedIndex];
+      const snapshot = parseDiffSnapshot(record?.diff_snapshot);
+      if (record && archive.detailTab === "files" && snapshot?.kind === "diff") {
+        const ownerId = archiveFilesOwnerId(record);
+        if (closeFilesPatch(state, ownerId, snapshot.files.length, `archive-detail-files-${record.task_id}`)) {
+          actions.render();
+          return;
+        }
+      }
       archive.focused = false;
       actions.render();
       return;
@@ -8481,6 +8905,16 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
   }
 
   if (isEnterKey(key)) {
+    const record = filteredArchiveRecords(archive)[archive.selectedIndex];
+    const snapshot = parseDiffSnapshot(record?.diff_snapshot);
+    if (archive.focused && record && archive.detailTab === "files" && snapshot?.kind === "diff" && snapshot.files.length > 0) {
+      const ownerId = archiveFilesOwnerId(record);
+      const detail = filesDetailState(state, ownerId, snapshot.files.length);
+      if (detail.mode === "patch") closeFilesPatch(state, ownerId, snapshot.files.length, `archive-detail-files-${record.task_id}`);
+      else openFilesPatch(state, ownerId, snapshot.files.length, `archive-detail-files-${record.task_id}`);
+      actions.render();
+      return;
+    }
     archive.focused = !archive.focused;
     actions.render();
     return;
@@ -8495,12 +8929,27 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
   if (archive.focused) {
     const record = filteredArchiveRecords(archive)[archive.selectedIndex];
     if (archive.detailTab === "files") {
-      const files = parseCompletion(record?.completion ?? null)?.changedFiles ?? [];
-      const ownerId = archiveFilesOwnerId(record?.task_id ?? "");
+      const snapshot = parseDiffSnapshot(record?.diff_snapshot);
+      const files = snapshot?.kind === "diff" ? snapshot.files : [];
+      const ownerId = record ? archiveFilesOwnerId(record) : "archive:none";
       const scrollId = record ? `archive-detail-files-${record.task_id}` : "";
       if (keyName === "down" || keyName === "up") {
         if (record && files.length > 0) {
-          moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, archiveFilesVisibleRows(state));
+          const detail = filesDetailState(state, ownerId, files.length);
+          if (detail.mode === "patch") {
+            const patchRows = normalizedPatchLines(files[detail.selectedIndex]?.patch).length + 3;
+            const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+            state.detailScrollTop[scrollId] = clampDetailScrollOffset(detailScrollOffset(state, scrollId) + delta, patchRows);
+          } else {
+            moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, archiveFilesVisibleRows(state));
+          }
+        } else if (record) {
+          const reportedCount = parseCompletion(record.completion)?.changedFiles.length ?? 0;
+          const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+          state.detailScrollTop[scrollId] = clampDetailScrollOffset(
+            detailScrollOffset(state, scrollId) + delta,
+            Math.max(DETAIL_SCROLL_STEP_ROWS, reportedCount + 3),
+          );
         }
         actions.render();
         return;
@@ -8576,7 +9025,11 @@ function currentHarnessLabel(draft: NewTaskDraft): string {
 }
 
 function currentTaskKindLabel(draft: NewTaskDraft): string {
-  return taskKindDisplayName(draft.taskKind);
+  return taskKindLabel(draft.taskKind);
+}
+
+function taskKindLabel(kind: unknown): string {
+  return TASK_KINDS.includes(kind as TaskKind) ? taskKindDisplayName(kind as TaskKind) : "None";
 }
 
 function taskKindDisplayName(kind: TaskKind): string {
@@ -8859,6 +9312,34 @@ function parseCompletion(json: string | null): CompletionReport | null {
         : [],
       residualRisk: typeof value.residualRisk === "string" ? value.residualRisk : "none",
       reportedAt: typeof value.reportedAt === "number" ? value.reportedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseDiffSnapshot(json: string | null | undefined): DiffResponse | null {
+  if (!json) return null;
+  try {
+    const value = JSON.parse(json) as Partial<DiffResponse> & { files?: unknown };
+    if (value.kind === "no-git" && typeof value.reason === "string") {
+      return { kind: "no-git", reason: value.reason };
+    }
+    if (value.kind !== "diff" || !Array.isArray(value.files) || typeof value.capped !== "boolean") return null;
+    const files = value.files.filter((item): item is DiffFile => {
+      if (!item || typeof item !== "object") return false;
+      const candidate = item as Partial<DiffFile>;
+      return typeof candidate.file === "string" &&
+        typeof candidate.additions === "number" &&
+        typeof candidate.deletions === "number" &&
+        (candidate.status === "added" || candidate.status === "deleted" || candidate.status === "modified") &&
+        (candidate.patch === undefined || typeof candidate.patch === "string");
+    });
+    return {
+      kind: "diff",
+      files,
+      capped: value.capped,
+      ...(typeof value.root === "string" ? { root: value.root } : {}),
     };
   } catch {
     return null;

@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -118,6 +119,40 @@ describe("archive routes", () => {
     expect(mirrored!.final_session_output).toBe("final assistant archive output");
     expect(mirrored!.comments).toContain("archive note");
     expect(mirrored!.task_id).toBe(task.id);
+    expect(JSON.parse(mirrored!.diff_snapshot!)).toMatchObject({ kind: "no-git" });
+  });
+
+  it("captures task_diff as an immutable global-archive snapshot", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "openboard-archive-diff-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+      execFileSync("git", ["config", "user.name", "OpenBoard Test"], { cwd: repo });
+      writeFileSync(join(repo, "src.ts"), "export const value = 1;\n");
+      execFileSync("git", ["add", "src.ts"], { cwd: repo });
+      execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+      const baseCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+
+      const task = store.create({ title: "Snapshot diff", description: "", directory: repo, isolation: "in-place" });
+      store.move(task.id, "done", 0);
+      store.update(task.id, { baseCommit, dirtyAtDispatch: false });
+      writeFileSync(join(repo, "src.ts"), "export const value = 2;\n");
+
+      const res = await app.request(`/api/tasks/${task.id}/archive`, { method: "POST" });
+      expect(res.status).toBe(200);
+
+      const mirrored = globalArchiveStore.getMirrored("/db/test-tasks.sqlite", task.id);
+      const snapshot = JSON.parse(mirrored!.diff_snapshot!);
+      expect(snapshot).toMatchObject({
+        kind: "diff",
+        capped: false,
+        files: [{ file: "src.ts", additions: 1, deletions: 1, status: "modified" }],
+      });
+      expect(snapshot.files[0].patch).toContain("-export const value = 1;");
+      expect(snapshot.files[0].patch).toContain("+export const value = 2;");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   it("re-archiving the same task is idempotent (no duplicate mirror rows)", async () => {

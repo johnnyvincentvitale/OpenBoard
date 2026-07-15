@@ -14,7 +14,7 @@
  */
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskEvent, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, DiffResponse, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskEvent, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
@@ -26,6 +26,7 @@ import { GitWorktreeManager, type WorktreeManager } from "./worktree";
 import { ClaudeAcpRunner, CodexAcpRunner, CursorAcpRunner, GeminiAcpRunner, HermesAcpRunner, PiAcpRunner } from "./claude-acp-runner";
 import type { ClaudeCodeRunnerLike } from "./acp-runner";
 import { completionHandoffGuidance } from "./completion-contract";
+import { computeDiffAgainstWorkingTree } from "./diff-engine";
 import { loadPermissionConfig, loadWatchdogConfig, type WatchdogConfig } from "./config";
 import { dirtyWarning, inspectGitDirectory, isWorkingTreeDirty, resolveHeadCommit } from "./git-inspect";
 import { SessionActivityCollector, type SessionActivityEventInput } from "./session-activity";
@@ -1325,6 +1326,22 @@ export class TaskDispatcher implements Dispatcher {
     const outcome = toCleanupOutcome(await this.worktrees.cleanupWorktree(repoRoot, worktreePath, { force: true }));
     if (outcome.removed) this.forgetDirtyOrphan(worktreePath);
     return outcome;
+  }
+
+  async getOrphanWorktreeDiff(worktreePath: string): Promise<DiffResponse> {
+    if (!worktreePath || !worktreePath.startsWith("/")) {
+      throw AdapterError.validation("worktreePath must be an absolute path");
+    }
+
+    const tasks = this.store.list();
+    if (tasks.some((task) => task.worktreePath === worktreePath)) {
+      throw AdapterError.validation("worktree is still referenced by a task");
+    }
+
+    const repoRoot = await this.findManagedWorktreeRepoRoot(worktreePath, tasks);
+    if (!repoRoot) throw AdapterError.notFound(`Orphan worktree not found: ${worktreePath}`);
+
+    return computeDiffAgainstWorkingTree(worktreePath, "HEAD");
   }
 
   private async findManagedWorktreeRepoRoot(worktreePath: string, tasks: Task[]): Promise<string | undefined> {

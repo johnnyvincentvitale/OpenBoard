@@ -17,7 +17,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
-import type { Task, TaskComment } from "../shared";
+import type { DiffResponse, Task, TaskComment } from "../shared";
 
 const GLOBAL_ARCHIVE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS global_archive (
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS global_archive (
   completion_source     TEXT,
   comments              TEXT,
   completed_by          TEXT,
+  diff_snapshot         TEXT,
   archived_at           INTEGER NOT NULL,
   task_created_at       INTEGER NOT NULL,
   task_updated_at       INTEGER NOT NULL,
@@ -63,6 +64,7 @@ const GLOBAL_ARCHIVE_COLUMNS: Array<[name: string, definition: string]> = [
   ["final_session_output", "TEXT"],
   ["comments", "TEXT"],
   ["completed_by", "TEXT"],
+  ["diff_snapshot", "TEXT"],
 ];
 
 /** Identity of the source OpenBoard instance that archived a task. */
@@ -108,6 +110,7 @@ export interface GlobalArchiveRecord {
   completion_source: string | null;
   comments: string | null;
   completed_by: string | null;
+  diff_snapshot: string | null;
   archived_at: number;
   task_created_at: number;
   task_updated_at: number;
@@ -173,7 +176,7 @@ export class GlobalArchiveStore {
            agent, assigned_to, model, isolation,
            column_name, run_state, run_started_at, error,
            session_id, worktree_path, worktree_branch, base_branch,
-           completion, final_session_output, completion_source, comments, completed_by,
+           completion, final_session_output, completion_source, comments, completed_by, diff_snapshot,
            archived_at, task_created_at, task_updated_at, mirrored_at
          ) VALUES (
            @sourceInstanceName, @sourcePort, @sourceWorkspace, @sourceDbPath,
@@ -181,7 +184,7 @@ export class GlobalArchiveStore {
            @agent, @assignedTo, @model, @isolation,
            @columnName, @runState, @runStartedAt, @error,
            @sessionId, @worktreePath, @worktreeBranch, @baseBranch,
-           @completion, @finalSessionOutput, @completionSource, @comments, @completedBy,
+           @completion, @finalSessionOutput, @completionSource, @comments, @completedBy, @diffSnapshot,
            @archivedAt, @taskCreatedAt, @taskUpdatedAt, @mirroredAt
          )`,
       ),
@@ -202,7 +205,13 @@ export class GlobalArchiveStore {
    * the existing row rather than creating a duplicate — see `INSERT OR REPLACE`
    * on the composite primary key `(source_db_path, task_id)`.
    */
-  mirrorTask(task: Task, source: SourceInstanceInfo, archivedAt: number, comments: TaskComment[] = []): void {
+  mirrorTask(
+    task: Task,
+    source: SourceInstanceInfo,
+    archivedAt: number,
+    comments: TaskComment[] = [],
+    diffSnapshot: DiffResponse | null = null,
+  ): void {
     const mirroredAt = Date.now();
 
     this.stmts.upsert.run({
@@ -233,6 +242,7 @@ export class GlobalArchiveStore {
       completionSource: task.completionSource ?? null,
       comments: comments.length ? JSON.stringify(comments) : null,
       completedBy: task.completedBy ?? null,
+      diffSnapshot: diffSnapshot ? JSON.stringify(diffSnapshot) : null,
       archivedAt,
       taskCreatedAt: task.createdAt,
       taskUpdatedAt: task.updatedAt,

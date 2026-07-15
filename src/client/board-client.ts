@@ -270,6 +270,7 @@ export interface BoardClient {
   integrateTask(id: string, targetBranch?: string, options?: { commitRemaining?: boolean; blockedAcceptance?: BlockedAcceptance }): Promise<MergeOutcome>;
   discardWorktree(id: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
   resolveOrphanWorktree(worktreePath: string): Promise<WorktreeCleanupOutcome>;
+  getOrphanWorktreeDiff(worktreePath: string): Promise<DiffResponse>;
   linkTasks(parentId: string, childId: string): Promise<Task>;
   unlinkTasks(parentId: string, childId: string): Promise<Task>;
   completeTask(id: string, report: CompletionWithOutputInput, runStartedAt?: number): Promise<Task>;
@@ -461,6 +462,8 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       postJson<WorktreeCleanupOutcome>(resolved, buildTaskPath.discardWorktree(id), options ?? {}),
     resolveOrphanWorktree: (worktreePath) =>
       postJson<WorktreeCleanupOutcome>(resolved, "/api/worktrees/orphans/resolve", { worktreePath }),
+    getOrphanWorktreeDiff: (worktreePath) =>
+      postJson<DiffResponse>(resolved, "/api/worktrees/orphans/diff", { worktreePath }),
     linkTasks: (parentId, childId) => postJson<Task>(resolved, buildTaskPath.links(childId), { parentId }),
     unlinkTasks: (parentId, childId) =>
       requestJson<Task>(resolved, buildTaskPath.unlink(childId, parentId), {

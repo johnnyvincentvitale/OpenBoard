@@ -4,6 +4,7 @@ import { mapTaskToDto } from "../dto";
 import type { TaskStore } from "../../shared";
 import { AdapterError } from "../../shared";
 import type { GlobalArchiveStore, SourceInstanceInfo } from "../../db/global-archive-store";
+import { computeDiff } from "../diff-engine";
 
 const ARCHIVEABLE_COLUMNS = new Set(["review", "done"]);
 
@@ -24,7 +25,7 @@ export function registerArchiveRoutes(app: Hono, deps: ArchiveRouteDeps): void {
     }
   });
 
-  app.post("/api/tasks/:id/archive", (c) => {
+  app.post("/api/tasks/:id/archive", async (c) => {
     try {
       const id = c.req.param("id");
       const task = store.get(id);
@@ -37,8 +38,9 @@ export function registerArchiveRoutes(app: Hono, deps: ArchiveRouteDeps): void {
       }
       const updated = store.setArchived(id, true);
       if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
+      const diffSnapshot = await archiveDiffSnapshot(updated);
       try {
-        globalArchiveStore.mirrorTask(updated, sourceInstance, Date.now(), store.listComments(id));
+        globalArchiveStore.mirrorTask(updated, sourceInstance, Date.now(), store.listComments(id), diffSnapshot);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("failed to mirror archived task to global archive", { taskId: id, err });
@@ -62,6 +64,17 @@ export function registerArchiveRoutes(app: Hono, deps: ArchiveRouteDeps): void {
       return respondWithError(c, err);
     }
   });
+}
+
+async function archiveDiffSnapshot(task: Parameters<typeof computeDiff>[0]): Promise<Awaited<ReturnType<typeof computeDiff>>> {
+  try {
+    return await computeDiff(task);
+  } catch (error) {
+    return {
+      kind: "no-git",
+      reason: `Archive-time task_diff failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 function respondWithError(c: Context, err: unknown): Response {

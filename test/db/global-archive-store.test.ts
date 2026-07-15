@@ -171,6 +171,7 @@ describe("GlobalArchiveStore", () => {
         { name: "src-inst", port: 4099, workspace: "/ws", dbPath: "/db/cols.sqlite" },
         99,
         [{ id: "comment_1", taskId: "task_columns", parentCommentId: null, author: "User", body: "archive this note", createdAt: 33 }],
+        { kind: "diff", capped: false, files: [{ file: "src/a.ts", additions: 2, deletions: 1, status: "modified", patch: "@@ -1 +1 @@\n-a\n+b" }] },
       );
 
       const rows = store.listAll();
@@ -182,6 +183,7 @@ describe("GlobalArchiveStore", () => {
       expect(row.final_session_output).toBe("final output snapshot");
       expect(row.comments).toContain("archive this note");
       expect(row.completed_by).toBe("User");
+      expect(JSON.parse(row.diff_snapshot!)).toMatchObject({ kind: "diff", files: [{ file: "src/a.ts" }] });
       expect(row.archived_at).toBe(99);
       expect(row.task_id).toBe("task_columns");
     } finally {
@@ -230,6 +232,7 @@ describe("GlobalArchiveStore", () => {
       expect(columns.has("final_session_output")).toBe(true);
       expect(columns.has("comments")).toBe(true);
       expect(columns.has("completed_by")).toBe(true);
+      expect(columns.has("diff_snapshot")).toBe(true);
     } finally {
       store.close();
       db.close();

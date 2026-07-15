@@ -53,6 +53,7 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
   discardWorktree: ReturnType<typeof vi.fn>;
   sweepOrphanedWorktrees: ReturnType<typeof vi.fn>;
   resolveOrphanWorktree: ReturnType<typeof vi.fn>;
+  getOrphanWorktreeDiff: ReturnType<typeof vi.fn>;
 } {
   return {
     getPermissionGraceMs: () => store.getPermissionGraceMs() ?? 300_000,
@@ -102,6 +103,7 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
     resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
+    getOrphanWorktreeDiff: vi.fn(async (_worktreePath: string) => ({ kind: "diff" as const, files: [], capped: false })),
     listPendingPermissions: vi.fn(() => []),
     respondPermission: vi.fn(async (_taskId: string, _input: { askId: string; action: "allow_once" | "deny"; answeredBy: string }): Promise<RespondPermissionOutcome> => ({ ok: true, askId: "ask_1", decision: "allow_once" })),
     sendSessionMessage: vi.fn(async (taskId: string, input) => ({ messageId: input.clientMessageId, taskId, sessionId: input.expectedSessionId, status: "accepted" as const, mode: input.mode, sentAt: Date.now(), sentBy: input.sentBy, task: store.get(taskId)! })),

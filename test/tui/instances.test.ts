@@ -61,6 +61,14 @@ function metaRowByLabel(node: any, label: string): any | undefined {
       candidate.children?.[0]?.props?.width === 13);
 }
 
+function wrappedBlockByLabel(node: any, label: string): any | undefined {
+  return nodesByType(node, "Box")
+    .find((candidate) =>
+      candidate.props?.flexDirection === "column" &&
+      candidate.children?.[0]?.props?.content === label &&
+      candidate.children?.[1]?.props?.wrapMode === "word");
+}
+
 function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
@@ -541,7 +549,7 @@ describe("TUI label cleanup", () => {
           changedFiles: [],
           verification: [],
           residualRisk: "blocked",
-          needsInput: "Which endpoint should I use?",
+          needsInput: `Which endpoint should I use for this integration? ${"Compare the current implementation against the supported contract before answering. ".repeat(4)}`,
           reportedAt: 123,
         },
       }],
@@ -552,9 +560,17 @@ describe("TUI label cleanup", () => {
     expect(text).toContain("Review · 1 · 1 NEEDS ANSWER");
     expect(text).toContain("▲ REVIEW · BLOCKED · NEEDS ANSWER");
     expect(text).toContain("QUESTION");
-    expect(text).toContain("Which endpoint should I use?");
+    expect(text).toContain("Which endpoint should I use for this integration?");
     expect(text).toContain("v diff · Shift+R answer");
     expect(text).not.toContain("NEEDS USER INPUT");
+    expect(text).not.toContain("TASK ID");
+    expect(text).not.toContain("MODEL");
+    expect(text).not.toContain("INSTANCE");
+
+    const question = wrappedBlockByLabel(app, "QUESTION");
+    expect(question).toBeTruthy();
+    expect(question?.children[1].props.height).toBeGreaterThan(2);
+    expect(question?.children[1].props.wrapMode).toBe("word");
 
     const questionCard = boxesContaining(app, "review-card")
       .find((node) => node.props?.border === true && node.props?.height === 8);
@@ -572,6 +588,52 @@ describe("TUI label cleanup", () => {
       .find((node) => node.props?.border === true && node.props?.height === 8);
     expect(questionCard?.props.backgroundColor).not.toBe(ordinaryCard?.props.backgroundColor);
     expect(questionCard?.props.borderColor).not.toBe(ordinaryCard?.props.borderColor);
+  });
+
+  it("scrolls the entire Selected card view as one viewport", () => {
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 30,
+      tasks: [{
+        ...task("review-card", "review"),
+        runState: "error",
+        completionSource: "reported" as const,
+        completion: {
+          outcome: "blocked" as const,
+          summary: "Blocked",
+          changedFiles: [],
+          verification: [],
+          residualRisk: "Agent session became silent while observation was live.",
+          needsInput: "Review the partial worktree and decide whether to retry manually.",
+          reportedAt: 123,
+        },
+      }],
+      selectedTaskId: "review-card",
+    });
+    const app = renderApp(fakeUi(), s);
+    const viewport = nodeById(app, "selected-card-review-card-summary");
+    const content = { height: 38, top: 0 };
+    const requestRender = vi.fn();
+    const event = {
+      scroll: { direction: "down" },
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+
+    expect(viewport?.props).toMatchObject({ overflow: "hidden", minHeight: 0 });
+    expect(textOf(viewport)).toContain("QUESTION");
+    expect(textOf(viewport)).toContain("v diff");
+
+    viewport?.props.onMouseScroll.call(
+      { height: 12, findDescendantById: () => content, requestRender },
+      event,
+    );
+
+    expect(s.detailScrollTop["selected-card-review-card-summary"]).toBe(3);
+    expect(content.top).toBe(-3);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.stopPropagation).toHaveBeenCalled();
+    expect(requestRender).toHaveBeenCalled();
   });
 
   it("budgets the Review NEEDS ANSWER row before windowing lane cards", () => {
@@ -1095,7 +1157,9 @@ describe("TUI archive detail cleanup", () => {
     // The detail labels should include the selected-card fields plus archive context.
     expect(text).toContain("STATE");
     expect(text).toContain("INSTANCE");
-    expect(text).toContain("TYPE");
+    expect(text).toContain("TASK");
+    expect(text).toContain("None");
+    expect(text).not.toContain("TYPE");
     expect(text).toContain("LANE");
     expect(text).toContain("AGENT");
     expect(text).toContain("MODEL");
@@ -1130,7 +1194,7 @@ describe("TUI archive detail cleanup", () => {
     expect(text).toContain("none");
   });
 
-  it("files tab renders archived changed-file names from completion metadata", async () => {
+  it("labels completion changed-file names as a fallback when old archives have no task_diff snapshot", async () => {
     const s = state({
       viewState: { view: "archive", previousView: "launch" },
       archive: archiveState([
@@ -1147,14 +1211,83 @@ describe("TUI archive detail cleanup", () => {
     const app = renderApp(fakeUi(), s);
 
     const text = textOf(app);
+    expect(text).toContain("REPORTED FILES · TASK_DIFF UNAVAILABLE");
+    expect(text).toContain("No archive-time task_diff snapshot is available for this older record.");
     expect(text).toContain("src/a.ts");
     expect(text).toContain("src/b.ts");
-    expect(textNodesContaining(app, "+?")[0]?.props.fg).toBe("#30d77d");
-    expect(textNodesContaining(app, "-?")[0]?.props.fg).toBe("#ff5c5c");
+    expect(text).not.toContain("+?");
+    expect(text).not.toContain("-?");
 
     await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
     expect(s.archive.selectedIndex).toBe(1);
     expect(s.filesDetail).toBeUndefined();
+  });
+
+  it("renders archived task_diff file stats and opens its immutable patch", async () => {
+    const diffSnapshot = JSON.stringify({
+      kind: "diff",
+      capped: false,
+      files: [{
+        file: "src/a.ts",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: "@@ -1 +1 @@\n-old\n+new",
+      }],
+    });
+    const s = state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(
+        archiveRecord("task-1", "2026-07-03 12:00", null, { diff_snapshot: diffSnapshot }),
+        "files",
+        true,
+      ),
+    });
+    const a = actions();
+
+    let text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("TASK_DIFF SNAPSHOT · 1 file");
+    expect(text).toContain("src/a.ts");
+    expect(text).toContain("+1");
+    expect(text).toContain("-1");
+    expect(text).toContain("↵ patch");
+    expect(text).not.toContain("@@ -1 +1 @@");
+
+    await handleKeypress({ name: "return", sequence: "\r" } as any, s, a);
+
+    expect(s.filesDetail).toMatchObject({
+      ownerId: "archive:/data/test.sqlite:task-1",
+      selectedIndex: 0,
+      mode: "patch",
+    });
+    text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("@@ -1 +1 @@");
+    expect(text).toContain("-old");
+    expect(text).toContain("+new");
+    expect(text).toContain("scroll patch");
+    expect(text).not.toContain("commit");
+    expect(text).not.toContain("edit");
+
+    await handleKeypress({ name: "escape", sequence: "\u001b" } as any, s, a);
+    expect(s.archive.focused).toBe(true);
+    expect(s.filesDetail?.mode).toBe("list");
+  });
+
+  it("shows the archive-time task_diff failure reason above reported-file fallback", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "archive", previousView: "launch" },
+      archive: archiveState(archiveRecord(
+        "task-1",
+        "2026-07-03 12:00",
+        JSON.stringify({ outcome: "complete", summary: "done", changedFiles: ["src/a.ts"], verification: [], residualRisk: "none" }),
+        { diff_snapshot: JSON.stringify({ kind: "no-git", reason: "Completed branch no longer exists" }) },
+      ), "files"),
+    }));
+
+    const text = textOf(app);
+    expect(text).toContain("REPORTED FILES · TASK_DIFF UNAVAILABLE");
+    expect(text).toContain("Completed branch no longer exists");
+    expect(text).toContain("src/a.ts");
   });
 
   it("archive detail tabs render in stable manual viewports without ScrollBox chrome", () => {
@@ -1244,6 +1377,7 @@ describe("TUI archive detail cleanup", () => {
       viewState: { view: "archive", previousView: "launch" },
       archive: archiveState(archiveRecord("task-1", "2026-07-03 12:00", null, {
         task_type: "agent",
+        task_kind: "build",
         completed_by: "User",
         session_id: "ses_123",
         worktree_path: "/repo/.openboard-worktrees/example_123_reported_complete",
@@ -1252,14 +1386,15 @@ describe("TUI archive detail cleanup", () => {
       }), "prompt"),
     }));
 
-    for (const label of ["STATE", "INSTANCE", "TYPE", "ACCEPTED BY", "LANE", "AGENT", "MODEL", "DIR", "ISO", "WORKTREE", "SESSION", "BRANCH", "BASE", "TASK ID"]) {
+    for (const label of ["STATE", "INSTANCE", "TASK", "ACCEPTED BY", "LANE", "AGENT", "MODEL", "DIR", "ISO", "WORKTREE", "SESSION", "BRANCH", "BASE", "TASK ID"]) {
       const row = metaRowByLabel(app, label);
       expect(row?.children[0].props.width).toBe(13);
       expect(row?.children[1].props.fg).toBe("#ffffff");
     }
 
     const text = textOf(app);
-    expect(text).toContain("agent");
+    expect(text).toContain("Build");
+    expect(text).not.toContain("TYPE");
     expect(text).toContain("User");
     expect(text).toContain("example_123_reported_complete");
     expect(text).toContain("ses_123");
@@ -1284,8 +1419,8 @@ describe("TUI archive detail cleanup", () => {
     const text = textOf(app);
     expect(text).toContain("MODEL");
     expect(text).toContain("anthropic/active");
-    expect(text).toContain("PRIMARY");
-    expect(text).toContain("openai/primary");
+    expect(text).not.toContain("PRIMARY");
+    expect(text).not.toContain("openai/primary");
     expect(text).toContain("FALLBACK");
     expect(text).toContain("none");
     expect(text).toContain("AUTO-RETRY");
@@ -1615,13 +1750,16 @@ describe("TUI archive tab navigation", () => {
   });
 
   it("in Files tab with focus on, Down/Up change file selection instead of records", async () => {
-    const records = [archiveRecord("task-1", "2026-07-03 12:00", JSON.stringify({
-      outcome: "complete",
-      summary: "Fix",
-      changedFiles: ["src/a.ts", "src/b.ts"],
-      verification: [],
-      residualRisk: "none",
-    }))];
+    const records = [archiveRecord("task-1", "2026-07-03 12:00", null, {
+      diff_snapshot: JSON.stringify({
+        kind: "diff",
+        capped: false,
+        files: [
+          { file: "src/a.ts", additions: 1, deletions: 0, status: "modified" },
+          { file: "src/b.ts", additions: 2, deletions: 1, status: "modified" },
+        ],
+      }),
+    })];
     const s = state({
       viewState: { view: "archive", previousView: "launch" },
       archive: archiveState(records, "files", true, false),
@@ -1632,11 +1770,11 @@ describe("TUI archive tab navigation", () => {
 
     await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, actions());
     expect(s.archive.selectedIndex).toBe(0);
-    expect(s.filesDetail).toMatchObject({ ownerId: "archive:task-1", selectedIndex: 1, mode: "list" });
+    expect(s.filesDetail).toMatchObject({ ownerId: "archive:/data/test.sqlite:task-1", selectedIndex: 1, mode: "list" });
 
     await handleKeypress({ name: "up", sequence: "\u001b[A" } as any, s, actions());
     expect(s.archive.selectedIndex).toBe(0);
-    expect(s.filesDetail).toMatchObject({ ownerId: "archive:task-1", selectedIndex: 0, mode: "list" });
+    expect(s.filesDetail).toMatchObject({ ownerId: "archive:/data/test.sqlite:task-1", selectedIndex: 0, mode: "list" });
   });
 });
 
@@ -1649,6 +1787,7 @@ describe("TUI board view command strip", () => {
 
     const text = textOf(app);
     expect(text).not.toContain("m move card");
+    expect(text).not.toContain("y/! permission");
     expect(text).toContain("p settings");
     expect(text).toContain("q quit · A global archive");
   });
@@ -1909,26 +2048,29 @@ describe("TUI Enter key shows inline selected-card details", () => {
     }));
 
     const metadataBox = boxesContaining(app, "STATE")
-      .find((node) => textOf(node).includes("TASK ID") && textOf(node).includes("TYPE") && textOf(node).includes("LANE") && textOf(node).includes("AGENT") && node.props?.height === 5);
+      .find((node) => textOf(node).includes("TASK ID") && textOf(node).includes("TASK") && textOf(node).includes("LANE") && textOf(node).includes("AGENT") && node.props?.height === 5);
 
     expect(metadataBox).toBeTruthy();
   });
 
-  it("Selected column shows STATE above TYPE", () => {
+  it("Selected column shows STATE above TASK and omits card type", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
       terminalRows: 30,
-      tasks: [task("todo-card", "todo")],
+      tasks: [{ ...task("todo-card", "todo"), taskKind: "audit" }],
       selectedTaskId: "todo-card",
     }));
 
     const text = textOf(app);
     expect(text.indexOf("STATE")).toBeGreaterThan(-1);
-    expect(text.indexOf("TYPE")).toBeGreaterThan(-1);
-    expect(text.indexOf("STATE")).toBeLessThan(text.indexOf("TYPE"));
+    expect(text.indexOf("TASK")).toBeGreaterThan(-1);
+    expect(text.indexOf("STATE")).toBeLessThan(text.indexOf("TASK"));
+    expect(text).toContain("Audit");
+    expect(text).not.toContain("TYPE");
+    expect(text).not.toContain("Use for reviewing work and reporting findings without fixing them.");
   });
 
-  it("Selected column shows STATE above INSTANCE before opening details", () => {
+  it("Selected column omits redundant instance metadata before opening details", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
       terminalRows: 30,
@@ -1938,8 +2080,7 @@ describe("TUI Enter key shows inline selected-card details", () => {
 
     const text = textOf(app);
     expect(text.indexOf("STATE")).toBeGreaterThan(-1);
-    expect(text.indexOf("INSTANCE")).toBeGreaterThan(-1);
-    expect(text.indexOf("STATE")).toBeLessThan(text.indexOf("INSTANCE"));
+    expect(text).not.toContain("INSTANCE");
   });
 
   it("Selected column shows the permission request and answer controls on an in-progress card", () => {
@@ -1952,7 +2093,7 @@ describe("TUI Enter key shows inline selected-card details", () => {
         source: "interactive-strict" as const,
         permission: "bash",
         tool: "bash",
-        summary: 'Tool "bash" requested permission category "bash".',
+        summary: `Tool "bash" requested permission category "bash" to run a focused test command. ${"Explain the requested command before approval. ".repeat(4)}`,
         patterns: ["npm test"],
         raisedAt: Date.now(),
         deadline: Date.now() + 60_000,
@@ -1965,19 +2106,20 @@ describe("TUI Enter key shows inline selected-card details", () => {
       selectedTaskId: permissionTask.id,
     }));
 
-    const request = nodesByType(app, "Box").find((candidate) =>
-      candidate.props?.height === 2 &&
-      candidate.props?.flexDirection === "row" &&
-      candidate.children?.[0]?.props?.content === "REQUEST" &&
-      candidate.children?.[0]?.props?.width === 13
-    );
+    const request = wrappedBlockByLabel(app, "REQUEST");
     const answer = metaRowByLabel(app, "ANSWER");
     expect(request).toBeTruthy();
-    expect(textOf(request)).toContain('Tool "bash" requested permission category "bash".');
-    expect(request?.children[1].props.height).toBe(2);
+    expect(textOf(request)).toContain('Tool "bash" requested permission category "bash"');
+    expect(request?.children[1].props.height).toBeGreaterThan(2);
     expect(request?.children[1].props.wrapMode).toBe("word");
     expect(answer).toBeTruthy();
     expect(textOf(answer)).toContain("y allow once · ! deny");
+    expect(textOf(app)).toContain("RESOURCE");
+    expect(textOf(app)).toContain("DIR");
+    expect(textOf(app)).toContain("ISO");
+    expect(textOf(app)).not.toContain("TASK ID");
+    expect(textOf(app)).not.toContain("MODEL");
+    expect(textOf(app)).not.toContain("INSTANCE");
   });
 
   it("Selected column shows TASK ID for normal and inline detail views", () => {
@@ -2030,11 +2172,12 @@ describe("TUI Enter key shows inline selected-card details", () => {
       selectedTaskId: "todo-card",
     }));
 
-    for (const label of ["INSTANCE", "STATE", "TYPE", "LANE", "DIR"]) {
+    for (const label of ["STATE", "TASK", "LANE", "DIR"]) {
       const row = metaRowByLabel(app, label);
       expect(row?.children[0].props.width).toBe(13);
       expect(row?.children[1].props.fg).toBe("#ffffff");
     }
+    expect(textOf(app)).not.toContain("INSTANCE");
   });
 
   it("inline error detail uses compact error notice at short heights", () => {
@@ -2078,11 +2221,12 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(errorBox?.props.height).toBe(5);
   });
 
-  it("error card selected view uses expanded label-over-value metadata at normal heights", () => {
+  it("error card selected view wraps substantially more error text at normal heights", () => {
+    const longError = `Acceptance evidence is incomplete: ${"the required verification output was not reported. ".repeat(8)}`;
     const errorTask = {
       ...task("error-card", "review"),
       runState: "error" as const,
-      error: "long prompt layout smoke failure",
+      error: longError,
       isolation: "worktree" as const,
       worktreePath: "/repo/.worktrees/error-card",
       sessionId: "ses_error_card",
@@ -2096,13 +2240,47 @@ describe("TUI Enter key shows inline selected-card details", () => {
 
     const stateLabel = textNodesContaining(app, "STATE")[0];
     const taskIdLabel = textNodesContaining(app, "TASK ID")[0];
+    const errorBlock = wrappedBlockByLabel(app, "ERROR");
     const errorText = textOf(app);
 
     expect(stateLabel?.props.width).toBeUndefined();
     expect(taskIdLabel?.props.width).toBeUndefined();
     expect(errorText).toContain("error-card");
-    expect(errorText).toContain("long prompt layout smoke failure");
+    expect(errorText).toContain("Acceptance evidence is incomplete");
+    expect(errorBlock).toBeTruthy();
+    expect(errorBlock?.children[1].props.wrapMode).toBe("word");
+    expect(errorBlock?.children[1].props.height).toBe(5);
     expect(nodesByType(app, "Box").some((node) => node.props?.id === "selected-error-box")).toBe(false);
+  });
+
+  it("ordinary blocked cards wrap ERR in the compact selected view", () => {
+    const longError = `Acceptance evidence is incomplete: ${"the requested command and result were not included. ".repeat(6)}`;
+    const blocked = {
+      ...task("blocked-card", "review"),
+      runState: "error" as const,
+      error: longError,
+      completion: {
+        outcome: "blocked" as const,
+        summary: "Incomplete acceptance evidence",
+        changedFiles: [],
+        verification: [],
+        residualRisk: "Needs retry",
+        reportedAt: 1,
+      },
+    };
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 30,
+      tasks: [blocked],
+      selectedTaskId: blocked.id,
+    }));
+
+    const errorBlock = wrappedBlockByLabel(app, "ERR");
+    expect(errorBlock).toBeTruthy();
+    expect(errorBlock?.children[1].props.wrapMode).toBe("word");
+    expect(errorBlock?.children[1].props.height).toBeGreaterThan(1);
+    expect(errorBlock?.children[1].props.height).toBeLessThanOrEqual(5);
+    expect(textOf(errorBlock)).toContain("Acceptance evidence is incomplete");
   });
 
   it("inline detail mode closes with esc key", async () => {
@@ -3249,7 +3427,7 @@ describe("TUI manual task creation", () => {
       viewState: { view: "board", previousView: "launch" },
       newTask: {
         type: "manual",
-        taskKind: "none",
+        taskKind: "synthesis",
         title: "PM review",
         description: "Check the copy",
         directory: "/repo",
@@ -3270,6 +3448,11 @@ describe("TUI manual task creation", () => {
     expect(text).toContain("Step 1/3");
     expect(text).toContain("CARD TYPE");
     expect(text).toContain("manual");
+    expect(text).toContain("TASK TYPE");
+    expect(text).toContain("Synthesis");
+    const taskKindDescription = textNodesContaining(app, "Use for turning evidence or prior work into a plan")[0];
+    expect(taskKindDescription?.props.wrapMode).toBe("word");
+    expect(taskKindDescription?.props.height).toBeGreaterThan(1);
     expect(text).toContain("NOTES");
     expect(text).toContain("ASSIGNED TO");
     // Manual cards skip harness/agent/isolation entirely — identity goes straight to confirm.
@@ -3366,6 +3549,7 @@ describe("TUI manual task creation", () => {
       viewState: { view: "board", previousView: "launch" },
       newTask: {
         type: "manual",
+        taskKind: "research",
         title: "PM review",
         description: "Check the copy",
         directory: "/repo",
@@ -3388,6 +3572,7 @@ describe("TUI manual task creation", () => {
 
     expect(createTask).toHaveBeenCalledWith({
       type: "manual",
+      taskKind: "research",
       title: "PM review",
       description: "Check the copy",
       directory: "/repo",
@@ -3402,7 +3587,7 @@ describe("TUI manual task creation", () => {
     const runTask = vi.fn(async () => task("manual-card", "todo"));
     const s = state({
       viewState: { view: "board", previousView: "launch" },
-      tasks: [{ ...task("manual-card", "todo"), type: "manual", assignedTo: "Johnny" }],
+      tasks: [{ ...task("manual-card", "todo"), type: "manual", taskKind: "audit", assignedTo: "Johnny" }],
       selectedTaskId: "manual-card",
     });
 
@@ -4135,6 +4320,47 @@ describe("TUI new-task wizard navigation", () => {
     expect(text).toContain("Unattended compatibility");
     expect(text).not.toContain("EDIT");
     expect(text).not.toContain("WEBFETCH");
+  });
+
+  it("wraps isolation guidance to the Selected width and keeps the wizard body scrollable", () => {
+    const s = state({
+      terminalCols: 160,
+      terminalRows: 30,
+      viewState: { view: "board", previousView: "launch" },
+      newTask: agentDraft({ step: "isolation", field: "isolation", isolation: "worktree" }),
+    });
+
+    const app = renderApp(fakeUi(), s);
+    const isolation = textNodesContaining(app, "Runs in a dedicated git worktree")[0];
+    const permissions = textNodesContaining(app, "Unattended compatibility")[0];
+    const footer = textNodesContaining(app, "mouse wheel scroll")[0];
+    const viewport = nodeById(app, "new-task-isolation");
+    const content = { height: 40, top: 0 };
+    const requestRender = vi.fn();
+    const event = {
+      scroll: { direction: "down" },
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+
+    expect(isolation?.props).toMatchObject({ wrapMode: "word" });
+    expect(isolation?.props.height).toBeGreaterThan(2);
+    expect(permissions?.props).toMatchObject({ wrapMode: "word" });
+    expect(permissions?.props.height).toBeGreaterThan(2);
+    expect(footer?.props).toMatchObject({ wrapMode: "word" });
+    expect(footer?.props.height).toBeGreaterThan(1);
+    expect(viewport?.props.onMouseScroll).toBeTypeOf("function");
+
+    viewport?.props.onMouseScroll.call(
+      { height: 12, findDescendantById: () => content, requestRender },
+      event,
+    );
+
+    expect(s.detailScrollTop["new-task-isolation"]).toBe(3);
+    expect(content.top).toBe(-3);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.stopPropagation).toHaveBeenCalled();
+    expect(requestRender).toHaveBeenCalled();
   });
 
   it("labels the non-worktree isolation option 'in_place', not 'none'", () => {
@@ -4948,6 +5174,75 @@ describe("TUI settings diagnostics view", () => {
     expect(s.settingsDirtyWorktrees?.selectedIndex).toBe(0);
   });
 
+  it("scrolls a long dirty-worktree viewport to keep keyboard selection visible", async () => {
+    const dirtyOrphans = Array.from({ length: 17 }, (_, index) => ({
+      worktreePath: `/repo/.opencode-board-worktrees/task_${index}`,
+      taskId: `task_${index}`,
+      dirtyFileCount: 1,
+    }));
+    const s = state({
+      terminalRows: 24,
+      viewState: { view: "settings", previousView: "board" },
+      settingsDirtyWorktrees: { selectedIndex: 0 },
+      diagnostics: diagnostics({
+        worktree: { removedCleanCount: 0, keptDirtyCount: dirtyOrphans.length, dirtyOrphans },
+      }),
+    });
+    const a = actions();
+
+    for (let index = 1; index < dirtyOrphans.length; index += 1) {
+      await handleKeypress({ sequence: "\u001b[B", name: "down" } as any, s, a);
+    }
+
+    expect(s.settingsDirtyWorktrees?.selectedIndex).toBe(16);
+    expect(s.detailScrollTop["settings-dirty-worktrees"]).toBeGreaterThan(0);
+  });
+
+  it("opens changed files and read-only patches for a dirty worktree", async () => {
+    const getOrphanWorktreeDiff = vi.fn(async () => ({
+      kind: "diff" as const,
+      capped: false,
+      root: "/repo/.opencode-board-worktrees/task_a",
+      files: [
+        { file: "src/a.ts", additions: 2, deletions: 1, patch: "diff --git a/src/a.ts b/src/a.ts\n-old\n+new\n" },
+        { file: "src/b.ts", additions: 1, deletions: 0, patch: "diff --git a/src/b.ts b/src/b.ts\n+added\n" },
+      ],
+    }));
+    const resolveOrphanWorktree = vi.fn();
+    const s = state({
+      viewState: { view: "settings", previousView: "board" },
+      settingsDirtyWorktrees: { selectedIndex: 0 },
+      diagnostics: diagnostics({
+        worktree: {
+          removedCleanCount: 0,
+          keptDirtyCount: 1,
+          dirtyOrphans: [{ worktreePath: "/repo/.opencode-board-worktrees/task_a", taskId: "task_a", dirtyFileCount: 2 }],
+        },
+      }),
+    });
+    const a = actions({ client: { getOrphanWorktreeDiff, resolveOrphanWorktree } });
+
+    await handleKeypress({ sequence: "\r", name: "return" } as any, s, a);
+
+    expect(getOrphanWorktreeDiff).toHaveBeenCalledWith("/repo/.opencode-board-worktrees/task_a");
+    let text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("Dirty Worktree Files");
+    expect(text).toContain("src/a.ts");
+    expect(text).toContain("src/b.ts");
+
+    await handleKeypress({ sequence: "\r", name: "return" } as any, s, a);
+    text = textOf(renderApp(fakeUi(), s));
+    expect(text).toContain("-old");
+    expect(text).toContain("+new");
+    expect(s.filesDetail?.mode).toBe("patch");
+
+    await handleKeypress({ sequence: "\u001b", name: "escape" } as any, s, a);
+    expect(s.filesDetail?.mode).toBe("list");
+    await handleKeypress({ sequence: "\u001b", name: "escape" } as any, s, a);
+    expect(s.settingsDirtyWorktrees?.inspection).toBeUndefined();
+    expect(resolveOrphanWorktree).not.toHaveBeenCalled();
+  });
+
   it("shows a failure status when deleting a dirty worktree fails", async () => {
     const resolveOrphanWorktree = vi.fn(async (_worktreePath: string) => ({
       ok: false,
@@ -4993,6 +5288,7 @@ function archiveRecord(
     source_db_path: "/data/test.sqlite",
     task_id: id,
     task_type: "agent",
+    task_kind: "none",
     title: `Task ${id}`,
     description: "Fix the login bug",
     directory: "/repo/test",
@@ -5013,6 +5309,7 @@ function archiveRecord(
     completion_source: null,
     comments: null,
     completed_by: null,
+    diff_snapshot: null,
     archived_at: new Date(archivedAt).getTime(),
     task_created_at: 1,
     task_updated_at: 1,
@@ -5057,6 +5354,7 @@ function actions(overrides: Record<string, unknown> = {}) {
       getTaskCommitStatus: vi.fn(async () => ({ committedFiles: [], uncommittedFiles: [] })),
       commitTaskFile: vi.fn(async (_id: string, file: string) => ({ task: task("review-card", "review"), ok: true, file, message: "committed" })),
       resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
+      getOrphanWorktreeDiff: vi.fn(async () => ({ kind: "diff", capped: false, files: [] })),
       listComments: vi.fn(async () => []),
       listTaskEvents: vi.fn(async () => []),
       addComment: vi.fn(async () => ({ id: "comment-1", taskId: "todo-card", author: "User", body: "", createdAt: 1 })),

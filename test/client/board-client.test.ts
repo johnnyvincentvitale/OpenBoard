@@ -243,6 +243,7 @@ describe("board client", () => {
     await client.listTaskEvents("task-1");
     await client.getTaskCompare("task-1", "task-0");
     await client.getTaskContext("task-1");
+    await client.getOrphanWorktreeDiff("/repo/.opencode-board-worktrees/task_dirty");
     await client.resolveOrphanWorktree("/repo/.opencode-board-worktrees/task_dirty");
     await client.deleteTask("task-1");
 
@@ -266,6 +267,7 @@ describe("board client", () => {
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/events`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/compare?baseTaskId=task-0`, "GET"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1/context`, "GET"],
+      [`${DEFAULT_BOARD_URL}/api/worktrees/orphans/diff`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/worktrees/orphans/resolve`, "POST"],
       [`${DEFAULT_BOARD_URL}/api/tasks/task-1`, "DELETE"],
     ]);
@@ -273,6 +275,7 @@ describe("board client", () => {
     expect(JSON.parse(String(calls[2][1]?.body))).toEqual({ feedback: "Use option A", blockedAnswer: { blockedReportedAt: 123, answeredBy: "Reviewer" } });
     expect(JSON.parse(String(calls[5][1]?.body))).toEqual({ parentId: "task-0" });
     expect(JSON.parse(String(calls[11][1]?.body))).toEqual({ targetBranch: "main" });
+    expect(JSON.parse(String(calls[18][1]?.body))).toEqual({ worktreePath: "/repo/.opencode-board-worktrees/task_dirty" });
   });
 
   it("rejects bad task input before POSTing", async () => {

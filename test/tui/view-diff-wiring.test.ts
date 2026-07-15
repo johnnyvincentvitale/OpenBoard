@@ -115,10 +115,21 @@ function deferred<T>() {
 
 describe("TUI diff view entry (v)", () => {
 
-  it("renders help for all active card actions and contextual c/u copy", async () => {
-    const s = state({ overlay: "help" });
-    const text = textOf(renderApp(fakeUi(), s));
+  it("renders scrollable help inside the Selected column", async () => {
+    const s = state({ terminalRows: 40 });
+    const a = actions();
 
+    await handleKeypress({ name: "?", sequence: "?" } as any, s, a);
+    const rendered = renderApp(fakeUi(), s);
+    const text = textOf(rendered);
+    const selected = nodesByType(rendered, "Box").find((node) => node.props?.title === "Selected");
+    const helpViewport = nodesByType(rendered, "Box").find((node) => node.props?.id === "selected-help");
+
+    expect(s.overlay).toBe("help");
+    expect(selected).toBeTruthy();
+    expect(textOf(selected)).toContain("Help");
+    expect(helpViewport).toBeTruthy();
+    expect(nodesByType(rendered, "Box").some((node) => node.props?.position === "absolute" && node.props?.zIndex === 50)).toBe(false);
     expect(text).toContain("k");
     expect(text).toContain("abort selected In Progress card");
     expect(text).toContain("u");
@@ -128,6 +139,12 @@ describe("TUI diff view entry (v)", () => {
     expect(text).toContain("answer NEEDS ANSWER cards; retry ordinary BLOCKED or failed cards");
     expect(text).toContain("compose replacement guidance that interrupts the active turn");
     expect(text).not.toContain("ctrl+enter");
+
+    await handleKeypress({ name: "down", sequence: "\u001b[B" } as any, s, a);
+    expect(s.detailScrollTop["selected-help"]).toBeGreaterThan(0);
+
+    await handleKeypress({ name: "b", sequence: "b" } as any, s, a);
+    expect(s.overlay).toBe("none");
   });
 
 
