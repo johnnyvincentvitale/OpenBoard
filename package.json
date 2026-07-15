@@ -1,6 +1,6 @@
 {
   "name": "openboard",
-  "version": "0.0.1",
+  "version": "0.1.0-alpha.1",
   "private": true,
   "type": "module",
   "description": "Local Devin-style Kanban command center for OpenCode sessions",
