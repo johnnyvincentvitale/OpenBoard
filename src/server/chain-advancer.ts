@@ -13,7 +13,12 @@
  */
 import type { Task, TaskStore } from "../shared";
 import { canAutoRun } from "../shared";
-import { ArchivedTaskActionError, DependencyGateError, unmetReason } from "./dispatcher";
+import {
+  ArchivedTaskActionError,
+  DependencyGateError,
+  RunDispatchClaimError,
+  unmetReason,
+} from "./dispatcher";
 
 export interface ChainAdvancerDeps {
   store: TaskStore;
@@ -37,7 +42,11 @@ function chainErrorMessage(err: unknown): string {
  * warning about.
  */
 function isDispatcherGuardError(err: unknown): boolean {
-  return err instanceof DependencyGateError || err instanceof ArchivedTaskActionError;
+  return (
+    err instanceof DependencyGateError ||
+    err instanceof ArchivedTaskActionError ||
+    err instanceof RunDispatchClaimError
+  );
 }
 
 /**
@@ -66,6 +75,17 @@ function allParentsSatisfied(store: TaskStore, child: Task): boolean {
   });
 }
 
+function stillOwnsBareDispatchClaim(current: Task | undefined, claimed: Task): boolean {
+  return !!current &&
+    current.runState === "running" &&
+    current.column === claimed.column &&
+    current.archived === claimed.archived &&
+    current.runStartedAt === claimed.runStartedAt &&
+    current.sessionId === claimed.sessionId &&
+    current.harnessSessionId === claimed.harnessSessionId &&
+    current.harnessSessionName === claimed.harnessSessionName;
+}
+
 export function createChainAdvancer(deps: ChainAdvancerDeps): ChainAdvancer {
   const { store, runTask } = deps;
 
@@ -92,7 +112,13 @@ export function createChainAdvancer(deps: ChainAdvancerDeps): ChainAdvancer {
           await runTask(childId);
           store.addEvent({ taskId: childId, type: "task_auto_dispatched", body: { parentId } });
         } catch (err) {
-          store.update(childId, { runState: preClaimRunState });
+          // A manual run may have owned dispatcher's in-memory claim and
+          // persisted a real session between our rejected run() call and this
+          // catch continuation. Only undo the bare chain claim; never rewrite
+          // a newer run's persisted ownership.
+          if (stillOwnsBareDispatchClaim(store.get(childId), claimed)) {
+            store.update(childId, { runState: preClaimRunState });
+          }
           if (isDispatcherGuardError(err)) continue;
           store.addEvent({
             taskId: childId,

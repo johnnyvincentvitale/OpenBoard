@@ -30,8 +30,9 @@ Then install it into your agent harness:
 
 The `.mcp.json` entry runs `openboard mcp`, so copied and symlinked plugin
 installs behave the same way. It starts unbound; use `select_instance` from the
-MCP client or start a bound worker process with `openboard mcp --instance
-<name>` when the instance is already known.
+MCP client. Start a bound worker process with `openboard mcp --instance <name>
+--worker` when the instance is already known; add `--task-id <task-id>` only
+when that MCP process belongs to one task.
 
 ## Source Of Truth
 
@@ -81,9 +82,14 @@ profiles, then dispatch and verify.
   abort/move, structured complete/block reports, sync/integrate, comments, and task events.
   Normal plugin launches run `openboard mcp` unbound and then bind with
   `select_instance`; worker/generated configs can use `openboard mcp --instance
-  <name>` so the CLI injects the selected board URL and token. It does not
-  assume a default board port. `openboard_status` proves the controlled
-  instance. `integrate_task` requires `confirmReviewed: true`; Done moves
+  <name> --worker` so the CLI injects the selected board URL and token. The
+  worker profile advertises only `task_diff`, `task_context`, `task_compare`,
+  `complete_task`, and `block_task`; task-specific ACP launches also bind the
+  assigned task ID, completion reports require the current `runStartedAt`, and
+  dispatched OpenCode sessions deny every other `openboard_*` tool. This is an
+  MCP interface boundary, not an OS sandbox. It does not assume a default board
+  port. `openboard_status` proves the controlled instance. `integrate_task`
+  requires `confirmReviewed: true`; Done moves
   require explicit `completedBy`.
 - **Skills** (`skills/`) — expose the OpenBoard workflow without automatically
   forcing unrelated sessions into orchestration mode. Agents should invoke
@@ -113,13 +119,20 @@ openboard mcp
 ```
 
 Then call `select_instance` from the MCP client to bind to the running board.
-For generated worker configs or manual terminal use, start MCP through the
-named-instance wrapper so the board URL, instance name, and per-instance token
-are injected automatically:
+For manual orchestrator use, the named-instance wrapper retains the full
+cockpit while injecting the board URL, instance name, and per-instance token:
 
 ```sh
 openboard mcp --instance <name>
 ```
+
+Generated worker configs use the restricted profile:
+
+```sh
+openboard mcp --instance <name> --worker
+```
+
+Add `--task-id <task-id>` only for a task-specific worker process.
 
 Manual `OPENBOARD_API_TOKEN` + `OPENCODE_BOARD_URL` remains available for custom
 scripts, but normal plugin use should not require env export. The MCP

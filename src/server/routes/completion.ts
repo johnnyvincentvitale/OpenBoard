@@ -5,21 +5,23 @@ import type {
   CompleteTaskBody,
   CompletionReport,
   Task,
+  TaskRunIdentity,
   TaskRunOutcome,
   TaskStore,
 } from "../../shared";
 import { AdapterError } from "../../shared/errors";
-import { detectTaskBaseCheckoutEscape, markTaskBaseCheckoutEscape } from "../base-checkout-escape";
+import { detectTaskBaseCheckoutEscape } from "../base-checkout-escape";
 import { inspectCompletionResult } from "../git-inspect";
 import { fireChainAdvance, type ChainAdvancer } from "../chain-advancer";
 
-const END_OF_COLUMN = Number.POSITIVE_INFINITY;
 type CompletionBody = CompleteTaskBody | BlockTaskBody;
 
 export interface CompletionRouteDeps {
   store: TaskStore;
   /** Optional so existing callers/tests that don't care about auto-dispatch keep working unchanged. */
   advancer?: ChainAdvancer;
+  /** Test seam for deterministically exercising a retry during asynchronous completion inspection. */
+  inspectCompletion?: typeof completionPatch;
 }
 
 export function registerCompletionRoutes(app: Hono, deps: CompletionRouteDeps): void {
@@ -56,6 +58,12 @@ async function handleCompletion(
         409 as ContentfulStatusCode,
       );
     }
+    const expectedRun: TaskRunIdentity = {
+      runStartedAt: task.runStartedAt,
+      sessionId: task.sessionId,
+      harnessSessionId: task.harnessSessionId,
+      harnessSessionName: task.harnessSessionName,
+    };
 
     let body: unknown;
     try {
@@ -69,62 +77,63 @@ async function handleCompletion(
     const report: CompletionReport = { ...reportPayload, outcome, reportedAt: Date.now() };
 
     const escapeCheck = await detectTaskBaseCheckoutEscape(task);
-    if (escapeCheck.escaped) {
-      const stored = store.setCompletion(id, report, "reported");
-      if (!stored) throw AdapterError.notFound(`Task not found: ${id}`);
-      const completionMetadata = await completionPatch(task, report);
-      const blocked = markTaskBaseCheckoutEscape(store, id, escapeCheck.changedPaths);
-      if (!blocked) throw AdapterError.notFound(`Task not found: ${id}`);
-      const updated = store.update(id, {
-        completionSource: "reported",
-        error: undefined,
-        finalSessionOutput: isAcpHarness(task)
-          ? null
-          : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
-            ? finalSessionOutput ?? null
-            : task.finalSessionOutput ?? null,
-        ...completionMetadata,
-        ...(isAcpHarness(task) ? { harnessStatus: "blocked" } : {}),
-      });
-      if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
-      store.addEvent({
-        taskId: id,
-        type: "task_blocked",
-        body: { ...report, pending: "base-checkout-escape", escapeDetectedPaths: escapeCheck.changedPaths },
-      });
-      return c.json(store.get(id) ?? updated, 200);
-    }
-
-    const stored = store.setCompletion(id, report, "reported");
-    if (!stored) throw AdapterError.notFound(`Task not found: ${id}`);
-
-    const completionMetadata = await completionPatch(task, report);
-    const updated = store.update(id, {
-      runState: outcome === "complete" ? "idle" : "error",
-      error: outcome === "complete" ? undefined : payload.residualRisk,
-      finalSessionOutput: isAcpHarness(task)
-        ? null
-        : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
-          ? finalSessionOutput ?? null
-          : task.finalSessionOutput ?? null,
-      ...completionMetadata,
-      ...(isAcpHarness(task)
-        ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }
-        : {}),
+    const completionMetadata = await (deps.inspectCompletion ?? completionPatch)(task, report);
+    const finalOutput = isAcpHarness(task)
+      ? null
+      : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
+        ? finalSessionOutput ?? null
+        : task.finalSessionOutput ?? null;
+    const commit = store.commitTaskCompletion({
+      taskId: id,
+      expectedRun,
+      expectedMode: isLateIdleFallbackUpgrade ? "idle-fallback" : "running",
+      report,
+      patch: escapeCheck.escaped
+        ? {
+            runState: "idle",
+            pending: "base-checkout-escape",
+            escapeDetectedPaths: escapeCheck.changedPaths,
+            error: undefined,
+            finalSessionOutput: finalOutput,
+            ...completionMetadata,
+            ...(isAcpHarness(task) ? { harnessStatus: "blocked" } : {}),
+          }
+        : {
+            runState: outcome === "complete" ? "idle" : "error",
+            error: outcome === "complete" ? undefined : payload.residualRisk,
+            finalSessionOutput: finalOutput,
+            ...completionMetadata,
+            ...(isAcpHarness(task)
+              ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }
+              : {}),
+          },
+      moveToReview: !escapeCheck.escaped && !isLateIdleFallbackUpgrade,
+      event: escapeCheck.escaped
+        ? {
+            type: "task_blocked",
+            body: {
+              ...report,
+              pending: "base-checkout-escape",
+              escapeDetectedPaths: escapeCheck.changedPaths,
+            },
+          }
+        : {
+            type: outcome === "complete" ? "task_completed" : "task_blocked",
+            body: { ...report },
+          },
     });
-    if (!updated) throw AdapterError.notFound(`Task not found: ${id}`);
-    store.addEvent({ taskId: id, type: outcome === "complete" ? "task_completed" : "task_blocked", body: { ...report } });
-    if (!isLateIdleFallbackUpgrade && (updated.column === "todo" || updated.column === "in_progress")) {
-      store.move(id, "review", END_OF_COLUMN);
+    if (commit.status === "missing") throw AdapterError.notFound(`Task not found: ${id}`);
+    if (commit.status === "stale") {
+      return c.json(
+        { error: { code: "validation", message: "Completion report is stale for this task run" } },
+        409 as ContentfulStatusCode,
+      );
     }
-    // Fire-and-forget: never delay this response on spawned child sessions.
-    // Only a reported "complete" satisfies a parent gate (unmetReason) — a
-    // "blocked" outcome never triggers the chain, and the base-checkout-escape
-    // branch above returns before reaching here regardless of outcome.
-    if (outcome === "complete") {
+
+    if (outcome === "complete" && !escapeCheck.escaped) {
       void fireChainAdvance(deps.advancer, store, id);
     }
-    return c.json(store.get(id) ?? updated, 200);
+    return c.json(commit.task, 200);
   } catch (err) {
     return respondWithError(c, err);
   }

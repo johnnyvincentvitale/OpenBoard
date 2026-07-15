@@ -579,7 +579,7 @@ describe("MCP orchestrator tools", () => {
     await linkTasks({ parentId: "task-0", childId: "task-1" }, options);
     await unlinkTasks({ parentId: "task-0", childId: "task-1" }, options);
     await completeTask({ taskId: "task-1", runStartedAt: 10, report }, options);
-    await blockTask({ taskId: "task-1", report }, options);
+    await blockTask({ taskId: "task-1", runStartedAt: 10, report }, options);
     await syncTask({ taskId: "task-1" }, options);
     await integrateTask({ taskId: "task-1", confirmReviewed: true, targetBranch: "main" }, options);
     await commentTask({ taskId: "task-1", author: "me", body: "note" }, options);
@@ -603,6 +603,7 @@ describe("MCP orchestrator tools", () => {
       "/api/tasks/task-1/diff",
     ]);
     expect(new URL(String(fetchMock.mock.calls[5][0])).search).toBe("?runStartedAt=10");
+    expect(new URL(String(fetchMock.mock.calls[6][0])).search).toBe("?runStartedAt=10");
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ feedback: "again" });
     expect(JSON.parse(String(fetchMock.mock.calls[8][1]?.body))).toEqual({ targetBranch: "main" });
   });
@@ -612,7 +613,7 @@ describe("MCP orchestrator tools", () => {
     const options = makeOptions([CWD], fetchMock);
     const report = { summary: "blocked", changedFiles: [], verification: [], residualRisk: "blocked" };
 
-    await blockTask({ taskId: "task-1", report: { ...report, needsInput: "Which env var should I use?" } }, options);
+    await blockTask({ taskId: "task-1", runStartedAt: 10, report: { ...report, needsInput: "Which env var should I use?" } }, options);
 
     expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe("/api/tasks/task-1/block");
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
@@ -626,10 +627,10 @@ describe("MCP orchestrator tools", () => {
     const report = { summary: "blocked", changedFiles: [], verification: [], residualRisk: "blocked" };
 
     await expect(
-      blockTask({ taskId: "task-1", report: { ...report, needsInput: "   " } }, options),
+      blockTask({ taskId: "task-1", runStartedAt: 10, report: { ...report, needsInput: "   " } }, options),
     ).rejects.toThrow();
     await expect(
-      blockTask({ taskId: "task-1", report: { ...report, needsInput: "x".repeat(2001) } }, options),
+      blockTask({ taskId: "task-1", runStartedAt: 10, report: { ...report, needsInput: "x".repeat(2001) } }, options),
     ).rejects.toThrow();
     expect(options.fetchMock).not.toHaveBeenCalled();
   });
@@ -639,8 +640,17 @@ describe("MCP orchestrator tools", () => {
     const report = { summary: "done", changedFiles: [], verification: [], residualRisk: "none" };
 
     await expect(
-      completeTask({ taskId: "task-1", report: { ...report, needsInput: "should not be allowed" } }, options),
+      completeTask({ taskId: "task-1", runStartedAt: 10, report: { ...report, needsInput: "should not be allowed" } }, options),
     ).rejects.toThrow();
+    expect(options.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires runStartedAt for MCP completion reports before any request", async () => {
+    const options = makeOptions([CWD]);
+    const report = { summary: "done", changedFiles: [], verification: [], residualRisk: "none" };
+
+    await expect(completeTask({ taskId: "task-1", report }, options)).rejects.toThrow();
+    await expect(blockTask({ taskId: "task-1", report }, options)).rejects.toThrow();
     expect(options.fetchMock).not.toHaveBeenCalled();
   });
 

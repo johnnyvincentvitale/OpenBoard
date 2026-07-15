@@ -176,7 +176,7 @@ describe("startOrConnect — spawn mode", () => {
       mcp: {
         openboard: {
           type: "local",
-          command: ["openboard", "mcp", "--instance", "alpha"],
+          command: ["openboard", "mcp", "--worker", "--instance", "alpha"],
           environment: {
             OPENCODE_BOARD_URL: "http://127.0.0.1:4097",
             OPENBOARD_API_TOKEN: "tok_test",
@@ -203,7 +203,7 @@ describe("startOrConnect — spawn mode", () => {
       mcp: {
         openboard: {
           type: "local",
-          command: ["openboard", "mcp"],
+          command: ["openboard", "mcp", "--worker"],
           environment: {
             OPENCODE_BOARD_URL: "http://127.0.0.1:4098",
             OPENBOARD_API_TOKEN: "tok_dev",

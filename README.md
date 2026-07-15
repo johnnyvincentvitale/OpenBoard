@@ -298,6 +298,19 @@ The MCP server's tools are an orchestrator control surface for the existing task
 `task_events`, `task_diff`, `answer_blocked_task`, `respond_permission`, `send_session_message`,
 `tail_session`, `task_context`, and `task_compare`. `move_task` requires `completedBy`
 when moving to Done, and `integrate_task` requires `confirmReviewed: true`.
+`complete_task` and `block_task` require the current task `runStartedAt`, so a
+late report from an earlier attempt cannot complete a newer run.
+
+Dispatched workers use `openboard mcp --instance <name> --worker`; task-specific
+ACP launches also pass `--task-id <task-id>`. The worker profile advertises only
+`task_diff`, `task_context`, `task_compare`, `complete_task`, and `block_task`.
+A task-bound ACP profile rejects a report for another task ID, and dispatched
+OpenCode sessions receive exact permission denials for every other
+`openboard_*` tool.
+This is least privilege at the normal OpenBoard MCP interface, not an OS or
+hostile-agent sandbox: workers still run with the local account and harness
+permissions available to them. Ordinary `openboard mcp` launches keep the full
+orchestrator cockpit listed above.
 
 Review and Done cards expose `GET /api/tasks/:id/diff`, also available to MCP
 clients as `task_diff`; keeping it available after acceptance lets dependent

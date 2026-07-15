@@ -83,8 +83,9 @@ window:
 - The session is producing real messages or tool activity.
 
 Workers end their turn through the injected MCP completion contract:
-`complete_task` or `block_task` with `{ summary, changedFiles, verification:
-[{ command, result }], residualRisk }`; blocked reports also carry
+`complete_task` or `block_task` with `{ taskId, runStartedAt, report: {
+summary, changedFiles, verification: [{ command, result }], residualRisk } }`;
+`runStartedAt` is the current attempt identity, and blocked reports also carry
 `needsInput` — the direct question the operator must answer. Dispatched
 prompts contain no board URLs or tokens, and a worker whose MCP reporting is
 unavailable is told to end its turn normally instead (the REST
@@ -232,17 +233,26 @@ unavailable", not breakage.
 
 ### Worker-Side Tools And Permissions
 
-A dispatched worker that receives the `openboard` MCP server is limited to
-inspection tools and completion reporting. The contract (injected at Run/Retry)
-states:
+A dispatched worker does not receive the orchestrator cockpit through its
+normal OpenBoard MCP interface. Its worker profile advertises only inspection
+tools and completion reporting:
 
 - **Available:** `task_diff` (inspect parent/sibling diffs), `task_context`
   (retrieve full ancestor handoffs), `task_compare` (compare evidence between
   any two task worktrees), `complete_task`, `block_task`.
-- **Forbidden:** `run_task`, `retry_task`, `abort_task`, `move_task`, all
-  card-lifecycle tools. Workers report results; they never advance cards.
-- **Board tools:** The worker's completion guidance names exactly the tools
-  they may call; any board tool not in that list is out of scope.
+- **Denied:** `run_task`, `retry_task`, `abort_task`, `move_task`, and all other
+  card-lifecycle tools. Workers report results; they do not advance cards.
+- **Identity:** task-specific ACP MCP processes are bound to the assigned task
+  ID. Every `complete_task` / `block_task` call must include the current
+  `runStartedAt`, so an earlier attempt cannot report for a newer run.
+- **OpenCode:** OpenBoard-owned MCP launches use the five-tool worker profile,
+  and dispatched sessions explicitly deny every other `openboard_*` tool. The
+  exact denials also apply in connect mode when the server is named
+  `openboard`.
+
+This is least privilege at the normal OpenBoard MCP interface, not an OS or
+hostile-agent sandbox. Workers still run as the local user with the filesystem,
+credentials, local services, and harness permissions available to that account.
 
 `respond_permission` is for the orchestrator cockpit, not workers. When a
 permission ask appears on a task (the task projection carries

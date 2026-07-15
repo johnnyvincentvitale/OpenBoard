@@ -18,6 +18,9 @@ import {
   canAutoRun,
   UNATTENDED_PERMISSION,
   WRITE_FENCED_PERMISSION,
+  OPENBOARD_WORKER_DENIED_TOOL_IDS,
+  OPENBOARD_WORKER_PERMISSION_DENIALS,
+  OPENBOARD_WORKER_TOOL_NAMES,
   TASK_HARNESSES,
   CODEX_MODELS,
   GEMINI_ACP_MODELS,
@@ -291,24 +294,34 @@ describe("FR08-FR12 shared contracts", () => {
 
 describe("resolveOpenCodePermissionRules", () => {
   it("worktree runs retain the fence and accept only a stricter bash ask/deny layer", () => {
-    expect(resolveOpenCodePermissionRules(true)).toEqual([...WRITE_FENCED_PERMISSION]);
+    expect(resolveOpenCodePermissionRules(true)).toEqual([
+      ...WRITE_FENCED_PERMISSION,
+      ...OPENBOARD_WORKER_PERMISSION_DENIALS,
+    ]);
     expect(resolveOpenCodePermissionRules(true, { edit: "deny", bash: "deny", webfetch: "deny" })).toEqual([
       ...WRITE_FENCED_PERMISSION,
       { permission: "bash", pattern: "**", action: "deny" },
+      ...OPENBOARD_WORKER_PERMISSION_DENIALS,
     ]);
     expect(resolveOpenCodePermissionRules(true, { bash: "ask" })).toEqual([
       ...WRITE_FENCED_PERMISSION,
       { permission: "bash", pattern: "**", action: "ask" },
+      ...OPENBOARD_WORKER_PERMISSION_DENIALS,
     ]);
-    expect(resolveOpenCodePermissionRules(true, null)).toEqual([...WRITE_FENCED_PERMISSION]);
+    expect(resolveOpenCodePermissionRules(true, null)).toEqual([
+      ...WRITE_FENCED_PERMISSION,
+      ...OPENBOARD_WORKER_PERMISSION_DENIALS,
+    ]);
   });
 
-  it("in-place runs with no override (or all-allow) match today's UNATTENDED_PERMISSION exactly", () => {
-    expect(resolveOpenCodePermissionRules(false)).toEqual([...UNATTENDED_PERMISSION]);
-    expect(resolveOpenCodePermissionRules(false, null)).toEqual([...UNATTENDED_PERMISSION]);
-    expect(resolveOpenCodePermissionRules(false, {})).toEqual([...UNATTENDED_PERMISSION]);
+  it("in-place runs keep unattended defaults before the worker denials", () => {
+    const expected = [...UNATTENDED_PERMISSION, ...OPENBOARD_WORKER_PERMISSION_DENIALS];
+    expect(resolveOpenCodePermissionRules(false)).toEqual(expected);
+    expect(resolveOpenCodePermissionRules(false, null)).toEqual(expected);
+    expect(resolveOpenCodePermissionRules(false, {})).toEqual(expected);
     expect(resolveOpenCodePermissionRules(false, { edit: "allow", bash: "allow", webfetch: "allow" })).toEqual([
       ...UNATTENDED_PERMISSION,
+      ...OPENBOARD_WORKER_PERMISSION_DENIALS,
     ]);
   });
 
@@ -316,12 +329,49 @@ describe("resolveOpenCodePermissionRules", () => {
     expect(resolveOpenCodePermissionRules(false, { edit: "ask" })).toEqual([
       { permission: "*", pattern: "**", action: "allow" },
       { permission: "edit", pattern: "**", action: "ask" },
+      ...OPENBOARD_WORKER_PERMISSION_DENIALS,
     ]);
     expect(resolveOpenCodePermissionRules(false, { edit: "ask", bash: "deny", webfetch: "allow" })).toEqual([
       { permission: "*", pattern: "**", action: "allow" },
       { permission: "edit", pattern: "**", action: "ask" },
       { permission: "bash", pattern: "**", action: "deny" },
+      ...OPENBOARD_WORKER_PERMISSION_DENIALS,
     ]);
+  });
+
+  it("denies every non-worker OpenBoard tool by its exact OpenCode MCP id", () => {
+    expect(OPENBOARD_WORKER_DENIED_TOOL_IDS).toEqual([
+      "openboard_openboard_status",
+      "openboard_current_instance",
+      "openboard_list_instances",
+      "openboard_select_instance",
+      "openboard_create_task",
+      "openboard_add_tasks",
+      "openboard_link_tasks",
+      "openboard_unlink_tasks",
+      "openboard_run_task",
+      "openboard_retry_task",
+      "openboard_abort_task",
+      "openboard_move_task",
+      "openboard_sync_task",
+      "openboard_integrate_task",
+      "openboard_answer_blocked_task",
+      "openboard_respond_permission",
+      "openboard_send_session_message",
+      "openboard_tail_session",
+      "openboard_comment_task",
+      "openboard_add_note",
+      "openboard_task_events",
+      "openboard_list_tasks",
+      "openboard_list_agents",
+    ]);
+    const allowedIds = OPENBOARD_WORKER_TOOL_NAMES.map((name) => `openboard_${name}`);
+    for (const allowedId of allowedIds) {
+      expect(OPENBOARD_WORKER_DENIED_TOOL_IDS).not.toContain(allowedId);
+    }
+    expect(OPENBOARD_WORKER_PERMISSION_DENIALS).toEqual(
+      OPENBOARD_WORKER_DENIED_TOOL_IDS.map((permission) => ({ permission, pattern: "**", action: "deny" })),
+    );
   });
 });
 

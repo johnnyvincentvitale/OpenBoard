@@ -34,6 +34,7 @@ export interface McpContext {
   repoRoot: string;
   definition?: InstanceDefinition;
   runtime?: InstanceRuntimeState;
+  worker?: { taskId?: string };
 }
 
 /** Minimal output stream abstraction so tests do not need a real TTY. */
@@ -65,7 +66,7 @@ type ParsedCommand =
   | { command: "start"; name: string }
   | { command: "stop"; name: string }
   | { command: "attach"; name?: string }
-  | { command: "mcp"; name?: string }
+  | { command: "mcp"; name?: string; worker: boolean; taskId?: string }
   | { command: "rename"; oldName: string; newName: string }
   | { command: "default"; action: "show" | "set" | "clear"; name?: string }
   | { command: "status"; name: string; json: boolean }
@@ -232,16 +233,33 @@ export function parseArgs(argv: string[]): ParsedCommand {
     case "mcp": {
       if (rest.some(isHelpFlag)) return { command: "help" };
       let name: string | undefined;
+      let worker = false;
+      let taskId: string | undefined;
       for (let i = 0; i < rest.length; ) {
+        if (rest[i] === "--worker") {
+          worker = true;
+          i += 1;
+          continue;
+        }
         const instanceFlag = parseFlag(rest, i, "--instance", "-i");
         if (instanceFlag.value !== undefined) {
           name = instanceFlag.value;
           i = instanceFlag.nextIndex;
           continue;
         }
+        const taskIdFlag = parseFlag(rest, i, "--task-id");
+        if (taskIdFlag.value !== undefined) {
+          taskId = taskIdFlag.value.trim();
+          if (!taskId) throw new Error("--task-id requires a non-empty value");
+          i = taskIdFlag.nextIndex;
+          continue;
+        }
         throw new Error(`Unknown argument: ${rest[i]}`);
       }
-      return { command: "mcp", name };
+      if (taskId !== undefined && !worker) {
+        throw new Error("--task-id requires --worker");
+      }
+      return { command: "mcp", name, worker, taskId };
     }
     case "rename": {
       if (rest.some(isHelpFlag)) return { command: "help" };
@@ -901,8 +919,15 @@ export async function defaultAttach(ctx: AttachContext): Promise<number> {
 }
 
 /** Default MCP behavior: spawn the built MCP server, optionally pre-bound to a running instance. */
+export function buildMcpServerArgs(mcpPath: string, worker?: McpContext["worker"]): string[] {
+  return [
+    mcpPath,
+    ...(worker ? ["--worker", ...(worker.taskId ? ["--task-id", worker.taskId] : [])] : []),
+  ];
+}
+
 export async function defaultMcp(ctx: McpContext): Promise<number> {
-  const { repoRoot, definition, runtime } = ctx;
+  const { repoRoot, definition, runtime, worker } = ctx;
   const mcpPath = join(repoRoot, "dist", "mcp", "server.mjs");
   if (!existsSync(mcpPath)) {
     throw new InstanceError(`MCP server not found: ${mcpPath}. Run npm run build:mcp first.`);
@@ -932,7 +957,8 @@ export async function defaultMcp(ctx: McpContext): Promise<number> {
     });
   }
 
-  const child = spawn(process.execPath, [mcpPath], {
+  const serverArgs = buildMcpServerArgs(mcpPath, worker);
+  const child = spawn(process.execPath, serverArgs, {
     cwd: repoRoot,
     env,
     stdio: "inherit",
@@ -981,7 +1007,8 @@ Commands:
   worktrees <name>                        Show managed worktree summary
   restart <name>                          Stop/start and wait for health
   attach [name]                           Attach the TUI to an instance
-  mcp [--instance <name>]                  Start MCP unbound, or bound to a running instance
+  mcp [--instance <name>] [--worker [--task-id <id>]]
+                                           Start a cockpit or restricted worker MCP
   <name>                                  Start-if-stopped, then attach the TUI
 
 Options:
@@ -1245,8 +1272,11 @@ export async function runOpenboard(
       }
       case "mcp": {
         const repoRoot = cliRepoRoot();
+        const worker = parsed.worker
+          ? { ...(parsed.taskId !== undefined ? { taskId: parsed.taskId } : {}) }
+          : undefined;
         if (parsed.name === undefined) {
-          return await mcp({ repoRoot });
+          return await mcp({ repoRoot, ...(worker ? { worker } : {}) });
         }
         const definition = await provider.get(parsed.name);
         const runtime = await provider.getRuntime(parsed.name);
@@ -1260,7 +1290,7 @@ export async function runOpenboard(
           stderr.write(`Error: Instance "${parsed.name}" is missing a board token; restart or recreate it.\n`);
           return 1;
         }
-        return await mcp({ repoRoot, definition, runtime });
+        return await mcp({ repoRoot, definition, runtime, ...(worker ? { worker } : {}) });
       }
       case "attach":
       case "bare": {

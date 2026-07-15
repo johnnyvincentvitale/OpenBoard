@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import type {
+  CommitTaskCompletionInput,
+  CommitTaskCompletionResult,
   CompletionReport,
   CompletionSource,
   Column,
@@ -17,6 +19,7 @@ import type {
   TaskIsolationMode,
   TaskPending,
   TaskRunState,
+  TaskRunIdentity,
   TaskStore,
   WorktreeSweepResult,
 } from "../shared";
@@ -332,6 +335,15 @@ function toTaskEvent(record: TaskEventRowRecord): TaskEvent {
   };
 }
 
+function hasRunIdentity(task: Task, expected: TaskRunIdentity): boolean {
+  return (
+    task.runStartedAt === expected.runStartedAt &&
+    task.sessionId === expected.sessionId &&
+    task.harnessSessionId === expected.harnessSessionId &&
+    task.harnessSessionName === expected.harnessSessionName
+  );
+}
+
 /**
  * better-sqlite3-backed TaskStore. Fully synchronous. Positions are dense
  * integers starting at 0, unique within a column; every mutation that can
@@ -608,63 +620,7 @@ export class SqliteTaskStore implements TaskStore {
     const runTxn = this.db.transaction((taskId: string, p: Partial<Omit<Task, "id" | "createdAt">>) => {
       const existing = this.getTaskInTxn(taskId);
       if (!existing) return undefined;
-
-      // id/createdAt are excluded from the patch type itself; merge everything else.
-      const merged: Task = { ...existing, ...p };
-
-      this.stmts.updateTaskFields.run({
-        id: taskId,
-        type: merged.type,
-        taskKind: merged.taskKind ?? "none",
-        harness: merged.harness ?? "opencode",
-        title: merged.title,
-        description: merged.description,
-        directory: merged.directory,
-        column: merged.column,
-        position: merged.position,
-        sessionId: merged.sessionId ?? null,
-        harnessSessionId: merged.harnessSessionId ?? null,
-        harnessSessionName: merged.harnessSessionName ?? null,
-        harnessStatus: merged.harnessStatus ?? null,
-        permissionMode: merged.permissionMode ?? null,
-        claudePermissionMode: merged.claudePermissionMode ?? null,
-        acpOptions: merged.acpOptions ? JSON.stringify(merged.acpOptions) : null,
-        harnessCwd: merged.harnessCwd ?? null,
-        harnessBranch: merged.harnessBranch ?? null,
-        harnessCommit: merged.harnessCommit ?? null,
-        harnessWarning: merged.harnessWarning ?? null,
-        runState: merged.runState,
-        runStartedAt: merged.runStartedAt ?? null,
-        error: merged.error ?? null,
-        agent: merged.agent ?? null,
-        assignedTo: merged.assignedTo ?? null,
-        model: merged.model ? JSON.stringify(merged.model) : null,
-        fallbackModel: merged.fallbackModel ? JSON.stringify(merged.fallbackModel) : null,
-        activeModel: merged.activeModel ? JSON.stringify(merged.activeModel) : null,
-        autoRetries: merged.autoRetries ?? 0,
-        isolation: merged.isolation ?? null,
-        autoRun: merged.autoRun ? 1 : 0,
-        permissionOverrides: merged.permissionOverrides ? JSON.stringify(merged.permissionOverrides) : null,
-        worktreePath: merged.worktreePath ?? null,
-        worktreeBranch: merged.worktreeBranch ?? null,
-        baseBranch: merged.baseBranch ?? null,
-        pending: merged.pending ?? null,
-        archived: merged.archived ? 1 : 0,
-        completion: merged.completion ? JSON.stringify(merged.completion) : null,
-        finalSessionOutput: merged.finalSessionOutput ?? null,
-        completionSource: merged.completionSource ?? null,
-        completionLocation: merged.completionLocation ?? null,
-        completedBy: merged.completedBy ?? null,
-        baseCommit: merged.baseCommit ?? null,
-        dirtyAtDispatch: merged.dirtyAtDispatch ? 1 : 0,
-        isolationAtDispatch: merged.isolationAtDispatch ?? null,
-        baseCheckoutSnapshot: merged.baseCheckoutSnapshot ?? null,
-        escapeDetectedPaths: merged.escapeDetectedPaths ? JSON.stringify(merged.escapeDetectedPaths) : null,
-        rebaseConflictPaths: merged.rebaseConflictPaths ? JSON.stringify(merged.rebaseConflictPaths) : null,
-        updatedAt: this.now(),
-      });
-
-      return this.getTaskInTxn(taskId);
+      return this.updateTaskInTxn(existing, p);
     });
 
     return runTxn(id, patch);
@@ -697,6 +653,44 @@ export class SqliteTaskStore implements TaskStore {
 
   setCompletion(id: string, report: CompletionReport, source: CompletionSource): Task | undefined {
     return this.update(id, { completion: report, completionSource: source });
+  }
+
+  commitTaskCompletion(input: CommitTaskCompletionInput): CommitTaskCompletionResult {
+    const runTxn = this.db.transaction((data: CommitTaskCompletionInput): CommitTaskCompletionResult => {
+      const existing = this.getTaskInTxn(data.taskId);
+      if (!existing) return { status: "missing" };
+      if (!hasRunIdentity(existing, data.expectedRun)) return { status: "stale" };
+
+      const eligible = data.expectedMode === "running"
+        ? existing.runState === "running"
+        : existing.runState !== "running" &&
+          existing.column === "review" &&
+          existing.completionSource === "idle-fallback" &&
+          existing.completion == null;
+      if (!eligible) return { status: "stale" };
+
+      let updated = this.updateTaskInTxn(existing, {
+        ...data.patch,
+        completion: data.report,
+        completionSource: "reported",
+      });
+      if (data.moveToReview && (updated.column === "todo" || updated.column === "in_progress")) {
+        this.moveTaskInTxn(updated, "review", Number.POSITIVE_INFINITY);
+        updated = this.getTaskInTxn(data.taskId)!;
+      }
+
+      const event: TaskEvent = {
+        id: `event_${crypto.randomUUID()}`,
+        taskId: data.taskId,
+        type: data.event.type,
+        body: data.event.body,
+        createdAt: this.now(),
+      };
+      this.stmts.insertEvent.run({ ...event, body: JSON.stringify(event.body) });
+      return { status: "applied", task: updated };
+    });
+
+    return runTxn.immediate(input);
   }
 
   setArchived(id: string, archived: boolean): Task | undefined {
@@ -834,6 +828,67 @@ export class SqliteTaskStore implements TaskStore {
   }
 
   // ---- internal helpers (must only be called from within a db.transaction) ----
+
+  private updateTaskInTxn(
+    existing: Task,
+    patch: Partial<Omit<Task, "id" | "createdAt">>,
+  ): Task {
+    const merged: Task = { ...existing, ...patch };
+
+    this.stmts.updateTaskFields.run({
+      id: existing.id,
+      type: merged.type,
+      taskKind: merged.taskKind ?? "none",
+      harness: merged.harness ?? "opencode",
+      title: merged.title,
+      description: merged.description,
+      directory: merged.directory,
+      column: merged.column,
+      position: merged.position,
+      sessionId: merged.sessionId ?? null,
+      harnessSessionId: merged.harnessSessionId ?? null,
+      harnessSessionName: merged.harnessSessionName ?? null,
+      harnessStatus: merged.harnessStatus ?? null,
+      permissionMode: merged.permissionMode ?? null,
+      claudePermissionMode: merged.claudePermissionMode ?? null,
+      acpOptions: merged.acpOptions ? JSON.stringify(merged.acpOptions) : null,
+      harnessCwd: merged.harnessCwd ?? null,
+      harnessBranch: merged.harnessBranch ?? null,
+      harnessCommit: merged.harnessCommit ?? null,
+      harnessWarning: merged.harnessWarning ?? null,
+      runState: merged.runState,
+      runStartedAt: merged.runStartedAt ?? null,
+      error: merged.error ?? null,
+      agent: merged.agent ?? null,
+      assignedTo: merged.assignedTo ?? null,
+      model: merged.model ? JSON.stringify(merged.model) : null,
+      fallbackModel: merged.fallbackModel ? JSON.stringify(merged.fallbackModel) : null,
+      activeModel: merged.activeModel ? JSON.stringify(merged.activeModel) : null,
+      autoRetries: merged.autoRetries ?? 0,
+      isolation: merged.isolation ?? null,
+      autoRun: merged.autoRun ? 1 : 0,
+      permissionOverrides: merged.permissionOverrides ? JSON.stringify(merged.permissionOverrides) : null,
+      worktreePath: merged.worktreePath ?? null,
+      worktreeBranch: merged.worktreeBranch ?? null,
+      baseBranch: merged.baseBranch ?? null,
+      pending: merged.pending ?? null,
+      archived: merged.archived ? 1 : 0,
+      completion: merged.completion ? JSON.stringify(merged.completion) : null,
+      finalSessionOutput: merged.finalSessionOutput ?? null,
+      completionSource: merged.completionSource ?? null,
+      completionLocation: merged.completionLocation ?? null,
+      completedBy: merged.completedBy ?? null,
+      baseCommit: merged.baseCommit ?? null,
+      dirtyAtDispatch: merged.dirtyAtDispatch ? 1 : 0,
+      isolationAtDispatch: merged.isolationAtDispatch ?? null,
+      baseCheckoutSnapshot: merged.baseCheckoutSnapshot ?? null,
+      escapeDetectedPaths: merged.escapeDetectedPaths ? JSON.stringify(merged.escapeDetectedPaths) : null,
+      rebaseConflictPaths: merged.rebaseConflictPaths ? JSON.stringify(merged.rebaseConflictPaths) : null,
+      updatedAt: this.now(),
+    });
+
+    return this.getTaskInTxn(existing.id)!;
+  }
 
   private getTaskInTxn(id: string): Task | undefined {
     const row = this.stmts.getTask.get(id) as TaskRowRecord | undefined;

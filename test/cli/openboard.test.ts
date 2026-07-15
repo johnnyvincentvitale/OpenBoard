@@ -8,7 +8,7 @@ import type {
   InstanceDefinition,
   InstanceRuntimeState,
 } from "../../src/shared/instances";
-import { runOpenboard } from "../../src/cli/openboard";
+import { buildMcpServerArgs, runOpenboard } from "../../src/cli/openboard";
 import type {
   AttachContext,
   McpContext,
@@ -932,6 +932,20 @@ describe("openboard mcp", () => {
     });
   });
 
+  it("starts a restricted worker MCP unbound without resolving an instance", async () => {
+    const mcp = vi.fn().mockResolvedValue(0);
+    const provider = mockProvider();
+
+    const { code } = await run(["mcp", "--worker"], provider, undefined, undefined, mcp);
+
+    expect(code).toBe(0);
+    expect(provider.get).not.toHaveBeenCalled();
+    expect(mcp).toHaveBeenCalledWith({
+      repoRoot: expect.any(String) as unknown,
+      worker: {},
+    });
+  });
+
   it("starts MCP for a named running instance without starting it", async () => {
     const mcp = vi.fn().mockResolvedValue(0);
     const provider = mockProvider({
@@ -947,6 +961,63 @@ describe("openboard mcp", () => {
       definition: DEFAULT_DEFINITION,
       runtime: RUNNING_RUNTIME,
     });
+  });
+
+  it("passes a task-scoped worker profile to a named running instance", async () => {
+    const mcp = vi.fn().mockResolvedValue(0);
+    const provider = mockProvider({
+      getRuntime: vi.fn().mockResolvedValue(RUNNING_RUNTIME),
+    });
+
+    const { code } = await run(
+      ["mcp", "--worker", "--task-id", "task_1", "--instance", "my-project"],
+      provider,
+      undefined,
+      undefined,
+      mcp,
+    );
+
+    expect(code).toBe(0);
+    expect(mcp).toHaveBeenCalledWith({
+      repoRoot: expect.any(String) as unknown,
+      definition: DEFAULT_DEFINITION,
+      runtime: RUNNING_RUNTIME,
+      worker: { taskId: "task_1" },
+    });
+    expect(buildMcpServerArgs("/repo/dist/mcp/server.mjs", { taskId: "task_1" })).toEqual([
+      "/repo/dist/mcp/server.mjs",
+      "--worker",
+      "--task-id",
+      "task_1",
+    ]);
+  });
+
+  it("rejects a task scope without worker mode", async () => {
+    const mcp = vi.fn().mockResolvedValue(0);
+    const provider = mockProvider();
+
+    const { code, err } = await run(["mcp", "--task-id", "task_1"], provider, undefined, undefined, mcp);
+
+    expect(code).toBe(1);
+    expect(err).toContain("--task-id requires --worker");
+    expect(mcp).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing worker task id value", async () => {
+    const mcp = vi.fn().mockResolvedValue(0);
+    const provider = mockProvider();
+
+    const { code, err } = await run(["mcp", "--worker", "--task-id"], provider, undefined, undefined, mcp);
+
+    expect(code).toBe(1);
+    expect(err).toContain("--task-id requires a value");
+    expect(mcp).not.toHaveBeenCalled();
+  });
+
+  it("advertises worker mode in help", async () => {
+    const { code, out } = await run(["--help"], mockProvider());
+    expect(code).toBe(0);
+    expect(out).toContain("--worker [--task-id <id>]");
   });
 
   it("refuses stopped instances", async () => {

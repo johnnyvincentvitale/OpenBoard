@@ -213,7 +213,7 @@ describe("ClaudeAcpRunner", () => {
         {
           name: "openboard",
           command: DEFAULT_MCP_COMMAND,
-          args: ["mcp", "--instance", "alpha"],
+          args: ["mcp", "--worker", "--task-id", "task_1", "--instance", "alpha"],
           env: [],
         },
       ],
@@ -228,7 +228,27 @@ describe("ClaudeAcpRunner", () => {
     expect(promptText).toContain("not applicable: research only");
     expect(promptText).not.toContain("parent handoffs/raw files read");
     expect(promptText).toContain('complete_task with { taskId: "task_1", runStartedAt: 123');
+    expect(promptText).not.toContain("Board URL:");
     expect(promptText).toContain("When blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.");
+  });
+
+  it("keeps URL/token binding while task-scoping an instance-less worker MCP", async () => {
+    const { sessionNew, runner } = await launchRunner(makeAcpHarness(), task, { instanceName: undefined });
+
+    expect(sessionNew.params).toEqual({
+      cwd: "/repo",
+      mcpServers: [{
+        name: "openboard",
+        command: DEFAULT_MCP_COMMAND,
+        args: ["mcp", "--worker", "--task-id", "task_1"],
+        env: [
+          { name: "OPENCODE_BOARD_URL", value: "http://127.0.0.1:4097" },
+          { name: "OPENBOARD_API_TOKEN", value: "token" },
+        ],
+      }],
+      _meta: { claudeCode: { options: { model: "sonnet" } } },
+    });
+    runner.shutdown();
   });
 
   it("uses parent handoff guidance for linked tasks", async () => {
@@ -631,7 +651,7 @@ describe("CodexAcpRunner", () => {
     });
     expect(sessionNew.params).toEqual({
       cwd: "/repo",
-      mcpServers: [{ name: "openboard", command: DEFAULT_MCP_COMMAND, args: ["mcp", "--instance", "alpha"], env: [] }],
+      mcpServers: [{ name: "openboard", command: DEFAULT_MCP_COMMAND, args: ["mcp", "--worker", "--task-id", "task_1", "--instance", "alpha"], env: [] }],
       _meta: {
         openboard: { permissionMode: "agent-full-access", acpOptions: { reasoning_effort: "high", "fast-mode": "on" } },
       },
@@ -725,7 +745,7 @@ describe("GeminiAcpRunner", () => {
     });
     expect(sessionNew.params).toEqual({
       cwd: "/repo",
-      mcpServers: [{ name: "openboard", command: DEFAULT_MCP_COMMAND, args: ["mcp", "--instance", "alpha"], env: [] }],
+      mcpServers: [{ name: "openboard", command: DEFAULT_MCP_COMMAND, args: ["mcp", "--worker", "--task-id", "task_1", "--instance", "alpha"], env: [] }],
       _meta: {},
     });
     expect(setMode.params).toEqual({ sessionId: "gemini-session-1", modeId: "default" });

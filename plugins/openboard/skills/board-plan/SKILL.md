@@ -126,9 +126,12 @@ default agent prompt rather than extend it, so each role prompt must carry its
 own agentic-coding instructions; verify a role profile against one real
 dispatch before building a run on it. The loop is orchestrator-mediated —
 you author every hop; workers must not create or move cards. Spawned OpenCode
-workers do receive the injected `openboard` MCP server, but dispatch guidance
-limits its use to inspection (`task_diff`, `task_context`, `task_compare`)
-and completion reports (`complete_task` / `block_task`). Define the loop's exit condition (e.g. the audit card completes with
+workers do receive the injected `openboard` MCP server, but its worker profile
+advertises only inspection (`task_diff`, `task_context`, `task_compare`) and
+completion reports (`complete_task` / `block_task`). Dispatched OpenCode
+session rules explicitly deny every other `openboard_*` tool. This restricts
+the board interface; it does not OS-sandbox the worker process. Define the
+loop's exit condition (e.g. the audit card completes with
 no findings) and a round-trip cap in the plan; the runtime procedure lives in
 `openboard-orchestrator`.
 

@@ -71,6 +71,51 @@ export class ArchivedTaskActionError extends AdapterError {
   }
 }
 
+/** A synchronous dispatch claim already owns this task's pre-session window. */
+export class RunDispatchClaimError extends AdapterError {
+  constructor(taskId: string) {
+    super("validation", `Task is already being dispatched: ${taskId}`);
+    this.name = "RunDispatchClaimError";
+  }
+
+  override get status(): number {
+    return 409;
+  }
+}
+
+export class StaleTaskRunError extends AdapterError {
+  constructor(taskId: string, action: string) {
+    super("validation", `Task run changed while ${action} was in progress: ${taskId}`);
+    this.name = "StaleTaskRunError";
+  }
+
+  override get status(): number {
+    return 409;
+  }
+}
+
+function nextRunStartedAt(task: Pick<Task, "runStartedAt">): number {
+  return Math.max(Date.now(), (task.runStartedAt ?? 0) + 1);
+}
+
+function sameTaskRunIdentity(current: Task | undefined, expected: Task): current is Task {
+  return (
+    current !== undefined &&
+    current.runStartedAt === expected.runStartedAt &&
+    current.sessionId === expected.sessionId &&
+    current.harnessSessionId === expected.harnessSessionId &&
+    current.harnessSessionName === expected.harnessSessionName
+  );
+}
+
+function sameTaskRun(current: Task | undefined, expected: Task): boolean {
+  return (
+    sameTaskRunIdentity(current, expected) &&
+    current.runState === expected.runState &&
+    current.column === expected.column
+  );
+}
+
 export interface TaskDispatcherDeps {
   client: OpencodeHandle["client"];
   store: TaskStore;
@@ -650,6 +695,16 @@ interface OpenCodeRunRecord {
   blindReconnectAttempts?: number;
 }
 
+interface CompletionWatcher {
+  cancelled: boolean;
+  taskId: string;
+  runStartedAt?: number;
+}
+
+function watcherOwnsTask(watcher: CompletionWatcher, task: Task | undefined): task is Task {
+  return !watcher.cancelled && task !== undefined && task.runStartedAt === watcher.runStartedAt;
+}
+
 export class TaskDispatcher implements Dispatcher {
   private readonly client: OpencodeHandle["client"];
   private readonly store: TaskStore;
@@ -675,7 +730,7 @@ export class TaskDispatcher implements Dispatcher {
   private consumeLoopPromise: Promise<void> | null = null;
   /** Aborts the in-flight upstream event.subscribe() fetch/stream, if any — see shutdown(). */
   private upstreamAbort: AbortController | null = null;
-  private readonly completionWatchers = new Map<string, { cancelled: boolean; taskId: string; runStartedAt?: number }>();
+  private readonly completionWatchers = new Map<string, CompletionWatcher>();
   private readonly outputCandidates = new Map<string, string>();
   private readonly openCodeRunsByTask = new Map<string, OpenCodeRunRecord>();
   private readonly openCodeSessionToTask = new Map<string, string>();
@@ -686,6 +741,14 @@ export class TaskDispatcher implements Dispatcher {
   private readonly permissionAskMeta = new Map<string, Pick<PendingPermissionAsk, "raisedAt" | "deadline" | "patterns">>();
   /** Bounded ownership tombstones distinguish stale asks from unknown IDs. */
   private readonly permissionAskOwners = new Map<string, string>();
+  /**
+   * Synchronous pre-session claims. JavaScript cannot interleave another
+   * run() call between has() and add(), so one dispatcher invocation owns the
+   * async provisioning window until real session ownership is persisted.
+   */
+  private readonly dispatchClaims = new Set<string>();
+  /** FIFO lifecycle tails prevent provider operations for one card from overtaking each other. */
+  private readonly lifecycleTails = new Map<string, Promise<void>>();
 
   constructor(deps: TaskDispatcherDeps) {
     this.client = deps.client;
@@ -814,14 +877,45 @@ export class TaskDispatcher implements Dispatcher {
     this.onParentSatisfied = fn;
   }
 
-  async run(taskId: string): Promise<Task> {
-    const task = this.store.get(taskId);
-    if (!task) {
-      throw AdapterError.notFound(`Task not found: ${taskId}`);
+  private async withTaskLifecycleLock<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.lifecycleTails.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => gate);
+    this.lifecycleTails.set(taskId, tail);
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.lifecycleTails.get(taskId) === tail) this.lifecycleTails.delete(taskId);
     }
-    this.assertNotArchived(task, "run");
-    this.assertNotAlreadyRunning(task);
-    this.assertParentsSatisfied(task);
+  }
+
+  async run(taskId: string): Promise<Task> {
+    if (!this.store.get(taskId)) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (this.dispatchClaims.has(taskId)) {
+      throw new RunDispatchClaimError(taskId);
+    }
+    this.dispatchClaims.add(taskId);
+
+    try {
+      return await this.withTaskLifecycleLock(taskId, async () => {
+        const task = this.store.get(taskId);
+        if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+        this.assertNotArchived(task, "run");
+        this.assertNotAlreadyRunning(task);
+        this.assertParentsSatisfied(task);
+        return this.runWithClaim(task);
+      });
+    } finally {
+      this.dispatchClaims.delete(taskId);
+    }
+  }
+
+  private async runWithClaim(task: Task): Promise<Task> {
+    const taskId = task.id;
     this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
 
     // Resolve and contain the execution directory before doing any git or
@@ -880,7 +974,7 @@ export class TaskDispatcher implements Dispatcher {
       throw AdapterError.unreachable("OpenCode session create returned no id");
     }
 
-    const runStartedAt = Date.now();
+    const runStartedAt = nextRunStartedAt(task);
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
     this.store.update(taskId, { sessionId, activeModel, autoRetries: 0, runStartedAt });
     if (hasAskRule(permissionRules)) {
@@ -938,8 +1032,8 @@ export class TaskDispatcher implements Dispatcher {
     prompt: string,
     action: "run" | "retry",
     preserveBlocked = false,
+    runStartedAt = nextRunStartedAt(task),
   ): Promise<Task> {
-    const runStartedAt = Date.now();
     const warning = await dirtyWarning(execDirectory);
     const gitInfo = await inspectGitDirectory(execDirectory);
     const harness = asAcpHarness(task.harness);
@@ -1397,9 +1491,9 @@ export class TaskDispatcher implements Dispatcher {
     return (task.parentIds ?? this.store.getParentIds(task.id)).length > 0;
   }
 
-  private withCompletionContract(task: Task, prompt: string, runStartedAt?: number): string {
+  private withCompletionContract(task: Task, prompt: string, runStartedAt: number): string {
     const taskId = task.id;
-    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind, { hasParents: this.taskHasParents(task) })}\n\nWhen all work and verification are complete, report exactly once as your final action (replace JSON values with your actual report).\n\nUse the OpenBoard MCP reporting tools:\n- complete_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt ?? "undefined"}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nIf these MCP tools are unavailable, do not call board HTTP endpoints or inspect credentials. Finish with a normal final response; OpenBoard will treat an idle-only result as unconfirmed.\n\nCall complete_task or block_task exactly once, and only as the final action. Do not continue working after reporting.`;
+    return `${prompt}\n\n---\nOPENBOARD COMPLETION CONTRACT\nTask id: ${taskId}\n\n${completionHandoffGuidance(task.taskKind, { hasParents: this.taskHasParents(task) })}\n\nWhen all work and verification are complete, report exactly once as your final action (replace JSON values with your actual report).\n\nUse the OpenBoard MCP reporting tools:\n- complete_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${taskId}", runStartedAt: ${runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nIf these MCP tools are unavailable, do not call board HTTP endpoints or inspect credentials. Finish with a normal final response; OpenBoard will treat an idle-only result as unconfirmed.\n\nCall complete_task or block_task exactly once, and only as the final action. Do not continue working after reporting.`;
   }
 
   private withTaskContext(task: Task, prompt: string): string {
@@ -1554,7 +1648,7 @@ export class TaskDispatcher implements Dispatcher {
     };
   }
 
-  private async startFreshOpenCodeAnsweredBlock(task: Task, prompt: string): Promise<Task> {
+  private async startFreshOpenCodeAnsweredBlock(task: Task, prompt: string, runStartedAt: number): Promise<Task> {
     const taskId = task.id;
     const isolatedRun = wantsWorktree(task);
     const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
@@ -1569,7 +1663,6 @@ export class TaskDispatcher implements Dispatcher {
     if ((created as { error?: unknown }).error) throw AdapterError.unreachable("Failed to create OpenCode session", (created as { error?: unknown }).error);
     const sessionId = extractSessionId((created as { data?: unknown }).data);
     if (!sessionId) throw AdapterError.unreachable("OpenCode session create returned no id");
-    const runStartedAt = Date.now();
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
     this.store.update(taskId, { sessionId, activeModel, autoRetries: 0, runStartedAt });
     if (hasAskRule(permissionRules)) this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override", task.id, runStartedAt);
@@ -1592,6 +1685,10 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   async retry(taskId: string, feedback?: string, blockedAnswer?: BlockedAnswerContext): Promise<Task> {
+    return this.withTaskLifecycleLock(taskId, () => this.retryUnlocked(taskId, feedback, blockedAnswer));
+  }
+
+  private async retryUnlocked(taskId: string, feedback?: string, blockedAnswer?: BlockedAnswerContext): Promise<Task> {
     const task = this.store.get(taskId);
     if (!task) {
       throw AdapterError.notFound(`Task not found: ${taskId}`);
@@ -1600,17 +1697,34 @@ export class TaskDispatcher implements Dispatcher {
     if (blockedAnswer) this.assertBlockedAnswerCurrent(task, blockedAnswer);
     if (isAcpHarness(task.harness)) {
       this.assertParentsSatisfied(task);
-      if (!blockedAnswer) this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
+      const runStartedAt = nextRunStartedAt(task);
+      this.store.update(taskId, {
+        runStartedAt,
+        ...(!blockedAnswer ? { completion: null, completionSource: null, finalSessionOutput: null } : {}),
+      });
       const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
       if (!blockedAnswer) await this.captureDispatchBaseline(task, wantsWorktree(task), execDirectory);
-      return this.runAcpTask(task, execDirectory, blockedAnswer ? this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false) : feedback ?? task.description, "retry", blockedAnswer !== undefined);
+      return this.runAcpTask(
+        task,
+        execDirectory,
+        blockedAnswer ? this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false) : feedback ?? task.description,
+        "retry",
+        blockedAnswer !== undefined,
+        runStartedAt,
+      );
     }
 
     if (!task.sessionId && !blockedAnswer) {
       throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
     }
     this.assertParentsSatisfied(task);
-    if (!blockedAnswer) this.store.update(taskId, { completion: null, completionSource: null, finalSessionOutput: null });
+    const runStartedAt = nextRunStartedAt(task);
+    this.store.update(taskId, {
+      runStartedAt,
+      autoRetries: 0,
+      activeModel: task.model ?? null,
+      ...(!blockedAnswer ? { completion: null, completionSource: null, finalSessionOutput: null } : {}),
+    });
     if (task.sessionId) this.outputCandidates.delete(task.sessionId);
 
     const blockedAnswerResumePlan = blockedAnswer ? await this.decideOpenCodeBlockedAnswerResume(task) : undefined;
@@ -1619,13 +1733,16 @@ export class TaskDispatcher implements Dispatcher {
       if (blockedAnswerResumePlan?.fenceSessionBeforeFresh) {
         await this.fenceBlockedAnswerSessionBeforeFresh(task);
       }
-      const fresh = await this.startFreshOpenCodeAnsweredBlock(task, this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false));
+      const fresh = await this.startFreshOpenCodeAnsweredBlock(
+        task,
+        this.withBlockedAnswerPrompt(task, blockedAnswer, feedback, false),
+        runStartedAt,
+      );
       return { ...fresh, blockedAnswerResumeDecision };
     }
     const sessionId = task.sessionId;
     if (!sessionId) throw AdapterError.notFound(`Task has no session to retry: ${taskId}`);
 
-    const runStartedAt = Date.now();
     this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt: 0 });
     // retry() re-prompts an existing session — the worktree already exists from
     // run(), so its path comes off the task record rather than ensureWorktree().
@@ -1633,11 +1750,9 @@ export class TaskDispatcher implements Dispatcher {
     const retryDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
     if (!blockedAnswer) await this.captureDispatchBaseline(task, isolatedRetry, retryDirectory);
     const permissionRules = resolveOpenCodePermissionRules(isolatedRetry, task.permissionOverrides);
-    // A manual retry is a fresh operator-initiated attempt on the primary
-    // model — reset the breaker surface (autoRetries counter and any
-    // watchdog fallback activeModel) so the card doesn't keep displaying
-    // "AUTO-RETRY 2/2" and the fallback model for a primary-model run.
-    this.store.update(taskId, { runStartedAt, autoRetries: 0, activeModel: task.model ?? null });
+    // The fresh run identity and primary-model breaker reset were persisted
+    // before the first await so stale completion/abort work cannot still own
+    // the previous attempt while this retry provisions.
     if (hasAskRule(permissionRules)) {
       this.startPermissionResponder(sessionId, retryDirectory, isolatedRetry ? "worktree-fence" : "in-place-override", task.id, runStartedAt);
     } else {
@@ -1763,21 +1878,31 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   async abort(taskId: string): Promise<void> {
+    return this.withTaskLifecycleLock(taskId, () => this.abortUnlocked(taskId));
+  }
+
+  private async abortUnlocked(taskId: string): Promise<void> {
     const task = this.store.get(taskId);
     if (task && isAcpHarness(task.harness)) {
       if (task.harnessSessionName) {
-        this.cancelCompletionWatcher(task.harnessSessionName);
         const runner = this.acpRunners[task.harness];
         const label = harnessDisplayName(task.harness);
         try {
           await runner.abort(task.harnessSessionName);
         } catch (err) {
+          if (!sameTaskRun(this.store.get(taskId), task)) {
+            throw new StaleTaskRunError(taskId, "abort");
+          }
           this.store.update(taskId, {
             runState: "error",
             error: errorMessage(err, `${label} background abort failed`),
           });
           return;
         }
+        if (!sameTaskRun(this.store.get(taskId), task)) {
+          throw new StaleTaskRunError(taskId, "abort");
+        }
+        this.cancelCompletionWatcher(task.harnessSessionName);
       }
       this.store.update(taskId, { runState: "idle", harnessStatus: "aborted" });
       return;
@@ -1786,6 +1911,9 @@ export class TaskDispatcher implements Dispatcher {
       return;
     }
     await this.client.session.abort({ sessionID: task.sessionId });
+    if (!sameTaskRun(this.store.get(taskId), task)) {
+      throw new StaleTaskRunError(taskId, "abort");
+    }
     this.cancelCompletionWatcher(task.sessionId);
     this.stopPermissionResponder(task.sessionId);
     this.endOpenCodeRun(taskId, task.runStartedAt, "aborted");
@@ -1855,12 +1983,23 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   async sendSessionMessage(taskId: string, input: SessionMessageInput): Promise<SessionMessageReceipt> {
+    return this.withTaskLifecycleLock(taskId, () => this.sendSessionMessageUnlocked(taskId, input));
+  }
+
+  private async sendSessionMessageUnlocked(taskId: string, input: SessionMessageInput): Promise<SessionMessageReceipt> {
     const task = this.store.get(taskId);
     if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
     if (task.archived) throw AdapterError.validation("Cannot chat with an archived task");
     if (task.column === "done") throw AdapterError.validation("Done tasks are historical; move the task out of Done before chatting");
     const sessionId = task.sessionId ?? task.harnessSessionId;
     if (!sessionId) throw AdapterError.notFound("Task has no resumable session");
+    const acpRunner = isAcpHarness(task.harness) ? this.acpRunners[task.harness] : undefined;
+    if (isAcpHarness(task.harness) && (!task.harnessSessionName || !acpRunner?.sendMessage)) {
+      throw AdapterError.validation("This ACP session is no longer resumable; start a fresh continuation instead");
+    }
+    if (!isAcpHarness(task.harness) && !task.sessionId) {
+      throw AdapterError.notFound("OpenCode session is no longer resumable");
+    }
     if (sessionId !== input.expectedSessionId) {
       throw AdapterError.validation("Session changed while the message was being composed");
     }
@@ -1873,21 +2012,35 @@ export class TaskDispatcher implements Dispatcher {
 
     const sentAt = Date.now();
     const wasRunning = task.runState === "running";
-    const runStartedAt = wasRunning && input.mode === "queue"
-      ? task.runStartedAt ?? sentAt
-      : Math.max(sentAt, (task.runStartedAt ?? 0) + 1);
+    const runStartedAt = Math.max(sentAt, (task.runStartedAt ?? 0) + 1);
     const promptText = wasRunning
-      ? `OPENBOARD OPERATOR GUIDANCE\n\n${input.text}\n\nApply this guidance to the active task. Preserve the existing session, working tree, and original completion contract.`
+      ? `OPENBOARD OPERATOR GUIDANCE\n\n${input.text}\n\nApply this guidance to the active task. Preserve the existing session, working tree, and original completion contract.\n\nCurrent report identity: taskId "${taskId}", runStartedAt ${runStartedAt}. Use these exact values in the final complete_task or block_task call; this identity replaces any earlier runStartedAt.`
       : `OPENBOARD SESSION CHAT\n\n${input.text}\n\nRespond conversationally in this session. Do not call complete_task or block_task, do not change files, and do not alter the card lifecycle for this chat turn.`;
 
+    // Every operator message starts a new logical report generation, even
+    // when the provider queues it behind an active turn. Publish that
+    // identity before any provider await so an older completion cannot win
+    // while the guidance is being admitted.
+    const claimed = this.store.update(taskId, {
+      runStartedAt,
+      runState: "running",
+      error: undefined,
+      ...(isAcpHarness(task.harness)
+        ? { harnessStatus: input.mode === "queue" && wasRunning ? "queued" : "running" }
+        : {}),
+    });
+    if (!claimed) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (task.column === "todo") this.store.move(taskId, "in_progress", END_OF_COLUMN);
+
     if (isAcpHarness(task.harness)) {
-      const sessionName = task.harnessSessionName;
-      const runner = this.acpRunners[task.harness];
-      if (!sessionName || !runner.sendMessage) {
-        throw AdapterError.validation("This ACP session is no longer resumable; start a fresh continuation instead");
-      }
-      await runner.sendMessage(sessionName, promptText, { mode: input.mode, runStartedAt });
-      this.activity.startRun({ taskId, runStartedAt, sessionId, rootSessionId: sessionId, harness: task.harness });
+      if (task.harnessSessionName) this.cancelCompletionWatcher(task.harnessSessionName);
+      this.activity.startRun({
+        taskId,
+        runStartedAt,
+        sessionId,
+        rootSessionId: sessionId,
+        harness: task.harness,
+      });
       this.activity.recordEvent(taskId, runStartedAt, {
         sessionId,
         rootSessionId: sessionId,
@@ -1896,38 +2049,55 @@ export class TaskDispatcher implements Dispatcher {
         role: "user",
         text: input.text,
       });
-      this.cancelCompletionWatcher(sessionName);
-      this.startAcpWatcher(taskId, sessionName, task.harness);
-      this.store.update(taskId, {
-        runStartedAt,
-        runState: "running",
-        harnessStatus: input.mode === "queue" && wasRunning ? "queued" : "running",
-        error: undefined,
-      });
+    } else if (task.sessionId) {
+      this.cancelCompletionWatcher(task.sessionId);
+    }
+
+    try {
+      if (isAcpHarness(task.harness)) {
+        await acpRunner!.sendMessage!(task.harnessSessionName!, promptText, { mode: input.mode, runStartedAt });
+      } else {
+        if (input.mode === "interrupt" && wasRunning) {
+          const aborted = await this.client.session.abort({ sessionID: task.sessionId! });
+          const abortError = (aborted as { error?: unknown }).error;
+          if (abortError) throw AdapterError.unreachable("Could not interrupt the active OpenCode turn", abortError);
+        }
+        if (!sameTaskRunIdentity(this.store.get(taskId), claimed)) {
+          throw new StaleTaskRunError(taskId, "sending a session message");
+        }
+        this.bindOpenCodeRun({ task: claimed, sessionId: task.sessionId!, runStartedAt, attempt: 0 });
+        const promptError = await this.prompt(task.sessionId!, promptText, task.agent ?? undefined, task.activeModel ?? task.model ?? undefined);
+        if (promptError) {
+          throw AdapterError.unreachable(promptError);
+        }
+      }
+    } catch (error) {
+      await this.fenceFailedSessionMessage(task, claimed, errorMessage(error, "Session message delivery failed"));
+      throw error;
+    }
+
+    const current = this.store.get(taskId);
+    if (!sameTaskRunIdentity(current, claimed)) {
+      throw new StaleTaskRunError(taskId, "sending a session message");
+    }
+    if (isAcpHarness(task.harness)) {
+      if (current.runState === "running") {
+        this.startAcpWatcher(taskId, task.harnessSessionName!, task.harness);
+      } else {
+        this.activity.endRun(taskId, runStartedAt, current.runState === "error" ? "error" : "complete");
+      }
     } else {
-      if (!task.sessionId) throw AdapterError.notFound("OpenCode session is no longer resumable");
-      if (input.mode === "interrupt" && wasRunning) {
-        await this.client.session.abort({ sessionID: task.sessionId });
-        this.cancelCompletionWatcher(task.sessionId);
+      this.recordOpenCodeActivity(taskId, task.sessionId!, { kind: "text", role: "user", text: input.text });
+      if (current.runState === "running") {
+        this.startCompletionWatcher(taskId, task.sessionId!);
+      } else {
+        this.endOpenCodeRun(taskId, runStartedAt, current.runState === "error" ? "error" : "complete");
       }
-      if (!wasRunning || input.mode === "interrupt") {
-        this.bindOpenCodeRun({ task, sessionId: task.sessionId, runStartedAt, attempt: 0 });
-      }
-      const promptError = await this.prompt(task.sessionId, promptText, task.agent ?? undefined, task.activeModel ?? task.model ?? undefined);
-      if (promptError) throw AdapterError.unreachable(promptError);
-      this.recordOpenCodeActivity(taskId, task.sessionId, { kind: "text", role: "user", text: input.text });
-      this.store.update(taskId, {
-        runStartedAt,
-        runState: "running",
-        error: undefined,
-      });
-      this.startCompletionWatcher(taskId, task.sessionId);
     }
 
     // Chatting with a Review card is a conversation over its retained
-    // session, not a new task attempt. Keep the card and its completion
-    // evidence in Review. Active task guidance remains In Progress.
-    if (task.column === "todo") this.store.move(taskId, "in_progress", END_OF_COLUMN);
+    // session, not a new task attempt. Its placement and completion evidence
+    // stay untouched; Todo was moved before provider admission above.
     this.store.addEvent({
       taskId,
       type: "task_session_message",
@@ -1952,6 +2122,83 @@ export class TaskDispatcher implements Dispatcher {
       sentBy: input.sentBy,
       task: updated,
     };
+  }
+
+  /**
+   * Provider admission errors are ambiguous: the message may have been
+   * accepted even though its response failed. Fence the captured session
+   * before exposing an error so a caller cannot immediately retry beside a
+   * ghost writer. If the fence itself is unconfirmed, keep the claimed run
+   * observable instead of pretending it stopped.
+   */
+  private async fenceFailedSessionMessage(task: Task, claimed: Task, deliveryError: string): Promise<void> {
+    const beforeAbort = this.store.get(task.id);
+    if (!sameTaskRunIdentity(beforeAbort, claimed)) return;
+    if (beforeAbort.runState !== "running") {
+      if (isAcpHarness(task.harness)) {
+        this.activity.endRun(task.id, claimed.runStartedAt!, beforeAbort.runState === "error" ? "error" : "complete");
+      } else {
+        this.endOpenCodeRun(task.id, claimed.runStartedAt, beforeAbort.runState === "error" ? "error" : "complete");
+      }
+      return;
+    }
+
+    let fenceError: string | undefined;
+    try {
+      if (isAcpHarness(task.harness)) {
+        await this.acpRunners[task.harness].abort(task.harnessSessionName!);
+      } else {
+        const aborted = await this.client.session.abort({ sessionID: task.sessionId! });
+        const abortError = (aborted as { error?: unknown }).error;
+        if (abortError) throw abortError;
+      }
+    } catch (error) {
+      fenceError = errorMessage(error, "provider abort failed");
+    }
+
+    const afterAbort = this.store.get(task.id);
+    if (!sameTaskRunIdentity(afterAbort, claimed)) return;
+    if (afterAbort.runState !== "running") {
+      if (isAcpHarness(task.harness)) {
+        this.activity.endRun(task.id, claimed.runStartedAt!, afterAbort.runState === "error" ? "error" : "complete");
+      } else {
+        this.endOpenCodeRun(task.id, claimed.runStartedAt, afterAbort.runState === "error" ? "error" : "complete");
+      }
+      return;
+    }
+
+    if (fenceError) {
+      this.store.update(task.id, {
+        error: `${deliveryError}; could not confirm the active session stopped: ${fenceError}`,
+        ...(isAcpHarness(task.harness) ? { harnessStatus: "running" } : {}),
+      });
+      if (isAcpHarness(task.harness)) {
+        this.startAcpWatcher(task.id, task.harnessSessionName!, task.harness);
+      } else {
+        const currentRun = this.openCodeRunsByTask.get(task.id);
+        if (currentRun?.runStartedAt !== claimed.runStartedAt) {
+          this.bindOpenCodeRun({ task: claimed, sessionId: task.sessionId!, runStartedAt: claimed.runStartedAt!, attempt: 0 });
+        }
+        this.startCompletionWatcher(task.id, task.sessionId!);
+      }
+      return;
+    }
+
+    if (isAcpHarness(task.harness)) {
+      this.cancelCompletionWatcher(task.harnessSessionName!);
+    } else {
+      this.cancelCompletionWatcher(task.sessionId!);
+      this.stopPermissionResponder(task.sessionId!);
+      const currentRun = this.openCodeRunsByTask.get(task.id);
+      if (currentRun) this.endOpenCodeRun(task.id, currentRun.runStartedAt, "aborted");
+      this.outputCandidates.delete(task.sessionId!);
+    }
+    this.store.update(task.id, {
+      runState: "error",
+      error: deliveryError,
+      ...(isAcpHarness(task.harness) ? { harnessStatus: "aborted" } : {}),
+    });
+    if (isAcpHarness(task.harness)) this.activity.endRun(task.id, claimed.runStartedAt!, "error");
   }
 
   // ---- internals ----
@@ -2252,25 +2499,36 @@ export class TaskDispatcher implements Dispatcher {
     if (!task || task.runState !== "running" || task.runStartedAt !== event.run.runStartedAt || task.sessionId !== event.run.sessionId) return;
     const abortConfirmed = await (current.abortPromise ?? this.confirmWatchdogAbort(event.run));
     if (abortConfirmed === "busy-rearm") return; // status probe re-armed the watchdog; the run is still healthy
-    const stillExpected = this.store.get(event.run.taskId);
-    if (!stillExpected || stillExpected.runState !== "running" || stillExpected.runStartedAt !== event.run.runStartedAt || stillExpected.sessionId !== event.run.sessionId) return;
-    if (!abortConfirmed) {
-      this.store.update(task.id, { runState: "error", error: "Watchdog tripped but old OpenCode root abort was not confirmed; refusing to start a second writer" });
-      this.store.addEvent({ taskId: task.id, type: "task_watchdog_abort_unconfirmed", body: watchdogEventBody(event.run, { model: watchdogModelForTask(task), reason: event.reason, outcome: "abort-unconfirmed" }) });
-      return;
-    }
-    if (event.outcome === "exhausted") {
-      this.systemBlockAfterWatchdogExhaustion(
-        task,
-        event.run.runStartedAt,
-        `tripped for runStartedAt ${event.run.runStartedAt}`,
-        watchdogEventBody(event.run, { model: watchdogModelForTask(task), reason: event.reason }),
-      );
-      return;
-    }
+    await this.withTaskLifecycleLock(event.run.taskId, async () => {
+      const stillExpected = this.store.get(event.run.taskId);
+      const stillCurrentRun = this.openCodeRunsByTask.get(event.run.taskId);
+      if (
+        !stillExpected ||
+        !stillCurrentRun ||
+        stillExpected.runState !== "running" ||
+        stillExpected.runStartedAt !== event.run.runStartedAt ||
+        stillExpected.sessionId !== event.run.sessionId ||
+        stillCurrentRun.runStartedAt !== event.run.runStartedAt ||
+        stillCurrentRun.rootSessionId !== event.run.sessionId
+      ) return;
+      if (!abortConfirmed) {
+        this.store.update(stillExpected.id, { runState: "error", error: "Watchdog tripped but old OpenCode root abort was not confirmed; refusing to start a second writer" });
+        this.store.addEvent({ taskId: stillExpected.id, type: "task_watchdog_abort_unconfirmed", body: watchdogEventBody(event.run, { model: watchdogModelForTask(stillExpected), reason: event.reason, outcome: "abort-unconfirmed" }) });
+        return;
+      }
+      if (event.outcome === "exhausted") {
+        this.systemBlockAfterWatchdogExhaustion(
+          stillExpected,
+          event.run.runStartedAt,
+          `tripped for runStartedAt ${event.run.runStartedAt}`,
+          watchdogEventBody(event.run, { model: watchdogModelForTask(stillExpected), reason: event.reason }),
+        );
+        return;
+      }
 
-    const nextAttempt = event.nextAttempt ?? event.run.attempt + 1;
-    await this.escalateWatchdogAttempt(task, nextAttempt, event.reason);
+      const nextAttempt = event.nextAttempt ?? event.run.attempt + 1;
+      await this.escalateWatchdogAttempt(stillExpected, nextAttempt, event.reason);
+    });
   }
 
   /**
@@ -2333,21 +2591,30 @@ export class TaskDispatcher implements Dispatcher {
   }
 
   private async confirmWatchdogAbort(run: WatchdogRunIdentity): Promise<boolean> {
+    return this.withTaskLifecycleLock(run.taskId, () => this.confirmWatchdogAbortUnlocked(run));
+  }
+
+  private async confirmWatchdogAbortUnlocked(run: WatchdogRunIdentity): Promise<boolean> {
     const task = this.store.get(run.taskId);
     if (!task || task.sessionId !== run.sessionId || task.runStartedAt !== run.runStartedAt || task.runState !== "running") return false;
     try {
       const result = await this.client.session.abort({ sessionID: run.sessionId });
       const error = (result as { error?: unknown }).error;
       if (error) throw error;
+      const current = this.store.get(run.taskId);
+      if (!current || current.sessionId !== run.sessionId || current.runStartedAt !== run.runStartedAt || current.runState !== "running") return false;
       this.cancelCompletionWatcher(run.sessionId);
       this.stopPermissionResponder(run.sessionId);
       return true;
     } catch (err) {
-      this.store.addEvent({
-        taskId: run.taskId,
-        type: "task_watchdog_abort_failed",
-        body: watchdogEventBody(run, { model: watchdogModelForTask(task), outcome: "abort-failed", error: errorMessage(err, "abort failed") }),
-      });
+      const current = this.store.get(run.taskId);
+      if (current?.sessionId === run.sessionId && current.runStartedAt === run.runStartedAt && current.runState === "running") {
+        this.store.addEvent({
+          taskId: run.taskId,
+          type: "task_watchdog_abort_failed",
+          body: watchdogEventBody(run, { model: watchdogModelForTask(current), outcome: "abort-failed", error: errorMessage(err, "abort failed") }),
+        });
+      }
       return false;
     }
   }
@@ -2356,6 +2623,15 @@ export class TaskDispatcher implements Dispatcher {
     const execDirectory = this.resolveDirectory(task.worktreePath ?? task.directory);
     const isolatedRun = wantsWorktree(task);
     const permissionRules = resolveOpenCodePermissionRules(isolatedRun, task.permissionOverrides);
+    const runStartedAt = nextRunStartedAt(task);
+    const reservedTask = this.store.update(task.id, {
+      runStartedAt,
+      activeModel,
+      autoRetries: attempt,
+      runState: "running",
+      error: undefined,
+    });
+    if (!reservedTask) return;
     let created: unknown;
     try {
       created = await this.client.session.create({
@@ -2366,7 +2642,7 @@ export class TaskDispatcher implements Dispatcher {
       });
     } catch (err) {
       await this.handleWatchdogAttemptStartFailure(
-        task,
+        reservedTask,
         attempt,
         "session-create",
         errorMessage(err, "OpenCode session create threw"),
@@ -2380,11 +2656,10 @@ export class TaskDispatcher implements Dispatcher {
     const sessionId = extractSessionId((created as { data?: unknown }).data);
     if (!sessionId || (created as { error?: unknown }).error) {
       const detail = errorMessage((created as { error?: unknown }).error, "OpenCode session create returned no id");
-      await this.handleWatchdogAttemptStartFailure(task, attempt, "session-create", detail, activeModel, previousSessionId, sessionId, reason);
+      await this.handleWatchdogAttemptStartFailure(reservedTask, attempt, "session-create", detail, activeModel, previousSessionId, sessionId, reason);
       return;
     }
-    const runStartedAt = Date.now();
-    this.bindOpenCodeRun({ task, sessionId, runStartedAt, attempt });
+    this.bindOpenCodeRun({ task: reservedTask, sessionId, runStartedAt, attempt });
     this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt });
     if (hasAskRule(permissionRules)) {
       this.startPermissionResponder(sessionId, execDirectory, isolatedRun ? "worktree-fence" : "in-place-override", task.id, runStartedAt);
@@ -2405,10 +2680,25 @@ export class TaskDispatcher implements Dispatcher {
     const fullPrompt = this.withCompletionContract(task, this.withParentHandoffs(task, this.withTaskContext(task, prompt)), runStartedAt);
     const promptError = await this.prompt(sessionId, fullPrompt, task.agent ?? undefined, activeModel);
     if (promptError) {
+      const current = this.store.get(task.id);
+      const expected = { ...reservedTask, sessionId };
+      if (!sameTaskRunIdentity(current, expected) || current.runState !== "running") {
+        this.endOpenCodeRun(task.id, runStartedAt, current?.runState === "error" ? "error" : "complete");
+        return;
+      }
       this.stopPermissionResponder(sessionId);
       this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, error: promptError });
       this.endOpenCodeRun(task.id, runStartedAt, "error");
-      await this.handleWatchdogAttemptStartFailure(task, attempt, "prompt", promptError, activeModel, previousSessionId, sessionId, reason);
+      await this.handleWatchdogAttemptStartFailure(reservedTask, attempt, "prompt", promptError, activeModel, previousSessionId, sessionId, reason);
+      return;
+    }
+    const current = this.store.get(task.id);
+    if (!sameTaskRunIdentity(current, { ...reservedTask, sessionId })) {
+      this.endOpenCodeRun(task.id, runStartedAt, "aborted");
+      return;
+    }
+    if (current.runState !== "running") {
+      this.endOpenCodeRun(task.id, runStartedAt, current.runState === "error" ? "error" : "complete");
       return;
     }
     this.store.update(task.id, { sessionId, runStartedAt, activeModel, autoRetries: attempt, runState: "running", error: undefined });
@@ -2697,7 +2987,7 @@ export class TaskDispatcher implements Dispatcher {
   private async watchCompletion(
     taskId: string,
     sessionId: string,
-    watcher: { cancelled: boolean; taskId: string; runStartedAt?: number },
+    watcher: CompletionWatcher,
   ): Promise<void> {
     const startedAt = Date.now();
     const stallState: StallTrackingState = {
@@ -2712,7 +3002,7 @@ export class TaskDispatcher implements Dispatcher {
         if (watcher.cancelled) return;
 
         const task = this.getTaskForWatcher(taskId);
-        if (!task || task.sessionId !== sessionId) return;
+        if (!watcherOwnsTask(watcher, task) || task.sessionId !== sessionId) return;
         if (task.runState !== "running") {
           // complete_task/block_task can update the card before OpenCode has
           // emitted and persisted the provider's final post-tool assistant
@@ -2722,10 +3012,12 @@ export class TaskDispatcher implements Dispatcher {
             try {
               const result = await this.client.session.messages({ sessionID: sessionId });
               const messages = (result as { data?: unknown; error?: unknown }).data;
+              const current = this.getTaskForWatcher(taskId);
+              if (!watcherOwnsTask(watcher, current) || current.sessionId !== sessionId) return;
               if (!(result as { error?: unknown }).error && hasAssistantTurnFinished(messages)) {
                 const output = extractFinalOutput(messages);
                 if (output) this.recordOpenCodeActivity(taskId, sessionId, { kind: "text", role: "assistant", text: output });
-                this.endOpenCodeRun(taskId, task.runStartedAt, task.runState === "error" ? "error" : "complete");
+                this.endOpenCodeRun(taskId, current.runStartedAt, current.runState === "error" ? "error" : "complete");
                 return;
               }
             } catch {
@@ -2754,8 +3046,11 @@ export class TaskDispatcher implements Dispatcher {
           continue;
         }
 
+        const taskAfterMessages = this.getTaskForWatcher(taskId);
+        if (!watcherOwnsTask(watcher, taskAfterMessages) || taskAfterMessages.sessionId !== sessionId || taskAfterMessages.runState !== "running") return;
+
         if (!hasAssistantTurnFinished(messages)) {
-          const gaveUp = await this.trackStallAndMaybeNudge(taskId, sessionId, task, messages, stallState);
+          const gaveUp = await this.trackStallAndMaybeNudge(taskId, sessionId, taskAfterMessages, messages, stallState, watcher);
           if (gaveUp) return;
           continue;
         }
@@ -2763,7 +3058,7 @@ export class TaskDispatcher implements Dispatcher {
         const finalOutput = this.outputCandidates.get(sessionId) ?? extractFinalOutput(messages);
 
         const beforeFallback = this.getTaskForWatcher(taskId);
-        if (!beforeFallback || beforeFallback.runState !== "running") {
+        if (!watcherOwnsTask(watcher, beforeFallback) || beforeFallback.sessionId !== sessionId || beforeFallback.runState !== "running") {
           return;
         }
 
@@ -2784,6 +3079,8 @@ export class TaskDispatcher implements Dispatcher {
           this.endOpenCodeRun(taskId, beforeFallback.runStartedAt, "error");
           return;
         }
+        const afterEscapeCheck = this.getTaskForWatcher(taskId);
+        if (!watcherOwnsTask(watcher, afterEscapeCheck) || afterEscapeCheck.sessionId !== sessionId || afterEscapeCheck.runState !== "running") return;
 
         if (
           !this.updateTaskForWatcher(taskId, {
@@ -2806,24 +3103,21 @@ export class TaskDispatcher implements Dispatcher {
         return;
       }
     } finally {
-      if (this.completionWatchers.get(sessionId) === watcher) {
+      const ownsWatcherSlot = this.completionWatchers.get(sessionId) === watcher;
+      if (ownsWatcherSlot) {
         this.completionWatchers.delete(sessionId);
         this.outputCandidates.delete(sessionId);
-      }
-      // The permission responder must be stopped whenever this watcher stops
-      // watching a worktree-isolated session, regardless of which exit path
-      // got here — normal idle-fallback completion, timeout, escape
-      // detection, or the task having already left "running" because the
-      // agent itself reported completion via /complete or /block (those
-      // routes flip runState directly on the store without touching the
-      // dispatcher, so this finally block is the only place that reliably
-      // observes every completion path for this sessionId).
-      const finalTask = this.getTaskForWatcher(taskId);
-      const ownsCurrentRun = finalTask?.sessionId === sessionId && finalTask.runStartedAt === watcher.runStartedAt;
-      if (ownsCurrentRun) {
-        this.stopPermissionResponder(sessionId);
-        if (watcher.runStartedAt !== undefined) {
-          this.endOpenCodeRun(taskId, watcher.runStartedAt, finalTask.runState === "error" ? "error" : "complete");
+        // Only the watcher still installed for this session owns terminal
+        // cleanup. A repeated idle event can replace a watcher without
+        // changing the task/run identity; its cancelled predecessor must not
+        // tear down the replacement run's watchdog or permission responder.
+        const finalTask = this.getTaskForWatcher(taskId);
+        const ownsCurrentRun = finalTask?.sessionId === sessionId && finalTask.runStartedAt === watcher.runStartedAt;
+        if (ownsCurrentRun) {
+          this.stopPermissionResponder(sessionId);
+          if (watcher.runStartedAt !== undefined) {
+            this.endOpenCodeRun(taskId, watcher.runStartedAt, finalTask.runState === "error" ? "error" : "complete");
+          }
         }
       }
     }
@@ -2849,6 +3143,7 @@ export class TaskDispatcher implements Dispatcher {
     task: Task,
     messages: unknown,
     stallState: StallTrackingState,
+    watcher: CompletionWatcher,
   ): Promise<boolean> {
     const currentCount = Array.isArray(messages) ? messages.length : 0;
     const now = Date.now();
@@ -2874,6 +3169,8 @@ export class TaskDispatcher implements Dispatcher {
       const error = recentDenial
         ? `Session stalled after ${MAX_CONSECUTIVE_FUTILE_NUDGES} automatic recovery nudges following a permission denial (tool: ${recentDenial.tool}); it did not recover on its own.`
         : `Session stalled after ${MAX_CONSECUTIVE_FUTILE_NUDGES} automatic recovery nudges with no progress; no permission denial was recorded as the cause.`;
+      const current = this.getTaskForWatcher(taskId);
+      if (!watcherOwnsTask(watcher, current) || current.sessionId !== sessionId || current.runState !== "running") return true;
       this.updateTaskForWatcher(taskId, { runState: "error", error });
       return true;
     }
@@ -2884,6 +3181,8 @@ export class TaskDispatcher implements Dispatcher {
 
     const attempt = stallState.consecutiveFutileNudges + 1;
     const promptError = await this.prompt(sessionId, nudgeText, task.agent ?? undefined, task.model ?? undefined);
+    const afterPrompt = this.getTaskForWatcher(taskId);
+    if (!watcherOwnsTask(watcher, afterPrompt) || afterPrompt.sessionId !== sessionId || afterPrompt.runState !== "running") return true;
     stallState.consecutiveFutileNudges = attempt;
     stallState.lastProgressAt = now;
 
@@ -2900,6 +3199,9 @@ export class TaskDispatcher implements Dispatcher {
       // Worst case the nudge's own message is mistaken for progress once —
       // costs one extra stall-threshold wait, not a correctness problem.
     }
+
+    const afterMessages = this.getTaskForWatcher(taskId);
+    if (!watcherOwnsTask(watcher, afterMessages) || afterMessages.sessionId !== sessionId || afterMessages.runState !== "running") return true;
 
     const warning = promptError
       ? `Auto-nudge attempt ${attempt}/${MAX_CONSECUTIVE_FUTILE_NUDGES} failed to send: ${promptError}`
@@ -2924,6 +3226,9 @@ export class TaskDispatcher implements Dispatcher {
       const { escaped, changedPaths } = await detectTaskBaseCheckoutEscape(task);
       if (!escaped) return false;
 
+      const current = this.getTaskForWatcher(taskId);
+      if (!sameTaskRun(current, task)) return false;
+
       markTaskBaseCheckoutEscape(this.store, taskId, changedPaths, {
         completion: null,
         completionSource: null,
@@ -2941,7 +3246,7 @@ export class TaskDispatcher implements Dispatcher {
     taskId: string,
     sessionName: string,
     harness: AcpTaskHarness,
-    watcher: { cancelled: boolean; taskId: string; runStartedAt?: number },
+    watcher: CompletionWatcher,
   ): Promise<void> {
     const startedAt = Date.now();
     const runner = this.acpRunners[harness];
@@ -2953,7 +3258,7 @@ export class TaskDispatcher implements Dispatcher {
         if (watcher.cancelled) return;
 
         const task = this.getTaskForWatcher(taskId);
-        if (!task || task.harness !== harness || task.harnessSessionName !== sessionName || task.runState !== "running") return;
+        if (!watcherOwnsTask(watcher, task) || task.harness !== harness || task.harnessSessionName !== sessionName || task.runState !== "running") return;
 
         if (Date.now() - startedAt > COMPLETION_WATCH_TIMEOUT_MS) {
           this.updateTaskForWatcher(taskId, {
@@ -2969,6 +3274,8 @@ export class TaskDispatcher implements Dispatcher {
         } catch {
           continue;
         }
+        const taskAfterPoll = this.getTaskForWatcher(taskId);
+        if (!watcherOwnsTask(watcher, taskAfterPoll) || taskAfterPoll.harness !== harness || taskAfterPoll.harnessSessionName !== sessionName || taskAfterPoll.runState !== "running") return;
         if (!status) continue;
 
         const metadata: Partial<Omit<Task, "id" | "createdAt">> = {
@@ -2982,12 +3289,14 @@ export class TaskDispatcher implements Dispatcher {
           if (status.cwd !== task.directory && gitInfo.isRepo && gitInfo.branch) {
             metadata.worktreePath = status.cwd;
             metadata.worktreeBranch = gitInfo.branch;
-            if (!task.baseBranch) {
-              const taskGitInfo = await inspectGitDirectory(task.directory);
+            if (!taskAfterPoll.baseBranch) {
+              const taskGitInfo = await inspectGitDirectory(taskAfterPoll.directory);
               if (taskGitInfo.branch) metadata.baseBranch = taskGitInfo.branch;
             }
           }
         }
+        const taskAfterInspection = this.getTaskForWatcher(taskId);
+        if (!watcherOwnsTask(watcher, taskAfterInspection) || taskAfterInspection.harness !== harness || taskAfterInspection.harnessSessionName !== sessionName || taskAfterInspection.runState !== "running") return;
         this.updateTaskForWatcher(taskId, metadata);
         if (!status.terminal) continue;
 
@@ -3000,7 +3309,7 @@ export class TaskDispatcher implements Dispatcher {
         }
 
         const beforeFallback = this.getTaskForWatcher(taskId);
-        if (!beforeFallback || beforeFallback.runState !== "running") {
+        if (!watcherOwnsTask(watcher, beforeFallback) || beforeFallback.harness !== harness || beforeFallback.harnessSessionName !== sessionName || beforeFallback.runState !== "running") {
           return;
         }
         if (beforeFallback.completion) {
@@ -3013,6 +3322,8 @@ export class TaskDispatcher implements Dispatcher {
         if (await this.blockOnBaseCheckoutEscape(taskId, beforeFallback)) {
           return;
         }
+        const afterEscapeCheck = this.getTaskForWatcher(taskId);
+        if (!watcherOwnsTask(watcher, afterEscapeCheck) || afterEscapeCheck.harness !== harness || afterEscapeCheck.harnessSessionName !== sessionName || afterEscapeCheck.runState !== "running") return;
         if (
           !this.updateTaskForWatcher(taskId, {
             runState: "idle",

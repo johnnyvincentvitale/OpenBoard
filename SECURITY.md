@@ -96,13 +96,33 @@ openboard mcp
 ```
 
 Then call `select_instance` from the MCP client so the running process binds to
-the selected board without exposing the stored token. For generated worker
-configs or manual terminal use, the named-instance wrapper still injects the
-token and board URL automatically:
+the selected board without exposing the stored token. For manual orchestrator
+use, the named-instance wrapper injects the token and board URL automatically
+while retaining the full cockpit:
 
 ```
 openboard mcp --instance <name>
 ```
+
+Generated workers use the restricted profile instead:
+
+```
+openboard mcp --instance <name> --worker
+```
+
+Task-specific worker processes may also pass `--task-id <task-id>`. That ACP
+worker MCP rejects reports for another task, and both `complete_task` and
+`block_task` require the current `runStartedAt`. OpenBoard-owned OpenCode MCP
+launches advertise only the five worker tools (`task_diff`, `task_context`,
+`task_compare`, `complete_task`, and `block_task`); dispatched OpenCode
+sessions also receive explicit denials for every other `openboard_*` tool,
+including when they connect to an externally managed OpenCode server whose MCP
+entry is named `openboard`.
+
+This restricts the normal OpenBoard MCP interface. It is not an OS/syscall
+sandbox or a hostile-agent security boundary: workers still run as the local
+user with the filesystem, credentials, local services, and harness permissions
+available to that account.
 
 Custom scripts that bypass the wrapper can still set `OPENBOARD_API_TOKEN` and
 `OPENCODE_BOARD_URL` directly.

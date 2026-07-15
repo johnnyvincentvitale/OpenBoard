@@ -687,7 +687,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
 
     const created = await this.request(state, "session/new", {
       cwd: input.directory,
-      mcpServers: this.mcpServers(),
+      mcpServers: this.mcpServers(input.task.id),
       _meta: this.sessionMeta(input),
     });
     const sessionId = (created as { sessionId?: unknown })?.sessionId;
@@ -793,13 +793,13 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
     }
   }
 
-  private mcpServers(): Array<{ name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }> {
+  private mcpServers(taskId: string): Array<{ name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }> {
     if (this.instanceName) {
       return [
         {
           name: "openboard",
           command: this.mcpCommand,
-          args: ["mcp", "--instance", this.instanceName],
+          args: ["mcp", "--worker", "--task-id", taskId, "--instance", this.instanceName],
           env: [],
         },
       ];
@@ -809,7 +809,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       {
         name: "openboard",
         command: this.mcpCommand,
-        args: ["mcp"],
+        args: ["mcp", "--worker", "--task-id", taskId],
         env: [
           { name: "OPENCODE_BOARD_URL", value: this.adapterBaseUrl },
           ...(this.boardToken ? [{ name: "OPENBOARD_API_TOKEN", value: this.boardToken }] : []),
@@ -819,7 +819,7 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
   }
 
   private withWorkerContract(input: ClaudeCodeRunInput): string {
-    return `${input.prompt}\n\n---\n${this.service.contractName}\nTask id: ${input.task.id}\nBoard URL: ${this.adapterBaseUrl}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this ${this.service.sessionLabel} session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk.\n\n${completionHandoffGuidance(input.task.taskKind, { hasParents: (input.task.parentIds ?? []).length > 0 })}\n\nWhen all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
+    return `${input.prompt}\n\n---\n${this.service.contractName}\nTask id: ${input.task.id}\nWorking directory: ${input.directory}\n\nUse the OpenBoard MCP tools loaded in this ${this.service.sessionLabel} session. If you change directories, create a worktree, or commit to a branch, include the actual cwd, branch, and commit in your summary or residual risk.\n\n${completionHandoffGuidance(input.task.taskKind, { hasParents: (input.task.parentIds ?? []).length > 0 })}\n\nWhen all work and verification are complete, call exactly one of these MCP tools as your final action:\n\n- complete_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n- block_task with { taskId: "${input.task.id}", runStartedAt: ${input.runStartedAt}, report: { summary, changedFiles, verification, residualRisk } }\n\nWhen blocking on a question the operator must answer before you can continue, also include needsInput with the direct question.\n\nDo not just describe completion in chat. Do not move the card to Done. The OpenBoard orchestrator will review and integrate the work.`;
   }
 
   private request(state: AcpSessionState, method: string, params: Record<string, unknown>): Promise<unknown> {

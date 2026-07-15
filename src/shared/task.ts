@@ -1,6 +1,7 @@
 import type { BlockedAnswerContext } from "./blocked-task";
 import type { Column } from "./columns";
 import type { WorktreeOrphan } from "./diagnostics";
+import { OPENBOARD_WORKER_DENIED_TOOL_IDS } from "./mcp-tool-profile";
 
 /** A single file in a task diff response. Mirrors OpenCode's server diff contract. */
 export interface DiffFile {
@@ -569,14 +570,27 @@ export interface OpenCodePermissionRule {
 }
 
 /**
+ * OpenCode exposes MCP tools as `<server>_<tool>`. These exact denials are
+ * appended after the broad session rules so last-rule-wins permission
+ * resolution cannot re-enable the OpenBoard orchestrator cockpit for workers.
+ */
+export const OPENBOARD_WORKER_PERMISSION_DENIALS: readonly OpenCodePermissionRule[] =
+  OPENBOARD_WORKER_DENIED_TOOL_IDS.map((permission) => ({
+    permission,
+    pattern: "**",
+    action: "deny" as const,
+  }));
+
+/**
  * The single choke point for what permission ruleset a dispatched OpenCode
  * session runs with. Worktree-isolated runs always retain
  * `WRITE_FENCED_PERMISSION`; their only accepted override is `bash: ask|deny`,
  * appended after the fence. `bash: ask` is interactive-strict, while no
  * override preserves unattended compatibility. In-place tasks may layer
  * category overrides after
- * the base allow-all rule, since OpenCode 1.17.13 lets whichever rule is
- * last in the array win (see `WRITE_FENCED_PERMISSION`'s doc comment above).
+ * the base allow-all rule. Both shapes finish with exact OpenBoard worker-tool
+ * denials. OpenCode 1.17.13 lets whichever rule is last in the array win (see
+ * `WRITE_FENCED_PERMISSION`'s doc comment above).
  */
 export function resolveOpenCodePermissionRules(
   isolatedRun: boolean,
@@ -586,6 +600,7 @@ export function resolveOpenCodePermissionRules(
     const rules: OpenCodePermissionRule[] = WRITE_FENCED_PERMISSION.map((rule) => ({ ...rule }));
     const bash = overrides?.bash;
     if (bash === "ask" || bash === "deny") rules.push({ permission: "bash", pattern: "**", action: bash });
+    rules.push(...OPENBOARD_WORKER_PERMISSION_DENIALS.map((rule) => ({ ...rule })));
     return rules;
   }
   const rules: OpenCodePermissionRule[] = UNATTENDED_PERMISSION.map((rule) => ({ ...rule }));
@@ -595,6 +610,7 @@ export function resolveOpenCodePermissionRules(
       if (action && action !== "allow") rules.push({ permission: category, pattern: "**", action });
     }
   }
+  rules.push(...OPENBOARD_WORKER_PERMISSION_DENIALS.map((rule) => ({ ...rule })));
   return rules;
 }
 
@@ -641,6 +657,34 @@ export type TaskFrame =
   | { kind: "remove"; seq: number; taskId: string }
   | { kind: "heartbeat"; seq: number };
 
+/** Durable identity of one provider-backed task attempt. */
+export interface TaskRunIdentity {
+  runStartedAt?: number;
+  sessionId?: string;
+  harnessSessionId?: string;
+  harnessSessionName?: string;
+}
+
+export interface CommitTaskCompletionInput {
+  taskId: string;
+  expectedRun: TaskRunIdentity;
+  expectedMode: "running" | "idle-fallback";
+  report: CompletionReport;
+  patch: Partial<
+    Omit<
+      Task,
+      "id" | "createdAt" | "column" | "position" | "completion" | "completionSource"
+    >
+  >;
+  moveToReview: boolean;
+  event: { type: string; body: Record<string, unknown> };
+}
+
+export type CommitTaskCompletionResult =
+  | { status: "applied"; task: Task }
+  | { status: "missing" }
+  | { status: "stale" };
+
 /** Task persistence (better-sqlite3, synchronous). Owns task rows + column/order. */
 export interface TaskStore {
   list(): Task[];
@@ -653,6 +697,8 @@ export interface TaskStore {
   move(id: string, column: Column, position: number): void;
   remove(id: string): void;
   setCompletion(id: string, report: CompletionReport, source: CompletionSource): Task | undefined;
+  /** Atomically validate one run and commit its completion, event, and optional Review move. */
+  commitTaskCompletion(input: CommitTaskCompletionInput): CommitTaskCompletionResult;
   setArchived(id: string, archived: boolean): Task | undefined;
   addLink(parentId: string, childId: string): void;
   removeLink(parentId: string, childId: string): void;

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
-import { registerCompletionRoutes } from "../../../src/server/routes/completion";
+import { registerCompletionRoutes, type CompletionRouteDeps } from "../../../src/server/routes/completion";
 import { createChainAdvancer } from "../../../src/server/chain-advancer";
 import type { Task } from "../../../src/shared";
 
@@ -16,10 +16,20 @@ const validBody = {
   residualRisk: "none",
 };
 
-function appFor(store: SqliteTaskStore, advancer?: ReturnType<typeof createChainAdvancer>): Hono {
+function appFor(
+  store: SqliteTaskStore,
+  advancer?: ReturnType<typeof createChainAdvancer>,
+  inspectCompletion?: CompletionRouteDeps["inspectCompletion"],
+): Hono {
   const app = new Hono();
-  registerCompletionRoutes(app, { store, advancer });
+  registerCompletionRoutes(app, { store, advancer, inspectCompletion });
   return app;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -497,6 +507,69 @@ describe("completion routes", () => {
     const body = await res.json();
     expect(body.error.message).toBe("Completion report is stale for this task run");
     expect(store.get(task.id)?.completionSource).toBeNull();
+  });
+
+  it("rejects a completion that becomes stale during async inspection without partial writes", async () => {
+    const task = store.create({
+      harness: "claude-code",
+      title: "Overlapping completion",
+      description: "do it",
+      directory: "/repo",
+    });
+    store.update(task.id, {
+      runState: "running",
+      runStartedAt: 100,
+      harnessSessionId: "claude-old",
+      harnessSessionName: "openboard-old",
+      harnessStatus: "running",
+    });
+    store.move(task.id, "in_progress", 0);
+    const inspectionEntered = deferred<void>();
+    const releaseInspection = deferred<Partial<Omit<Task, "id" | "createdAt">>>();
+    const advanceReadyChildren = vi.fn(async () => undefined);
+    const app = appFor(
+      store,
+      { advanceReadyChildren },
+      async () => {
+        inspectionEntered.resolve(undefined);
+        return releaseInspection.promise;
+      },
+    );
+
+    const completionRequest = app.request(`/api/tasks/${task.id}/complete?runStartedAt=100`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(validBody),
+    });
+    await inspectionEntered.promise;
+    store.update(task.id, {
+      runState: "running",
+      runStartedAt: 200,
+      harnessSessionId: "claude-new",
+      harnessSessionName: "openboard-new",
+      harnessStatus: "running",
+      completion: null,
+      completionSource: null,
+    });
+    releaseInspection.resolve({ completionLocation: "task-directory" });
+
+    const res = await completionRequest;
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: { message: "Completion report is stale for this task run" },
+    });
+    expect(store.get(task.id)).toMatchObject({
+      runState: "running",
+      runStartedAt: 200,
+      harnessSessionId: "claude-new",
+      harnessSessionName: "openboard-new",
+      harnessStatus: "running",
+      column: "in_progress",
+      completion: null,
+      completionSource: null,
+    });
+    expect(store.listEvents(task.id).some((event) => event.type === "task_completed")).toBe(false);
+    expect(advanceReadyChildren).not.toHaveBeenCalled();
   });
 
   it("returns 400 for malformed bodies", async () => {

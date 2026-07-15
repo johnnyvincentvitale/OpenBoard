@@ -76,8 +76,9 @@ Optional frontmatter:
   config is part of the crash risk.
 
 Prompt body requirements: state the role in one sentence; list sources to read
-before work; state hard boundaries (board tools limited to `task_diff`
-inspection and completion reports — never run/move/create/integrate; no
+before work; mirror the enforced board boundary (`task_diff`, `task_context`,
+and `task_compare` for inspection; `complete_task` / `block_task` for the final
+report; never run/move/create/integrate); state other hard boundaries (no
 commits/pushes; no secret exposure; stay inside the card's file boundary);
 state verification
 expectations; state the final handoff format (changed files, commands run,

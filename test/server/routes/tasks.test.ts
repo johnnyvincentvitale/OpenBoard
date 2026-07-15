@@ -150,10 +150,14 @@ class FakeOpencodeClient {
   createCalls: unknown[] = [];
   promptCalls: Array<{ parts: unknown }> = [];
   nextSessionId = "ses_route";
+  createEntered?: () => void;
+  createGate?: Promise<void>;
 
   session = {
     create: async (params: unknown) => {
       this.createCalls.push(params);
+      this.createEntered?.();
+      await this.createGate;
       return { data: { id: this.nextSessionId }, error: undefined };
     },
     promptAsync: async (params: { parts: unknown }) => {
@@ -1516,6 +1520,36 @@ describe("POST /api/tasks/:id/run", () => {
     const res = await app.request(`/api/tasks/${child.id}/run`, { method: "POST" });
 
     expect(res.status).toBe(202);
+  });
+
+  it("returns 409 to a concurrent run while the first request provisions the only writer", async () => {
+    const task = store.create({ title: "One writer", description: "do it", directory: repoDir });
+    const client = new FakeOpencodeClient();
+    const createEntered = deferred<void>();
+    const releaseCreate = deferred<void>();
+    client.createEntered = () => createEntered.resolve();
+    client.createGate = releaseCreate.promise;
+    const realDispatcher = new TaskDispatcher({ client: client as never, store });
+    const app = buildRealDispatchApp(store, realDispatcher);
+
+    const firstRequest = app.request(`/api/tasks/${task.id}/run`, { method: "POST" });
+    await createEntered.promise;
+    const secondResponse = await app.request(`/api/tasks/${task.id}/run`, { method: "POST" });
+
+    expect(secondResponse.status).toBe(409);
+    expect(await secondResponse.json()).toMatchObject({
+      error: {
+        code: "validation",
+        message: `Task is already being dispatched: ${task.id}`,
+      },
+    });
+    expect(client.createCalls).toHaveLength(1);
+
+    releaseCreate.resolve();
+    const firstResponse = await firstRequest;
+    expect(firstResponse.status).toBe(202);
+    expect(client.createCalls).toHaveLength(1);
+    expect(store.listEvents(task.id).filter((event) => event.type === "task_run")).toHaveLength(1);
   });
 });
 

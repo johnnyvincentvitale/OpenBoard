@@ -135,8 +135,8 @@ function openboardMcpConfig(options: OpenboardMcpConfig): NonNullable<ServerOpti
       openboard: {
         type: "local",
         command: options.instanceName
-          ? ["openboard", "mcp", "--instance", options.instanceName]
-          : ["openboard", "mcp"],
+          ? ["openboard", "mcp", "--worker", "--instance", options.instanceName]
+          : ["openboard", "mcp", "--worker"],
         environment: {
           OPENCODE_BOARD_URL: options.adapterBaseUrl,
           ...(options.boardToken ? { OPENBOARD_API_TOKEN: options.boardToken } : {}),

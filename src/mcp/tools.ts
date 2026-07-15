@@ -158,10 +158,10 @@ export const MoveTaskInputSchema = z
   })
   .strict();
 export const CompleteTaskInputSchema = z
-  .object({ taskId: IdSchema, runStartedAt: z.number().finite().optional(), report: CompletionReportInputSchema })
+  .object({ taskId: IdSchema, runStartedAt: z.number().finite(), report: CompletionReportInputSchema })
   .strict();
 export const BlockTaskInputSchema = z
-  .object({ taskId: IdSchema, runStartedAt: z.number().finite().optional(), report: BlockReportInputSchema })
+  .object({ taskId: IdSchema, runStartedAt: z.number().finite(), report: BlockReportInputSchema })
   .strict();
 export const CommentTaskInputSchema = z.object({ taskId: IdSchema, author: z.string(), body: z.string() }).strict();
 export const IntegrateTaskInputSchema = z

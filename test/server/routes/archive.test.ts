@@ -2,13 +2,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { GlobalArchiveStore } from "../../../src/db/global-archive-store";
 import { registerArchiveRoutes } from "../../../src/server/routes/archive";
 
-function makeApp() {
+function makeApp(options: {
+  archiveDiffSnapshot?: Parameters<typeof registerArchiveRoutes>[1]["archiveDiffSnapshot"];
+} = {}) {
   const store = new SqliteTaskStore(":memory:");
   const globalArchiveStore = new GlobalArchiveStore(":memory:");
   const app = new Hono();
@@ -21,6 +23,7 @@ function makeApp() {
       workspace: "/ws",
       dbPath: "/db/test-tasks.sqlite",
     },
+    archiveDiffSnapshot: options.archiveDiffSnapshot,
   });
   return { app, store, globalArchiveStore };
 }
@@ -61,6 +64,18 @@ describe("archive routes", () => {
 
     expect(res.status).toBe(409);
     expect(store.get(task.id)?.archived).toBe(false);
+  });
+
+  it("rejects archiving a running review task", async () => {
+    const task = store.create({ title: "Still running", description: "", directory: "/repo" });
+    store.move(task.id, "review", 0);
+    store.update(task.id, { runState: "running", runStartedAt: 1000, sessionId: "ses_live" });
+
+    const res = await app.request(`/api/tasks/${task.id}/archive`, { method: "POST" });
+
+    expect(res.status).toBe(409);
+    expect(store.get(task.id)).toMatchObject({ archived: false, runState: "running" });
+    expect(globalArchiveStore.countMirrored()).toBe(0);
   });
 
   it("returns 404 for archiving an unknown task", async () => {
@@ -120,6 +135,97 @@ describe("archive routes", () => {
     expect(mirrored!.comments).toContain("archive note");
     expect(mirrored!.task_id).toBe(task.id);
     expect(JSON.parse(mirrored!.diff_snapshot!)).toMatchObject({ kind: "no-git" });
+  });
+
+  it("returns an error and keeps the local card visible when the global mirror fails", async () => {
+    const task = store.create({ title: "Do not disappear", description: "", directory: "/repo" });
+    store.move(task.id, "review", 0);
+    vi.spyOn(globalArchiveStore, "mirrorTask").mockImplementationOnce(() => {
+      throw new Error("disk full");
+    });
+
+    const res = await app.request(`/api/tasks/${task.id}/archive`, { method: "POST" });
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({
+      error: {
+        message: "Failed to mirror task to the global archive; local archive was rolled back",
+      },
+    });
+    expect(store.get(task.id)?.archived).toBe(false);
+    expect(store.list().map((visible) => visible.id)).toContain(task.id);
+    expect(globalArchiveStore.countMirrored()).toBe(0);
+  });
+
+  it("keeps an already archived card archived when re-mirroring fails", async () => {
+    const task = store.create({ title: "Stay archived", description: "", directory: "/repo" });
+    store.move(task.id, "done", 0);
+    store.setArchived(task.id, true);
+    vi.spyOn(globalArchiveStore, "mirrorTask").mockImplementationOnce(() => {
+      throw new Error("disk full");
+    });
+
+    const res = await app.request(`/api/tasks/${task.id}/archive`, { method: "POST" });
+
+    expect(res.status).toBe(500);
+    expect(store.get(task.id)?.archived).toBe(true);
+    expect(store.list().map((visible) => visible.id)).not.toContain(task.id);
+    expect(globalArchiveStore.countMirrored()).toBe(0);
+  });
+
+  it("does not archive a card that starts running while its diff snapshot is prepared", async () => {
+    let markSnapshotStarted!: () => void;
+    const snapshotStarted = new Promise<void>((resolve) => {
+      markSnapshotStarted = resolve;
+    });
+    let releaseSnapshot!: () => void;
+    const snapshotRelease = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+
+    store.close();
+    globalArchiveStore.close();
+    const replacement = makeApp({
+      archiveDiffSnapshot: async () => {
+        markSnapshotStarted();
+        await snapshotRelease;
+        return { kind: "no-git", reason: "gated archive snapshot" };
+      },
+    });
+    store = replacement.store;
+    globalArchiveStore = replacement.globalArchiveStore;
+    app = replacement.app;
+
+    const task = store.create({ title: "Do not hide a live run", description: "", directory: "/repo" });
+    store.move(task.id, "review", 0);
+
+    const archiveRequest = app.request(`/api/tasks/${task.id}/archive`, { method: "POST" });
+    await snapshotStarted;
+    store.move(task.id, "in_progress", 0);
+    store.update(task.id, {
+      runState: "running",
+      runStartedAt: 6000,
+      sessionId: "ses_new_run",
+    });
+    releaseSnapshot();
+
+    const res = await archiveRequest;
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: {
+        message: "Task changed while preparing the archive; retry after the current run finishes",
+      },
+    });
+    expect(store.get(task.id)).toMatchObject({
+      archived: false,
+      column: "in_progress",
+      runState: "running",
+      runStartedAt: 6000,
+      sessionId: "ses_new_run",
+    });
+    expect(store.list().map((visible) => visible.id)).toContain(task.id);
+    expect(globalArchiveStore.countMirrored()).toBe(0);
   });
 
   it("captures task_diff as an immutable global-archive snapshot", async () => {

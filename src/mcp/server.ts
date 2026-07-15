@@ -5,7 +5,7 @@
  * Multi-instance: this server starts unbound unless the CLI or environment
  * selects one OpenBoard adapter. Plugin MCP launches should use `openboard mcp`
  * and then call `select_instance`; worker sessions can use
- * `openboard mcp --instance <name>` when the board is known. Manual
+ * `openboard mcp --instance <name> --worker` when the board is known. Manual
  * `OPENCODE_BOARD_URL` remains supported for advanced callers. The server does
  * not fall back to a default port when no board is selected.
  */
@@ -64,12 +64,102 @@ import {
 
 const SERVER_VERSION = "0.1.0";
 
-export function createMcpServer(options: McpToolOptions = {}): McpServer {
-  let toolOptions: McpToolOptions = { ...options, requireExplicitBoardUrl: true, mcpStartedAt: options.mcpStartedAt ?? new Date().toISOString() };
+export interface WorkerMcpScope {
+  taskId: string;
+}
+
+export interface McpServerOptions extends McpToolOptions {
+  profile?: "cockpit" | "worker";
+  workerScope?: WorkerMcpScope;
+}
+
+function assertWorkerAssignment(
+  input: { taskId: string; runStartedAt: number },
+  scope: WorkerMcpScope | undefined,
+): void {
+  if (scope && input.taskId !== scope.taskId) {
+    throw new Error(`Worker MCP is bound to task ${scope.taskId}`);
+  }
+}
+
+function registerReportTools(
+  server: McpServer,
+  getOptions: () => McpToolOptions,
+  worker: boolean,
+  scope?: WorkerMcpScope,
+): void {
+  server.registerTool(
+    "complete_task",
+    {
+      title: "Complete OpenBoard task",
+      description: "Submit a structured completion report for the current run through POST /api/tasks/:id/complete. Requires that run's runStartedAt.",
+      inputSchema: CompleteTaskInputSchema,
+    },
+    async (args) => {
+      if (worker) assertWorkerAssignment(args, scope);
+      return toToolResult(await completeTask(args, getOptions()));
+    },
+  );
+
+  server.registerTool(
+    "block_task",
+    {
+      title: "Block OpenBoard task",
+      description: "Submit a structured blocked report for the current run through POST /api/tasks/:id/block. Requires that run's runStartedAt. When blocked on a question the operator must answer, include needsInput with the direct question (1-2000 chars) so the board can surface it for an answer.",
+      inputSchema: BlockTaskInputSchema,
+    },
+    async (args) => {
+      if (worker) assertWorkerAssignment(args, scope);
+      return toToolResult(await blockTask(args, getOptions()));
+    },
+  );
+}
+
+function registerInspectionTools(server: McpServer, getOptions: () => McpToolOptions): void {
+  server.registerTool(
+    "task_context",
+    {
+      title: "Get task lineage context",
+      description: "Retrieve the full resolved task lineage: target handoff, direct-parent handoffs, inherited-ancestor metadata, and code-evidence candidates. No raw transcripts.",
+      inputSchema: TaskContextInputSchema,
+    },
+    async (args) => toToolResult(await taskContext(args, getOptions())),
+  );
+
+  server.registerTool(
+    "task_compare",
+    {
+      title: "Compare task evidence",
+      description: "Fetch the git delta from a base task's output to a target task's output via GET /api/tasks/:targetId/compare?baseTaskId=:baseTaskId. Returns the real server comparison: a single DiffResponse from base→target with source refs and an honest no-git reason when Git evidence is unavailable.",
+      inputSchema: TaskCompareInputSchema,
+    },
+    async (args) => toToolResult(await taskCompare(args, getOptions())),
+  );
+
+  server.registerTool(
+    "task_diff",
+    {
+      title: "Get OpenBoard task diff",
+      description: "Fetch the structured Review- or Done-card diff through GET /api/tasks/:id/diff.",
+      inputSchema: TaskIdInputSchema,
+    },
+    async (args) => toToolResult(await taskDiff(args, getOptions())),
+  );
+}
+
+export function createMcpServer(options: McpServerOptions = {}): McpServer {
+  const { profile = "cockpit", workerScope, ...clientOptions } = options;
+  let toolOptions: McpToolOptions = { ...clientOptions, requireExplicitBoardUrl: true, mcpStartedAt: options.mcpStartedAt ?? new Date().toISOString() };
   const server = new McpServer({
     name: "openboard",
     version: SERVER_VERSION,
   });
+
+  if (profile === "worker") {
+    registerInspectionTools(server, () => toolOptions);
+    registerReportTools(server, () => toolOptions, true, workerScope);
+    return server;
+  }
 
   server.registerTool(
     "openboard_status",
@@ -192,25 +282,7 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
     async (args) => toToolResult(await moveTask(args, toolOptions)),
   );
 
-  server.registerTool(
-    "complete_task",
-    {
-      title: "Complete OpenBoard task",
-      description: "Submit a structured completion report through POST /api/tasks/:id/complete.",
-      inputSchema: CompleteTaskInputSchema,
-    },
-    async (args) => toToolResult(await completeTask(args, toolOptions)),
-  );
-
-  server.registerTool(
-    "block_task",
-    {
-      title: "Block OpenBoard task",
-      description: "Submit a structured blocked report through POST /api/tasks/:id/block. When blocked on a question the operator must answer, include needsInput with the direct question (1-2000 chars) so the board can surface it for an answer.",
-      inputSchema: BlockTaskInputSchema,
-    },
-    async (args) => toToolResult(await blockTask(args, toolOptions)),
-  );
+  registerReportTools(server, () => toolOptions, false);
 
   server.registerTool(
     "sync_task",
@@ -272,25 +344,7 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
     async (args) => toToolResult(await tailSession(args, toolOptions)),
   );
 
-  server.registerTool(
-    "task_context",
-    {
-      title: "Get task lineage context",
-      description: "Retrieve the full resolved task lineage: target handoff, direct-parent handoffs, inherited-ancestor metadata, and code-evidence candidates. No raw transcripts.",
-      inputSchema: TaskContextInputSchema,
-    },
-    async (args) => toToolResult(await taskContext(args, toolOptions)),
-  );
-
-  server.registerTool(
-    "task_compare",
-    {
-      title: "Compare task evidence",
-      description: "Fetch the git delta from base task output to target task output via GET /api/tasks/:targetId/compare?baseTaskId=:baseTaskId. Returns the real server comparison: a single DiffResponse from base→target with source refs and an honest no-git reason when Git evidence is unavailable.",
-      inputSchema: TaskCompareInputSchema,
-    },
-    async (args) => toToolResult(await taskCompare(args, toolOptions)),
-  );
+  registerInspectionTools(server, () => toolOptions);
 
   server.registerTool(
     "comment_task",
@@ -323,16 +377,6 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
   );
 
   server.registerTool(
-    "task_diff",
-    {
-      title: "Get OpenBoard task diff",
-      description: "Fetch the structured Review- or Done-card diff through GET /api/tasks/:id/diff.",
-      inputSchema: TaskIdInputSchema,
-    },
-    async (args) => toToolResult(await taskDiff(args, toolOptions)),
-  );
-
-  server.registerTool(
     "list_tasks",
     {
       title: "List OpenBoard tasks",
@@ -353,8 +397,40 @@ export function createMcpServer(options: McpToolOptions = {}): McpServer {
   return server;
 }
 
-export async function main(): Promise<void> {
-  const server = createMcpServer();
+export function parseMcpServerArgs(argv: string[]): Pick<McpServerOptions, "profile" | "workerScope"> {
+  let worker = false;
+  let taskId: string | undefined;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--worker") {
+      worker = true;
+      continue;
+    }
+    if (arg === "--task-id") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("-") || !value.trim()) {
+        throw new Error("--task-id requires a non-empty value");
+      }
+      taskId = value.trim();
+      i += 1;
+      continue;
+    }
+    throw new Error(`Unknown MCP server argument: ${arg}`);
+  }
+
+  if (taskId !== undefined && !worker) {
+    throw new Error("--task-id requires --worker");
+  }
+  if (!worker) return {};
+  return {
+    profile: "worker",
+    ...(taskId !== undefined ? { workerScope: { taskId } } : {}),
+  };
+}
+
+export async function main(argv = process.argv.slice(2)): Promise<void> {
+  const server = createMcpServer(parseMcpServerArgs(argv));
   await server.connect(new StdioServerTransport());
 }
 

@@ -3,9 +3,10 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
+import { OPENBOARD_WORKER_PERMISSION_DENIALS } from "../../src/shared";
 import type { Task, TaskKind } from "../../src/shared";
 import { SqliteTaskStore } from "../../src/db/task-store";
-import { TaskDispatcher } from "../../src/server/dispatcher";
+import { RunDispatchClaimError, StaleTaskRunError, TaskDispatcher } from "../../src/server/dispatcher";
 import type { PermissionAskEvent } from "../../src/server/permission-broker";
 import { SessionActivityCollector } from "../../src/server/session-activity";
 import type { SessionActivityFrame } from "../../src/shared";
@@ -74,6 +75,15 @@ function deferred<T = unknown>(): { promise: Promise<T>; resolve: (value: T) => 
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => { resolve = r; });
   return { promise, resolve };
+}
+
+function runIdentity(task: Task) {
+  return {
+    runStartedAt: task.runStartedAt,
+    sessionId: task.sessionId,
+    harnessSessionId: task.harnessSessionId,
+    harnessSessionName: task.harnessSessionName,
+  };
 }
 
 /**
@@ -403,7 +413,7 @@ describe("TaskDispatcher", () => {
       expect(client.createCalls).toHaveLength(0);
     });
 
-    it("throws AdapterError.unreachable when session.create errors", async () => {
+    it("releases the dispatch claim when session.create errors", async () => {
       const task = createTask();
       client.createShouldError = { error: { message: "boom" } };
       dispatcher = new TaskDispatcher({ client: client as never, store });
@@ -411,6 +421,53 @@ describe("TaskDispatcher", () => {
       await expect(dispatcher.run(task.id)).rejects.toMatchObject({
         code: "opencode_unreachable",
       });
+
+      client.createShouldError = null;
+      client.nextSessionId = "ses_after_failed_claim";
+      await expect(dispatcher.run(task.id)).resolves.toMatchObject({
+        sessionId: "ses_after_failed_claim",
+        runState: "running",
+      });
+      expect(client.createCalls).toHaveLength(2);
+    });
+
+    it("synchronously claims the pre-session window so concurrent runs launch only one writer", async () => {
+      const task = createTask();
+      const createGate = deferred<{
+        data: { id: string; agent: string | undefined; model: unknown };
+        error: undefined;
+      }>();
+      client.session.create = vi.fn(async (params: {
+        agent?: string;
+        model?: unknown;
+        directory?: string;
+        permission?: unknown;
+      }) => {
+        client.createCalls.push(params);
+        return createGate.promise;
+      });
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const winner = dispatcher.run(task.id);
+      await waitFor(() => client.createCalls.length === 1);
+      const loser = dispatcher.run(task.id);
+
+      await expect(loser).rejects.toMatchObject({
+        name: "RunDispatchClaimError",
+        code: "validation",
+        status: 409,
+      } satisfies Partial<RunDispatchClaimError>);
+      expect(client.createCalls).toHaveLength(1);
+
+      createGate.resolve({
+        data: { id: "ses_claim_winner", agent: undefined, model: undefined },
+        error: undefined,
+      });
+      await expect(winner).resolves.toMatchObject({
+        sessionId: "ses_claim_winner",
+        runState: "running",
+      });
+      expect(client.promptCalls).toHaveLength(1);
     });
 
     it("refuses to start a second writer session on a task that is already running (P3-11 regression)", async () => {
@@ -987,8 +1044,171 @@ describe("TaskDispatcher", () => {
         expect.stringContaining("Now focus on the API test"),
         expect.objectContaining({ mode: "queue" }),
       );
+      const guidance = String(claudeRunner.sendMessage.mock.calls[0]?.[1]);
+      expect(receipt.task.runStartedAt).toBeGreaterThan(current.runStartedAt ?? 0);
+      expect(guidance).toContain(`taskId "${task.id}", runStartedAt ${receipt.task.runStartedAt}`);
+      expect(guidance).toContain("this identity replaces any earlier runStartedAt");
       expect(receipt.task.harnessSessionId).toBe("claude-session-1");
       expect(claudeRunner.run).toHaveBeenCalledTimes(1);
+    });
+
+    it("publishes a fresh ACP guidance identity before provider admission and preserves its completion", async () => {
+      const task = store.create({ title: "Claude queued race", description: "Start", directory: myProjectDir, harness: "claude-code" });
+      const claudeRunner = makeClaudeRunner();
+      const activity = new SessionActivityCollector();
+      const sendGate = deferred<void>();
+      claudeRunner.sendMessage.mockImplementationOnce(async () => sendGate.promise);
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner, activity });
+      await dispatcher.run(task.id);
+      const oldRun = store.get(task.id)!;
+
+      const sending = dispatcher.sendSessionMessage(task.id, {
+        text: "Queue this safely",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-acp-race",
+        expectedSessionId: "claude-session-1",
+        expectedRunStartedAt: oldRun.runStartedAt,
+      });
+      await waitFor(() => claudeRunner.sendMessage.mock.calls.length === 1);
+
+      const claimed = store.get(task.id)!;
+      expect(claimed.runStartedAt).toBeGreaterThan(oldRun.runStartedAt ?? 0);
+      expect(store.commitTaskCompletion({
+        taskId: task.id,
+        expectedRun: runIdentity(oldRun),
+        expectedMode: "running",
+        report: { outcome: "complete", summary: "old", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 1 },
+        patch: { runState: "idle" },
+        moveToReview: true,
+        event: { type: "task_completed", body: { summary: "old" } },
+      }).status).toBe("stale");
+      expect(store.commitTaskCompletion({
+        taskId: task.id,
+        expectedRun: runIdentity(claimed),
+        expectedMode: "running",
+        report: { outcome: "complete", summary: "new", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 2 },
+        patch: { runState: "idle", harnessStatus: "idle" },
+        moveToReview: true,
+        event: { type: "task_completed", body: { summary: "new" } },
+      }).status).toBe("applied");
+
+      sendGate.resolve();
+      const receipt = await sending;
+
+      expect(receipt.task).toMatchObject({
+        column: "review",
+        runState: "idle",
+        harnessStatus: "idle",
+        completion: { summary: "new" },
+      });
+      const frames: SessionActivityFrame[] = [];
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+      expect(frames.some((frame) => frame.kind === "snapshot"
+        && frame.run.runStartedAt === claimed.runStartedAt
+        && frame.events.some((event) => event.kind === "text" && event.role === "user" && event.text === "Queue this safely"))).toBe(true);
+      expect(frames.some((frame) => frame.kind === "terminal" && frame.status === "complete")).toBe(true);
+    });
+
+    it("fences a failed ACP message before a queued retry can launch", async () => {
+      const task = store.create({ title: "Claude delivery failure", description: "Start", directory: myProjectDir, harness: "claude-code" });
+      const claudeRunner = makeClaudeRunner();
+      const activity = new SessionActivityCollector();
+      const frames: SessionActivityFrame[] = [];
+      const abortGate = deferred<void>();
+      claudeRunner.sendMessage.mockRejectedValueOnce(new Error("ACP send failed"));
+      claudeRunner.abort.mockImplementationOnce(async () => abortGate.promise);
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner, activity });
+      await dispatcher.run(task.id);
+      activity.subscribe(task.id, 0, (frame) => frames.push(frame));
+      const active = store.get(task.id)!;
+
+      const sending = dispatcher.sendSessionMessage(task.id, {
+        text: "Queue this safely",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-acp-fence",
+        expectedSessionId: "claude-session-1",
+        expectedRunStartedAt: active.runStartedAt,
+      });
+      const sendRejected = expect(sending).rejects.toThrow("ACP send failed");
+      await waitFor(() => claudeRunner.abort.mock.calls.length === 1);
+      expect(claudeRunner.abort).toHaveBeenCalledWith("openboard-task-claude");
+      expect(store.get(task.id)).toMatchObject({ runState: "running", runStartedAt: expect.any(Number) });
+
+      const retrying = dispatcher.retry(task.id, "try after the failed delivery");
+      await Promise.resolve();
+      expect(claudeRunner.retry).not.toHaveBeenCalled();
+
+      abortGate.resolve();
+      await sendRejected;
+      const retried = await retrying;
+      expect(claudeRunner.retry).toHaveBeenCalledTimes(1);
+      expect(retried.runState).toBe("running");
+      expect(frames.some((frame) => frame.kind === "append"
+        && frame.event.kind === "text"
+        && frame.event.role === "user"
+        && frame.event.text === "Queue this safely")).toBe(true);
+      expect(frames.some((frame) => frame.kind === "terminal" && frame.status === "error")).toBe(true);
+    });
+
+    it("ignores an old ACP watcher result that returns after a session message claims a new run", async () => {
+      const task = store.create({ title: "Claude watcher race", description: "Start", directory: myProjectDir, harness: "claude-code" });
+      const claudeRunner = makeClaudeRunner();
+      const oldPoll = deferred<{
+        status: string;
+        terminal: boolean;
+        error?: string;
+      }>();
+      claudeRunner.poll
+        .mockImplementationOnce(async () => oldPoll.promise)
+        .mockImplementation(async () => undefined);
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+      await dispatcher.run(task.id);
+      const oldRunStartedAt = store.get(task.id)?.runStartedAt;
+      await waitFor(() => claudeRunner.poll.mock.calls.length === 1);
+
+      const receipt = await dispatcher.sendSessionMessage(task.id, {
+        text: "New owner",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-acp-watcher-race",
+        expectedSessionId: "claude-session-1",
+        expectedRunStartedAt: oldRunStartedAt,
+      });
+      expect(receipt.task.runStartedAt).toBeGreaterThan(oldRunStartedAt ?? 0);
+
+      oldPoll.resolve({ status: "done", terminal: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(store.get(task.id)).toMatchObject({
+        runStartedAt: receipt.task.runStartedAt,
+        runState: "running",
+        completion: null,
+        completionSource: null,
+      });
+    });
+
+    it("reissues the new ACP run identity when operator guidance interrupts an active turn", async () => {
+      const task = store.create({ title: "Claude redirect", description: "Start", directory: myProjectDir, harness: "claude-code" });
+      const claudeRunner = makeClaudeRunner();
+      dispatcher = new TaskDispatcher({ client: client as never, store, claudeRunner });
+      await dispatcher.run(task.id);
+      const previousRunStartedAt = store.get(task.id)?.runStartedAt;
+
+      const receipt = await dispatcher.sendSessionMessage(task.id, {
+        text: "Change direction",
+        mode: "interrupt",
+        sentBy: "User",
+        clientMessageId: "msg-acp-interrupt",
+        expectedSessionId: "claude-session-1",
+        expectedRunStartedAt: previousRunStartedAt,
+      });
+
+      expect(receipt.task.runStartedAt).toBeGreaterThan(previousRunStartedAt ?? 0);
+      const guidance = String(claudeRunner.sendMessage.mock.calls[0]?.[1]);
+      expect(guidance).toContain(`taskId "${task.id}", runStartedAt ${receipt.task.runStartedAt}`);
+      expect(guidance).toContain("this identity replaces any earlier runStartedAt");
     });
 
     it("injects satisfied parent handoffs before the completion-contract footer", async () => {
@@ -1489,6 +1709,102 @@ describe("TaskDispatcher", () => {
       expect(store.get(task.id)).toMatchObject({ sessionId: "ses_abort_pending_new", autoRetries: 1, runState: "running" });
     });
 
+    it("publishes the watchdog replacement identity before awaiting session creation", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_watchdog_create_old";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const oldRun = store.get(task.id)!;
+      const createGate = deferred<{
+        data: { id: string; agent: string | undefined; model: unknown };
+        error: undefined;
+      }>();
+      client.session.create = vi.fn(async (params: {
+        agent?: string;
+        model?: unknown;
+        directory?: string;
+        permission?: unknown;
+      }) => {
+        client.createCalls.push(params);
+        return createGate.promise;
+      });
+
+      const retryPromise = (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: oldRun.runStartedAt!, sessionId: "ses_watchdog_create_old", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+      await waitFor(() => client.createCalls.length === 2);
+
+      const reserved = store.get(task.id)!;
+      expect(reserved.runStartedAt).toBeGreaterThan(oldRun.runStartedAt ?? 0);
+      expect(store.commitTaskCompletion({
+        taskId: task.id,
+        expectedRun: runIdentity(oldRun),
+        expectedMode: "running",
+        report: { outcome: "complete", summary: "old", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 6 },
+        patch: { runState: "idle" },
+        moveToReview: true,
+        event: { type: "task_completed", body: { summary: "old" } },
+      }).status).toBe("stale");
+
+      createGate.resolve({
+        data: { id: "ses_watchdog_create_new", agent: undefined, model: undefined },
+        error: undefined,
+      });
+      await retryPromise;
+
+      expect(store.get(task.id)).toMatchObject({
+        sessionId: "ses_watchdog_create_new",
+        runStartedAt: reserved.runStartedAt,
+        runState: "running",
+        completion: null,
+      });
+    });
+
+    it("serializes a manual retry behind watchdog abort and lets the newer retry win", async () => {
+      const task = createTask({ directory: myProjectDir });
+      client.nextSessionId = "ses_watchdog_manual_retry";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const oldRun = store.get(task.id)!;
+      const abortGate = deferred<{ data: unknown; error: undefined }>();
+      client.abortDeferred = abortGate;
+
+      const watchdogRetry = (dispatcher as unknown as {
+        applyWatchdogRetryDecision(event: { run: { taskId: string; runStartedAt: number; sessionId: string; attempt: number }; reason: "liveness-timeout"; decidedAt: number; outcome: "retry"; nextAttempt: number }): Promise<void>;
+      }).applyWatchdogRetryDecision({
+        run: { taskId: task.id, runStartedAt: oldRun.runStartedAt!, sessionId: "ses_watchdog_manual_retry", attempt: 0 },
+        reason: "liveness-timeout",
+        decidedAt: Date.now(),
+        outcome: "retry",
+        nextAttempt: 1,
+      });
+      await waitFor(() => client.abortCalls.length === 1);
+
+      const manualRetry = dispatcher.retry(task.id, "operator retry wins");
+      await Promise.resolve();
+      expect(store.get(task.id)?.runStartedAt).toBe(oldRun.runStartedAt);
+      expect(client.promptCalls).toHaveLength(1);
+
+      abortGate.resolve({ data: {}, error: undefined });
+      await Promise.all([watchdogRetry, manualRetry]);
+
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_watchdog_manual_retry" }]);
+      expect(client.createCalls).toHaveLength(1);
+      expect(client.promptCalls).toHaveLength(2);
+      expect(store.get(task.id)).toMatchObject({
+        sessionId: "ses_watchdog_manual_retry",
+        runState: "running",
+        autoRetries: 0,
+      });
+      expect(store.get(task.id)?.runStartedAt).toBeGreaterThan(oldRun.runStartedAt ?? 0);
+    });
+
     it("suppresses watchdog abort/retry while an operator permission ask is still within grace", async () => {
       const task = createTask({ isolation: "in-place", permissionOverrides: { bash: "ask" } });
       client.nextSessionId = "ses_watchdog_permission";
@@ -1939,6 +2255,41 @@ describe("TaskDispatcher", () => {
       }
     });
 
+    it("repeated idle events cannot let a cancelled watcher tear down the current run", async () => {
+      vi.useFakeTimers();
+      try {
+        const task = createTask({ directory: myProjectDir });
+        client.nextSessionId = "ses_repeated_idle";
+        client.stableMessagesResponse = [{ info: { role: "assistant" }, parts: [{ type: "tool", callID: "call1", tool: "bash", state: { status: "running" } }] }];
+        dispatcher = new TaskDispatcher({ client: client as never, store });
+        await dispatcher.run(task.id);
+        const runStartedAt = store.get(task.id)?.runStartedAt;
+        const internal = dispatcher as unknown as {
+          handleEvent(event: OpencodeEvent): void;
+          completionWatchers: Map<string, unknown>;
+          openCodeRunsByTask: Map<string, { runStartedAt: number; rootSessionId: string }>;
+        };
+        const idle = { type: "session.idle", properties: { sessionID: "ses_repeated_idle" } } as unknown as OpencodeEvent;
+
+        internal.handleEvent(idle);
+        internal.handleEvent(idle);
+        const newestWatcher = internal.completionWatchers.get("ses_repeated_idle");
+        expect(newestWatcher).toBeDefined();
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await Promise.resolve();
+
+        expect(internal.completionWatchers.get("ses_repeated_idle")).toBe(newestWatcher);
+        expect(internal.openCodeRunsByTask.get(task.id)).toMatchObject({
+          runStartedAt,
+          rootSessionId: "ses_repeated_idle",
+        });
+        expect(store.get(task.id)).toMatchObject({ runState: "running", runStartedAt });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("empty status map plus active tool messages re-arms before aborting with bounded budget", async () => {
       const task = createTask({ directory: myProjectDir });
       client.nextSessionId = "ses_active_tool_probe";
@@ -2138,7 +2489,11 @@ describe("TaskDispatcher", () => {
 
       await dispatcher.run(task.id);
 
-      expect(client.createCalls[0]?.permission).toEqual([{ permission: "*", pattern: "**", action: "allow" }]);
+      expect(client.createCalls[0]?.permission).toEqual([
+        { permission: "*", pattern: "**", action: "allow" },
+        ...OPENBOARD_WORKER_PERMISSION_DENIALS,
+      ]);
+      expect(client.promptCalls[0]).not.toHaveProperty("tools");
       // Give any (incorrectly-started) responder a chance to poll before asserting it didn't.
       await new Promise((r) => setTimeout(r, 30));
       expect(client.permissionListCalls).toHaveLength(0);
@@ -2158,6 +2513,7 @@ describe("TaskDispatcher", () => {
       expect(client.createCalls[0]?.permission).toEqual([
         { permission: "*", pattern: "**", action: "allow" },
         { permission: "external_directory", pattern: "**", action: "ask" },
+        ...OPENBOARD_WORKER_PERMISSION_DENIALS,
       ]);
 
       await waitFor(() => client.permissionListCalls.length > 0);
@@ -2175,6 +2531,7 @@ describe("TaskDispatcher", () => {
         { permission: "*", pattern: "**", action: "allow" },
         { permission: "edit", pattern: "**", action: "ask" },
         { permission: "bash", pattern: "**", action: "deny" },
+        ...OPENBOARD_WORKER_PERMISSION_DENIALS,
       ]);
     });
 
@@ -2185,7 +2542,10 @@ describe("TaskDispatcher", () => {
 
       await dispatcher.run(task.id);
 
-      expect(client.createCalls[0]?.permission).toEqual([{ permission: "*", pattern: "**", action: "allow" }]);
+      expect(client.createCalls[0]?.permission).toEqual([
+        { permission: "*", pattern: "**", action: "allow" },
+        ...OPENBOARD_WORKER_PERMISSION_DENIALS,
+      ]);
     });
 
     it("SAFETY: a worktree-isolated task with a permissionOverrides on its row still gets WRITE_FENCED_PERMISSION unchanged", async () => {
@@ -2206,6 +2566,7 @@ describe("TaskDispatcher", () => {
       expect(client.createCalls[0]?.permission).toEqual([
         { permission: "*", pattern: "**", action: "allow" },
         { permission: "external_directory", pattern: "**", action: "ask" },
+        ...OPENBOARD_WORKER_PERMISSION_DENIALS,
       ]);
     });
 
@@ -3731,6 +4092,58 @@ describe("TaskDispatcher", () => {
       expect(client.abortCalls).toEqual([{ sessionID: "ses_abort" }]);
     });
 
+    it("finishes an in-flight abort before retrying the reused OpenCode session", async () => {
+      const task = createTask();
+      client.nextSessionId = "ses_abort_then_retry";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const oldRunStartedAt = store.get(task.id)?.runStartedAt;
+      const abortGate = deferred<{ data: unknown; error: undefined }>();
+      client.abortDeferred = abortGate;
+
+      const abortPromise = dispatcher.abort(task.id);
+      await waitFor(() => client.abortCalls.length === 1);
+      const retryPromise = dispatcher.retry(task.id, "try after abort");
+      await Promise.resolve();
+
+      expect(client.promptCalls).toHaveLength(1);
+      abortGate.resolve({ data: {}, error: undefined });
+      await abortPromise;
+      const retried = await retryPromise;
+
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_abort_then_retry" }]);
+      expect(client.promptCalls).toHaveLength(2);
+      expect(retried).toMatchObject({
+        sessionId: "ses_abort_then_retry",
+        runState: "running",
+      });
+      expect(retried.runStartedAt).toBeGreaterThan(oldRunStartedAt ?? 0);
+    });
+
+    it("does not apply abort cleanup when the run identity changes during the provider await", async () => {
+      const task = createTask();
+      client.nextSessionId = "ses_stale_abort";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const oldRunStartedAt = store.get(task.id)?.runStartedAt ?? 0;
+      const abortGate = deferred<{ data: unknown; error: undefined }>();
+      client.abortDeferred = abortGate;
+
+      const abortPromise = dispatcher.abort(task.id);
+      await waitFor(() => client.abortCalls.length === 1);
+      store.update(task.id, { runStartedAt: oldRunStartedAt + 1, runState: "running" });
+      abortGate.resolve({ data: {}, error: undefined });
+
+      const error = await abortPromise.catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(StaleTaskRunError);
+      expect(error).toMatchObject({ status: 409 });
+      expect(store.get(task.id)).toMatchObject({
+        sessionId: "ses_stale_abort",
+        runStartedAt: oldRunStartedAt + 1,
+        runState: "running",
+      });
+    });
+
     it("is a no-op when the task has no linked session", async () => {
       const task = createTask();
       dispatcher = new TaskDispatcher({ client: client as never, store });
@@ -4140,6 +4553,127 @@ describe("TaskDispatcher", () => {
       expect(chatPrompt).not.toContain("OPENBOARD COMPLETION CONTRACT");
     });
 
+    it("publishes queued OpenCode guidance before prompt admission and never reopens its completed run", async () => {
+      const task = createTask({ title: "Queued guidance race" });
+      client.nextSessionId = "ses_queue_race";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const oldRun = store.get(task.id)!;
+      const promptGate = deferred<{ data: undefined; error: undefined }>();
+      client.session.promptAsync = vi.fn(async (params: {
+        sessionID: string;
+        agent?: string;
+        model?: unknown;
+        parts: unknown;
+      }) => {
+        client.promptCalls.push(params);
+        return promptGate.promise;
+      });
+
+      const sending = dispatcher.sendSessionMessage(task.id, {
+        text: "Apply this before reporting",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-queue-race",
+        expectedSessionId: "ses_queue_race",
+        expectedRunStartedAt: oldRun.runStartedAt,
+      });
+      await waitFor(() => client.promptCalls.length === 2);
+
+      const claimed = store.get(task.id)!;
+      expect(claimed.runStartedAt).toBeGreaterThan(oldRun.runStartedAt ?? 0);
+      expect(store.commitTaskCompletion({
+        taskId: task.id,
+        expectedRun: runIdentity(oldRun),
+        expectedMode: "running",
+        report: { outcome: "complete", summary: "old", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 3 },
+        patch: { runState: "idle" },
+        moveToReview: true,
+        event: { type: "task_completed", body: { summary: "old" } },
+      }).status).toBe("stale");
+      expect(store.commitTaskCompletion({
+        taskId: task.id,
+        expectedRun: runIdentity(claimed),
+        expectedMode: "running",
+        report: { outcome: "complete", summary: "new", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 4 },
+        patch: { runState: "idle" },
+        moveToReview: true,
+        event: { type: "task_completed", body: { summary: "new" } },
+      }).status).toBe("applied");
+
+      promptGate.resolve({ data: undefined, error: undefined });
+      const receipt = await sending;
+
+      expect(receipt.task).toMatchObject({
+        column: "review",
+        runState: "idle",
+        completion: { summary: "new" },
+      });
+      const internal = dispatcher as unknown as {
+        openCodeRunsByTask: Map<string, unknown>;
+        completionWatchers: Map<string, unknown>;
+      };
+      expect(internal.openCodeRunsByTask.has(task.id)).toBe(false);
+      expect(internal.completionWatchers.has("ses_queue_race")).toBe(false);
+    });
+
+    it("fences an OpenCode prompt admission failure before reporting the message error", async () => {
+      const task = createTask({ title: "Queued prompt failure" });
+      client.nextSessionId = "ses_queue_failure";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const active = store.get(task.id)!;
+      client.promptShouldErrorCount = 1;
+
+      await expect(dispatcher.sendSessionMessage(task.id, {
+        text: "Queue this safely",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-queue-failure",
+        expectedSessionId: "ses_queue_failure",
+        expectedRunStartedAt: active.runStartedAt,
+      })).rejects.toThrow("prompt failed");
+
+      expect(client.abortCalls).toEqual([{ sessionID: "ses_queue_failure" }]);
+      expect(store.get(task.id)).toMatchObject({ runState: "error", error: "prompt failed" });
+      const internal = dispatcher as unknown as {
+        openCodeRunsByTask: Map<string, unknown>;
+        completionWatchers: Map<string, unknown>;
+      };
+      expect(internal.openCodeRunsByTask.has(task.id)).toBe(false);
+      expect(internal.completionWatchers.has("ses_queue_failure")).toBe(false);
+    });
+
+    it("keeps observing a failed OpenCode message when its abort cannot be confirmed", async () => {
+      const task = createTask({ title: "Unconfirmed prompt fence" });
+      client.nextSessionId = "ses_queue_unconfirmed";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const active = store.get(task.id)!;
+      client.promptShouldErrorCount = 1;
+      client.abortShouldError = { error: { message: "abort unavailable" } };
+
+      await expect(dispatcher.sendSessionMessage(task.id, {
+        text: "Queue this ambiguously",
+        mode: "queue",
+        sentBy: "User",
+        clientMessageId: "msg-queue-unconfirmed",
+        expectedSessionId: "ses_queue_unconfirmed",
+        expectedRunStartedAt: active.runStartedAt,
+      })).rejects.toThrow("prompt failed");
+
+      expect(store.get(task.id)).toMatchObject({
+        runState: "running",
+        error: expect.stringContaining("could not confirm the active session stopped"),
+      });
+      const internal = dispatcher as unknown as {
+        openCodeRunsByTask: Map<string, { runStartedAt: number }>;
+        completionWatchers: Map<string, unknown>;
+      };
+      expect(internal.openCodeRunsByTask.get(task.id)?.runStartedAt).toBe(store.get(task.id)?.runStartedAt);
+      expect(internal.completionWatchers.has("ses_queue_unconfirmed")).toBe(true);
+    });
+
     it("interrupts only the active OpenCode turn before sending a replacement message", async () => {
       const task = createTask({ title: "Chat redirect" });
       client.nextSessionId = "ses_chat_interrupt";
@@ -4160,6 +4694,48 @@ describe("TaskDispatcher", () => {
       expect(receipt.task.sessionId).toBe("ses_chat_interrupt");
       expect(client.createCalls).toHaveLength(1);
       expect(client.promptCalls).toHaveLength(2);
+      const replacementPrompt = String((client.promptCalls.at(-1)?.parts as Array<{ text: string }>)[0]?.text);
+      expect(replacementPrompt).toContain(`taskId "${task.id}", runStartedAt ${receipt.task.runStartedAt}`);
+    });
+
+    it("publishes an interrupt identity before awaiting the OpenCode abort", async () => {
+      const task = createTask({ title: "Interrupt completion race" });
+      client.nextSessionId = "ses_interrupt_race";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+      await dispatcher.run(task.id);
+      const oldRun = store.get(task.id)!;
+      client.abortDeferred = deferred();
+
+      const sending = dispatcher.sendSessionMessage(task.id, {
+        text: "Replace the old turn",
+        mode: "interrupt",
+        sentBy: "User",
+        clientMessageId: "msg-interrupt-race",
+        expectedSessionId: "ses_interrupt_race",
+        expectedRunStartedAt: oldRun.runStartedAt,
+      });
+      await waitFor(() => client.abortCalls.length === 1);
+
+      const claimed = store.get(task.id)!;
+      expect(claimed.runStartedAt).toBeGreaterThan(oldRun.runStartedAt ?? 0);
+      expect(store.commitTaskCompletion({
+        taskId: task.id,
+        expectedRun: runIdentity(oldRun),
+        expectedMode: "running",
+        report: { outcome: "complete", summary: "too old", changedFiles: [], verification: [], residualRisk: "none", reportedAt: 5 },
+        patch: { runState: "idle" },
+        moveToReview: true,
+        event: { type: "task_completed", body: { summary: "too old" } },
+      }).status).toBe("stale");
+
+      client.abortDeferred.resolve({ data: {}, error: undefined });
+      const receipt = await sending;
+
+      expect(receipt.task).toMatchObject({
+        runState: "running",
+        runStartedAt: claimed.runStartedAt,
+        sessionId: "ses_interrupt_race",
+      });
     });
   });
 });

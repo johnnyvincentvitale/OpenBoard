@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { createChainAdvancer } from "../../src/server/chain-advancer";
-import { ArchivedTaskActionError, DependencyGateError } from "../../src/server/dispatcher";
+import { ArchivedTaskActionError, DependencyGateError, RunDispatchClaimError } from "../../src/server/dispatcher";
 import type { CreateTaskInput } from "../../src/shared";
 
 function parentInput(overrides: Partial<CreateTaskInput> = {}): CreateTaskInput {
@@ -205,6 +205,47 @@ describe("chain advancer", () => {
 
     await advancer.advanceReadyChildren(parent.id);
 
+    expect(store.listEvents(child.id).some((e) => e.type === "task_warning")).toBe(false);
+  });
+
+  it("skips silently when a manual run already owns the dispatch window", async () => {
+    const parent = store.create(parentInput());
+    store.move(parent.id, "done", 0);
+    const child = readyChild([parent.id]);
+    const runTask = vi.fn(async () => {
+      throw new RunDispatchClaimError(child.id);
+    });
+    const advancer = createChainAdvancer({ store, runTask });
+
+    await advancer.advanceReadyChildren(parent.id);
+
+    expect(store.get(child.id)?.runState).not.toBe("running");
+    expect(store.listEvents(child.id).some((e) => e.type === "task_warning")).toBe(false);
+  });
+
+  it("does not roll back a manual winner that persists run ownership before the claim rejection is handled", async () => {
+    const parent = store.create(parentInput());
+    store.move(parent.id, "done", 0);
+    const child = readyChild([parent.id]);
+    const runTask = vi.fn(async () => {
+      store.move(child.id, "in_progress", 0);
+      store.update(child.id, {
+        runState: "running",
+        runStartedAt: 7000,
+        sessionId: "ses_manual_winner",
+      });
+      throw new RunDispatchClaimError(child.id);
+    });
+    const advancer = createChainAdvancer({ store, runTask });
+
+    await advancer.advanceReadyChildren(parent.id);
+
+    expect(store.get(child.id)).toMatchObject({
+      column: "in_progress",
+      runState: "running",
+      runStartedAt: 7000,
+      sessionId: "ses_manual_winner",
+    });
     expect(store.listEvents(child.id).some((e) => e.type === "task_warning")).toBe(false);
   });
 
