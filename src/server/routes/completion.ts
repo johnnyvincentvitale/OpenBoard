@@ -9,7 +9,7 @@ import type {
   TaskRunOutcome,
   TaskStore,
 } from "../../shared";
-import { AdapterError } from "../../shared/errors";
+import { AdapterError, deriveTaskAttemptIdentity } from "../../shared";
 import { detectTaskBaseCheckoutEscape } from "../base-checkout-escape";
 import { inspectCompletionResult } from "../git-inspect";
 import { fireChainAdvance, type ChainAdvancer } from "../chain-advancer";
@@ -75,6 +75,8 @@ async function handleCompletion(
   const { finalSessionOutput, ...reportPayload } = payload;
   const report: CompletionReport = { ...reportPayload, outcome, reportedAt: Date.now() };
 
+  const attempt = deriveTaskAttemptIdentity(task);
+
   const escapeCheck = await detectTaskBaseCheckoutEscape(task);
   const completionMetadata = await (deps.inspectCompletion ?? completionPatch)(task, report);
   const finalOutput = isAcpHarness(task)
@@ -111,6 +113,7 @@ async function handleCompletion(
       ? {
           type: "task_blocked",
           body: {
+            ...(attempt ? { attempt } : {}),
             ...report,
             pending: "base-checkout-escape",
             escapeDetectedPaths: escapeCheck.changedPaths,
@@ -118,7 +121,7 @@ async function handleCompletion(
         }
       : {
           type: outcome === "complete" ? "task_completed" : "task_blocked",
-          body: { ...report },
+          body: { ...(attempt ? { attempt } : {}), ...report },
         },
   });
   if (commit.status === "missing") throw AdapterError.notFound(`Task not found: ${id}`);

@@ -22,9 +22,12 @@ import type {
   TaskRunIdentity,
   TaskResolution,
   TaskStore,
+  TaskVerificationPolicy,
+  VerificationCheckDefinition,
+  VerificationPreset,
   WorktreeSweepResult,
 } from "../shared";
-import { DEFAULT_COLUMN, TASK_HARNESSES, TASK_KINDS } from "../shared";
+import { DEFAULT_COLUMN, TASK_HARNESSES, TASK_KINDS, validateVerificationCatalog, validateVerificationPresets } from "../shared";
 import { bootstrap } from "./schema";
 
 const TASK_SCHEMA_SQL = `
@@ -78,6 +81,7 @@ CREATE TABLE IF NOT EXISTS task (
   base_checkout_snapshot TEXT,
   escape_detected_paths TEXT,
   rebase_conflict_paths TEXT,
+  verification_policy TEXT,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   UNIQUE(column, position)
@@ -162,11 +166,15 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["fallback_model", "TEXT"],
   ["active_model", "TEXT"],
   ["auto_retries", "INTEGER NOT NULL DEFAULT 0"],
+  ["verification_policy", "TEXT"],
 ];
 
 const WORKTREE_REPO_ROOTS_SETTING = "worktreeRepoRoots";
 const LAST_SWEEP_SETTING = "lastSweep";
 const PERMISSION_GRACE_MS_SETTING = "permissionGraceMs";
+const BOARD_VERIFICATION_CATALOG_SETTING = "boardVerificationCatalog";
+const BOARD_VERIFICATION_PRESETS_SETTING = "boardVerificationPresets";
+const BOARD_VERIFICATION_DEFAULT_SETTING = "boardVerificationDefault";
 
 interface TaskRowRecord {
   id: string;
@@ -218,6 +226,7 @@ interface TaskRowRecord {
   base_checkout_snapshot: string | null;
   escape_detected_paths: string | null;
   rebase_conflict_paths: string | null;
+  verification_policy: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -280,6 +289,7 @@ function toTask(record: TaskRowRecord): Task {
     dirtyAtDispatch: record.dirty_at_dispatch === 1,
     isolationAtDispatch: record.isolation_at_dispatch as TaskIsolationMode | null,
     baseCheckoutSnapshot: record.base_checkout_snapshot ?? null,
+    verificationPolicy: record.verification_policy ? (JSON.parse(record.verification_policy) as TaskVerificationPolicy) : { mode: "inherit" },
   };
   if (record.session_id !== null) task.sessionId = record.session_id;
   if (record.harness_session_id !== null) task.harnessSessionId = record.harness_session_id;
@@ -394,8 +404,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, task_kind, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, fallback_model, active_model, auto_retries, isolation, auto_run, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, resolution, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
-         VALUES (@id, @type, @taskKind, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @fallbackModel, @activeModel, @autoRetries, @isolation, @autoRun, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @resolution, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, task_kind, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, fallback_model, active_model, auto_retries, isolation, auto_run, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, resolution, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, verification_policy, created_at, updated_at)
+         VALUES (@id, @type, @taskKind, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @fallbackModel, @activeModel, @autoRetries, @isolation, @autoRun, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @resolution, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @verificationPolicy, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -447,6 +457,7 @@ export class SqliteTaskStore implements TaskStore {
            base_checkout_snapshot = @baseCheckoutSnapshot,
            escape_detected_paths = @escapeDetectedPaths,
            rebase_conflict_paths = @rebaseConflictPaths,
+           verification_policy = @verificationPolicy,
            updated_at = @updatedAt
          WHERE id = @id`,
       ),
@@ -613,6 +624,7 @@ export class SqliteTaskStore implements TaskStore {
         baseCheckoutSnapshot: null,
         escapeDetectedPaths: null,
         rebaseConflictPaths: null,
+        verificationPolicy: data.verificationPolicy ? JSON.stringify(data.verificationPolicy) : null,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -784,6 +796,100 @@ export class SqliteTaskStore implements TaskStore {
     return Number.isInteger(value) && value >= 0 ? value : null;
   }
 
+  getVerificationCatalog(): VerificationCheckDefinition[] {
+    const row = this.stmts.getSetting.get(BOARD_VERIFICATION_CATALOG_SETTING) as { value: string } | undefined;
+    if (!row) return [];
+    try {
+      const parsed = JSON.parse(row.value);
+      if (!Array.isArray(parsed)) return [];
+      // Fail closed: use the shared validator to reject any malformed persisted
+      // entry — never silently filter.
+      const result = validateVerificationCatalog(parsed as VerificationCheckDefinition[]);
+      return result.valid ? parsed as VerificationCheckDefinition[] : [];
+    } catch {
+      return [];
+    }
+  }
+
+  setVerificationCatalog(checks: VerificationCheckDefinition[]): void {
+    const result = validateVerificationCatalog(checks);
+    if (!result.valid) {
+      throw new Error(`SqliteTaskStore: invalid verification catalog — ${result.error}`);
+    }
+    this.stmts.putSetting.run({ key: BOARD_VERIFICATION_CATALOG_SETTING, value: JSON.stringify(checks) });
+  }
+
+  getVerificationPresets(): VerificationPreset[] {
+    const row = this.stmts.getSetting.get(BOARD_VERIFICATION_PRESETS_SETTING) as { value: string } | undefined;
+    if (!row) return [];
+    try {
+      const parsed = JSON.parse(row.value);
+      if (!Array.isArray(parsed)) return [];
+      const catalog = this.getVerificationCatalog();
+      const catalogIds = new Set(catalog.map((c) => c.id));
+      const result = validateVerificationPresets(parsed as VerificationPreset[], catalogIds);
+      return result.valid ? parsed as VerificationPreset[] : [];
+    } catch {
+      return [];
+    }
+  }
+
+  setVerificationPresets(presets: VerificationPreset[]): void {
+    const catalog = this.getVerificationCatalog();
+    const catalogIds = new Set(catalog.map((c) => c.id));
+    const result = validateVerificationPresets(presets, catalogIds);
+    if (!result.valid) {
+      throw new Error(`SqliteTaskStore: invalid verification presets — ${result.error}`);
+    }
+    this.stmts.putSetting.run({ key: BOARD_VERIFICATION_PRESETS_SETTING, value: JSON.stringify(presets) });
+  }
+
+  getBoardVerificationDefault(): TaskVerificationPolicy | null {
+    const row = this.stmts.getSetting.get(BOARD_VERIFICATION_DEFAULT_SETTING) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object" || !("mode" in parsed)) return null;
+      const mode = parsed.mode;
+      if (typeof mode !== "string" || !["inherit", "required", "disabled"].includes(mode)) return null;
+      const result: TaskVerificationPolicy = { mode: mode as TaskVerificationPolicy["mode"] };
+      if (mode === "required") {
+        if ("checkIds" in parsed && parsed.checkIds !== undefined) {
+          if (!Array.isArray(parsed.checkIds) || !parsed.checkIds.every((id): id is string => typeof id === "string" && id.length > 0)) {
+            return null;
+          }
+          result.checkIds = parsed.checkIds as string[];
+        }
+        if ("presetId" in parsed && parsed.presetId !== undefined) {
+          if (typeof parsed.presetId !== "string" || !parsed.presetId) return null;
+          result.presetId = parsed.presetId as string;
+        }
+      }
+      return result;
+    } catch {
+      return null;
+    }
+  }
+
+  setBoardVerificationDefault(policy: TaskVerificationPolicy | null): void {
+    if (policy === null) {
+      this.db.prepare("DELETE FROM board_setting WHERE key = ?").run(BOARD_VERIFICATION_DEFAULT_SETTING);
+      return;
+    }
+    if (!["inherit", "required", "disabled"].includes(policy.mode)) {
+      throw new Error("SqliteTaskStore: invalid board verification default mode");
+    }
+    if (policy.mode === "required") {
+      if (policy.checkIds !== undefined && (!Array.isArray(policy.checkIds) || !policy.checkIds.every((id): id is string => typeof id === "string" && id.length > 0))) {
+        throw new Error("SqliteTaskStore: invalid checkIds in board verification default");
+      }
+      if (policy.presetId !== undefined && (typeof policy.presetId !== "string" || !policy.presetId)) {
+        throw new Error("SqliteTaskStore: invalid presetId in board verification default");
+      }
+    }
+    this.stmts.putSetting.run({ key: BOARD_VERIFICATION_DEFAULT_SETTING, value: JSON.stringify(policy) });
+  }
+
   addComment(input: { taskId: string; author: string; body: string; parentCommentId?: string | null }): TaskComment {
     if (!this.get(input.taskId)) throw new Error(`SqliteTaskStore: unknown task ${input.taskId}`);
     if (input.parentCommentId != null) {
@@ -892,6 +998,7 @@ export class SqliteTaskStore implements TaskStore {
       baseCheckoutSnapshot: merged.baseCheckoutSnapshot ?? null,
       escapeDetectedPaths: merged.escapeDetectedPaths ? JSON.stringify(merged.escapeDetectedPaths) : null,
       rebaseConflictPaths: merged.rebaseConflictPaths ? JSON.stringify(merged.rebaseConflictPaths) : null,
+      verificationPolicy: merged.verificationPolicy ? JSON.stringify(merged.verificationPolicy) : null,
       updatedAt: this.now(),
     });
 

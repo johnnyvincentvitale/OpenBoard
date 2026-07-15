@@ -14,8 +14,8 @@
  */
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
-import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, DiffResponse, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskEvent, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
-import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
+import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, CompletionReport, DiffResponse, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskEvent, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
+import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, deriveTaskAttemptIdentity, resolveOpenCodePermissionRules } from "../shared";
 import type { Dispatcher } from "../shared";
 import type { OpencodeHandle } from "./opencode";
 import { detectBaseCheckoutEscape, snapshotBaseCheckout } from "./escape-detector";
@@ -93,8 +93,16 @@ export class StaleTaskRunError extends AdapterError {
   }
 }
 
+/**
+ * Admit a new attempt with a guaranteed-finite, monotonic runStartedAt.
+ * Non-finite legacy values (NaN, +/-Infinity, undefined) are safely
+ * recovered by treating the prior value as 0 so the new timestamp is always
+ * at least Date.now().
+ */
 function nextRunStartedAt(task: Pick<Task, "runStartedAt">): number {
-  return Math.max(Date.now(), (task.runStartedAt ?? 0) + 1);
+  const prior = task.runStartedAt;
+  const base = (typeof prior === "number" && Number.isFinite(prior)) ? prior : 0;
+  return Math.max(Date.now(), base + 1);
 }
 
 function sameTaskRunIdentity(current: Task | undefined, expected: Task): current is Task {
@@ -1992,7 +2000,7 @@ export class TaskDispatcher implements Dispatcher {
 
     const sentAt = Date.now();
     const wasRunning = task.runState === "running";
-    const runStartedAt = Math.max(sentAt, (task.runStartedAt ?? 0) + 1);
+    const runStartedAt = nextRunStartedAt(task);
     const promptText = wasRunning
       ? `OPENBOARD OPERATOR GUIDANCE\n\n${input.text}\n\nApply this guidance to the active task. Preserve the existing session, working tree, and original completion contract.\n\nCurrent report identity: taskId "${taskId}", runStartedAt ${runStartedAt}. Use these exact values in the final complete_task or block_task call; this identity replaces any earlier runStartedAt.`
       : `OPENBOARD SESSION CHAT\n\n${input.text}\n\nRespond conversationally in this session. Do not call complete_task or block_task, do not change files, and do not alter the card lifecycle for this chat turn.`;
@@ -2554,8 +2562,8 @@ export class TaskDispatcher implements Dispatcher {
     verificationResult: string,
     eventBody: Record<string, unknown>,
   ): void {
-    const report = {
-      outcome: "blocked" as const,
+    const report: CompletionReport = {
+      outcome: "blocked",
       summary: "OpenCode watchdog exhausted automatic recovery after two retries.",
       changedFiles: [],
       verification: [{ command: "OPENBOARD_WATCHDOG_MS", result: verificationResult }],
@@ -2566,7 +2574,30 @@ export class TaskDispatcher implements Dispatcher {
     this.store.setCompletion(task.id, report, "watchdog");
     this.store.update(task.id, { runState: "error", error: report.residualRisk, completionLocation: "task-directory" });
     this.store.move(task.id, "review", END_OF_COLUMN);
-    this.store.addEvent({ taskId: task.id, type: "task_watchdog_exhausted", body: { ...eventBody, outcome: "exhausted" } });
+    const attempt = deriveTaskAttemptIdentity(task);
+
+    // Diagnostic event — preserves legacy watchdog-specific evidence.
+    this.store.addEvent({ taskId: task.id, type: "task_watchdog_exhausted", body: { ...eventBody, ...(attempt ? { attempt } : {}), outcome: "exhausted" } });
+
+    // System-authored blocked completion evidence carrying the same attempt identity.
+    this.store.addEvent({
+      taskId: task.id,
+      type: "task_blocked",
+      body: {
+        ...(attempt ? { attempt } : {}),
+        outcome: "blocked",
+        summary: report.summary,
+        changedFiles: report.changedFiles,
+        verification: report.verification,
+        residualRisk: report.residualRisk,
+        needsInput: report.needsInput,
+        reportedAt: report.reportedAt,
+        source: "watchdog",
+        authoredBy: "system",
+        verdict: "exhausted",
+      },
+    });
+
     if (runStartedAtToClose !== undefined) this.endOpenCodeRun(task.id, runStartedAtToClose, "error");
   }
 

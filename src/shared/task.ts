@@ -216,6 +216,279 @@ export type TaskCausalityMap = Record<string, { autoDispatchedBy: string }>;
 
 export type CompletionSource = "reported" | "idle-fallback" | "watchdog";
 
+/** Verification-policy modes for a task's acceptance gate. */
+export const VERIFICATION_POLICY_MODES = ["inherit", "required", "disabled"] as const;
+export type VerificationPolicyMode = (typeof VERIFICATION_POLICY_MODES)[number];
+
+/** One operator-defined verification check stored in the board catalog. */
+export interface VerificationCheckDefinition {
+  id: string;
+  label: string;
+  command: string;
+  timeoutMs: number;
+  maxOutputBytes: number;
+}
+
+/** Named, reusable set of verification checks presets configured by the operator. */
+export interface VerificationPreset {
+  id: string;
+  label: string;
+  checkIds: string[];
+}
+
+/**
+ * Per-task acceptance-verification policy.
+ * - inherit: defer to the board default (default for legacy + omitted rows).
+ * - required: verification checks must pass before the task can be moved to Done.
+ * - disabled: verification checks are explicitly skipped for this task.
+ */
+export interface TaskVerificationPolicy {
+  mode: VerificationPolicyMode;
+  /** When mode is "required", optional preset id to resolve checks from. */
+  presetId?: string;
+  /** When mode is "required", optional explicit check IDs. Omitted/empty means all board catalog checks apply (unless presetId is set). */
+  checkIds?: string[];
+}
+
+/**
+ * Canonical identity fields for one provider-backed task attempt.
+ * `runStartedAt` is the primary key; the remaining fields are supporting
+ * session/harness/model evidence. Derive this from the current Task through
+ * {@link deriveTaskAttemptIdentity} instead of hand-building variants.
+ */
+export interface TaskAttemptIdentity {
+  runStartedAt: number;
+  harness: TaskHarness;
+  sessionId?: string;
+  harnessSessionId?: string;
+  model?: ModelRef | null;
+}
+
+/**
+ * Derive a canonical {@link TaskAttemptIdentity} from the current task row.
+ * Returns null when the task has no finite `runStartedAt`, `harness` is
+ * missing, or any required evidence is absent — legacy rows that pre-date
+ * attempt tracking produce no identity without a dispatch.
+ */
+export function deriveTaskAttemptIdentity(task: Task): TaskAttemptIdentity | null {
+  const runStartedAt = task.runStartedAt;
+  if (runStartedAt == null || !Number.isFinite(runStartedAt)) return null;
+  const harness = task.harness ?? "opencode";
+  return {
+    runStartedAt,
+    harness,
+    ...(task.sessionId ? { sessionId: task.sessionId } : {}),
+    ...(task.harnessSessionId ? { harnessSessionId: task.harnessSessionId } : {}),
+    ...(task.activeModel ?? task.model ? { model: task.activeModel ?? task.model } : {}),
+  };
+}
+
+/** Validation bounds for verification checks and policies. */
+export const VERIFICATION_BOUNDS = {
+  /** Maximum number of checks in a catalog. */
+  MAX_CATALOG_CHECKS: 100,
+  /** Maximum number of presets. */
+  MAX_PRESETS: 50,
+  /** Maximum check ID / preset ID length. */
+  MAX_ID_LENGTH: 128,
+  /** Maximum label length. */
+  MAX_LABEL_LENGTH: 256,
+  /** Maximum command length. */
+  MAX_COMMAND_LENGTH: 2000,
+  /** Maximum timeout in milliseconds (1 hour). */
+  MAX_TIMEOUT_MS: 3_600_000,
+  /** Maximum output bytes (100 MB). */
+  MAX_OUTPUT_BYTES: 100_000_000,
+  /** Maximum checkIds per policy/preset. */
+  MAX_CHECK_IDS: 50,
+} as const;
+
+/**
+ * Shared bounded catalog validator — rejects malformed entries, out-of-bounds
+ * values, duplicate IDs, and oversized strings. Returns a Set of valid IDs on
+ * success. The store's typed persistence reuses this so it cannot admit shapes
+ * the resolver later rejects.
+ */
+export function validateVerificationCatalog(
+  catalog: readonly VerificationCheckDefinition[],
+): { valid: true; catalogIds: Set<string> } | { valid: false; error: string } {
+  if (!Array.isArray(catalog)) {
+    return { valid: false, error: "Catalog must be an array" };
+  }
+  if (catalog.length > VERIFICATION_BOUNDS.MAX_CATALOG_CHECKS) {
+    return { valid: false, error: `Catalog exceeds maximum of ${VERIFICATION_BOUNDS.MAX_CATALOG_CHECKS} checks` };
+  }
+  const ids = new Set<string>();
+  for (const check of catalog) {
+    if (check === null || typeof check !== "object") {
+      return { valid: false, error: "Catalog entry is not an object" };
+    }
+    const id = (check as Record<string, unknown>).id;
+    if (typeof id !== "string" || id.length === 0 || id.length > VERIFICATION_BOUNDS.MAX_ID_LENGTH) {
+      return { valid: false, error: `Check has invalid id: ${JSON.stringify(id)}` };
+    }
+    if (ids.has(id)) {
+      return { valid: false, error: `Duplicate check id in catalog: ${id}` };
+    }
+    ids.add(id);
+    const label = (check as Record<string, unknown>).label;
+    if (typeof label !== "string" || label.length === 0 || label.length > VERIFICATION_BOUNDS.MAX_LABEL_LENGTH) {
+      return { valid: false, error: `Check ${id} has invalid label` };
+    }
+    const command = (check as Record<string, unknown>).command;
+    if (typeof command !== "string" || command.length === 0 || command.length > VERIFICATION_BOUNDS.MAX_COMMAND_LENGTH) {
+      return { valid: false, error: `Check ${id} has invalid command` };
+    }
+    const timeoutMs = (check as Record<string, unknown>).timeoutMs;
+    if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > VERIFICATION_BOUNDS.MAX_TIMEOUT_MS || !Number.isInteger(timeoutMs)) {
+      return { valid: false, error: `Check ${id} has invalid timeoutMs: must be a positive integer ≤ ${VERIFICATION_BOUNDS.MAX_TIMEOUT_MS}` };
+    }
+    const maxOutputBytes = (check as Record<string, unknown>).maxOutputBytes;
+    if (typeof maxOutputBytes !== "number" || !Number.isFinite(maxOutputBytes) || maxOutputBytes <= 0 || maxOutputBytes > VERIFICATION_BOUNDS.MAX_OUTPUT_BYTES || !Number.isInteger(maxOutputBytes)) {
+      return { valid: false, error: `Check ${id} has invalid maxOutputBytes: must be a positive integer ≤ ${VERIFICATION_BOUNDS.MAX_OUTPUT_BYTES}` };
+    }
+  }
+  return { valid: true, catalogIds: ids };
+}
+
+/**
+ * Shared bounded preset validator — validates presets against a catalog id
+ * set. Rejects malformed entries, out-of-bounds values, duplicate IDs,
+ * duplicate/unknown check ID references. Returns a Set of valid preset IDs on
+ * success.
+ */
+export function validateVerificationPresets(
+  presets: readonly VerificationPreset[],
+  catalogIds: ReadonlySet<string>,
+): { valid: true; presetIds: Set<string> } | { valid: false; error: string } {
+  if (!Array.isArray(presets)) {
+    return { valid: false, error: "Presets must be an array" };
+  }
+  if (presets.length > VERIFICATION_BOUNDS.MAX_PRESETS) {
+    return { valid: false, error: `Presets exceed maximum of ${VERIFICATION_BOUNDS.MAX_PRESETS}` };
+  }
+  const ids = new Set<string>();
+  for (const preset of presets) {
+    if (preset === null || typeof preset !== "object") {
+      return { valid: false, error: "Preset entry is not an object" };
+    }
+    const id = (preset as Record<string, unknown>).id;
+    if (typeof id !== "string" || id.length === 0 || id.length > VERIFICATION_BOUNDS.MAX_ID_LENGTH) {
+      return { valid: false, error: "Preset has invalid id" };
+    }
+    if (ids.has(id)) {
+      return { valid: false, error: `Duplicate preset id: ${id}` };
+    }
+    ids.add(id);
+    const label = (preset as Record<string, unknown>).label;
+    if (typeof label !== "string" || label.length === 0 || label.length > VERIFICATION_BOUNDS.MAX_LABEL_LENGTH) {
+      return { valid: false, error: `Preset ${id} has invalid label` };
+    }
+    const checkIds = (preset as Record<string, unknown>).checkIds;
+    if (!Array.isArray(checkIds) || checkIds.length > VERIFICATION_BOUNDS.MAX_CHECK_IDS) {
+      return { valid: false, error: `Preset ${id} has invalid checkIds` };
+    }
+    const presetCheckIds = new Set<string>();
+    for (const checkId of checkIds) {
+      if (typeof checkId !== "string" || checkId.length === 0) {
+        return { valid: false, error: `Preset ${id} references an invalid check id` };
+      }
+      if (presetCheckIds.has(checkId)) {
+        return { valid: false, error: `Preset ${id} has duplicate check id: ${checkId}` };
+      }
+      presetCheckIds.add(checkId);
+      if (!catalogIds.has(checkId)) {
+        return { valid: false, error: `Preset ${id} references unknown check: ${checkId}` };
+      }
+    }
+  }
+  return { valid: true, presetIds: ids };
+}
+
+/**
+ * Pure bounded catalog/policy validation and resolution.
+ * Validates the catalog, presets, board default, and per-task policy against
+ * each other with bounded limits and fail-closed semantics. Does not spawn
+ * processes, run commands, or access I/O.
+ *
+ * Never throws — malformed runtime shapes (null/non-object array entries)
+ * return `{ valid: false, error }`.
+ *
+ * @param policy      Per-task policy (null/undefined = inherit).
+ * @param catalog     Board-wide verification check catalog.
+ * @param presets     Board-wide verification presets.
+ * @param boardDefault Board-level default policy (null = disabled).
+ */
+export function validateVerificationPolicy(
+  policy: TaskVerificationPolicy | null | undefined,
+  catalog: readonly VerificationCheckDefinition[],
+  presets: readonly VerificationPreset[],
+  boardDefault: TaskVerificationPolicy | null,
+): { valid: true; resolved: TaskVerificationPolicy | null } | { valid: false; error: string } {
+  // --- Validate the catalog ---
+  const catalogResult = validateVerificationCatalog(catalog);
+  if (!catalogResult.valid) return catalogResult as { valid: false; error: string };
+
+  // --- Validate presets ---
+  const presetResult = validateVerificationPresets(presets, catalogResult.catalogIds);
+  if (!presetResult.valid) return presetResult as { valid: false; error: string };
+
+  // --- Validate and normalize the policy ---
+  const mode = policy?.mode ?? "inherit";
+  if (!["inherit", "required", "disabled"].includes(mode)) {
+    return { valid: false, error: `Invalid verification policy mode: ${mode}` };
+  }
+
+  if (mode === "disabled") return { valid: true, resolved: null };
+  if (mode === "inherit") {
+    // Board default must itself be valid, and its resolved form is what
+    // "inherit" returns — not the raw boardDefault. A disabled or
+    // unresolvable-inherit board default resolves to null.
+    if (boardDefault) {
+      const boardResult = validateVerificationPolicy(boardDefault, catalog, presets, null);
+      if (!boardResult.valid) {
+        return { valid: false, error: `Board default policy is invalid: ${boardResult.error}` };
+      }
+      return { valid: true, resolved: boardResult.resolved };
+    }
+    return { valid: true, resolved: null };
+  }
+
+  // mode === "required"
+  const presetId = policy?.presetId;
+  const checkIds = policy?.checkIds;
+
+  if (presetId !== undefined) {
+    if (typeof presetId !== "string" || presetId.length === 0) {
+      return { valid: false, error: "presetId must be a non-empty string" };
+    }
+    if (!presetResult.presetIds.has(presetId)) {
+      return { valid: false, error: `Unknown preset: ${presetId}` };
+    }
+  }
+
+  if (checkIds !== undefined) {
+    if (!Array.isArray(checkIds) || checkIds.length > VERIFICATION_BOUNDS.MAX_CHECK_IDS) {
+      return { valid: false, error: `checkIds must be an array with at most ${VERIFICATION_BOUNDS.MAX_CHECK_IDS} entries` };
+    }
+    const seen = new Set<string>();
+    for (const checkId of checkIds) {
+      if (typeof checkId !== "string" || checkId.length === 0) {
+        return { valid: false, error: "Each checkId must be a non-empty string" };
+      }
+      if (seen.has(checkId)) {
+        return { valid: false, error: `Duplicate checkId: ${checkId}` };
+      }
+      seen.add(checkId);
+      if (!catalogResult.catalogIds.has(checkId)) {
+        return { valid: false, error: `Unknown verification check: ${checkId}` };
+      }
+    }
+  }
+
+  return { valid: true, resolved: { mode: "required", presetId, checkIds } };
+}
+
 export interface PendingPermissionAsk {
   id: string;
   /** Owning board task and attempt. Present for asks raised by current runtimes. */
@@ -446,6 +719,8 @@ export interface Task {
   completedBy?: string | null;
   /** Operator disposition layered over the original run report. */
   resolution?: TaskResolution | null;
+  /** Per-task acceptance-verification policy. Legacy rows hydrate as `{ mode: "inherit" }`. */
+  verificationPolicy?: TaskVerificationPolicy | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -516,6 +791,8 @@ export interface CreateTaskInput {
   permissionOverrides?: PermissionOverrides;
   /** Parent task IDs for dependency links. Applied after the task is created. */
   parentIds?: string[];
+  /** Per-task acceptance-verification policy. Omitted defaults to `{ mode: "inherit" }`. */
+  verificationPolicy?: TaskVerificationPolicy | null;
 }
 
 export interface UpdateTaskInput {
@@ -537,6 +814,8 @@ export interface UpdateTaskInput {
   permissionOverrides?: PermissionOverrides | null;
   /** Parent task IDs to set atomically on the child. Replaces all existing links. */
   parentIds?: string[] | null;
+  /** Per-task acceptance-verification policy. */
+  verificationPolicy?: TaskVerificationPolicy | null;
 }
 
 /** A roster agent (OpenCode agent) the board can assign tasks to — from GET /api/agent. */
@@ -739,6 +1018,18 @@ export interface TaskStore {
   listComments(taskId: string): TaskComment[];
   addEvent(input: { taskId: string; type: string; body?: Record<string, unknown> }): TaskEvent;
   listEvents(taskId: string): TaskEvent[];
+  /** Persist the operator-controlled verification check catalog. */
+  setVerificationCatalog(checks: VerificationCheckDefinition[]): void;
+  /** Read the operator-controlled verification check catalog. */
+  getVerificationCatalog(): VerificationCheckDefinition[];
+  /** Persist the operator-controlled verification preset catalog. */
+  setVerificationPresets(presets: VerificationPreset[]): void;
+  /** Read the operator-controlled verification preset catalog. */
+  getVerificationPresets(): VerificationPreset[];
+  /** Set the board-level default verification policy. */
+  setBoardVerificationDefault(policy: TaskVerificationPolicy | null): void;
+  /** Get the board-level default verification policy, or null when unset (disabled). */
+  getBoardVerificationDefault(): TaskVerificationPolicy | null;
 }
 
 /**

@@ -2225,6 +2225,11 @@ describe("TaskDispatcher", () => {
       expect(events.filter((e) => e === "task_watchdog_retry_failed")).toHaveLength(2);
       expect(events).toContain("task_watchdog_exhausted");
       expect((dispatcher as never as { openCodeRunsByTask: Map<string, unknown> }).openCodeRunsByTask.has(task.id)).toBe(false);
+
+      // Attempt identity must be present on the exhaustion event and separately attributable
+      const exhaustedEvent = store.listEvents(task.id).find((e) => e.type === "task_watchdog_exhausted");
+      expect(exhaustedEvent?.body.attempt).toBeTruthy();
+      expect((exhaustedEvent?.body.attempt as Record<string, unknown>)?.runStartedAt).toBeTypeOf("number");
     });
 
     it("same-session retry watcher cleanup cannot tear down the replacement run", async () => {
@@ -2471,6 +2476,63 @@ describe("TaskDispatcher", () => {
       expect(retryPrompt).toContain("preserve work already done");
       // The original dispatch prompt must NOT carry the preamble.
       expect(JSON.stringify(client.promptCalls[0]?.parts ?? "")).not.toContain("WATCHDOG RETRY CONTEXT");
+    });
+
+    it("admission repairs a legacy NaN runStartedAt and produces a finite canonical identity", async () => {
+      const task = createTask({ directory: projectDir });
+      store.update(task.id, { runStartedAt: NaN, runState: "unstarted" });
+      client.nextSessionId = "ses_nan_legacy";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.run(task.id);
+      expect(Number.isFinite(result.runStartedAt!)).toBe(true);
+      const fresh = store.get(task.id)!;
+      expect(Number.isFinite(fresh.runStartedAt!)).toBe(true);
+      expect(fresh.runStartedAt).toBeGreaterThan(0);
+    });
+
+    it("admission repairs a legacy +Infinity runStartedAt and produces a finite canonical identity", async () => {
+      const task = createTask({ directory: projectDir });
+      store.update(task.id, { runStartedAt: Infinity, runState: "unstarted" });
+      client.nextSessionId = "ses_inf_legacy";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.run(task.id);
+      expect(Number.isFinite(result.runStartedAt!)).toBe(true);
+      const fresh = store.get(task.id)!;
+      expect(Number.isFinite(fresh.runStartedAt!)).toBe(true);
+    });
+
+    it("admission repairs a legacy -Infinity runStartedAt and produces a finite canonical identity", async () => {
+      const task = createTask({ directory: projectDir });
+      store.update(task.id, { runStartedAt: -Infinity, runState: "unstarted" });
+      client.nextSessionId = "ses_neg_inf_legacy";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.run(task.id);
+      expect(Number.isFinite(result.runStartedAt!)).toBe(true);
+      const fresh = store.get(task.id)!;
+      expect(Number.isFinite(fresh.runStartedAt!)).toBe(true);
+    });
+
+    it("admission on a non-finite prior value still yields a strictly increasing identity for successive runs", async () => {
+      const task = createTask({ directory: projectDir });
+      store.update(task.id, { runStartedAt: NaN });
+      client.nextSessionId = "ses_nonfinite_a";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.run(task.id);
+      const first = store.get(task.id)!.runStartedAt!;
+      expect(Number.isFinite(first)).toBe(true);
+
+      // Simulate abort then re-run
+      store.update(task.id, { runState: "unstarted", sessionId: undefined });
+      client.nextSessionId = "ses_nonfinite_b";
+      await dispatcher.run(task.id);
+
+      const second = store.get(task.id)!.runStartedAt!;
+      expect(Number.isFinite(second)).toBe(true);
+      expect(second).toBeGreaterThan(first);
     });
   });
 
@@ -4070,6 +4132,46 @@ describe("TaskDispatcher", () => {
         message: "Cannot retry an archived task",
       });
       expect(client.promptCalls).toHaveLength(0);
+    });
+
+    it("retry admission repairs a legacy NaN runStartedAt and produces a finite identity", async () => {
+      const task = createTask({ directory: projectDir });
+      store.update(task.id, { sessionId: "ses_nan_retry", runStartedAt: NaN, runState: "idle" });
+      client.nextSessionId = "ses_nan_retry_fresh";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.retry(task.id, "try again");
+      expect(Number.isFinite(result.runStartedAt!)).toBe(true);
+      expect(store.get(task.id)!.runStartedAt).toBeGreaterThan(0);
+    });
+
+    it("retry admission repairs a legacy +Infinity runStartedAt and produces a finite identity", async () => {
+      const task = createTask({ directory: projectDir });
+      store.update(task.id, { sessionId: "ses_inf_retry", runStartedAt: Infinity, runState: "idle" });
+      client.nextSessionId = "ses_inf_retry_fresh";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      const result = await dispatcher.retry(task.id, "try again");
+      expect(Number.isFinite(result.runStartedAt!)).toBe(true);
+    });
+
+    it("retry admission produces strict monotonicity after a non-finite legacy value", async () => {
+      const task = createTask({ directory: projectDir });
+      store.update(task.id, { sessionId: "ses_mono_0", runStartedAt: NaN, runState: "idle" });
+      client.nextSessionId = "ses_mono_a";
+      dispatcher = new TaskDispatcher({ client: client as never, store });
+
+      await dispatcher.retry(task.id, "first retry");
+      const first = store.get(task.id)!.runStartedAt!;
+      expect(Number.isFinite(first)).toBe(true);
+
+      store.update(task.id, { runState: "idle", sessionId: "ses_mono_a" });
+      client.nextSessionId = "ses_mono_b";
+      await dispatcher.retry(task.id, "second retry");
+
+      const second = store.get(task.id)!.runStartedAt!;
+      expect(Number.isFinite(second)).toBe(true);
+      expect(second).toBeGreaterThan(first);
     });
   });
 

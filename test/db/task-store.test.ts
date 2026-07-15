@@ -814,4 +814,177 @@ describe("SqliteTaskStore", () => {
       db.close();
     });
   });
+
+  describe("verificationPolicy persistence", () => {
+    it("defaults verificationPolicy to { mode: 'inherit' } on new tasks", () => {
+      const task = store.create(input());
+      expect(task.verificationPolicy).toEqual({ mode: "inherit" });
+      expect(store.get(task.id)!.verificationPolicy).toEqual({ mode: "inherit" });
+    });
+
+    it("round-trips verificationPolicy through create/update/list/get", () => {
+      const policy = { mode: "required" as const, checkIds: ["lint", "test"] };
+      const created = store.create(input({ verificationPolicy: policy }));
+      expect(created.verificationPolicy).toEqual(policy);
+      expect(store.get(created.id)!.verificationPolicy).toEqual(policy);
+      expect(store.list().find((t) => t.id === created.id)!.verificationPolicy).toEqual(policy);
+
+      const updated = store.update(created.id, { verificationPolicy: { mode: "disabled" } });
+      expect(updated!.verificationPolicy).toEqual({ mode: "disabled" });
+      expect(store.get(created.id)!.verificationPolicy).toEqual({ mode: "disabled" });
+
+      const cleared = store.update(created.id, { verificationPolicy: null });
+      expect(cleared!.verificationPolicy).toEqual({ mode: "inherit" });
+    });
+
+    it("round-trips verificationPolicy with presetId", () => {
+      const policy = { mode: "required" as const, presetId: "quick" };
+      const created = store.create(input({ verificationPolicy: policy }));
+      expect(created.verificationPolicy).toEqual(policy);
+      expect(store.get(created.id)!.verificationPolicy).toEqual(policy);
+    });
+
+    it("round-trips verificationPolicy with both presetId and checkIds", () => {
+      const policy = { mode: "required" as const, presetId: "full", checkIds: ["lint"] };
+      const created = store.create(input({ verificationPolicy: policy }));
+      expect(created.verificationPolicy).toEqual(policy);
+    });
+
+    it("reopen preserves verificationPolicy across column/state transitions", () => {
+      const policy = { mode: "required" as const, checkIds: ["lint"] };
+      const task = store.create(input({ verificationPolicy: policy }));
+      store.update(task.id, { runState: "running", runStartedAt: 200 });
+      store.move(task.id, "in_progress", 0);
+      store.update(task.id, { runState: "idle", completionSource: "idle-fallback" });
+      store.move(task.id, "review", 0);
+
+      // Retry/reopen
+      store.update(task.id, { runState: "running", runStartedAt: 300, completion: null, completionSource: null });
+      store.move(task.id, "in_progress", 0);
+
+      const reopened = store.get(task.id);
+      expect(reopened!.verificationPolicy).toEqual(policy);
+    });
+
+    it("hydrates legacy rows (no verification_policy column) as { mode: 'inherit' }", () => {
+      const db = new Database(":memory:");
+      db.exec(`
+        CREATE TABLE task (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL, directory TEXT NOT NULL,
+          column TEXT NOT NULL, position INTEGER NOT NULL, session_id TEXT, run_state TEXT NOT NULL,
+          error TEXT, agent TEXT, model TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          UNIQUE(column, position)
+        );
+      `);
+      db.prepare(
+        "INSERT INTO task (id, title, description, directory, column, position, session_id, run_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("task_legacy", "Legacy", "desc", "/repo", "todo", 0, null, "unstarted", 1000, 1000);
+
+      const migrated = new SqliteTaskStore(db);
+      const legacy = migrated.get("task_legacy");
+      expect(legacy!.verificationPolicy).toEqual({ mode: "inherit" });
+
+      const taskColumns = new Set(
+        (db.prepare("PRAGMA table_info(task)").all() as Array<{ name: string }>).map((row) => row.name),
+      );
+      expect(taskColumns.has("verification_policy")).toBe(true);
+
+      migrated.close();
+      db.close();
+    });
+  });
+
+  describe("verification catalog + presets + board default access", () => {
+    function chk(id: string): import("../../src/shared").VerificationCheckDefinition {
+      return { id, label: `${id} check`, command: `run ${id}`, timeoutMs: 30_000, maxOutputBytes: 10_000 };
+    }
+
+    it("catalog access round-trips checks through persistence", () => {
+      const checks = [chk("lint"), chk("test")];
+      store.setVerificationCatalog(checks);
+      expect(store.getVerificationCatalog()).toEqual(checks);
+    });
+
+    it("catalog access returns an empty array when nothing is persisted", () => {
+      expect(store.getVerificationCatalog()).toEqual([]);
+    });
+
+    it("catalog access rejects malformed entries rather than silently filtering", () => {
+      const db = (store as any).db as any;
+      db.prepare("INSERT OR REPLACE INTO board_setting (key, value) VALUES (?, ?)").run(
+        "boardVerificationCatalog",
+        JSON.stringify([
+          { id: "good", label: "Good", command: "cmd", timeoutMs: 1000, maxOutputBytes: 1000 },
+          { id: "bad", command: "missing-fields" },
+        ]),
+      );
+      expect(store.getVerificationCatalog()).toEqual([]);
+    });
+
+    it("presets round-trips through persistence", () => {
+      store.setVerificationCatalog([chk("lint"), chk("test")]);
+      const presets = [
+        { id: "quick", label: "Quick", checkIds: ["lint"] },
+        { id: "full", label: "Full", checkIds: ["lint", "test"] },
+      ];
+      store.setVerificationPresets(presets);
+      expect(store.getVerificationPresets()).toEqual(presets);
+    });
+
+    it("presets returns an empty array when nothing is persisted", () => {
+      expect(store.getVerificationPresets()).toEqual([]);
+    });
+
+it("presets rejects malformed entries", () => {
+      store.setVerificationCatalog([chk("lint")]);
+      const db = (store as any).db as any;
+      db.prepare("INSERT OR REPLACE INTO board_setting (key, value) VALUES (?, ?)").run(
+        "boardVerificationPresets",
+        JSON.stringify([
+          { id: "good", label: "Good", checkIds: ["lint"] },
+          { id: "bad" }, // missing label and checkIds
+        ]),
+      );
+      expect(store.getVerificationPresets()).toEqual([]);
+    });
+
+    it("board default policy round-trips through persistence", () => {
+      const policy = { mode: "required" as const, checkIds: ["lint"] };
+      store.setBoardVerificationDefault(policy);
+      expect(store.getBoardVerificationDefault()).toEqual(policy);
+
+      store.setBoardVerificationDefault(null);
+      expect(store.getBoardVerificationDefault()).toBeNull();
+    });
+
+    it("board default returns null when nothing is persisted", () => {
+      expect(store.getBoardVerificationDefault()).toBeNull();
+    });
+
+    it("board default rejects invalid persisted shapes", () => {
+      const db = (store as any).db as any;
+      db.prepare("INSERT OR REPLACE INTO board_setting (key, value) VALUES (?, ?)").run(
+        "boardVerificationDefault",
+        JSON.stringify({ mode: "invalid-mode", checkIds: ["x"] }),
+      );
+      expect(store.getBoardVerificationDefault()).toBeNull();
+    });
+
+    it("board default rejects required mode with invalid checkIds", () => {
+      const db = (store as any).db as any;
+      db.prepare("INSERT OR REPLACE INTO board_setting (key, value) VALUES (?, ?)").run(
+        "boardVerificationDefault",
+        JSON.stringify({ mode: "required", checkIds: [""] }),
+      );
+      expect(store.getBoardVerificationDefault()).toBeNull();
+    });
+
+    it("setBoardVerificationDefault rejects invalid modes at write time", () => {
+      expect(() => store.setBoardVerificationDefault({ mode: "invalid" as any })).toThrow();
+    });
+
+    it("setBoardVerificationDefault rejects invalid checkIds at write time", () => {
+      expect(() => store.setBoardVerificationDefault({ mode: "required" as const, checkIds: [""] })).toThrow();
+    });
+  });
 });

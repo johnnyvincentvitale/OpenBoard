@@ -729,4 +729,155 @@ describe("completion routes", () => {
       expect(runTask).toHaveBeenCalledWith(child.id);
     });
   });
+
+  describe("attempt identity in completion/block events", () => {
+    it("includes attempt identity in task_completed events", async () => {
+      const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+      store.update(task.id, { runState: "running", runStartedAt: 100, sessionId: "ses_1" });
+      store.move(task.id, "in_progress", 0);
+      const app = appFor(store);
+
+      await app.request(`/api/tasks/${task.id}/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      const event = store.listEvents(task.id).find((e) => e.type === "task_completed");
+      expect(event?.body.attempt).toMatchObject({
+        runStartedAt: 100,
+        sessionId: "ses_1",
+      });
+    });
+
+    it("includes attempt identity in task_blocked events", async () => {
+      const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+      store.update(task.id, { runState: "running", runStartedAt: 200, sessionId: "ses_2" });
+      store.move(task.id, "in_progress", 0);
+      const app = appFor(store);
+
+      await app.request(`/api/tasks/${task.id}/block`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...validBody, residualRisk: "needs human" }),
+      });
+
+      const event = store.listEvents(task.id).find((e) => e.type === "task_blocked");
+      expect(event?.body.attempt).toMatchObject({
+        runStartedAt: 200,
+        sessionId: "ses_2",
+      });
+    });
+
+    it("includes attempt identity in base-checkout-escape block events", async () => {
+      const { repo } = gitRepoWithClaudeWorktree();
+      const task = store.create({ title: "Escape report", description: "do it", directory: repo });
+      store.update(task.id, {
+        runState: "running",
+        runStartedAt: 300,
+        sessionId: "ses_esc",
+        isolationAtDispatch: "worktree",
+        baseCheckoutSnapshot: "",
+      });
+      store.move(task.id, "in_progress", 0);
+      writeFileSync(join(repo, "escaped.txt"), "escaped\n");
+      const app = appFor(store);
+
+      await app.request(`/api/tasks/${task.id}/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      const event = store.listEvents(task.id).find((e) => e.type === "task_blocked");
+      expect(event?.body.pending).toBe("base-checkout-escape");
+      expect(event?.body.attempt).toMatchObject({
+        runStartedAt: 300,
+        sessionId: "ses_esc",
+      });
+    });
+
+    it("includes attempt identity in late idle-fallback-upgrade events", async () => {
+      const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+      store.update(task.id, {
+        sessionId: "ses_idle",
+        runState: "idle",
+        runStartedAt: 400,
+        completion: null,
+        completionSource: "idle-fallback",
+      });
+      store.move(task.id, "review", 0);
+      const app = appFor(store);
+
+      await app.request(`/api/tasks/${task.id}/complete?runStartedAt=400`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      const event = store.listEvents(task.id).find((e) => e.type === "task_completed");
+      expect(event?.body.attempt).toMatchObject({
+        runStartedAt: 400,
+        sessionId: "ses_idle",
+      });
+    });
+
+    it("stale-report rejection does not stamp attempt A onto attempt B in events", async () => {
+      const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+      store.update(task.id, {
+        runState: "running",
+        runStartedAt: 100,
+        sessionId: "ses_old",
+      });
+      store.move(task.id, "in_progress", 0);
+
+      // Simulate a new dispatch overwriting the old run identity
+      store.update(task.id, {
+        runState: "running",
+        runStartedAt: 200,
+        sessionId: "ses_new",
+        completion: null,
+        completionSource: null,
+      });
+
+      const app = appFor(store);
+      const res = await app.request(`/api/tasks/${task.id}/complete?runStartedAt=100`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      expect(res.status).toBe(409);
+      // No events should be written for the stale attempt
+      const events = store.listEvents(task.id);
+      expect(events.some((e) => e.type === "task_completed")).toBe(false);
+      expect(events.some((e) => e.type === "task_blocked")).toBe(false);
+    });
+
+    it("preserves CompletionReport payload fields unchanged alongside attempt identity", async () => {
+      const task = store.create({ title: "A", description: "do it", directory: "/repo" });
+      store.update(task.id, { runState: "running", runStartedAt: 500, sessionId: "ses_5" });
+      store.move(task.id, "in_progress", 0);
+      const app = appFor(store);
+
+      await app.request(`/api/tasks/${task.id}/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validBody),
+      });
+
+      const stored = store.get(task.id);
+      expect(stored!.completion).toMatchObject({ ...validBody, outcome: "complete" });
+      expect(typeof stored!.completion!.reportedAt).toBe("number");
+
+      const event = store.listEvents(task.id).find((e) => e.type === "task_completed");
+      // The event body must still contain all original report fields
+      expect(event?.body.summary).toBe("implemented the change");
+      expect(event?.body.changedFiles).toEqual(["src/file.ts"]);
+      expect(event?.body.verification).toEqual([{ command: "npm test", result: "passed" }]);
+      expect(event?.body.residualRisk).toBe("none");
+      // And the attempt identity must also be present
+      expect(event?.body.attempt).toMatchObject({ runStartedAt: 500, sessionId: "ses_5" });
+    });
+  });
 });
