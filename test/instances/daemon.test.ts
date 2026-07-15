@@ -616,4 +616,39 @@ describe("buildAdapterEnv", () => {
     const env = buildAdapterEnv(def);
     expect(env.OPENBOARD_OPENCODE_PORT).toBe("4098");
   });
+
+  it("pins POSIX child commands to the adapter Node and removes renderer-only editor state", () => {
+    const def = makeDef("test", 4097, "/ws", "db.sqlite");
+    const env = buildAdapterEnv(def, {
+      platform: "linux",
+      nodeExec: "/stable/node22/bin/node",
+      processEnv: {
+        PATH: "/transient/node26/bin:/usr/bin",
+        EDITOR: "vim",
+        OPENBOARD_NODE_EXEC: "/stable/node22/bin/node",
+        OPENBOARD_USER_EDITOR: "vim",
+        OPENBOARD_USER_VISUAL: "",
+      },
+    });
+
+    expect(env.PATH).toBe("/stable/node22/bin:/transient/node26/bin:/usr/bin");
+    expect(env.EDITOR).toBe("vim");
+    expect(env).not.toHaveProperty("OPENBOARD_USER_EDITOR");
+    expect(env).not.toHaveProperty("OPENBOARD_USER_VISUAL");
+  });
+
+  it("normalizes Windows Path without adding a conflicting PATH key", () => {
+    const def = makeDef("test", 4097, "C:\\ws", "db.sqlite");
+    const env = buildAdapterEnv(def, {
+      platform: "win32",
+      nodeExec: "C:\\stable\\node22\\node.exe",
+      processEnv: {
+        Path: "C:\\transient\\node26;C:\\Windows\\System32",
+        PATH: "C:\\duplicate-that-must-not-win",
+      },
+    });
+
+    expect(env.Path).toBe("C:\\stable\\node22;C:\\transient\\node26;C:\\Windows\\System32");
+    expect(env).not.toHaveProperty("PATH");
+  });
 });

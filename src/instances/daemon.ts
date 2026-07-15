@@ -23,7 +23,7 @@ import {
   closeSync,
 } from "node:fs";
 import { request } from "node:http";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   InstanceError,
@@ -63,8 +63,20 @@ function projectRoot(): string {
   return resolve(dirname(dirname(dirname(filePath))));
 }
 
+interface AdapterEnvOptions {
+  processEnv?: NodeJS.ProcessEnv;
+  nodeExec?: string;
+  platform?: NodeJS.Platform;
+}
+
 /**
  * Build the environment object passed to the spawned adapter process.
+ *
+ * The OpenTUI renderer may run through a transient `npx node@26` wrapper while
+ * the adapter intentionally runs under a native-dependency-compatible Node 22.
+ * Keep the adapter's executable directory first on PATH so every child process
+ * (including Git hooks) resolves the same node/npm toolchain as the adapter.
+ * Renderer-only editor sentinels must not escape into adapter tests or shells.
  *
  * Maps InstanceDefinition fields to the env vars the adapter reads:
  * - port → OPENBOARD_PORT
@@ -72,14 +84,38 @@ function projectRoot(): string {
  * - workspace → BOARD_WORKSPACE
  * - opencodePort → OPENBOARD_OPENCODE_PORT
  */
-export function buildAdapterEnv(def: InstanceDefinition): Record<string, string> {
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
+export function buildAdapterEnv(def: InstanceDefinition, options: AdapterEnvOptions = {}): Record<string, string> {
+  const processEnv = options.processEnv ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const pathApi = platform === "win32" ? win32 : posix;
+  const nodeExec = options.nodeExec?.trim() || processEnv.OPENBOARD_NODE_EXEC?.trim() || process.execPath;
+  const inheritedPathKey = platform === "win32"
+    ? Object.keys(processEnv).find((key) => key.toLowerCase() === "path")
+    : (Object.hasOwn(processEnv, "PATH") ? "PATH" : undefined);
+  const pathKey = inheritedPathKey ?? (platform === "win32" ? "Path" : "PATH");
+  const inheritedPath = inheritedPathKey ? processEnv[inheritedPathKey] ?? "" : "";
+  const nodeDir = pathApi.isAbsolute(nodeExec) ? pathApi.dirname(nodeExec) : undefined;
+  const normalizePathEntry = (entry: string): string => platform === "win32" ? entry.toLowerCase() : entry;
+  const pathEntries = (inheritedPath ? inheritedPath.split(pathApi.delimiter) : [])
+    .filter((entry) => !nodeDir || normalizePathEntry(entry) !== normalizePathEntry(nodeDir));
+
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(processEnv)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path" && key !== pathKey) delete env[key];
+  }
+  env[pathKey] = [...(nodeDir ? [nodeDir] : []), ...pathEntries].join(pathApi.delimiter);
+  delete env.OPENBOARD_USER_EDITOR;
+  delete env.OPENBOARD_USER_VISUAL;
+
+  Object.assign(env, {
     OPENBOARD_PORT: String(def.port),
     OPENBOARD_DB: def.dbPath,
     BOARD_WORKSPACE: def.workspace,
     OPENBOARD_INSTANCE_NAME: def.name,
-  };
+  });
   if (def.opencodePort !== undefined) {
     env.OPENBOARD_OPENCODE_PORT = String(def.opencodePort);
   }
@@ -313,14 +349,12 @@ export function createInstanceDaemon(
 
       // Open log file for append
       let logFd: number | undefined = openSync(dirs.logFile, "a");
-    // Truncate log for clean start? No — per the contract, keep appending.
-    // But let's add a start marker.
-    writeFileSync(
-      logFd,
-      `--- OpenBoard instance "${def.name}" starting at ${new Date().toISOString()} ---\n`,
-    );
-
-    const env = buildAdapterEnv(def);
+      // Truncate log for clean start? No — per the contract, keep appending.
+      // But let's add a start marker.
+      writeFileSync(
+        logFd,
+        `--- OpenBoard instance "${def.name}" starting at ${new Date().toISOString()} ---\n`,
+      );
 
       let child: ChildProcess;
       try {
@@ -330,6 +364,7 @@ export function createInstanceDaemon(
         // newer FFI Node whose ABI cannot load better-sqlite3. Never bare
         // "node": PATH resolution is terminal-dependent.
         const nodeExec = process.env.OPENBOARD_NODE_EXEC?.trim() || process.execPath;
+        const env = buildAdapterEnv(def, { nodeExec });
         child = spawn(nodeExec, [serveScript], {
           env,
           detached: true,
