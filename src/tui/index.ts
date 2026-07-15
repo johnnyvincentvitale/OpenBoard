@@ -3358,6 +3358,19 @@ function renderInlineMetaValue(ui: OpenTui, parts: MetaValuePart[], fallbackColo
 
 function renderSidebar(ui: OpenTui, state: TuiState) {
   const task = selectedTask(state);
+  const inlineDetailOwnsViewport = Boolean(
+    task &&
+    state.detailTab &&
+    state.overlay !== "help" &&
+    !state.filterMode &&
+    !state.instanceSwitcher &&
+    !state.newTask &&
+    !state.blockedAnswer &&
+    !state.blockedResolution &&
+    !state.dirtyCleanup &&
+    !state.moveTargetColumn &&
+    state.pendingConfirmation?.taskId !== task.id
+  );
   const content = state.overlay === "help"
     ? renderInlineHelp(ui, state)
     : state.filterMode
@@ -3385,7 +3398,13 @@ function renderSidebar(ui: OpenTui, state: TuiState) {
       title: "Selected",
       titleColor: COLORS.text,
     },
-    renderDetailViewport(ui, state, selectedColumnScrollId(state, task), content),
+    // Active tabs already provide one bounded, scrollable content viewport below
+    // fixed title/metadata/tab chrome, matching Archive detail. Wrapping that layout
+    // in the whole-column viewport leaves its flex-grown body without a constrained
+    // height and collapses Prompt/Handoff/Output/etc. to a single line.
+    inlineDetailOwnsViewport
+      ? content
+      : renderDetailViewport(ui, state, selectedColumnScrollId(state, task), content),
   );
 }
 

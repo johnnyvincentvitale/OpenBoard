@@ -2035,6 +2035,25 @@ describe("TUI Enter key shows inline selected-card details", () => {
     expect(text).toContain("Handoff");
   });
 
+  it("gives active detail tabs the remaining Selected height without nesting scroll viewports", () => {
+    const app = renderApp(fakeUi(), state({
+      viewState: { view: "board", previousView: "launch" },
+      terminalRows: 48,
+      tasks: [{ ...task("todo-card", "todo"), description: "A prompt long enough to need a real tab body." }],
+      selectedTaskId: "todo-card",
+      detailTab: "prompt",
+    }));
+
+    const selectedPanel = nodesByType(app, "Box").find((node) => node.props?.title === "Selected");
+    const detailLayout = selectedPanel?.children?.[0];
+    const promptViewport = nodeById(app, "board-detail-prompt-todo-card");
+
+    expect(detailLayout?.props).toMatchObject({ flexGrow: 1, flexDirection: "column" });
+    expect(detailLayout?.props?.id).not.toBe("selected-card-todo-card-prompt");
+    expect(promptViewport?.props).toMatchObject({ flexGrow: 1, minHeight: 0, overflow: "hidden" });
+    expect(textOf(promptViewport)).toContain("A prompt long enough to need a real tab body.");
+  });
+
   it("inline detail footer and command strip mention up/down scrolling while locked", () => {
     const app = renderApp(fakeUi(), state({
       viewState: { view: "board", previousView: "launch" },
