@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Local Devin-style Kanban command center for OpenCode sessions",
+  "license": "MIT",
   "bin": {
     "openboard": "dist/cli/openboard.mjs"
   },

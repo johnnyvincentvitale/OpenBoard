@@ -74,7 +74,7 @@ setup, permissions, models, and current limitations.
 ## Install
 
 ```sh
-git clone https://github.com/johnnyvincentvitale/OpenBoard.git openboard
+git clone <repository-url> openboard
 cd openboard
 npm install
 npm run build:app
@@ -166,3 +166,7 @@ application build. Use `npm run tui` to run a local board from source.
 
 OpenBoard is pre-release software under active development. Interfaces and
 workflows may change before a stable release.
+
+## License
+
+OpenBoard is available under the [MIT License](LICENSE).
