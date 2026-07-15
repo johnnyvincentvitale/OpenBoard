@@ -444,6 +444,8 @@ export interface Task {
    * the task is still active or attribution is unknown.
    */
   completedBy?: string | null;
+  /** Operator disposition layered over the original run report. */
+  resolution?: TaskResolution | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -467,6 +469,23 @@ export interface MoveTaskBody {
 export interface BlockedAcceptance {
   blockedReportedAt: number;
   acceptIncomplete: true;
+}
+
+export const TASK_RESOLUTION_KINDS = ["accepted_incomplete", "completed_elsewhere", "superseded"] as const;
+export type TaskResolutionKind = (typeof TASK_RESOLUTION_KINDS)[number];
+
+export interface TaskResolution {
+  kind: TaskResolutionKind;
+  resolvedBy: string;
+  resolvedAt: number;
+}
+
+export type WorktreeDisposition = "discard" | "keep";
+
+export interface ResolveBlockedTaskBody {
+  kind: Exclude<TaskResolutionKind, "accepted_incomplete">;
+  resolvedBy: string;
+  worktreeDisposition?: WorktreeDisposition;
 }
 
 export interface BlockedAnswerResumeDecision {
@@ -747,6 +766,8 @@ export interface Dispatcher {
   removeTask(taskId: string, options?: { force?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; worktree?: WorktreeCleanupOutcome; message?: string }>;
   /** Remove a Review card's worktree without merging; keeps the branch and card. */
   discardWorktree(taskId: string, options?: { force?: boolean }): Promise<WorktreeCleanupOutcome>;
+  /** Inspect and deliberately retain a Review card's worktree for operator salvage. */
+  retainTaskWorktree(taskId: string): Promise<WorktreeCleanupOutcome>;
   /** Best-effort startup sweep for board-owned worktrees no live task references. */
   sweepOrphanedWorktrees(): Promise<WorktreeCleanupOutcome[]>;
   /** Delete a dirty orphan worktree surfaced by the startup sweep. */
@@ -809,6 +830,7 @@ export const TASK_ROUTE_PATTERNS = {
   retry: "/api/tasks/:id/retry",
   abort: "/api/tasks/:id/abort",
   move: "/api/tasks/:id/move",
+  resolveBlocked: "/api/tasks/:id/resolve-blocked",
   remove: "/api/tasks/:id",
   initGit: "/api/tasks/:id/init-git",
   sync: "/api/tasks/:id/sync",
@@ -834,6 +856,7 @@ export const buildTaskPath = {
   retry: (id: string) => `/api/tasks/${encodeURIComponent(id)}/retry`,
   abort: (id: string) => `/api/tasks/${encodeURIComponent(id)}/abort`,
   move: (id: string) => `/api/tasks/${encodeURIComponent(id)}/move`,
+  resolveBlocked: (id: string) => `/api/tasks/${encodeURIComponent(id)}/resolve-blocked`,
   update: (id: string) => `/api/tasks/${encodeURIComponent(id)}`,
   remove: (id: string) => `/api/tasks/${encodeURIComponent(id)}`,
   initGit: (id: string) => `/api/tasks/${encodeURIComponent(id)}/init-git`,

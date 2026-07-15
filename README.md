@@ -438,9 +438,14 @@ semantics.
 
 Moving a blocked card to Done or integrating it requires explicit
 `blockedAcceptance` (`acceptIncomplete: true` plus the current
-`blockedReportedAt`). Archived blocked cards cannot be answered; discard
-cleans up the worktree at Review without accepting the work. This is the
-server-enforced blocked Done acceptance policy.
+`blockedReportedAt`). In the TUI, `x` keeps that accepted-incomplete meaning.
+Use `s` on a blocked Review card when the task was completed elsewhere or became
+superseded: the operator chooses whether to discard the original worktree or keep
+it for salvage, the original blocked report remains attached, and a separate
+resolution record moves the card to Done. `a` can archive a non-running blocked
+Review card directly as evidence. Archived blocked cards cannot be answered.
+Dirty delete/discard never happens silently: after the normal confirmation, the
+TUI requires an explicit remove-or-keep choice.
 
 ## Task lifecycle
 Beyond Run/Retry/Stop, a Task carries an explicit completion contract, optional
@@ -502,6 +507,12 @@ re-runs it.
 `archived` flag; only `review`/`done` tasks can be archived (409 otherwise). `GET
 /api/tasks` excludes archived tasks by default; pass `?archived=true` to see only archived
 tasks, or `?archived=all` to see both (any other value is a 400).
+
+**Blocked operator resolution.** `POST /api/tasks/:id/resolve-blocked` accepts
+`completed_elsewhere` or `superseded`, operator attribution, and an explicit
+`discard`/`keep` worktree disposition when a worktree exists. The endpoint
+preserves the blocked completion report, stores resolution metadata and an audit
+event, then moves the card to Done.
 
 ## Develop
 ```sh

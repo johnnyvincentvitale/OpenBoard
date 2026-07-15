@@ -1326,6 +1326,36 @@ export class TaskDispatcher implements Dispatcher {
     return cleanup;
   }
 
+  async retainTaskWorktree(taskId: string): Promise<WorktreeCleanupOutcome> {
+    const task = this.store.get(taskId);
+    if (!task) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    if (task.column !== "review") {
+      throw AdapterError.validation("Retain worktree is only available for Review cards");
+    }
+    if (!task.worktreePath) {
+      return {
+        ok: true,
+        removed: false,
+        dirty: false,
+        kept: false,
+        message: "task has no worktree to retain",
+      };
+    }
+
+    const repoDir = this.resolveDirectory(task.directory);
+    const repoRoot = await this.resolveRepoRoot(repoDir);
+    this.store.rememberWorktreeRepoRoot(repoRoot);
+    const dirty = await this.worktrees.isWorktreeDirty(task.worktreePath);
+    return {
+      ok: true,
+      removed: false,
+      dirty,
+      kept: true,
+      message: dirty ? "dirty worktree kept on disk for manual salvage" : "clean worktree kept on disk",
+      worktreePath: task.worktreePath,
+    };
+  }
+
   async sweepOrphanedWorktrees(): Promise<WorktreeCleanupOutcome[]> {
     const tasks = this.store.list();
     const liveTaskIds = new Set(tasks.map((task) => task.id));

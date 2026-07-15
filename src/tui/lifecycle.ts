@@ -24,6 +24,7 @@ export type TaskLifecyclePhase =
   | "review-no-agent-report"
   | "review-manual"
   | "done-accepted-blocked"
+  | "done-resolved"
   | "done-user"
   | "done";
 
@@ -58,7 +59,7 @@ export interface LifecycleDetailRow {
 export type TaskLifecycleInput = Pick<
   Task,
   "type" | "runState" | "column" | "pending" | "escapeDetectedPaths" | "rebaseConflictPaths" | "runStartedAt" | "completion" | "completionSource" | "completedBy" | "error" | "sessionId"
-  | "pendingPermissions"
+  | "pendingPermissions" | "resolution"
 >;
 
 function normalizeOutcome(outcome: string | undefined): string {
@@ -101,6 +102,12 @@ export function taskLifecycleStatus(task: TaskLifecycleInput, now = Date.now()):
     }
     case "accepted-blocked": {
       const by = task.completedBy ?? "";
+      if (task.resolution?.kind === "completed_elsewhere") {
+        return { phase: "done-resolved", glyph: "○", label: "DONE", detail: by ? `completed elsewhere · ${by}` : "completed elsewhere" };
+      }
+      if (task.resolution?.kind === "superseded") {
+        return { phase: "done-resolved", glyph: "○", label: "DONE", detail: by ? `superseded · ${by}` : "superseded" };
+      }
       return { phase: "done-accepted-blocked", glyph: "○", label: "DONE", detail: by ? `accepted blocked · ${by}` : "accepted blocked" };
     }
     case "running": {
@@ -220,7 +227,12 @@ export function taskLifecycleDetailRows(task: TaskLifecycleInput, now = Date.now
   }
 
   if (task.column === "done" && task.completion?.outcome === "blocked") {
-    rows.push({ label: "OUTCOME", value: "ACCEPTED BLOCKED", role: "outcome" });
+    const resolution = task.resolution?.kind === "completed_elsewhere"
+      ? "COMPLETED ELSEWHERE"
+      : task.resolution?.kind === "superseded"
+        ? "SUPERSEDED"
+        : "ACCEPTED BLOCKED";
+    rows.push({ label: "OUTCOME", value: resolution, role: "outcome" });
     rows.push({ label: "SOURCE", value: task.completionSource ?? "reported", role: "source" });
   }
 

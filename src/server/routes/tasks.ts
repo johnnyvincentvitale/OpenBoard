@@ -27,6 +27,8 @@ import {
   canAutoRun,
   type BlockedAcceptance,
   type BlockedAnswerContext,
+  type ResolveBlockedTaskBody,
+  type TaskResolution,
   isColumn,
   isAcpPermissionMode,
 } from "../../shared";
@@ -629,6 +631,7 @@ export function registerTaskRoutes(
             ? USER_COMPLETED_BY
             : null;
 
+      let acceptedResolution: TaskResolution | null | undefined;
       if (column === "done") {
         await assertWorktreeDoneMoveResolved(dispatcher, task);
         const policy = evaluateDonePolicy({
@@ -640,6 +643,11 @@ export function registerTaskRoutes(
         if (!policy.ok) throw blockedPolicyConflict(policy.error.code, policy.error.message, task, "move");
         if (policy.blockedAccepted) {
           store.addEvent({ taskId: id, type: "task_blocked_accepted", body: blockedAcceptanceEvidence(task, policy.acceptedBy, "move") });
+          acceptedResolution = {
+            kind: "accepted_incomplete",
+            resolvedBy: policy.acceptedBy!,
+            resolvedAt: Date.now(),
+          };
         }
       } else if (body.blockedAcceptance !== undefined) {
         throw new ConflictRouteError("blocked_acceptance_unexpected", "Blocked acceptance is only valid when moving to Done");
@@ -647,7 +655,14 @@ export function registerTaskRoutes(
 
       store.move(id, column, position);
 
-      store.update(id, { completedBy: nextCompletedBy });
+      store.update(id, {
+        completedBy: nextCompletedBy,
+        resolution: column === "done"
+          ? isDoneReorder
+            ? task.resolution ?? null
+            : acceptedResolution ?? null
+          : null,
+      });
       store.addEvent({ taskId: id, type: "task_moved", body: { column, position, completedBy: nextCompletedBy } });
 
       // Fire-and-forget: a manual move to Done satisfies this task as a
@@ -662,6 +677,83 @@ export function registerTaskRoutes(
     } catch (err) {
       throw err;
     }
+  });
+
+  app.post(TASK_ROUTE_PATTERNS.resolveBlocked, async (c) => {
+    const id = c.req.param("id");
+    const task = store.get(id);
+    if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
+    if (task.column !== "review" || task.completion?.outcome !== "blocked") {
+      throw new ConflictRouteError("blocked_resolution_unexpected", "Only blocked Review cards can be resolved");
+    }
+    if (task.runState === "running") {
+      throw new ConflictRouteError("blocked_resolution_running", "Stop the task session before resolving the blocked card");
+    }
+
+    let body: ResolveBlockedTaskBody;
+    try {
+      body = await c.req.json();
+    } catch {
+      throw AdapterError.validation("Request body must be valid JSON");
+    }
+    if (!body || typeof body !== "object") {
+      throw AdapterError.validation("Request body must be an object");
+    }
+    if (body.kind !== "completed_elsewhere" && body.kind !== "superseded") {
+      throw AdapterError.validation("kind must be 'completed_elsewhere' or 'superseded'");
+    }
+    const resolvedBy = cleanBounded(body.resolvedBy, "resolvedBy", BLOCKED_ATTRIBUTION_MAX_LENGTH, "blocked_resolution_incomplete");
+    if (body.worktreeDisposition !== undefined && body.worktreeDisposition !== "discard" && body.worktreeDisposition !== "keep") {
+      throw AdapterError.validation("worktreeDisposition must be 'discard' or 'keep'");
+    }
+    if (task.worktreePath && body.worktreeDisposition === undefined) {
+      throw new ConflictRouteError(
+        "worktree_disposition_required",
+        "Choose whether to discard or keep the task worktree before resolving the blocked card",
+      );
+    }
+
+    const policy = evaluateDonePolicy({
+      task,
+      targetColumn: "done",
+      completedBy: resolvedBy,
+      blockedAcceptance: { acceptIncomplete: true, blockedReportedAt: task.completion.reportedAt },
+    });
+    if (!policy.ok) throw blockedPolicyConflict(policy.error.code, policy.error.message, task, "move");
+
+    const worktree = task.worktreePath
+      ? body.worktreeDisposition === "discard"
+        ? await dispatcher.discardWorktree(id, { force: true })
+        : await dispatcher.retainTaskWorktree(id)
+      : undefined;
+    if (worktree && !worktree.ok) {
+      throw new ConflictRouteError("worktree_resolution_failed", worktree.message);
+    }
+    const current = store.get(id);
+    if (
+      !current ||
+      current.column !== "review" ||
+      current.runState === "running" ||
+      current.completion?.outcome !== "blocked" ||
+      current.completion.reportedAt !== task.completion.reportedAt
+    ) {
+      throw new ConflictRouteError("blocked_resolution_stale", "The blocked card changed while its worktree disposition was being applied; refresh and retry");
+    }
+
+    const resolution: TaskResolution = {
+      kind: body.kind,
+      resolvedBy,
+      resolvedAt: Date.now(),
+    };
+    store.move(id, "done", Number.POSITIVE_INFINITY);
+    store.update(id, { completedBy: resolvedBy, resolution });
+    store.addEvent({
+      taskId: id,
+      type: "task_blocked_resolved",
+      body: { ...resolution, blockedReportedAt: task.completion.reportedAt, worktreeDisposition: body.worktreeDisposition, worktree },
+    });
+    void fireChainAdvance(deps.advancer, store, id);
+    return c.json(projectPendingPermissions(store.list(), dispatcher), 200);
   });
 
   app.delete(TASK_ROUTE_PATTERNS.remove, async (c) => {

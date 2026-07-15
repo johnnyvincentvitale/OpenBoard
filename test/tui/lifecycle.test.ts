@@ -316,6 +316,20 @@ describe("task lifecycle helpers", () => {
     ]);
   });
 
+  it("renders an externally completed blocked card as resolved rather than accepted incomplete", () => {
+    const task = baseTask({
+      column: "done",
+      runState: "error",
+      completedBy: "User",
+      completion: { outcome: "blocked", summary: "Original run blocked", changedFiles: [], verification: [], residualRisk: "not finished", reportedAt: 33 },
+      completionSource: "reported",
+      resolution: { kind: "completed_elsewhere", resolvedBy: "User", resolvedAt: 44 },
+    });
+    expect(taskLifecycleStatus(task).phase).toBe("done-resolved");
+    expect(compactTaskBoardLabel(task)).toBe("○ DONE · completed elsewhere · User");
+    expect(taskLifecycleDetailRows(task)).toContainEqual({ label: "OUTCOME", value: "COMPLETED ELSEWHERE", role: "outcome" });
+  });
+
   describe("done without attribution", () => {
     const task = baseTask({ column: "done", runState: "idle" });
 

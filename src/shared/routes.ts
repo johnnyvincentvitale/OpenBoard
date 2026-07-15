@@ -1,5 +1,5 @@
 /** Canonical REST route contracts. */
-import type { BlockedAcceptance, CompletionReport } from "./task";
+import type { BlockedAcceptance, CompletionReport, ResolveBlockedTaskBody } from "./task";
 import type { BlockedAnswerContext } from "./blocked-task";
 
 export const ROUTE_PATTERNS = {
@@ -28,6 +28,7 @@ export interface RetryTaskBody {
 }
 
 export type { BlockedAcceptance };
+export type { ResolveBlockedTaskBody };
 
 /** POST /api/tasks/:id/archive body. */
 export type ArchiveTaskBody = Record<string, never>;

@@ -52,6 +52,7 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
   integrate: ReturnType<typeof vi.fn>;
   removeTask: ReturnType<typeof vi.fn>;
   discardWorktree: ReturnType<typeof vi.fn>;
+  retainTaskWorktree: ReturnType<typeof vi.fn>;
   sweepOrphanedWorktrees: ReturnType<typeof vi.fn>;
   resolveOrphanWorktree: ReturnType<typeof vi.fn>;
   getOrphanWorktreeDiff: ReturnType<typeof vi.fn>;
@@ -102,6 +103,7 @@ function makeFakeDispatcher(store: SqliteTaskStore): Dispatcher & {
       return { ok: true };
     }),
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
+    retainTaskWorktree: vi.fn(async () => ({ ok: true, removed: false, dirty: true, kept: true, message: "kept" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
     resolveOrphanWorktree: vi.fn(async (worktreePath: string) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
     getOrphanWorktreeDiff: vi.fn(async (_worktreePath: string) => ({ kind: "diff" as const, files: [], capped: false })),
@@ -1908,6 +1910,7 @@ describe("POST /api/tasks/:id/move", () => {
     expect(accepted.status).toBe(200);
     expect(store.get(a.id)?.column).toBe("done");
     expect(store.get(a.id)?.completion?.outcome).toBe("blocked");
+    expect(store.get(a.id)?.resolution).toMatchObject({ kind: "accepted_incomplete", resolvedBy: "Reviewer" });
     expect(store.listEvents(a.id).find((event) => event.type === "task_blocked_accepted")?.body).toMatchObject({
       completedBy: "Reviewer",
       blockedReportedAt: 321,
@@ -1915,6 +1918,90 @@ describe("POST /api/tasks/:id/move", () => {
       summary: "stuck",
       residualRisk: "Need choice",
       transition: "move",
+    });
+  });
+
+  it("resolves a blocked Review card completed elsewhere while preserving the blocked report", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.move(a.id, "review", 0);
+    store.update(a.id, {
+      runState: "error",
+      worktreePath: "/worktrees/a",
+      worktreeBranch: "board/a",
+      completion: { outcome: "blocked", summary: "stuck", changedFiles: ["src/a.ts"], verification: [], residualRisk: "Need choice", reportedAt: 321 },
+      completionSource: "reported",
+    });
+    dispatcher.discardWorktree.mockResolvedValueOnce({ ok: true, removed: true, dirty: true, kept: false, message: "discarded" });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${a.id}/resolve-blocked`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "completed_elsewhere", resolvedBy: "Operator", worktreeDisposition: "discard" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatcher.discardWorktree).toHaveBeenCalledWith(a.id, { force: true });
+    expect(store.get(a.id)).toMatchObject({
+      column: "done",
+      completedBy: "Operator",
+      completion: { outcome: "blocked", reportedAt: 321 },
+      resolution: { kind: "completed_elsewhere", resolvedBy: "Operator" },
+    });
+    expect(store.listEvents(a.id).find((event) => event.type === "task_blocked_resolved")?.body).toMatchObject({
+      kind: "completed_elsewhere",
+      resolvedBy: "Operator",
+      blockedReportedAt: 321,
+      worktreeDisposition: "discard",
+    });
+  });
+
+  it("requires an explicit keep or discard choice when resolving a blocked card with a worktree", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.move(a.id, "review", 0);
+    store.update(a.id, {
+      runState: "error",
+      worktreePath: "/worktrees/a",
+      completion: { outcome: "blocked", summary: "stuck", changedFiles: [], verification: [], residualRisk: "risk", reportedAt: 9 },
+      completionSource: "reported",
+    });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${a.id}/resolve-blocked`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "superseded", resolvedBy: "Operator" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error.code).toBe("worktree_disposition_required");
+    expect(store.get(a.id)?.column).toBe("review");
+  });
+
+  it("can resolve a superseded blocked card while retaining its dirty worktree", async () => {
+    const a = store.create({ title: "A", description: "", directory: repoDir });
+    store.move(a.id, "review", 0);
+    store.update(a.id, {
+      runState: "error",
+      worktreePath: "/worktrees/a",
+      completion: { outcome: "blocked", summary: "duplicate", changedFiles: [], verification: [], residualRisk: "superseded", reportedAt: 12 },
+      completionSource: "reported",
+    });
+    dispatcher.retainTaskWorktree.mockResolvedValueOnce({ ok: true, removed: false, dirty: true, kept: true, message: "kept", worktreePath: "/worktrees/a" });
+    const app = buildApp(store, dispatcher);
+
+    const res = await app.request(`/api/tasks/${a.id}/resolve-blocked`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "superseded", resolvedBy: "Operator", worktreeDisposition: "keep" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatcher.retainTaskWorktree).toHaveBeenCalledWith(a.id);
+    expect(store.get(a.id)).toMatchObject({
+      column: "done",
+      worktreePath: "/worktrees/a",
+      resolution: { kind: "superseded", resolvedBy: "Operator" },
     });
   });
 

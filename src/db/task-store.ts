@@ -20,6 +20,7 @@ import type {
   TaskPending,
   TaskRunState,
   TaskRunIdentity,
+  TaskResolution,
   TaskStore,
   WorktreeSweepResult,
 } from "../shared";
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS task (
   completion_source TEXT,
   completion_location TEXT,
   completed_by    TEXT,
+  resolution      TEXT,
   base_commit     TEXT,
   dirty_at_dispatch INTEGER NOT NULL DEFAULT 0,
   isolation_at_dispatch TEXT,
@@ -148,6 +150,7 @@ const TASK_ADDED_COLUMNS: Array<[string, string]> = [
   ["completion_source", "TEXT"],
   ["completion_location", "TEXT"],
   ["completed_by", "TEXT"],
+  ["resolution", "TEXT"],
   ["base_commit", "TEXT"],
   ["dirty_at_dispatch", "INTEGER NOT NULL DEFAULT 0"],
   ["isolation_at_dispatch", "TEXT"],
@@ -208,6 +211,7 @@ interface TaskRowRecord {
   completion_source: string | null;
   completion_location: string | null;
   completed_by: string | null;
+  resolution: string | null;
   base_commit: string | null;
   dirty_at_dispatch: number;
   isolation_at_dispatch: string | null;
@@ -271,6 +275,7 @@ function toTask(record: TaskRowRecord): Task {
     completionSource: record.completion_source as CompletionSource | null,
     completionLocation: record.completion_location as TaskCompletionLocation | null,
     completedBy: record.completed_by ?? null,
+    resolution: record.resolution ? (JSON.parse(record.resolution) as TaskResolution) : null,
     baseCommit: record.base_commit ?? null,
     dirtyAtDispatch: record.dirty_at_dispatch === 1,
     isolationAtDispatch: record.isolation_at_dispatch as TaskIsolationMode | null,
@@ -389,8 +394,8 @@ export class SqliteTaskStore implements TaskStore {
         "SELECT MAX(position) AS maxPos FROM task WHERE column = ?",
       ),
       insertTask: this.db.prepare(
-        `INSERT INTO task (id, task_type, task_kind, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, fallback_model, active_model, auto_retries, isolation, auto_run, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
-         VALUES (@id, @type, @taskKind, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @fallbackModel, @activeModel, @autoRetries, @isolation, @autoRun, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
+        `INSERT INTO task (id, task_type, task_kind, harness, title, description, directory, column, position, session_id, harness_session_id, harness_session_name, harness_status, permission_mode, claude_permission_mode, acp_options, harness_cwd, harness_branch, harness_commit, harness_warning, run_state, run_started_at, error, agent, assigned_to, model, fallback_model, active_model, auto_retries, isolation, auto_run, permission_overrides, worktree_path, worktree_branch, base_branch, pending, archived, completion, final_session_output, completion_source, completion_location, completed_by, resolution, base_commit, dirty_at_dispatch, isolation_at_dispatch, base_checkout_snapshot, escape_detected_paths, rebase_conflict_paths, created_at, updated_at)
+         VALUES (@id, @type, @taskKind, @harness, @title, @description, @directory, @column, @position, @sessionId, @harnessSessionId, @harnessSessionName, @harnessStatus, @permissionMode, @claudePermissionMode, @acpOptions, @harnessCwd, @harnessBranch, @harnessCommit, @harnessWarning, @runState, @runStartedAt, @error, @agent, @assignedTo, @model, @fallbackModel, @activeModel, @autoRetries, @isolation, @autoRun, @permissionOverrides, @worktreePath, @worktreeBranch, @baseBranch, @pending, @archived, @completion, @finalSessionOutput, @completionSource, @completionLocation, @completedBy, @resolution, @baseCommit, @dirtyAtDispatch, @isolationAtDispatch, @baseCheckoutSnapshot, @escapeDetectedPaths, @rebaseConflictPaths, @createdAt, @updatedAt)`,
       ),
       updateTaskFields: this.db.prepare(
         `UPDATE task SET
@@ -435,6 +440,7 @@ export class SqliteTaskStore implements TaskStore {
            completion_source = @completionSource,
            completion_location = @completionLocation,
            completed_by = @completedBy,
+           resolution = @resolution,
            base_commit = @baseCommit,
            dirty_at_dispatch = @dirtyAtDispatch,
            isolation_at_dispatch = @isolationAtDispatch,
@@ -600,6 +606,7 @@ export class SqliteTaskStore implements TaskStore {
         completionSource: null,
         completionLocation: null,
         completedBy: null,
+        resolution: null,
         baseCommit: null,
         dirtyAtDispatch: 0,
         isolationAtDispatch: null,
@@ -878,6 +885,7 @@ export class SqliteTaskStore implements TaskStore {
       completionSource: merged.completionSource ?? null,
       completionLocation: merged.completionLocation ?? null,
       completedBy: merged.completedBy ?? null,
+      resolution: merged.resolution ? JSON.stringify(merged.resolution) : null,
       baseCommit: merged.baseCommit ?? null,
       dirtyAtDispatch: merged.dirtyAtDispatch ? 1 : 0,
       isolationAtDispatch: merged.isolationAtDispatch ?? null,

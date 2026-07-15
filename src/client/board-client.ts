@@ -24,6 +24,7 @@ import type {
   PermissionSettings,
   UpdatePermissionSettingsInput,
   RespondPermissionInput,
+  ResolveBlockedTaskBody,
   RosterAgent,
   RosterProvider,
   SessionActivityFrame,
@@ -152,6 +153,8 @@ export interface TaskSummary {
   completedBy?: string | null;
   /** Compact blocked-information projection when the card is blocked. Never contains raw answer text. */
   blocked?: CompactBlockedProjection | null;
+  /** Operator disposition layered over the original run report. */
+  resolution?: Task["resolution"];
   /** Live pending permission asks on this task; empty when none or no broker is live. */
   pendingPermissions: PendingPermissionAsk[];
   /** True when this task has parent dependencies (lineage metadata available). */
@@ -262,6 +265,7 @@ export interface BoardClient {
   answerBlockedTask(id: string, answer: string, context: BlockedAnswerContext): Promise<Task>;
   abortTask(id: string): Promise<Task>;
   moveTask(id: string, column: Column, position: number, completedBy?: string | null, blockedAcceptance?: BlockedAcceptance): Promise<Task[]>;
+  resolveBlockedTask(id: string, input: ResolveBlockedTaskBody): Promise<Task[]>;
   deleteTask(id: string, options?: { forceWorktree?: boolean; keepWorktree?: boolean }): Promise<{ ok: boolean; message?: string }>;
   initGitAndRun(id: string): Promise<Task>;
   syncTask(id: string): Promise<MergeOutcome>;
@@ -419,6 +423,7 @@ export function createBoardClient(options: BoardClientOptions = {}): BoardClient
       if (blockedAcceptance !== undefined) body.blockedAcceptance = blockedAcceptance;
       return postJson<Task[]>(resolved, buildTaskPath.move(id), body);
     },
+    resolveBlockedTask: (id, input) => postJson<Task[]>(resolved, buildTaskPath.resolveBlocked(id), input),
     deleteTask: (id, options) => {
       const params = new URLSearchParams();
       if (options?.forceWorktree) params.set("forceWorktree", "true");
@@ -623,6 +628,7 @@ export function toTaskSummary(task: Task): TaskSummary {
     ...(task.completionLocation !== undefined ? { completionLocation: task.completionLocation } : {}),
     ...(task.completedBy !== undefined ? { completedBy: task.completedBy } : {}),
     ...(blocked !== null ? { blocked } : {}),
+    ...(task.resolution ? { resolution: { ...task.resolution } } : {}),
     pendingPermissions: task.pendingPermissions ?? [],
     ...(hasParentIds ? { hasParentIds: true } : {}),
     ...(hasCompletion ? { hasCompletion: true } : {}),

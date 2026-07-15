@@ -447,6 +447,22 @@ describe("TaskDispatcher — worktree isolation", () => {
     expect(g(repo, ["branch", "--list", `board/${task.id}`])).toContain(`board/${task.id}`);
   });
 
+  it("retainTaskWorktree reports dirty state while keeping the Review worktree attached", async () => {
+    const repo = join(tmp, "repo");
+    makeRepo(repo);
+    const dispatcher = buildDispatcher(makeFakeClient());
+    const task = store.create({ isolation: "worktree", title: "t", description: "d", directory: repo });
+    const ran = await dispatcher.run(task.id);
+    store.update(task.id, { column: "review", runState: "error" });
+    writeFileSync(join(ran.worktreePath!, "partial.txt"), "unfinished\n");
+
+    const outcome = await dispatcher.retainTaskWorktree(task.id);
+
+    expect(outcome).toMatchObject({ ok: true, removed: false, dirty: true, kept: true, worktreePath: ran.worktreePath });
+    expect(store.get(task.id)?.worktreePath).toBe(ran.worktreePath);
+    expect(existsSync(ran.worktreePath!)).toBe(true);
+  });
+
   it("sweepOrphanedWorktrees removes clean unreferenced worktrees and keeps live task worktrees", async () => {
     const repo = join(tmp, "repo");
     makeRepo(repo);

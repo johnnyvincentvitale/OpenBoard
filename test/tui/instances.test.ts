@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { applySuccessfulTaskActionResult, archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, reconcileFailedInstanceRename, renderApp, type TaskDetailTab } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
 import type { BoardDiagnostics, Column, RespondPermissionOutcome, Task } from "../../src/shared";
+import { BoardClientError } from "../../src/client/board-client";
 
 function fakeUi() {
   return {
@@ -1154,7 +1155,7 @@ describe("TUI archive shortcut", () => {
     await archiveTaskShortcut(s, "http://127.0.0.1:4097", "todo-card", vi.fn(), vi.fn(), fetchImpl as any);
 
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(s.status).toBe("Archive: only Done cards");
+    expect(s.status).toBe("Archive: only non-running Review or Done cards");
   });
 });
 
@@ -3719,33 +3720,27 @@ describe("TUI manual task creation", () => {
     expect(moveTask).toHaveBeenCalledWith("blocked-card", "done", 0, "User", { acceptIncomplete: true, blockedReportedAt: 123 });
   });
 
-  it("archive stays unavailable on a blocked Review card until it reaches Done", async () => {
+  it("archives a blocked Review card after explicit confirmation", async () => {
     const archiveTask = vi.fn(async () => undefined);
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [blockedReviewCard("blocked-card")],
       selectedTaskId: "blocked-card",
     });
-
-    await handleKeypress({ name: "a", sequence: "a" } as any, s, actions({ archiveTask }));
-    expect(archiveTask).not.toHaveBeenCalled();
-    expect(s.status).toBe("archive is only available for Done cards");
-
-    // Once accepted into Done (accepted-blocked), archive is unconditional
-    // for any Done card — no separate blocked-aware gate needed there.
-    const doneCard: Task = { ...blockedReviewCard("blocked-card"), column: "done", completedBy: "User" };
-    const doneState = state({
-      viewState: { view: "board", previousView: "launch" },
-      tasks: [doneCard],
-      selectedTaskId: "blocked-card",
+    const a = actions({
+      archiveTask,
+      runAction: vi.fn(async (_label: string, action: (task: Task) => Promise<unknown>) => action(blockedReviewCard("blocked-card"))),
     });
-    await handleKeypress({ name: "a", sequence: "a" } as any, doneState, actions({ archiveTask }));
-    expect(doneState.status).not.toBe("archive is only available for Done cards");
+
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, a);
+    expect(archiveTask).not.toHaveBeenCalled();
+    expect(s.pendingConfirmation).toEqual({ action: "archive", taskId: "blocked-card" });
+    await handleKeypress({ name: "a", sequence: "a" } as any, s, a);
+    expect(archiveTask).toHaveBeenCalledWith("blocked-card");
   });
 
   it("deletes Error cards from the board shortcut", async () => {
     const deleteTask = vi.fn(async () => undefined);
-    const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [{ ...task("error-card", "in_progress"), runState: "error" }],
@@ -3754,28 +3749,19 @@ describe("TUI manual task creation", () => {
 
     await handleKeypress({ name: "d", sequence: "d" } as any, s, actions({
       client: { deleteTask },
-      runAction,
     }));
 
     expect(deleteTask).not.toHaveBeenCalled();
-    expect(runAction).not.toHaveBeenCalled();
     expect(s.pendingConfirmation).toEqual({ action: "delete", taskId: "error-card" });
 
     await handleKeypress({ name: "d", sequence: "d" } as any, s, actions({
       client: { deleteTask },
-      runAction,
     }));
-
-    expect(runAction).toHaveBeenCalledTimes(1);
-    expect(runAction.mock.calls[0]?.[0]).toBe("delete");
-    const callback = runAction.mock.calls[0]?.[1] as (t: Task) => Promise<unknown>;
-    await callback({ ...task("error-card", "in_progress"), runState: "error" });
     expect(deleteTask).toHaveBeenCalledWith("error-card");
   });
 
   it("delete confirmation asks the server to remove a selected card worktree safely", async () => {
     const deleteTask = vi.fn(async () => undefined);
-    const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [{ ...task("review-card", "review"), worktreePath: "/repo/.wt/review-card" }],
@@ -3784,21 +3770,15 @@ describe("TUI manual task creation", () => {
 
     await handleKeypress({ name: "d", sequence: "d" } as any, s, actions({
       client: { deleteTask },
-      runAction,
     }));
     await handleKeypress({ name: "d", sequence: "d" } as any, s, actions({
       client: { deleteTask },
-      runAction,
     }));
-
-    const callback = runAction.mock.calls[0]?.[1] as (t: Task) => Promise<unknown>;
-    await callback({ ...task("review-card", "review"), worktreePath: "/repo/.wt/review-card" });
     expect(deleteTask).toHaveBeenCalledWith("review-card");
   });
 
   it("D discards Review card worktrees from the board shortcut", async () => {
     const discardWorktree = vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" }));
-    const runAction = vi.fn(async (_label: string, _action: (t: Task) => Promise<unknown>) => {});
     const s = state({
       viewState: { view: "board", previousView: "launch" },
       tasks: [{ ...task("review-card", "review"), worktreePath: "/repo/.wt/review-card" }],
@@ -3807,20 +3787,59 @@ describe("TUI manual task creation", () => {
 
     await handleKeypress({ name: "D", sequence: "D" } as any, s, actions({
       client: { discardWorktree },
-      runAction,
     }));
 
     expect(s.pendingConfirmation).toEqual({ action: "discard-worktree", taskId: "review-card" });
 
     await handleKeypress({ name: "D", sequence: "D" } as any, s, actions({
       client: { discardWorktree },
-      runAction,
     }));
-
-    expect(runAction.mock.calls[0]?.[0]).toBe("discard worktree");
-    const callback = runAction.mock.calls[0]?.[1] as (t: Task) => Promise<unknown>;
-    await callback({ ...task("review-card", "review"), worktreePath: "/repo/.wt/review-card" });
     expect(discardWorktree).toHaveBeenCalledWith("review-card");
+  });
+
+  it("resolves a blocked card as completed elsewhere and discards its original worktree", async () => {
+    const blocked = { ...blockedReviewCard("blocked-card"), worktreePath: "/repo/.wt/blocked-card" };
+    const resolveBlockedTask = vi.fn(async () => [{
+      ...blocked,
+      column: "done" as const,
+      completedBy: "User",
+      resolution: { kind: "completed_elsewhere" as const, resolvedBy: "User", resolvedAt: 10 },
+    }]);
+    const s = state({
+      viewState: { view: "board", previousView: "launch" },
+      tasks: [blocked],
+      selectedTaskId: blocked.id,
+    });
+    const a = actions({ client: { resolveBlockedTask } });
+
+    await handleKeypress({ name: "s", sequence: "s" } as any, s, a);
+    expect(textOf(renderApp(fakeUi(), s))).toContain("Completed elsewhere · discard original worktree");
+    await handleKeypress({ name: "1", sequence: "1" } as any, s, a);
+
+    expect(resolveBlockedTask).toHaveBeenCalledWith(blocked.id, {
+      kind: "completed_elsewhere",
+      resolvedBy: "User",
+      worktreeDisposition: "discard",
+    });
+    expect(s.blockedResolution).toBeUndefined();
+  });
+
+  it("offers force-remove or keep after dirty delete is rejected", async () => {
+    const deleteTask = vi.fn()
+      .mockRejectedValueOnce(new BoardClientError(409, "worktree has uncommitted changes"))
+      .mockResolvedValueOnce({ ok: true });
+    const review = { ...task("review-card", "review"), worktreePath: "/repo/.wt/review-card" };
+    const s = state({ viewState: { view: "board", previousView: "launch" }, tasks: [review], selectedTaskId: review.id });
+    const a = actions({ client: { deleteTask } });
+
+    await handleKeypress({ name: "d", sequence: "d" } as any, s, a);
+    await handleKeypress({ name: "d", sequence: "d" } as any, s, a);
+    expect(s.dirtyCleanup).toEqual({ taskId: review.id, action: "delete" });
+    expect(textOf(renderApp(fakeUi(), s))).toContain("k delete card but keep worktree for salvage");
+    await handleKeypress({ name: "k", sequence: "k" } as any, s, a);
+
+    expect(deleteTask).toHaveBeenLastCalledWith(review.id, { keepWorktree: true });
+    expect(s.dirtyCleanup).toBeUndefined();
   });
 
   it("g requires confirmation before init-git mutates and runs", async () => {

@@ -155,6 +155,7 @@ describe("GlobalArchiveStore", () => {
           description: "spot-check fields",
           directory: "/repo",
           completedBy: "User",
+          resolution: { kind: "completed_elsewhere", resolvedBy: "User", resolvedAt: 77 },
           column: "done",
           position: 0,
           runState: "idle",
@@ -183,6 +184,7 @@ describe("GlobalArchiveStore", () => {
       expect(row.final_session_output).toBe("final output snapshot");
       expect(row.comments).toContain("archive this note");
       expect(row.completed_by).toBe("User");
+      expect(JSON.parse(row.resolution!)).toEqual({ kind: "completed_elsewhere", resolvedBy: "User", resolvedAt: 77 });
       expect(JSON.parse(row.diff_snapshot!)).toMatchObject({ kind: "diff", files: [{ file: "src/a.ts" }] });
       expect(row.archived_at).toBe(99);
       expect(row.task_id).toBe("task_columns");
@@ -232,6 +234,7 @@ describe("GlobalArchiveStore", () => {
       expect(columns.has("final_session_output")).toBe(true);
       expect(columns.has("comments")).toBe(true);
       expect(columns.has("completed_by")).toBe(true);
+      expect(columns.has("resolution")).toBe(true);
       expect(columns.has("diff_snapshot")).toBe(true);
     } finally {
       store.close();

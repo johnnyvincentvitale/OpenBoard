@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS global_archive (
   completion_source     TEXT,
   comments              TEXT,
   completed_by          TEXT,
+  resolution            TEXT,
   diff_snapshot         TEXT,
   archived_at           INTEGER NOT NULL,
   task_created_at       INTEGER NOT NULL,
@@ -64,6 +65,7 @@ const GLOBAL_ARCHIVE_COLUMNS: Array<[name: string, definition: string]> = [
   ["final_session_output", "TEXT"],
   ["comments", "TEXT"],
   ["completed_by", "TEXT"],
+  ["resolution", "TEXT"],
   ["diff_snapshot", "TEXT"],
 ];
 
@@ -110,6 +112,7 @@ export interface GlobalArchiveRecord {
   completion_source: string | null;
   comments: string | null;
   completed_by: string | null;
+  resolution: string | null;
   diff_snapshot: string | null;
   archived_at: number;
   task_created_at: number;
@@ -176,7 +179,7 @@ export class GlobalArchiveStore {
            agent, assigned_to, model, isolation,
            column_name, run_state, run_started_at, error,
            session_id, worktree_path, worktree_branch, base_branch,
-           completion, final_session_output, completion_source, comments, completed_by, diff_snapshot,
+           completion, final_session_output, completion_source, comments, completed_by, resolution, diff_snapshot,
            archived_at, task_created_at, task_updated_at, mirrored_at
          ) VALUES (
            @sourceInstanceName, @sourcePort, @sourceWorkspace, @sourceDbPath,
@@ -184,7 +187,7 @@ export class GlobalArchiveStore {
            @agent, @assignedTo, @model, @isolation,
            @columnName, @runState, @runStartedAt, @error,
            @sessionId, @worktreePath, @worktreeBranch, @baseBranch,
-           @completion, @finalSessionOutput, @completionSource, @comments, @completedBy, @diffSnapshot,
+           @completion, @finalSessionOutput, @completionSource, @comments, @completedBy, @resolution, @diffSnapshot,
            @archivedAt, @taskCreatedAt, @taskUpdatedAt, @mirroredAt
          )`,
       ),
@@ -242,6 +245,7 @@ export class GlobalArchiveStore {
       completionSource: task.completionSource ?? null,
       comments: comments.length ? JSON.stringify(comments) : null,
       completedBy: task.completedBy ?? null,
+      resolution: task.resolution ? JSON.stringify(task.resolution) : null,
       diffSnapshot: diffSnapshot ? JSON.stringify(diffSnapshot) : null,
       archivedAt,
       taskCreatedAt: task.createdAt,

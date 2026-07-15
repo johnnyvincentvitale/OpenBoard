@@ -52,6 +52,7 @@ function makeDispatcher(store: SqliteTaskStore): Dispatcher {
       return { ok: true };
     }),
     discardWorktree: vi.fn(async () => ({ ok: true, removed: true, dirty: false, kept: false, message: "discarded" })),
+    retainTaskWorktree: vi.fn(async () => ({ ok: true, removed: false, dirty: true, kept: true, message: "kept" })),
     sweepOrphanedWorktrees: vi.fn(async () => []),
     resolveOrphanWorktree: vi.fn(async (worktreePath) => ({ ok: true, removed: true, dirty: false, kept: false, message: "resolved", worktreePath })),
     getOrphanWorktreeDiff: vi.fn(async (_worktreePath: string) => ({ kind: "diff" as const, files: [], capped: false })),

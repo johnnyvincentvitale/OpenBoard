@@ -104,11 +104,13 @@ describe("SqliteTaskStore — isolation fields + settings", () => {
         reportedAt: 2,
       },
       completionSource: "reported",
+      resolution: { kind: "superseded", resolvedBy: "User", resolvedAt: 3 },
     });
     expect(updated?.isolation).toBe("worktree");
     expect(updated?.worktreeBranch).toBe("board/t1");
     expect(updated?.archived).toBe(true);
     expect(updated?.completion?.outcome).toBe("blocked");
+    expect(updated?.resolution).toEqual({ kind: "superseded", resolvedBy: "User", resolvedAt: 3 });
 
     const t2 = store.create({ title: "new", description: "desc", directory: "/repo" });
     store.addLink("t1", t2.id);
@@ -127,6 +129,7 @@ describe("SqliteTaskStore — isolation fields + settings", () => {
     expect(taskColumns.has("archived")).toBe(true);
     expect(taskColumns.has("completion")).toBe(true);
     expect(taskColumns.has("completion_source")).toBe(true);
+    expect(taskColumns.has("resolution")).toBe(true);
 
     const taskLinks = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_links'")

@@ -266,6 +266,7 @@ export function buildConfirmationCopy(
       body = [
         `Move "${task.title}" to the global archive.`,
         "Archived cards are hidden from the active board.",
+        "Any task worktree is preserved; discard it first if it is no longer needed.",
       ];
       break;
     case "delete":

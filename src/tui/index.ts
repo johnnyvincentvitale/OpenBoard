@@ -491,6 +491,7 @@ interface GlobalArchiveRecord {
   completion_source: string | null;
   comments?: string | null;
   completed_by?: string | null;
+  resolution?: string | null;
   diff_snapshot?: string | null;
   archived_at: number;
   task_created_at: number;
@@ -639,6 +640,15 @@ type ReviewCommitStatusState =
   | { taskId: string; taskUpdatedAt: number; status: "success"; response: WorktreeCommitStatus }
   | { taskId: string; taskUpdatedAt: number; status: "error" };
 
+interface BlockedResolutionState {
+  taskId: string;
+}
+
+interface DirtyCleanupState {
+  taskId: string;
+  action: "delete" | "discard";
+}
+
 /** In-progress compose state for a new top-level comment or a reply. */
 interface CommentDraftState {
   taskId: string;
@@ -697,6 +707,8 @@ interface TuiState {
   detailTab?: TaskDetailTab;
   moveTargetColumn?: Column;
   pendingConfirmation?: PendingConfirmation;
+  blockedResolution?: BlockedResolutionState;
+  dirtyCleanup?: DirtyCleanupState;
   workspaceGateInput: string;
   workspaceGateError?: string;
   workspaceGateSubmitting: boolean;
@@ -1579,8 +1591,8 @@ export async function archiveTaskShortcut(
     return;
   }
 
-  if (task.column !== "done") {
-    state.status = "Archive: only Done cards";
+  if ((task.column !== "review" && task.column !== "done") || task.runState === "running") {
+    state.status = "Archive: only non-running Review or Done cards";
     state.error = undefined;
     render();
     return;
@@ -2208,11 +2220,13 @@ function renderArchiveDetail(ui: OpenTui, state: TuiState, record: GlobalArchive
 function archiveDetailRows(record: GlobalArchiveRecord, model: ModelRef | null): MetaRow[] {
   const taskType = record.task_type === "manual" ? "manual" : "agent";
   const state = archiveTaskStatus(record);
+  const resolution = parseTaskResolution(record.resolution);
   return [
     { label: "STATE", value: `${state.glyph} ${state.label}`, color: COLORS.text },
     { label: "INSTANCE", value: `${record.source_instance_name ?? "unknown"}:${record.source_port}`, color: COLORS.text },
     { label: "TASK", value: taskKindLabel(record.task_kind), color: COLORS.text },
     ...(record.completed_by ? [{ label: "ACCEPTED BY", value: record.completed_by, color: COLORS.text }] : []),
+    ...(resolution ? [{ label: "RESOLUTION", value: resolution.kind.replaceAll("_", " ").toUpperCase(), color: COLORS.text }] : []),
     { label: "LANE", value: TUI_COLUMN_LABELS[archiveColumn(record.column_name)], color: COLORS.text },
     ...(taskType === "manual"
       ? [{ label: "ASSIGNED TO", value: record.assigned_to ?? "unassigned", color: COLORS.text }]
@@ -2461,6 +2475,55 @@ function archiveFilterLabel(archive: ArchiveState | undefined): string {
   if (!archive) return "";
   const filters = [archive.instanceFilter ? `instance:${archive.instanceFilter}` : undefined, archive.laneFilter ? `lane:${archive.laneFilter}` : undefined].filter(Boolean);
   return filters.length ? filters.join(" · ") : "all archived tasks";
+}
+
+function renderBlockedResolutionDetail(ui: OpenTui, task: Task) {
+  const choices = task.worktreePath
+    ? [
+        "1. Completed elsewhere · discard original worktree",
+        "2. Completed elsewhere · keep original worktree",
+        "3. Superseded · discard original worktree",
+        "4. Superseded · keep original worktree",
+      ]
+    : [
+        "1. Completed elsewhere",
+        "2. Superseded",
+      ];
+  return ui.Box(
+    {
+      flexGrow: 1,
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
+    },
+    ui.Text({ content: "Resolve Blocked Card", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1 }),
+    ui.Text({ content: task.title, fg: COLORS.bright, height: 2, wrapMode: "word" }),
+    ui.Text({ content: "The original blocked report remains attached as evidence.", fg: COLORS.muted, height: 2, wrapMode: "word" }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ...choices.map((choice) => ui.Text({ content: choice, fg: COLORS.text, height: 1, truncate: true })),
+    ui.Box({ flexGrow: 1 }),
+    ui.Text({ content: "Press a number to resolve · esc cancel", fg: COLORS.accentBright, height: 1, truncate: true }),
+  );
+}
+
+function renderDirtyCleanupDetail(ui: OpenTui, task: Task, action: "delete" | "discard") {
+  const deleting = action === "delete";
+  return ui.Box(
+    {
+      flexGrow: 1,
+      flexDirection: "column",
+      gap: 1,
+      ...boxBg(COLORS.panel),
+    },
+    ui.Text({ content: "Dirty Worktree", fg: COLORS.text, attributes: ui.TextAttributes.BOLD, height: 1 }),
+    ui.Text({ content: task.title, fg: COLORS.bright, height: 2, wrapMode: "word" }),
+    ui.Text({ content: "The worktree contains uncommitted changes.", fg: COLORS.text, height: 1 }),
+    ui.Text({ content: HAIRLINE, fg: COLORS.hairline, height: 1, truncate: true }),
+    ui.Text({ content: deleting ? "d remove worktree and delete card" : "D force-remove worktree; keep card and branch", fg: COLORS.text, height: 1 }),
+    ...(deleting ? [ui.Text({ content: "k delete card but keep worktree for salvage", fg: COLORS.text, height: 1 })] : []),
+    ui.Box({ flexGrow: 1 }),
+    ui.Text({ content: "esc cancel", fg: COLORS.accentBright, height: 1 }),
+  );
 }
 
 
@@ -3332,6 +3395,8 @@ function selectedColumnScrollId(state: TuiState, task: Task | undefined): string
   if (state.instanceSwitcher) return "selected-instance-switcher";
   if (state.newTask) return wizardScrollId(state.newTask);
   if (state.blockedAnswer) return `selected-answer-${state.blockedAnswer.taskId}`;
+  if (state.blockedResolution) return `selected-resolution-${state.blockedResolution.taskId}`;
+  if (state.dirtyCleanup) return `selected-cleanup-${state.dirtyCleanup.taskId}`;
   if (task) return `selected-card-${task.id}-${state.detailTab ?? "summary"}`;
   return "selected-empty";
 }
@@ -3394,6 +3459,14 @@ function selectedDetailRows(state: TuiState, task: Task): MetaRow[] {
 
 function renderTaskDetails(ui: OpenTui, state: TuiState, task: Task) {
   const rows = selectedDetailRows(state, task);
+  if (state.blockedResolution?.taskId === task.id) {
+    return renderBlockedResolutionDetail(ui, task);
+  }
+
+  if (state.dirtyCleanup?.taskId === task.id) {
+    return renderDirtyCleanupDetail(ui, task, state.dirtyCleanup.action);
+  }
+
   if (state.moveTargetColumn) {
     return renderInlineMoveDetail(ui, state, task);
   }
@@ -4240,6 +4313,7 @@ type SelectedCardAction =
   | "view-diff"
   | "integrate"
   | "discard-worktree"
+  | "resolve"
   | "done"
   | "archive"
   | "delete"
@@ -4262,6 +4336,7 @@ const SELECTED_CARD_SHORTCUTS: Record<SelectedCardAction, SelectedCardShortcut> 
   "view-diff": { action: "view-diff", key: "v", label: "diff" },
   integrate: { action: "integrate", key: "i", label: "integrate" },
   "discard-worktree": { action: "discard-worktree", key: "D", label: "discard" },
+  resolve: { action: "resolve", key: "s", label: "resolve" },
   done: { action: "done", key: "x", label: "done" },
   archive: { action: "archive", key: "a", label: "archive" },
   delete: { action: "delete", key: "d", label: "delete" },
@@ -4285,7 +4360,7 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
   if (dominantTaskState(task) === "blocked") {
     const actions: SelectedCardAction[] = ["view-diff", blockedTaskNeedsAnswer(task) ? "answer" : "retry"];
     if (task.worktreePath) actions.push("discard-worktree");
-    actions.push("done", "delete", "move", "details");
+    actions.push("resolve", "done", "archive", "delete", "move", "details");
     return shortcutList(...actions);
   }
 
@@ -4308,7 +4383,7 @@ function selectedCardShortcuts(task: Task): SelectedCardShortcut[] {
     if (task.pending === "rebase-conflict") actions.push("retry");
     actions.push("integrate");
     if (task.worktreePath) actions.push("discard-worktree");
-    actions.push("done", "delete", "move", "details");
+    actions.push("done", "archive", "delete", "move", "details");
     return shortcutList(...actions);
   }
 
@@ -4358,10 +4433,12 @@ function selectedCardActionUnavailableMessage(action: SelectedCardAction, task: 
       return "integrate is only available for Review cards";
     case "discard-worktree":
       return "discard is only available for Review cards with worktrees";
+    case "resolve":
+      return "resolve is only available for blocked Review cards";
     case "done":
       return "done is only available for Review cards";
     case "archive":
-      return "archive is only available for Done cards";
+      return "archive is only available for Review or Done cards";
     case "delete":
       return "delete is only available for To Do, Error, Review, or Done cards";
     case "move":
@@ -4545,7 +4622,11 @@ function renderDetail(ui: OpenTui, label: string, value: string, valueColor: Tui
 function renderCommandStrip(ui: OpenTui, state: TuiState) {
   const showBoardSummary = state.viewState.view !== "board";
   const visibleChatCodeHint = visibleFollowChatCodeBlocks(state).length ? " · tab code · c copy" : "";
-  const boardKeyHints = state.detailTab
+  const boardKeyHints = state.blockedResolution
+    ? "1-4 choose resolution · esc cancel"
+    : state.dirtyCleanup
+    ? state.dirtyCleanup.action === "delete" ? "d remove+delete · k keep+delete · esc cancel" : "D force discard · esc cancel"
+    : state.detailTab
     ? state.overlay === "help"
       ? "↑/↓ scroll help · mouse wheel · ?/esc/b close"
       : state.detailTab === "comments"
@@ -5647,6 +5728,16 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     return;
   }
 
+  if (state.blockedResolution) {
+    await handleBlockedResolutionKey(key, state, actions);
+    return;
+  }
+
+  if (state.dirtyCleanup) {
+    await handleDirtyCleanupKey(key, state, actions);
+    return;
+  }
+
   if (state.moveTargetColumn) {
     await handleInlineMoveKey(key, state, actions);
     return;
@@ -5829,23 +5920,15 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       return;
     case "d":
       if (!canUseSelectedCardAction(state, actions, "delete")) return;
-      await handleConfirmableCardAction(
-        "delete",
-        state,
-        actions,
-        (task) => actions.client.deleteTask(task.id),
-        "delete",
-      );
+      await handleDeleteRequested(state, actions);
       return;
     case "D":
       if (!canUseSelectedCardAction(state, actions, "discard-worktree")) return;
-      await handleConfirmableCardAction(
-        "discard-worktree",
-        state,
-        actions,
-        (task) => actions.client.discardWorktree(task.id),
-        "discard worktree",
-      );
+      await handleDiscardRequested(state, actions);
+      return;
+    case "s":
+      if (!canUseSelectedCardAction(state, actions, "resolve")) return;
+      openBlockedResolution(state, actions);
       return;
     case "v":
       await openViewDiffForSelection(state, actions);
@@ -6321,6 +6404,168 @@ async function confirmMoveToDone(state: TuiState, actions: TuiActions): Promise<
     (task) => moveTaskToDone(state, actions, task),
     "move done",
   );
+}
+
+function openBlockedResolution(state: TuiState, actions: Pick<TuiActions, "render">): void {
+  const task = selectedTask(state);
+  if (!task || dominantTaskState(task) !== "blocked") {
+    state.status = "resolve is only available for blocked Review cards";
+    actions.render();
+    return;
+  }
+  clearPendingConfirmation(state);
+  closeInlineDetail(state);
+  state.moveTargetColumn = undefined;
+  state.blockedResolution = { taskId: task.id };
+  state.error = undefined;
+  state.status = "choose blocked-card resolution";
+  actions.render();
+}
+
+async function handleBlockedResolutionKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const prompt = state.blockedResolution;
+  const task = prompt ? state.tasks.find((item) => item.id === prompt.taskId) : undefined;
+  if (!prompt || !task || dominantTaskState(task) !== "blocked") {
+    state.blockedResolution = undefined;
+    actions.render();
+    return;
+  }
+  if (isEscapeKey(key)) {
+    state.blockedResolution = undefined;
+    state.status = "resolution cancelled";
+    actions.render();
+    return;
+  }
+
+  const choice = key.sequence;
+  const input = task.worktreePath
+    ? choice === "1"
+      ? { kind: "completed_elsewhere" as const, resolvedBy: "User", worktreeDisposition: "discard" as const }
+      : choice === "2"
+        ? { kind: "completed_elsewhere" as const, resolvedBy: "User", worktreeDisposition: "keep" as const }
+        : choice === "3"
+          ? { kind: "superseded" as const, resolvedBy: "User", worktreeDisposition: "discard" as const }
+          : choice === "4"
+            ? { kind: "superseded" as const, resolvedBy: "User", worktreeDisposition: "keep" as const }
+            : undefined
+    : choice === "1"
+      ? { kind: "completed_elsewhere" as const, resolvedBy: "User" }
+      : choice === "2"
+        ? { kind: "superseded" as const, resolvedBy: "User" }
+        : undefined;
+  if (!input) return;
+
+  state.status = `resolving ${task.title}...`;
+  state.error = undefined;
+  actions.render();
+  try {
+    const tasks = await actions.client.resolveBlockedTask(task.id, input);
+    state.blockedResolution = undefined;
+    applySuccessfulTaskActionResult(state, tasks, task.id);
+    state.status = input.kind === "completed_elsewhere" ? "resolved: completed elsewhere" : "resolved: superseded";
+    await actions.refresh(true);
+  } catch (error) {
+    state.error = errorMessage(error);
+    state.status = "resolution failed";
+  }
+  actions.render();
+}
+
+async function handleDeleteRequested(state: TuiState, actions: TuiActions): Promise<void> {
+  const task = selectedTask(state);
+  if (!task) return;
+  const result = requestConfirmation(state, "delete", task.id);
+  state.pendingConfirmation = result.state.pendingConfirmation;
+  closeInlineDetail(state);
+  state.error = undefined;
+  if (!result.execute) {
+    state.status = confirmationStatus("delete", task);
+    actions.render();
+    return;
+  }
+  clearPendingConfirmation(state);
+  try {
+    await actions.client.deleteTask(task.id);
+    state.status = `delete complete: ${task.title}`;
+    await actions.refresh(true);
+  } catch (error) {
+    if (error instanceof BoardClientError && error.status === 409 && task.worktreePath) {
+      state.dirtyCleanup = { taskId: task.id, action: "delete" };
+      state.status = "dirty worktree requires an explicit delete choice";
+      state.error = undefined;
+    } else {
+      state.error = errorMessage(error);
+      state.status = "delete failed";
+    }
+  }
+  actions.render();
+}
+
+async function handleDiscardRequested(state: TuiState, actions: TuiActions): Promise<void> {
+  const task = selectedTask(state);
+  if (!task) return;
+  const result = requestConfirmation(state, "discard-worktree", task.id);
+  state.pendingConfirmation = result.state.pendingConfirmation;
+  closeInlineDetail(state);
+  state.error = undefined;
+  if (!result.execute) {
+    state.status = confirmationStatus("discard-worktree", task);
+    actions.render();
+    return;
+  }
+  clearPendingConfirmation(state);
+  try {
+    await actions.client.discardWorktree(task.id);
+    state.status = `discard worktree complete: ${task.title}`;
+    await actions.refresh(true);
+  } catch (error) {
+    if (error instanceof BoardClientError && error.status === 409) {
+      state.dirtyCleanup = { taskId: task.id, action: "discard" };
+      state.status = "dirty worktree requires explicit force removal";
+      state.error = undefined;
+    } else {
+      state.error = errorMessage(error);
+      state.status = "discard worktree failed";
+    }
+  }
+  actions.render();
+}
+
+async function handleDirtyCleanupKey(key: KeyEvent, state: TuiState, actions: TuiActions): Promise<void> {
+  const cleanup = state.dirtyCleanup;
+  const task = cleanup ? state.tasks.find((item) => item.id === cleanup.taskId) : undefined;
+  if (!cleanup || !task) {
+    state.dirtyCleanup = undefined;
+    actions.render();
+    return;
+  }
+  if (isEscapeKey(key)) {
+    state.dirtyCleanup = undefined;
+    state.status = "cleanup cancelled";
+    actions.render();
+    return;
+  }
+
+  const remove = cleanup.action === "delete" ? key.sequence === "d" : key.sequence === "D";
+  const keep = cleanup.action === "delete" && key.sequence === "k";
+  if (!remove && !keep) return;
+  state.status = remove ? "removing dirty worktree..." : "keeping worktree and deleting card...";
+  state.error = undefined;
+  actions.render();
+  try {
+    if (cleanup.action === "delete") {
+      await actions.client.deleteTask(task.id, remove ? { forceWorktree: true } : { keepWorktree: true });
+    } else {
+      await actions.client.discardWorktree(task.id, { force: true });
+    }
+    state.dirtyCleanup = undefined;
+    state.status = cleanup.action === "delete" ? "card deleted" : "dirty worktree discarded";
+    await actions.refresh(true);
+  } catch (error) {
+    state.error = errorMessage(error);
+    state.status = `${cleanup.action} failed`;
+  }
+  actions.render();
 }
 
 async function handleIntegrateRequested(state: TuiState, actions: TuiActions): Promise<void> {
@@ -9331,6 +9576,18 @@ function parseCompletion(json: string | null): CompletionReport | null {
       residualRisk: typeof value.residualRisk === "string" ? value.residualRisk : "none",
       reportedAt: typeof value.reportedAt === "number" ? value.reportedAt : 0,
     };
+  } catch {
+    return null;
+  }
+}
+
+function parseTaskResolution(json: string | null | undefined): Task["resolution"] {
+  if (!json) return null;
+  try {
+    const value = JSON.parse(json) as Partial<NonNullable<Task["resolution"]>>;
+    if (value.kind !== "accepted_incomplete" && value.kind !== "completed_elsewhere" && value.kind !== "superseded") return null;
+    if (typeof value.resolvedBy !== "string" || typeof value.resolvedAt !== "number") return null;
+    return { kind: value.kind, resolvedBy: value.resolvedBy, resolvedAt: value.resolvedAt };
   } catch {
     return null;
   }
