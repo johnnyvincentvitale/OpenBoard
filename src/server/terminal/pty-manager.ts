@@ -287,7 +287,7 @@ export class PtyManager {
     return rest;
   }
 
-  beginAttach(id: string, token: string): TerminalReservationClaim {
+  beginAttach(id: string): TerminalReservationClaim {
     const reservation = this.reservations.get(id);
     if (!reservation) {
       throw new TerminalManagerError(404, `Terminal reservation not found: ${id}`);

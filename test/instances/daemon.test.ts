@@ -14,21 +14,18 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
-  createInstanceRegistry,
   createInstanceDaemon,
   buildAdapterEnv,
   InstanceError,
   InstanceSpawnError,
   instanceDataDir,
   type InstanceDefinition,
-  type InstanceRegistry,
   type InstanceDaemon,
 } from "../../src/instances";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 let homeDir: string;
-let registry: InstanceRegistry;
 let daemon: InstanceDaemon;
 
 function makeDef(
@@ -165,7 +162,7 @@ function findFreePort(): Promise<number> {
 function startStubAdapter(
   pidFilePath?: string,
   customPort?: number,
-): Promise<{ port: number; pid: number; close: () => Promise<void>; failHealth?: () => void }> {
+): Promise<{ port: number; pid: number; close: () => Promise<void> }> {
   return new Promise(async (resolve, reject) => {
     const port = customPort ?? (await findFreePort());
     const server = createServer((req, res) => {
@@ -177,11 +174,6 @@ function startStubAdapter(
         res.end();
       }
     });
-
-    let healthResponds = true;
-    const failHealth = () => {
-      healthResponds = false;
-    };
 
     server.listen(port, "127.0.0.1", () => {
       const pid = process.pid; // Use current process PID for tracking
@@ -196,7 +188,6 @@ function startStubAdapter(
           new Promise<void>((res) => {
             server.close(() => res());
           }),
-        failHealth,
       });
     });
 
@@ -206,8 +197,7 @@ function startStubAdapter(
 
 beforeEach(() => {
   homeDir = mkdtempSync(join(tmpdir(), "openboard-daemon-"));
-  registry = createInstanceRegistry(homeDir);
-  daemon = createInstanceDaemon(homeDir, registry);
+  daemon = createInstanceDaemon(homeDir);
 });
 
 afterEach(() => {
@@ -407,7 +397,7 @@ describe("daemon lifecycle with stub adapter", () => {
       homeDir,
       dirs.dataDir + "/db.sqlite",
     );
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: healthyStubScript() });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: healthyStubScript() });
 
     try {
       const started = await stubDaemon.start(defReal);
@@ -436,7 +426,7 @@ describe("daemon lifecycle with stub adapter", () => {
     const dirs = instanceDataDir(homeDir, "test");
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
     const closedFds: number[] = [];
-    const stubDaemon = createInstanceDaemon(homeDir, registry, {
+    const stubDaemon = createInstanceDaemon(homeDir, {
       serveScript: healthyStubScript(),
       closeFd: (fd) => {
         closedFds.push(fd);
@@ -457,7 +447,7 @@ describe("daemon lifecycle with stub adapter", () => {
     const port = await findFreePort();
     const dirs = instanceDataDir(homeDir, "test");
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: healthyStubScript() });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: healthyStubScript() });
 
     try {
       const results = await Promise.allSettled([stubDaemon.start(defReal), stubDaemon.start(defReal)]);
@@ -478,7 +468,7 @@ describe("daemon lifecycle with stub adapter", () => {
     const dirs = instanceDataDir(homeDir, "test");
     const lockPath = writeStartLock(dirs.dataDir, deadPid());
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: healthyStubScript() });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: healthyStubScript() });
 
     try {
       const started = await stubDaemon.start(defReal);
@@ -496,7 +486,7 @@ describe("daemon lifecycle with stub adapter", () => {
     const lockPath = writeStartLock(dirs.dataDir, process.pid);
     const before = readFileSync(lockPath, "utf-8");
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: healthyStubScript() });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: healthyStubScript() });
 
     await expect(stubDaemon.start(defReal)).rejects.toBeInstanceOf(InstanceError);
     await expect(stubDaemon.start(defReal)).rejects.toThrow(/already starting/);
@@ -509,7 +499,7 @@ describe("daemon lifecycle with stub adapter", () => {
     const dirs = instanceDataDir(homeDir, "test");
     const lockPath = writeStartLock(dirs.dataDir, process.pid, Date.now() - 31_000);
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: healthyStubScript() });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: healthyStubScript() });
 
     try {
       const started = await stubDaemon.start(defReal);
@@ -526,7 +516,7 @@ describe("daemon lifecycle with stub adapter", () => {
     mkdirSync(dirs.dataDir, { recursive: true });
     writeFileSync(dirs.pidFile, String(process.pid), "utf-8");
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: healthyStubScript() });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: healthyStubScript() });
 
     await expect(stubDaemon.start(defReal)).rejects.toBeInstanceOf(InstanceError);
     expect(readFileSync(dirs.pidFile, "utf-8").trim()).toBe(String(process.pid));
@@ -537,7 +527,7 @@ describe("daemon lifecycle with stub adapter", () => {
     const port = await findFreePort();
     const dirs = instanceDataDir(homeDir, "test");
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: earlyExitStubScript() });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: earlyExitStubScript() });
 
     try {
       await stubDaemon.start(defReal);
@@ -555,7 +545,7 @@ describe("daemon lifecycle with stub adapter", () => {
     const dirs = instanceDataDir(homeDir, "test");
     const grandchildPidFile = join(homeDir, "grandchild.pid");
     const defReal = makeDef("test", port, homeDir, dirs.dataDir + "/db.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: groupStubScript(grandchildPidFile) });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: groupStubScript(grandchildPidFile) });
 
     const started = await stubDaemon.start(defReal);
     const childPid = started.pid;
@@ -577,7 +567,7 @@ describe("spawn failure", () => {
   it("start() asserts exactly one failure outcome for a missing child script", async () => {
     const port = await findFreePort();
     const def = makeDef("test", port, homeDir, "board.sqlite");
-    const stubDaemon = createInstanceDaemon(homeDir, registry, { serveScript: join(homeDir, "missing.mjs") });
+    const stubDaemon = createInstanceDaemon(homeDir, { serveScript: join(homeDir, "missing.mjs") });
 
     await expect(stubDaemon.start(def)).rejects.toBeInstanceOf(InstanceSpawnError);
     try {

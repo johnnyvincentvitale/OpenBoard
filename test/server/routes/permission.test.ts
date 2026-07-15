@@ -3,8 +3,9 @@ import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { registerPermissionRoutes } from "../../../src/server/routes/permission";
 import type { Dispatcher, Task } from "../../../src/shared";
+import { respondWithAppError } from "../../../src/server/app";
 
-function makeFakeDispatcher(askId: string, outcome: { ok: true; askId: string; decision: "allow_once" | "deny" } | { ok: false; askId: string; conflict: "not-found" | "stale" | "already-resolved" | "unsupported-action" | "reply-failed"; error?: string }) {
+function makeFakeDispatcher(_askId: string, outcome: { ok: true; askId: string; decision: "allow_once" | "deny" } | { ok: false; askId: string; conflict: "not-found" | "stale" | "already-resolved" | "unsupported-action" | "reply-failed"; error?: string }) {
   return {
     listPendingPermissions: vi.fn(() => []),
     respondPermission: vi.fn(async () => outcome),
@@ -19,6 +20,7 @@ function makeTask(store: SqliteTaskStore): Task {
 
 function appFor(store: SqliteTaskStore, dispatcher: Dispatcher): Hono {
   const app = new Hono();
+  app.onError(respondWithAppError);
   registerPermissionRoutes(app, { store, dispatcher });
   return app;
 }

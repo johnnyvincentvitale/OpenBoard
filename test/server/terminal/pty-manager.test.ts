@@ -186,9 +186,9 @@ describe("PtyManager", () => {
     });
 
     const reservation = await manager.reserve({ cwd: workspace });
-    const claim = manager.beginAttach(reservation.id, reservation.token);
+    const claim = manager.beginAttach(reservation.id);
     claim.release();
-    expect(() => manager.beginAttach(reservation.id, reservation.token)).not.toThrow();
+    expect(() => manager.beginAttach(reservation.id)).not.toThrow();
   });
 
   it("rejects a terminal cwd outside the workspace", async () => {

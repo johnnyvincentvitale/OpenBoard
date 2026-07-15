@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { requireBoardToken } from "../../../src/server/auth";
 import { registerPermissionSettingsRoutes } from "../../../src/server/routes/permission-settings";
+import { respondWithAppError } from "../../../src/server/app";
 
 const TOKEN = "settings-token";
 
@@ -14,6 +15,7 @@ function buildApp(initialMs = 300_000) {
     }),
   };
   const app = new Hono();
+  app.onError(respondWithAppError);
   app.use("/api/*", requireBoardToken(TOKEN));
   registerPermissionSettingsRoutes(app, { dispatcher });
   return { app, dispatcher };
@@ -59,4 +61,3 @@ describe("permission settings routes", () => {
     expect(dispatcher.setPermissionGraceMs).not.toHaveBeenCalled();
   });
 });
-

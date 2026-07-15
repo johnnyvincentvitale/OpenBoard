@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import { BoardClientError, createBoardClient } from "../../src/client/board-client";
 import { SqliteTaskStore } from "../../src/db/task-store";
 import { registerTaskRoutes } from "../../src/server/routes/tasks";
+import { respondWithAppError } from "../../src/server/app";
 import { applyDiffResponse, createLoadingViewDiffState, viewDiffHeaderLabel } from "../../src/tui/view-diff";
 import type { Dispatcher, RespondPermissionOutcome, RosterAgent, Task } from "../../src/shared";
 
@@ -64,6 +65,7 @@ function makeDispatcher(store: SqliteTaskStore): Dispatcher {
 
 function makeApp(store: SqliteTaskStore): Hono {
   const app = new Hono();
+  app.onError(respondWithAppError);
   const agents: RosterAgent[] = [
     { id: "build", mode: "primary", model: { providerID: "opencode", id: "north-mini-code-free" } },
   ];

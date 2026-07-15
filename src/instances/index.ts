@@ -56,6 +56,7 @@ export {
   type InstanceRenameTransaction,
 } from "./registry";
 export { createInstanceDaemon, type InstanceDaemon, buildAdapterEnv } from "./daemon";
+export { createInstanceLifecycleCore, type InstanceLifecycleCore } from "./lifecycle";
 export {
   renameInstance,
   type InstanceRenameFileSystem,

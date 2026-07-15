@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
+import { constants } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -829,24 +830,7 @@ function printWorktrees(items: InstanceWorktreeSummary[], stdout: OutStream): vo
 // ── Attach implementation ────────────────────────────────────────────────────
 
 function signalNumber(signal: NodeJS.Signals): number {
-  const signals: Partial<Record<NodeJS.Signals, number>> = {
-    SIGHUP: 1,
-    SIGINT: 2,
-    SIGQUIT: 3,
-    SIGILL: 4,
-    SIGTRAP: 5,
-    SIGABRT: 6,
-    SIGBUS: 7,
-    SIGFPE: 8,
-    SIGKILL: 9,
-    SIGUSR1: 10,
-    SIGSEGV: 11,
-    SIGUSR2: 12,
-    SIGPIPE: 13,
-    SIGALRM: 14,
-    SIGTERM: 15,
-  };
-  return signals[signal] ?? 0;
+  return constants.signals[signal] ?? 0;
 }
 
 /** Default selector behavior: spawn the TUI launcher in selector mode — no

@@ -12,7 +12,7 @@
  * moves the task back to `in_progress`. `abort()` stops the task's session.
  * `shutdown()` stops consuming the event stream.
  */
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2/types";
 import type { AcpTaskHarness, BlockedAcceptance, BlockedAnswerContext, BlockedAnswerResumeDecision, DiffResponse, FileCommitOutcome, MergeOutcome, ModelRef, PendingPermissionAsk, RespondPermissionInput, SessionMessageInput, SessionMessageReceipt, Task, TaskEvent, TaskStore, WorktreeCleanupOutcome, WorktreeCommitStatus } from "../shared";
 import { AdapterError, INTEGRATED_COMPLETED_BY, blockedQuestion, resolveOpenCodePermissionRules } from "../shared";
@@ -40,7 +40,6 @@ import {
   isUnderWorkspace,
   resolveBoardWorkspace,
   resolveTaskDirectory,
-  type ResolveTaskDirectoryOptions,
 } from "./workspace";
 
 export interface UnmetParentDependency {
@@ -496,15 +495,6 @@ function toCleanupOutcome(outcome: WorktreeCleanupOutcome): WorktreeCleanupOutco
   };
 }
 
-function parentWorktreeRelativeChangedFiles(parent: Task): string[] {
-  return (parent.completion?.changedFiles ?? []).map((file) => {
-    if (!parent.worktreePath || !isAbsolute(file)) return file;
-    const rel = relative(parent.worktreePath, file);
-    const outsideParentWorktree = rel === ".." || rel.startsWith("../") || rel.startsWith("..\\") || isAbsolute(rel);
-    return rel && !outsideParentWorktree ? rel : file;
-  });
-}
-
 function hasAskRule(rules: Array<{ action: string }>): boolean {
   return rules.some((rule) => rule.action === "ask");
 }
@@ -727,7 +717,6 @@ export class TaskDispatcher implements Dispatcher {
   private running = false;
   /** Bumped on every stop()/restart so a stale consume loop knows to exit. */
   private generation = 0;
-  private consumeLoopPromise: Promise<void> | null = null;
   /** Aborts the in-flight upstream event.subscribe() fetch/stream, if any — see shutdown(). */
   private upstreamAbort: AbortController | null = null;
   private readonly completionWatchers = new Map<string, CompletionWatcher>();
@@ -771,61 +760,22 @@ export class TaskDispatcher implements Dispatcher {
     this.boardToken = deps.boardToken;
     const envInstanceName = process.env.OPENBOARD_INSTANCE_NAME?.trim();
     const instanceName = deps.instanceName ?? (envInstanceName || undefined);
+    const acpRunnerDeps = {
+      adapterBaseUrl: this.adapterBaseUrl,
+      boardToken: this.boardToken,
+      instanceName,
+      permissionGraceMs,
+      permissionBroker: this.permissionBroker,
+      onActivity: (taskId: string, runStartedAt: number, input: SessionActivityEventInput) => this.activity.recordEvent(taskId, runStartedAt, input),
+      onRunTerminal: (taskId: string, runStartedAt: number, status: "complete" | "error" | "aborted") => this.activity.endRun(taskId, runStartedAt, status),
+    };
     this.acpRunners = {
-      "claude-code": deps.claudeRunner ?? new ClaudeAcpRunner({
-        adapterBaseUrl: this.adapterBaseUrl,
-        boardToken: this.boardToken,
-        instanceName,
-        permissionGraceMs,
-        permissionBroker: this.permissionBroker,
-        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
-        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
-      }),
-      codex: deps.codexRunner ?? new CodexAcpRunner({
-        adapterBaseUrl: this.adapterBaseUrl,
-        boardToken: this.boardToken,
-        instanceName,
-        permissionGraceMs,
-        permissionBroker: this.permissionBroker,
-        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
-        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
-      }),
-      "gemini-acp": deps.geminiRunner ?? new GeminiAcpRunner({
-        adapterBaseUrl: this.adapterBaseUrl,
-        boardToken: this.boardToken,
-        instanceName,
-        permissionGraceMs,
-        permissionBroker: this.permissionBroker,
-        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
-        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
-      }),
-      hermes: deps.hermesRunner ?? new HermesAcpRunner({
-        adapterBaseUrl: this.adapterBaseUrl,
-        boardToken: this.boardToken,
-        instanceName,
-        permissionGraceMs,
-        permissionBroker: this.permissionBroker,
-        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
-        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
-      }),
-      "pi-coding-agent": deps.piRunner ?? new PiAcpRunner({
-        adapterBaseUrl: this.adapterBaseUrl,
-        boardToken: this.boardToken,
-        instanceName,
-        permissionGraceMs,
-        permissionBroker: this.permissionBroker,
-        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
-        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
-      }),
-      "cursor-acp": deps.cursorRunner ?? new CursorAcpRunner({
-        adapterBaseUrl: this.adapterBaseUrl,
-        boardToken: this.boardToken,
-        instanceName,
-        permissionGraceMs,
-        permissionBroker: this.permissionBroker,
-        onActivity: (taskId, runStartedAt, input) => this.activity.recordEvent(taskId, runStartedAt, input),
-        onRunTerminal: (taskId, runStartedAt, status) => this.activity.endRun(taskId, runStartedAt, status),
-      }),
+      "claude-code": deps.claudeRunner ?? new ClaudeAcpRunner(acpRunnerDeps),
+      codex: deps.codexRunner ?? new CodexAcpRunner(acpRunnerDeps),
+      "gemini-acp": deps.geminiRunner ?? new GeminiAcpRunner(acpRunnerDeps),
+      hermes: deps.hermesRunner ?? new HermesAcpRunner(acpRunnerDeps),
+      "pi-coding-agent": deps.piRunner ?? new PiAcpRunner(acpRunnerDeps),
+      "cursor-acp": deps.cursorRunner ?? new CursorAcpRunner(acpRunnerDeps),
     };
     this.workspace = deps.workspace ?? resolveBoardWorkspace();
     this.allowExternalDirectories = deps.allowExternalDirectories ?? isExternalDirectoriesAllowed();
@@ -1930,7 +1880,7 @@ export class TaskDispatcher implements Dispatcher {
     if (this.running) return;
     this.running = true;
     const myGeneration = ++this.generation;
-    this.consumeLoopPromise = this.runConsumeLoop(myGeneration);
+    void this.runConsumeLoop(myGeneration);
   }
 
   /** Stop consuming the upstream event stream. Idempotent. */

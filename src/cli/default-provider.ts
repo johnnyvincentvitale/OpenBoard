@@ -3,11 +3,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   createInstanceDaemon,
+  createInstanceLifecycleCore,
   createInstanceRegistry,
   instanceDataDir,
   InstanceError,
-  InstanceUnknownError,
-  renameInstance,
   resolveDefaultInstance,
 } from "../instances";
 import type { BoardHealth } from "../shared/health";
@@ -43,21 +42,11 @@ function scrubSecrets(content: string): string {
  */
 export function createDefaultProvider(homeDir = homedir()): InstanceLifecycleProvider {
   const registry = createInstanceRegistry(homeDir);
-  const daemon = createInstanceDaemon(homeDir, registry);
-
-  const getDefinition = (name: string): InstanceDefinition => {
-    const def = registry.get(name);
-    if (!def) throw new InstanceUnknownError(name);
-    return def;
-  };
-
+  const daemon = createInstanceDaemon(homeDir);
   const createBoardToken = (): string =>
     resolveBoardToken({ OPENBOARD_API_TOKEN: process.env.OPENBOARD_API_TOKEN } as NodeJS.ProcessEnv);
-
-  const ensureBoardToken = (definition: InstanceDefinition): InstanceDefinition => {
-    if (definition.boardToken?.trim()) return definition;
-    return registry.ensureBoardToken(definition.name, createBoardToken());
-  };
+  const lifecycle = createInstanceLifecycleCore({ homeDir, registry, daemon, createBoardToken });
+  const getDefinition = lifecycle.get;
 
   const requireRunning = async (name: string): Promise<{ definition: InstanceDefinition; runtime: InstanceRuntimeState }> => {
     const definition = getDefinition(name);
@@ -84,14 +73,7 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
 
   return {
     async list() {
-      const defs = registry.list();
-      const entries = await Promise.all(
-        defs.map(async (definition) => ({
-          definition,
-          runtime: await daemon.status(definition),
-        })),
-      );
-      return entries;
+      return lifecycle.list();
     },
 
     async get(name) {
@@ -129,46 +111,23 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
     },
 
     async add(input) {
-      const dirs = instanceDataDir(homeDir, input.name);
-      const definition: InstanceDefinition = {
-        name: input.name,
-        port: input.port,
-        workspace: input.workspace,
-        dbPath: input.dbPath ?? `${dirs.dataDir}/board.sqlite`,
-        boardToken: createBoardToken(),
-        ...(input.opencodePort !== undefined
-          ? { opencodePort: input.opencodePort }
-          : {}),
-      };
-      registry.add(definition);
-      return definition;
+      return lifecycle.add(input);
     },
 
     async remove(name) {
-      registry.remove(name);
+      await lifecycle.remove(name);
     },
 
     async start(name) {
-      const definition = ensureBoardToken(getDefinition(name));
-      const before = await daemon.status(definition);
-      if (before.status === "running") {
-        return before;
-      }
-      if (before.status === "unhealthy") {
-        throw new InstanceError(`Instance "${name}" is unhealthy with live pid ${before.pid}; stop it before starting again`);
-      }
-      return daemon.start(definition);
+      return lifecycle.start(name);
     },
 
     async stop(name) {
-      const definition = getDefinition(name);
-      await daemon.stop(definition);
-      return daemon.status(definition);
+      return lifecycle.stop(name);
     },
 
     async getRuntime(name) {
-      const definition = getDefinition(name);
-      return daemon.status(definition);
+      return lifecycle.getRuntime(name);
     },
 
     async getHealth(name) {
@@ -251,11 +210,7 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
     },
 
     async rename(oldName, newName) {
-      return renameInstance(
-        { homeDir, registry, daemon, prepareForStart: ensureBoardToken },
-        oldName,
-        newName,
-      );
+      return lifecycle.rename(oldName, newName);
     },
   };
 }

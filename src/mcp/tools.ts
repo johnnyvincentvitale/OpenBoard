@@ -8,7 +8,6 @@ import {
   toTaskSummary,
   type BoardClientOptions,
   type BoardHealth,
-  type CompactBlockedProjection,
   type CompletionInput,
   type TaskSummary,
 } from "../client/board-client";
@@ -16,7 +15,6 @@ import type {
   Column,
   DiffResponse,
   MergeOutcome,
-  PendingPermissionAsk,
   RosterAgent,
   SessionActivityEvent,
   SessionActivityRun,
@@ -27,12 +25,7 @@ import type {
   TaskCompareResponse,
   SessionMessageReceipt,
 } from "../shared";
-import {
-  CLAUDE_CODE_PERMISSION_MODES,
-  TASK_HARNESSES,
-  TASK_KINDS,
-  blockedQuestion,
-} from "../shared";
+import { CLAUDE_CODE_PERMISSION_MODES, TASK_HARNESSES, TASK_KINDS } from "../shared";
 import {
   currentSelectionFromOptions,
   listInstances as listRegisteredInstances,
@@ -358,14 +351,9 @@ export { BOARD_UNAVAILABLE_MESSAGE, DEFAULT_BOARD_URL, parseModelRef, resolveBoa
 
 export async function addTasks(input: unknown, options: McpToolOptions = {}): Promise<AddTasksResult> {
   const parsed = AddTasksInputSchema.parse(input);
-  const created: TaskSummary[] = [];
-  let boardUrl = "";
-  for (const task of parsed.tasks) {
-    const result = await createTask(task, options);
-    boardUrl = result.boardUrl;
-    created.push(result.task);
-  }
-  return { boardUrl, count: created.length, created };
+  const client = await createMcpBoardClient(options);
+  const created = (await client.createTasks(parsed.tasks)).map(toTaskSummary);
+  return { boardUrl: client.boardUrl, count: created.length, created };
 }
 
 export async function createTask(input: unknown, options: McpToolOptions = {}): Promise<TaskResult> {

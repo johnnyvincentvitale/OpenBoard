@@ -32,7 +32,6 @@ import {
   type InstanceDefinition,
   type InstanceRuntimeState,
 } from "../shared/instances";
-import type { InstanceRegistry } from "./registry";
 import { acquireLockfile, LockfileBusyError, releaseLockfile, removeLockfileIfOwnerDead, type LockfileHandle } from "./lockfile";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -240,9 +239,7 @@ function signalProcessGroupWithFallback(pid: number, signal: NodeJS.Signals): bo
  *
  * ```ts
  * import { homedir } from "node:os";
- * import { createInstanceRegistry } from "./registry";
- * const registry = createInstanceRegistry(homedir());
- * const daemon = createInstanceDaemon(homedir(), registry);
+ * const daemon = createInstanceDaemon(homedir());
  * ```
  */
 export interface InstanceDaemon {
@@ -286,7 +283,6 @@ export interface InstanceDaemon {
 
 export function createInstanceDaemon(
   homeDir: string,
-  registry: InstanceRegistry,
   options: { serveScript?: string; closeFd?: (fd: number) => void } = {},
 ): InstanceDaemon {
   const root = projectRoot();

@@ -256,7 +256,6 @@ function isOpenBoardReportToolName(name: string): boolean {
 
 export function decideClaudeAcpPermission(
   params: AcpPermissionParams,
-  cwd: string,
   permissionMode: AcpPermissionMode,
 ): "allow" | "ask" | "deny" {
   if (permissionMode === "bypassPermissions" || permissionMode === "yolo") return "allow";
@@ -939,10 +938,10 @@ export class ClaudeAcpRunner implements ClaudeCodeRunnerLike {
       await this.writePermissionResponse(state, id, permission, "allow_once");
       return;
     }
-    const policy = decideClaudeAcpPermission(permission, state.cwd, state.permissionMode);
+    const policy = decideClaudeAcpPermission(permission, state.permissionMode);
     if (policy === "allow") {
-      // Policy already allows this request (e.g. an edit inside the task's cwd) — reply
-      // immediately, matching pre-FR08 base behavior. Only requests the write-fence policy
+      // The configured mode already allows this request — reply immediately,
+      // matching pre-FR08 base behavior. Only requests the write-fence policy
       // would otherwise reject are held for the operator broker below, so a normal in-cwd
       // session is not stalled for the configured operator window per tool call.
       await this.writePermissionResponse(state, id, permission, "allow_once");

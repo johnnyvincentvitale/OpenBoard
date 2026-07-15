@@ -920,7 +920,6 @@ async function streamSessionEvents(
   let lineBuffer = "";
   // SSE data buffer: accumulated data lines for the current event.
   const dataLines: string[] = [];
-  let eventType = "";
 
   function emitEvent(): void {
     if (dataLines.length === 0) return;
@@ -935,7 +934,6 @@ async function streamSessionEvents(
     } catch {
       // Malformed frame — skip without breaking the stream.
     }
-    eventType = "";
   }
 
   const reader = body.getReader();
@@ -970,7 +968,6 @@ async function streamSessionEvents(
           }
 
           if (line.startsWith("event:")) {
-            eventType = line.slice(6).trim();
             continue;
           }
 

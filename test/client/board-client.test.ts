@@ -560,7 +560,7 @@ describe("board client", () => {
       capped: false,
       root: "/repo/worktree",
     };
-    const fetchMock = vi.fn(async (url: string | URL) => {
+    const fetchMock = vi.fn(async () => {
       return jsonResponse(diffResponse);
     });
     const client = createBoardClient(makeOptions([CWD], fetchMock));

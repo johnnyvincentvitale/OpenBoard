@@ -16,9 +16,6 @@ import {
   instanceDataDir,
   resolveDefaultInstance,
   type InstanceRegistry,
-  type InstanceDaemon,
-  type InstanceDefinition,
-  type InstanceRuntimeState,
 } from "../../src/instances/index";
 
 describe("index re-exports", () => {

@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { Dispatcher, TaskStore } from "../shared/index";
@@ -113,14 +113,32 @@ export function createApp(deps: AppDeps): Hono {
   registerPermissionSettingsRoutes(app, { dispatcher: deps.dispatcher });
   registerSessionEventsRoutes(app, { store: deps.taskStore, client: deps.client, activity: deps.activity });
 
-  // Safety net — route modules already translate their own AdapterErrors, this catches escapes.
-  app.onError((err, c) => {
-    const ae =
-      err instanceof AdapterError
-        ? err
-        : AdapterError.internal(err instanceof Error ? err.message : "Unexpected error", err);
-    return c.json(ae.toEnvelope(), ae.status as ContentfulStatusCode);
-  });
+  app.onError(respondWithAppError);
 
   return app;
+}
+
+/** One error envelope for every route; exported for route-level test apps. */
+export function respondWithAppError(err: Error, c: Context): Response {
+  if (!(err instanceof AdapterError)) {
+    const structured = err as Error & {
+      status?: number;
+      code?: string;
+      details?: Record<string, unknown>;
+      unmetParents?: unknown;
+    };
+    if (typeof structured.status === "number") {
+      return c.json({
+        error: {
+          code: structured.code ?? "validation",
+          message: structured.message,
+          ...(structured.details ?? (structured.unmetParents ? { unmetParents: structured.unmetParents } : {})),
+        },
+      }, structured.status as ContentfulStatusCode);
+    }
+  }
+  const adapterError = err instanceof AdapterError
+    ? err
+    : AdapterError.internal(err.message || "Unexpected error", err);
+  return c.json(adapterError.toEnvelope(), adapterError.status as ContentfulStatusCode);
 }

@@ -209,8 +209,6 @@ describe("TUI new-task dependency picker", () => {
     it("renders an empty-state when no candidates exist", () => {
       const s = state({ tasks: [] });
       s.newTask = newTaskDraft({ step: "dependencies", field: "dependency" });
-      const a = actions();
-
       const rendered = renderApp(fakeUi(), s);
       expect(textOf(rendered)).toContain("No existing tasks available");
     });
@@ -270,8 +268,6 @@ describe("TUI new-task dependency picker", () => {
         title: "Implement endpoints",
         parentIds: ["parent-1", "parent-2"],
       });
-      const a = actions();
-
       const rendered = textOf(renderApp(fakeUi(), s));
       expect(rendered).toContain("PARENTS");
       expect(rendered).toContain("Backend refactor");
@@ -281,8 +277,6 @@ describe("TUI new-task dependency picker", () => {
     it("renders None under PARENTS when no parents are selected", () => {
       const s = state({ tasks: [] });
       s.newTask = newTaskDraft({ step: "confirm", field: "confirm", title: "Solo task", parentIds: [] });
-      const a = actions();
-
       const rendered = textOf(renderApp(fakeUi(), s));
       expect(rendered).toContain("PARENTS");
       expect(rendered).toContain("None");

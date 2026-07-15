@@ -13,6 +13,7 @@ import type { WorktreeManager } from "../../../src/server/worktree";
 import type { ChainAdvancer } from "../../../src/server/chain-advancer";
 import { createChainAdvancer } from "../../../src/server/chain-advancer";
 import { cleanupTestWorkspace, setupTestWorkspace } from "../test-workspace";
+import { respondWithAppError } from "../../../src/server/app";
 
 let workspaceDir: string;
 let repoDir: string;
@@ -119,6 +120,7 @@ function buildApp(
   advancer?: ChainAdvancer,
 ): Hono {
   const app = new Hono();
+  app.onError(respondWithAppError);
   const fetch = Array.isArray(rosterOrFetch) ? async () => rosterOrFetch : rosterOrFetch;
   registerTaskRoutes(app, {
     store,
@@ -229,6 +231,7 @@ class FakeWorktrees implements WorktreeManager {
 
 function buildRealDispatchApp(store: SqliteTaskStore, dispatcher: Dispatcher, roster: RosterAgent[] = []): Hono {
   const app = new Hono();
+  app.onError(respondWithAppError);
   registerCompletionRoutes(app, { store });
   registerTaskRoutes(app, {
     store,

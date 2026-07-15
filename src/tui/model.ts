@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { createInstanceDaemon, createInstanceRegistry, renameInstance } from "../instances";
+import { createInstanceDaemon, createInstanceLifecycleCore, createInstanceRegistry } from "../instances";
 import type { Column, ModelRef, RosterAgent, Task, TaskRunState } from "../shared";
 import {
   instanceDataDir,
@@ -33,70 +33,32 @@ export interface InstanceLifecycleProvider {
 
 export function createRealInstanceProvider(homeDir = homedir()): InstanceLifecycleProvider {
   const registry = createInstanceRegistry(homeDir);
-  const daemon = createInstanceDaemon(homeDir, registry);
-
-  const resolveDefinition = (name: string): InstanceDefinition => {
-    const definition = registry.get(name);
-    if (!definition) throw new Error(`Unknown instance: "${name}"`);
-    return definition;
-  };
-
+  const daemon = createInstanceDaemon(homeDir);
   const createBoardToken = (): string =>
     resolveBoardToken({ OPENBOARD_API_TOKEN: process.env.OPENBOARD_API_TOKEN } as NodeJS.ProcessEnv);
-
-  const ensureBoardToken = (definition: InstanceDefinition): InstanceDefinition => {
-    if (definition.boardToken?.trim()) return definition;
-    return registry.ensureBoardToken(definition.name, createBoardToken());
-  };
+  const lifecycle = createInstanceLifecycleCore({ homeDir, registry, daemon, createBoardToken });
 
   return {
-    async list() {
-      return Promise.all(
-        registry.list().map(async (definition) => ({
-          definition,
-          runtime: await daemon.status(definition),
-        })),
-      );
-    },
+    list: lifecycle.list,
     async start(name) {
-      const definition = ensureBoardToken(resolveDefinition(name));
-      const runtime = await daemon.status(definition);
-      if (runtime.status !== "running") await daemon.start(definition);
+      await lifecycle.start(name);
     },
     async stop(name) {
-      await daemon.stop(resolveDefinition(name));
+      await lifecycle.stop(name);
     },
     async remove(name) {
-      const definition = resolveDefinition(name);
-      const runtime = await daemon.status(definition);
-      if (runtime.status === "running") throw new Error(`Cannot remove running instance: "${name}"`);
-      registry.remove(name);
+      await lifecycle.remove(name);
     },
     async add(name, workspace) {
       const validation = validateInstanceName(name);
       if (!validation.ok) throw new Error(validation.error);
-      const instances = registry.list();
-      const usedPorts = new Set(instances.flatMap((instance) => [instance.port, instance.opencodePort]).filter((port): port is number => port !== undefined));
+      const instances = await lifecycle.list();
+      const usedPorts = new Set(instances.flatMap(({ definition }) => [definition.port, definition.opencodePort]).filter((port): port is number => port !== undefined));
       let port = 4097;
       while (usedPorts.has(port)) port += 1;
-      const dirs = instanceDataDir(homeDir, validation.value);
-      const definition: InstanceDefinition = {
-        name: validation.value,
-        port,
-        workspace,
-        dbPath: `${dirs.dataDir}/board.sqlite`,
-        boardToken: createBoardToken(),
-      };
-      registry.add(definition);
-      return definition;
+      return lifecycle.add({ name: validation.value, port, workspace });
     },
-    async rename(oldName, newName) {
-      return renameInstance(
-        { homeDir, registry, daemon, prepareForStart: ensureBoardToken },
-        oldName,
-        newName,
-      );
-    },
+    rename: lifecycle.rename,
   };
 }
 
@@ -233,7 +195,7 @@ export function transitionView(state: ViewState, nextView: TuiView): ViewState {
   return { view: nextView, previousView: state.view };
 }
 
-export function detachToLaunch(state: ViewState): ViewState {
+export function detachToLaunch(): ViewState {
   return { view: "launch", previousView: "board" };
 }
 

@@ -425,7 +425,7 @@ describe("computeDiff", () => {
   describe("edge cases", () => {
     it("handles binary files without crashing", async () => {
       const repoDir = join(tmpDir, "repo");
-      const baseCommit = initRepo(repoDir);
+      initRepo(repoDir);
 
       // Create a binary file
       const binary = Buffer.alloc(100);
@@ -456,7 +456,7 @@ describe("computeDiff", () => {
 
     it("handles deleted files", async () => {
       const repoDir = join(tmpDir, "repo");
-      const baseCommit = initRepo(repoDir);
+      initRepo(repoDir);
 
       writeFileSync(join(repoDir, "to-delete.ts"), "export const x = 1;\n");
       runGit(repoDir, ["add", "to-delete.ts"]);
@@ -485,7 +485,7 @@ describe("computeDiff", () => {
 
     it("handles renamed files", async () => {
       const repoDir = join(tmpDir, "repo");
-      const baseCommit = initRepo(repoDir);
+      initRepo(repoDir);
 
       writeFileSync(join(repoDir, "old.ts"), "export const x = 1;\n");
       runGit(repoDir, ["add", "old.ts"]);

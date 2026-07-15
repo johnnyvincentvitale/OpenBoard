@@ -846,7 +846,7 @@ describe("TUI diff view open-in-editor (e)", () => {
     const runTerminalEditor = vi.fn(async () => ({ code: 0 }));
     // Simulate the async ENOENT a missing editor binary produces: the real
     // spawner invokes onError from the child's "error" event.
-    const spawnGuiEditor = vi.fn((argv: string[], cwd: string, onError?: (error: unknown) => void) => {
+    const spawnGuiEditor = vi.fn((_argv: string[], _cwd: string, onError?: (error: unknown) => void) => {
       onError?.(new Error("spawn code ENOENT"));
     });
     const getTaskDiff = vi.fn(async () => ({ kind: "diff" as const, files: s.viewDiff.files, capped: false, root: "/repo" }));

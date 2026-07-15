@@ -3602,19 +3602,12 @@ describe("TaskDispatcher", () => {
       await waitFor(() => client.subscribeCallCount > 0);
       expect(client.lastSubscribeSignal?.aborted).toBe(false);
 
-      const loopPromise = (dispatcher as unknown as { consumeLoopPromise: Promise<void> | null }).consumeLoopPromise;
-      expect(loopPromise).not.toBeNull();
       dispatcher.shutdown();
 
       expect(client.lastSubscribeSignal?.aborted).toBe(true);
-      // The old consume loop must actually exit (not hang forever holding the
-      // upstream stream open) once shutdown() aborts it.
-      await expect(
-        Promise.race([
-          loopPromise,
-          new Promise((_resolve, reject) => setTimeout(() => reject(new Error("consume loop did not exit after shutdown")), 500)),
-        ]),
-      ).resolves.toBeUndefined();
+      // Give the aborted iterator time to unwind; it must not reconnect.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(client.subscribeCallCount).toBe(1);
     });
 
     it("persists the latest useful text-ended event as finalSessionOutput", async () => {

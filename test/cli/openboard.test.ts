@@ -68,7 +68,7 @@ function mockProvider(
     listProviders: vi.fn().mockResolvedValue([]),
     getAcpConfig: vi.fn().mockResolvedValue({}),
     listWorktrees: vi.fn().mockResolvedValue([]),
-    rename: vi.fn().mockImplementation(async (oldName, newName) => ({
+    rename: vi.fn().mockImplementation(async (_oldName, newName) => ({
       name: newName,
       port: DEFAULT_DEFINITION.port,
       workspace: DEFAULT_DEFINITION.workspace,

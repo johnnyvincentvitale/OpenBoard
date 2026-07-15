@@ -137,7 +137,7 @@ export function registerTerminalRoutes(app: Hono, deps: RegisterTerminalRoutesDe
     }
 
     try {
-      attachClaims.set(c.req.raw, manager.beginAttach(id, token ?? ""));
+      attachClaims.set(c.req.raw, manager.beginAttach(id));
     } catch (err) {
       const response = respondWithError(err);
       return c.json(response.body, response.status as ContentfulStatusCode);

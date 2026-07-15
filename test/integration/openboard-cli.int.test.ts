@@ -23,11 +23,11 @@
  * even when a test fails.
  */
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeAll, afterAll, describe, expect, it } from "vitest";
+import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { findFreePort } from "../../src/server/config";
 import {
   opencodeAvailable,

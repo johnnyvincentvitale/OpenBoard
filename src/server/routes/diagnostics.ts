@@ -17,7 +17,6 @@ import type { TaskStore } from "../../shared/task";
 import { resolveEditorDiagnostics } from "../../tui/editor-command";
 import type { BoardIdentitySource } from "../../shared/health";
 import type { AdapterBuildInfo } from "../../shared/health";
-import { resolveAdapterBuildInfo } from "../build-info";
 
 /** The OpenCode SDK client type — duck-typed for the health check. */
 type OpencodeClientLike = {
@@ -33,16 +32,6 @@ export interface DiagnosticsDeps {
   identity?: BoardIdentitySource;
   boardTokenPresent?: boolean;
   build?: AdapterBuildInfo;
-}
-
-/** Safely extract port from an OpenCode base URL. */
-function portFromUrl(raw: string): number | undefined {
-  try {
-    const port = new URL(raw).port;
-    return port ? Number(port) : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 export function registerDiagnosticsRoutes(app: Hono, deps: DiagnosticsDeps): void {

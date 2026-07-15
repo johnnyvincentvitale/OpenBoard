@@ -10,8 +10,7 @@
  * the next SSE snapshot to carry updated permissions without a store
  * mutation.
  */
-import type { Context, Hono } from "hono";
-import type { ContentfulStatusCode } from "hono/utils/http-status";
+import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { Dispatcher, TaskFrame, TaskStore } from "../../shared";
 import { TASK_ROUTE_PATTERNS } from "../../shared";
@@ -81,34 +80,21 @@ export function registerTaskEventsRoutes(app: Hono, deps: TaskEventsRouteDeps): 
 
   app.get(TASK_ROUTE_PATTERNS.taskEvents, (c) => {
     const taskId = c.req.param("id");
-    try {
-      if (!store.get(taskId)) throw AdapterError.notFound(`Task not found: ${taskId}`);
-      return c.json(store.listEvents(taskId), 200);
-    } catch (err) {
-      return respondWithError(c, err);
-    }
+    if (!store.get(taskId)) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    return c.json(store.listEvents(taskId), 200);
   });
 
   app.get(TASK_ROUTE_PATTERNS.taskCausality, (c) => {
-    try {
-      const causality: Record<string, { autoDispatchedBy: string }> = {};
-      for (const task of store.list()) {
-        const latest = store.listEvents(task.id)
-          .filter((event) => event.type === "task_auto_dispatched")
-          .at(-1);
-        const parentId = latest?.body?.parentId;
-        if (typeof parentId === "string" && parentId.trim()) {
-          causality[task.id] = { autoDispatchedBy: parentId };
-        }
+    const causality: Record<string, { autoDispatchedBy: string }> = {};
+    for (const task of store.list()) {
+      const latest = store.listEvents(task.id)
+        .filter((event) => event.type === "task_auto_dispatched")
+        .at(-1);
+      const parentId = latest?.body?.parentId;
+      if (typeof parentId === "string" && parentId.trim()) {
+        causality[task.id] = { autoDispatchedBy: parentId };
       }
-      return c.json(causality, 200);
-    } catch (err) {
-      return respondWithError(c, err);
     }
+    return c.json(causality, 200);
   });
-}
-
-function respondWithError(c: Context, err: unknown): Response {
-  const adapterError = err instanceof AdapterError ? err : AdapterError.internal("Unexpected error", err);
-  return c.json(adapterError.toEnvelope(), adapterError.status as ContentfulStatusCode);
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Hono } from "hono";
 import { resolveBoardToken, tokensEqual, requireBoardToken } from "../../src/server/auth";
 import { registerHealthRoutes } from "../../src/server/routes/health";

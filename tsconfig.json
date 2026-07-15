@@ -9,6 +9,8 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "types": ["node"],
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noEmit": true
   },
   "include": ["src", "test"]

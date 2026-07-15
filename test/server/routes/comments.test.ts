@@ -3,9 +3,11 @@ import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { registerTaskCommentRoutes } from "../../../src/server/routes/comments";
 import { registerTaskEventsRoutes } from "../../../src/server/routes/task-events";
+import { respondWithAppError } from "../../../src/server/app";
 
 function appFor(store: SqliteTaskStore): Hono {
   const app = new Hono();
+  app.onError(respondWithAppError);
   registerTaskCommentRoutes(app, { store });
   registerTaskEventsRoutes(app, { store });
   return app;

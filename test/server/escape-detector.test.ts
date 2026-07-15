@@ -118,7 +118,6 @@ describe("detectBaseCheckoutEscape", () => {
   });
 
   it("catches a modification to a path that was already dirty via rename at dispatch", async () => {
-    const snapshot = await snapshotBaseCheckout(repo);
     g(repo, ["mv", "file.txt", "renamed.txt"]);
     const afterRename = await snapshotBaseCheckout(repo);
 

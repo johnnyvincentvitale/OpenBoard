@@ -2,9 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { registerTaskLinkRoutes } from "../../../src/server/routes/links";
+import { respondWithAppError } from "../../../src/server/app";
 
 function appFor(store: SqliteTaskStore): Hono {
   const app = new Hono();
+  app.onError(respondWithAppError);
   registerTaskLinkRoutes(app, { store });
   return app;
 }

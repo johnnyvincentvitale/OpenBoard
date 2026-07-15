@@ -35,114 +35,103 @@ export function registerPermissionRoutes(app: Hono, deps: PermissionRouteDeps): 
       );
     }
 
+    const task = deps.store.get(taskId);
+    if (!task) {
+      return c.json(
+        { error: { code: "permission_ask_not_found", message: `Task not found: ${taskId}` } },
+        404 as ContentfulStatusCode,
+      );
+    }
+
+    let body: Record<string, unknown>;
     try {
-      const task = deps.store.get(taskId);
-      if (!task) {
+      body = (await c.req.json()) ?? {};
+    } catch {
+      throw AdapterError.validation("Request body must be valid JSON");
+    }
+
+    const { askId, action, answeredBy } = body;
+
+    if (typeof askId !== "string" || askId.trim().length === 0) {
+      throw AdapterError.validation("askId must be a non-empty string");
+    }
+    if (action !== "allow_once" && action !== "deny") {
+      throw AdapterError.validation("action must be 'allow_once' or 'deny'");
+    }
+    if (typeof answeredBy !== "string" || answeredBy.trim().length === 0) {
+      throw AdapterError.validation("answeredBy must be a non-empty string");
+    }
+    if (answeredBy.length > MAX_ANSWERED_BY_LENGTH) {
+      throw AdapterError.validation(
+        `answeredBy must be at most ${MAX_ANSWERED_BY_LENGTH} characters`,
+      );
+    }
+    const input: RespondPermissionInput = {
+      askId: askId.trim(),
+      action,
+      answeredBy: answeredBy.trim(),
+    };
+
+    const outcome = await deps.dispatcher.respondPermission(taskId, input);
+
+    if (!outcome.ok) {
+      // not-found means the ask doesn't exist or doesn't belong to this task.
+      if (outcome.conflict === "not-found") {
         return c.json(
-          { error: { code: "permission_ask_not_found", message: `Task not found: ${taskId}` } },
+          {
+            error: {
+              code: "permission_ask_not_found",
+              message: `Permission ask not found or does not belong to this task: ${outcome.askId}`,
+            },
+          },
           404 as ContentfulStatusCode,
         );
       }
 
-      let body: Record<string, unknown>;
-      try {
-        body = (await c.req.json()) ?? {};
-      } catch {
-        throw AdapterError.validation("Request body must be valid JSON");
-      }
-
-      const { askId, action, answeredBy } = body;
-
-      if (typeof askId !== "string" || askId.trim().length === 0) {
-        throw AdapterError.validation("askId must be a non-empty string");
-      }
-      if (action !== "allow_once" && action !== "deny") {
-        throw AdapterError.validation("action must be 'allow_once' or 'deny'");
-      }
-      if (typeof answeredBy !== "string" || answeredBy.trim().length === 0) {
-        throw AdapterError.validation("answeredBy must be a non-empty string");
-      }
-      if (answeredBy.length > MAX_ANSWERED_BY_LENGTH) {
-        throw AdapterError.validation(
-          `answeredBy must be at most ${MAX_ANSWERED_BY_LENGTH} characters`,
+      if (outcome.conflict === "unsupported-action") {
+        return c.json(
+          { error: { code: "permission_action_unsupported", message: outcome.error ?? `Permission action is unsupported: ${outcome.askId}` } },
+          422 as ContentfulStatusCode,
         );
       }
-      const cleanAnsweredBy = answeredBy.trim();
 
-      const input: RespondPermissionInput = {
-        askId: askId.trim(),
-        action,
-        answeredBy: cleanAnsweredBy,
-      };
-
-      const outcome = await deps.dispatcher.respondPermission(taskId, input);
-
-      if (!outcome.ok) {
-        // not-found means the ask doesn't exist or doesn't belong to this task.
-        if (outcome.conflict === "not-found") {
-          return c.json(
-            {
-              error: {
-                code: "permission_ask_not_found",
-                message: `Permission ask not found or does not belong to this task: ${outcome.askId}`,
-              },
-            },
-            404 as ContentfulStatusCode,
-          );
-        }
-
-        if (outcome.conflict === "unsupported-action") {
-          return c.json(
-            { error: { code: "permission_action_unsupported", message: outcome.error ?? `Permission action is unsupported: ${outcome.askId}` } },
-            422 as ContentfulStatusCode,
-          );
-        }
-
-        if (outcome.conflict === "stale") {
-          return c.json(
-            { error: { code: "permission_ask_stale", message: `Permission ask is stale: ${outcome.askId}` } },
-            409 as ContentfulStatusCode,
-          );
-        }
-
-        if (outcome.conflict === "reply-failed") {
-          return c.json(
-            {
-              error: {
-                code: "permission_reply_failed",
-                message: `Permission reply failed: ${outcome.error ?? "unknown error"}`,
-              },
-            },
-            502 as ContentfulStatusCode,
-          );
-        }
-
-        // already-resolved (stale/claimed)
+      if (outcome.conflict === "stale") {
         return c.json(
-          {
-            error: {
-              code: "permission_already_claimed",
-              message: `Permission ask already resolved: ${outcome.askId}`,
-            },
-          },
+          { error: { code: "permission_ask_stale", message: `Permission ask is stale: ${outcome.askId}` } },
           409 as ContentfulStatusCode,
         );
       }
 
-      // Return the shared projected Task on success — the resolved ask is
-      // removed from pendingPermissions by the dispatcher, so re-reading
-      // the task and projecting gives the accurate post-resolution state.
-      const fresh = deps.store.get(taskId);
-      if (!fresh) throw AdapterError.notFound(`Task not found: ${taskId}`);
-      const projected = projectPendingPermissions([fresh], deps.dispatcher)[0];
-      return c.json(projected, 200);
-    } catch (err) {
-      return respondWithError(c, err);
-    }
-  });
-}
+      if (outcome.conflict === "reply-failed") {
+        return c.json(
+          {
+            error: {
+              code: "permission_reply_failed",
+              message: `Permission reply failed: ${outcome.error ?? "unknown error"}`,
+            },
+          },
+          502 as ContentfulStatusCode,
+        );
+      }
 
-function respondWithError(c: Context, err: unknown): Response {
-  const adapterError = err instanceof AdapterError ? err : AdapterError.internal("Unexpected error", err);
-  return c.json(adapterError.toEnvelope(), adapterError.status as ContentfulStatusCode);
+      // already-resolved (stale/claimed)
+      return c.json(
+        {
+          error: {
+            code: "permission_already_claimed",
+            message: `Permission ask already resolved: ${outcome.askId}`,
+          },
+        },
+        409 as ContentfulStatusCode,
+      );
+    }
+
+    // Return the shared projected Task on success — the resolved ask is
+    // removed from pendingPermissions by the dispatcher, so re-reading
+    // the task and projecting gives the accurate post-resolution state.
+    const fresh = deps.store.get(taskId);
+    if (!fresh) throw AdapterError.notFound(`Task not found: ${taskId}`);
+    const projected = projectPendingPermissions([fresh], deps.dispatcher)[0];
+    return c.json(projected, 200);
+  });
 }

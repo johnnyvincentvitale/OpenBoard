@@ -5,7 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BoardClientError, createBoardClient } from "../client/board-client";
 import type { BoardClient, BoardHealth } from "../client/board-client";
-import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, permissionTimeoutSecondsToMs, type AcpConfigCatalog, type AcpConfigOption, type AcpConfigValueOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffFile, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type PermissionSettings, type RosterAgent, type RosterProvider, type SessionMessageMode, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
+import { CLAUDE_CODE_MODELS, CODEX_MODELS, CURSOR_ACP_MODELS, DEFAULT_ACP_PERMISSION_MODE, blockedQuestion, dominantTaskState, GEMINI_ACP_MODELS, HERMES_MODELS, PI_CODING_AGENT_MODELS, TASK_HARNESSES, TASK_KINDS, USER_COMPLETED_BY, permissionTimeoutSecondsToMs, type AcpConfigCatalog, type AcpConfigOption, type AcpOptions, type AcpPermissionMode, type AcpTaskHarness, type BoardDiagnostics, type Column, type CompletionReport, type DiffFile, type DiffResponse, type ModelRef, type PermissionOverrideAction, type PendingPermissionAsk, type PermissionOverrideCategory, type PermissionOverrides, type PermissionSettings, type RosterAgent, type RosterProvider, type SessionMessageMode, type Task, type TaskComment, type TaskEvent, type TaskHarness, type TaskIsolationMode, type TaskKind, type TaskRunState, type TaskType, type WorktreeCommitStatus } from "../shared";
 import { PERMISSION_OVERRIDE_ACTIONS, PERMISSION_OVERRIDE_CATEGORIES, projectWatchdogAttempts, type WatchdogAttemptEntry } from "../shared";
 import { blockedQuestionPresentation } from "../shared/blocked-task";
 import { validateInstanceName } from "../shared/instances";
@@ -38,12 +38,10 @@ import {
   // Instance-related exports
   InstanceLifecycleProvider,
   createRealInstanceProvider,
-  TuiView,
   ViewState,
   initialViewState,
   transitionView,
   detachToLaunch,
-  openSwitcher,
   closeSwitcher,
   openArchive as openArchiveView,
   closeArchive as closeArchiveView,
@@ -1220,7 +1218,7 @@ export async function runOpenBoardTui(
   };
 
   const detachInstance = async () => {
-    state.viewState = detachToLaunch(state.viewState);
+    state.viewState = detachToLaunch();
     state.tasks = [];
     state.agents = [];
     state.providers = [];
@@ -2370,25 +2368,7 @@ function renderArchiveFilesTab(ui: OpenTui, state: TuiState, record: GlobalArchi
     if (files.length === 0) {
       return renderDetailViewport(ui, state, scrollId, header, ui.Text({ content: "No changes.", fg: COLORS.muted, height: 1 }));
     }
-    const detail = filesDetailState(state, archiveFilesOwnerId(record), files.length);
-    const selectedFile = files[detail.selectedIndex];
-    if (detail.mode === "patch") {
-      return renderDetailViewport(
-        ui,
-        state,
-        scrollId,
-        header,
-        renderChangedFileListRow(ui, selectedFile, true),
-        ...renderPatchLines(ui, selectedFile.patch),
-      );
-    }
-    return renderDetailViewport(
-      ui,
-      state,
-      scrollId,
-      header,
-      ...files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex)),
-    );
+    return renderFilesBrowser(ui, state, archiveFilesOwnerId(record), scrollId, files, [header]);
   }
 
   const reportedFiles = completion?.changedFiles ?? [];
@@ -2595,7 +2575,7 @@ function renderLaunchView(ui: OpenTui, state: TuiState) {
     for (let i = 0; i < state.instanceList.length; i++) {
       const item = state.instanceList[i];
       const selected = i === state.selectedInstanceIndex;
-      rows.push(renderInstanceRow(ui, state, item, selected));
+      rows.push(renderInstanceRow(ui, item, selected));
     }
   }
 
@@ -2616,7 +2596,7 @@ function renderLaunchView(ui: OpenTui, state: TuiState) {
   );
 }
 
-function renderInstanceRow(ui: OpenTui, state: TuiState, item: InstanceListItem, selected: boolean) {
+function renderInstanceRow(ui: OpenTui, item: InstanceListItem, selected: boolean) {
   const glyph = INSTANCE_STATUS_GLYPHS[item.runtime.status] ?? "?";
 
   const cardCountStr =
@@ -2745,22 +2725,7 @@ function renderSettingsDirtyWorktreeInspection(
   } else if (files.length === 0) {
     content = renderDetailViewport(ui, state, scrollId, ui.Text({ content: "No changed files remain in this worktree.", fg: COLORS.muted, height: 1 }));
   } else {
-    const detail = filesDetailState(state, ownerId, files.length);
-    const selectedFile = files[detail.selectedIndex];
-    content = detail.mode === "patch"
-      ? renderDetailViewport(
-          ui,
-          state,
-          scrollId,
-          renderChangedFileListRow(ui, selectedFile, true),
-          ...renderPatchLines(ui, selectedFile.patch),
-        )
-      : renderDetailViewport(
-          ui,
-          state,
-          scrollId,
-          ...files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex)),
-        );
+    content = renderFilesBrowser(ui, state, ownerId, scrollId, files);
   }
 
   return ui.Box(
@@ -3828,24 +3793,15 @@ function renderFilesTab(ui: OpenTui, state: TuiState, task: Task) {
   if (cache.response.files.length === 0) {
     return renderDetailViewport(ui, state, scrollId, ui.Text({ content: "No changes.", fg: COLORS.muted, height: 1 }));
   }
-  const detail = filesDetailState(state, task.id, cache.response.files.length);
-  const selectedFile = cache.response.files[detail.selectedIndex];
   const commitStatus = reviewCommitStatusForTask(state, task);
-  if (detail.mode === "patch") {
-    return renderDetailViewport(
-      ui,
-      state,
-      scrollId,
-      renderChangedFileListRow(ui, selectedFile, true, diffFileCommitState(commitStatus, selectedFile.file)),
-      ...renderPatchLines(ui, selectedFile.patch),
-    );
-  }
-
-  return renderDetailViewport(
+  return renderFilesBrowser(
     ui,
     state,
+    task.id,
     scrollId,
-    ...cache.response.files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex, diffFileCommitState(commitStatus, file.file))),
+    cache.response.files,
+    [],
+    (file) => diffFileCommitState(commitStatus, file.file),
   );
 }
 
@@ -3858,7 +3814,7 @@ function filesTabFooter(state: TuiState, task: Task): string {
     : `↑/↓ files · enter patch${commitHint} · esc details · ←/→ tabs`;
 }
 
-function reviewDiffFiles(state: TuiState, task: Task | undefined): Array<{ file: string; additions: number; deletions: number; patch?: string }> {
+function reviewDiffFiles(state: TuiState, task: Task | undefined): DiffFile[] {
   const cache = isSameReviewDiffStatIdentity(state.reviewDiffStat, task) ? state.reviewDiffStat : undefined;
   return cache?.status === "success" && cache.response?.kind === "diff" ? cache.response.files : [];
 }
@@ -3879,6 +3835,26 @@ function renderChangedFileListRow(ui: OpenTui, file: { file: string; additions: 
       commitState === "dirty" ? ui.Text({ content: "dirty", fg: COLORS.muted, height: 1, width: 6, truncate: true }) : ui.Box({ width: 0 }),
     ),
   );
+}
+
+function renderFilesBrowser(
+  ui: OpenTui,
+  state: TuiState,
+  ownerId: string,
+  scrollId: string,
+  files: DiffFile[],
+  header: VChild[] = [],
+  commitState: (file: DiffFile) => DiffFileCommitState = () => undefined,
+) {
+  const detail = filesDetailState(state, ownerId, files.length);
+  const selectedFile = files[detail.selectedIndex];
+  const rows = detail.mode === "patch"
+    ? [
+        renderChangedFileListRow(ui, selectedFile, true, commitState(selectedFile)),
+        ...renderPatchLines(ui, selectedFile.patch),
+      ]
+    : files.map((file, index) => renderChangedFileListRow(ui, file, index === detail.selectedIndex, commitState(file)));
+  return renderDetailViewport(ui, state, scrollId, ...header, ...rows);
 }
 
 function renderPatchLines(ui: OpenTui, patch: string | undefined): VChild[] {
@@ -3961,6 +3937,42 @@ function closeFilesPatch(state: TuiState, ownerId: string, fileCount: number, sc
   setFilesDetailState(state, { ownerId, selectedIndex: current.selectedIndex, mode: "list" });
   state.detailScrollTop[scrollId] = Math.max(0, current.selectedIndex * 2);
   return true;
+}
+
+function handleFilesBrowserKey(
+  key: KeyEvent,
+  state: TuiState,
+  options: {
+    ownerId: string;
+    scrollId: string;
+    files: DiffFile[];
+    visibleRows: number;
+    backWithB?: boolean;
+    closePatchOnEnter?: boolean;
+    patchScrollMax?: number;
+  },
+): "handled" | "back" | "other" {
+  const { ownerId, scrollId, files } = options;
+  const keyName = key.name || key.sequence;
+  if (isEscapeKey(key) || (options.backWithB && key.sequence === "b")) {
+    return files.length > 0 && closeFilesPatch(state, ownerId, files.length, scrollId) ? "handled" : "back";
+  }
+  if (isEnterKey(key) && files.length > 0) {
+    const detail = filesDetailState(state, ownerId, files.length);
+    if (detail.mode === "list") openFilesPatch(state, ownerId, files.length, scrollId);
+    else if (options.closePatchOnEnter) closeFilesPatch(state, ownerId, files.length, scrollId);
+    return "handled";
+  }
+  if (files.length === 0 || (keyName !== "down" && keyName !== "up")) return "other";
+  const detail = filesDetailState(state, ownerId, files.length);
+  if (detail.mode === "list") {
+    moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, options.visibleRows);
+  } else {
+    const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+    const max = options.patchScrollMax ?? normalizedPatchLines(files[detail.selectedIndex]?.patch).length + 3;
+    state.detailScrollTop[scrollId] = clampDetailScrollOffset(detailScrollOffset(state, scrollId) + delta, max);
+  }
+  return "handled";
 }
 
 function renderCommentsTab(ui: OpenTui, state: TuiState, task: Task) {
@@ -5656,11 +5668,18 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
     const ownerId = task?.id ?? "";
     const scrollId = task ? `board-detail-files-${task.id}` : "";
     const inlineRowsCount = task ? selectedDetailRows(state, task).filter((row) => ["STATE", "TASK ID", "TASK", "LANE", "AGENT", "ASSIGNED TO", "ACCEPTED BY", "DIFF"].includes(row.label)).length : 0;
-    if (isEscapeKey(key)) {
-      if (task && closeFilesPatch(state, ownerId, files.length, scrollId)) {
-        actions.render();
-        return;
-      }
+    const fileKeyResult = handleFilesBrowserKey(key, state, {
+      ownerId,
+      scrollId,
+      files,
+      visibleRows: boardFilesVisibleRows(state, inlineRowsCount),
+      patchScrollMax: task ? boardDetailScrollMax(state, task, state.detailTab) : 0,
+    });
+    if (fileKeyResult === "handled") {
+      actions.render();
+      return;
+    }
+    if (fileKeyResult === "back") {
       closeInlineDetail(state);
       actions.render();
       return;
@@ -5677,27 +5696,20 @@ export async function handleKeypress(key: KeyEvent, state: TuiState, actions: Tu
       actions.render();
       return;
     }
-    if (isEnterKey(key)) {
-      const detail = filesDetailState(state, ownerId, files.length);
-      if (task && files.length > 0 && detail.mode === "list") openFilesPatch(state, ownerId, files.length, scrollId);
-      actions.render();
-      return;
-    }
     if (key.sequence === "c") {
       await commitSelectedFilesTabFile(state, actions);
       return;
     }
-    if ((key.name || key.sequence) === "down" || (key.name || key.sequence) === "up") {
-      const detail = filesDetailState(state, ownerId, files.length);
-      if (task && files.length > 0 && detail.mode === "list") {
-        moveFilesSelection(state, ownerId, files.length, (key.name || key.sequence) === "down" ? 1 : -1, scrollId, boardFilesVisibleRows(state, inlineRowsCount));
-      } else if (task && scrollId) {
-        const delta = (key.name || key.sequence) === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
-        state.detailScrollTop[scrollId] = clampDetailScrollOffset(
-          detailScrollOffset(state, scrollId) + delta,
-          boardDetailScrollMax(state, task, state.detailTab),
-        );
-      }
+    if (isEnterKey(key)) {
+      actions.render();
+      return;
+    }
+    if (files.length === 0 && task && scrollId && ((key.name || key.sequence) === "down" || (key.name || key.sequence) === "up")) {
+      const delta = (key.name || key.sequence) === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
+      state.detailScrollTop[scrollId] = clampDetailScrollOffset(
+        detailScrollOffset(state, scrollId) + delta,
+        boardDetailScrollMax(state, task, state.detailTab),
+      );
       actions.render();
       return;
     }
@@ -6003,37 +6015,26 @@ async function handleSettingsViewKey(key: KeyEvent, state: TuiState, actions: Tu
       const files = response?.kind === "diff" ? response.files : [];
       const ownerId = settingsDirtyWorktreeFilesOwnerId(inspection.worktreePath);
       const scrollId = settingsDirtyWorktreeFilesScrollId(inspection.worktreePath);
-      if (key.sequence === "b" || isEscapeKey(key)) {
-        if (files.length > 0 && closeFilesPatch(state, ownerId, files.length, scrollId)) {
-          actions.render();
-          return;
-        }
-        panel.inspection = undefined;
-        state.filesDetail = undefined;
-        state.status = "dirty worktrees";
-        actions.render();
-        return;
-      }
       if (key.sequence === "u") {
         await inspectSettingsDirtyWorktree(state, actions, inspection.worktreePath, inspection.taskId);
         return;
       }
-      if (files.length > 0 && (keyName === "down" || keyName === "up")) {
-        const detail = filesDetailState(state, ownerId, files.length);
-        if (detail.mode === "patch") {
-          const patchRows = normalizedPatchLines(files[detail.selectedIndex]?.patch).length + 3;
-          const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
-          state.detailScrollTop[scrollId] = clampDetailScrollOffset(detailScrollOffset(state, scrollId) + delta, patchRows);
-        } else {
-          moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, settingsDirtyFilesVisibleRows(state));
-        }
+      const fileKeyResult = handleFilesBrowserKey(key, state, {
+        ownerId,
+        scrollId,
+        files,
+        visibleRows: settingsDirtyFilesVisibleRows(state),
+        backWithB: true,
+        closePatchOnEnter: true,
+      });
+      if (fileKeyResult === "handled") {
         actions.render();
         return;
       }
-      if (files.length > 0 && isEnterKey(key)) {
-        const detail = filesDetailState(state, ownerId, files.length);
-        if (detail.mode === "patch") closeFilesPatch(state, ownerId, files.length, scrollId);
-        else openFilesPatch(state, ownerId, files.length, scrollId);
+      if (fileKeyResult === "back") {
+        panel.inspection = undefined;
+        state.filesDetail = undefined;
+        state.status = "dirty worktrees";
         actions.render();
         return;
       }
@@ -8909,17 +8910,30 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
     actions.shutdown();
     return;
   }
+  const focusedRecord = archive.focused ? filteredArchiveRecords(archive)[archive.selectedIndex] : undefined;
+  const focusedSnapshot = parseDiffSnapshot(focusedRecord?.diff_snapshot);
+  const focusedFiles = focusedSnapshot?.kind === "diff" ? focusedSnapshot.files : [];
+  if (archive.focused && archive.detailTab === "files") {
+    const fileKeyResult = handleFilesBrowserKey(key, state, {
+      ownerId: focusedRecord ? archiveFilesOwnerId(focusedRecord) : "archive:none",
+      scrollId: focusedRecord ? `archive-detail-files-${focusedRecord.task_id}` : "",
+      files: focusedFiles,
+      visibleRows: archiveFilesVisibleRows(state),
+      backWithB: true,
+      closePatchOnEnter: true,
+    });
+    if (fileKeyResult === "handled") {
+      actions.render();
+      return;
+    }
+    if (fileKeyResult === "back") {
+      archive.focused = false;
+      actions.render();
+      return;
+    }
+  }
   if (key.sequence === "b" || isEscapeKey(key)) {
     if (archive.focused) {
-      const record = filteredArchiveRecords(archive)[archive.selectedIndex];
-      const snapshot = parseDiffSnapshot(record?.diff_snapshot);
-      if (record && archive.detailTab === "files" && snapshot?.kind === "diff") {
-        const ownerId = archiveFilesOwnerId(record);
-        if (closeFilesPatch(state, ownerId, snapshot.files.length, `archive-detail-files-${record.task_id}`)) {
-          actions.render();
-          return;
-        }
-      }
       archive.focused = false;
       actions.render();
       return;
@@ -8929,16 +8943,6 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
   }
 
   if (isEnterKey(key)) {
-    const record = filteredArchiveRecords(archive)[archive.selectedIndex];
-    const snapshot = parseDiffSnapshot(record?.diff_snapshot);
-    if (archive.focused && record && archive.detailTab === "files" && snapshot?.kind === "diff" && snapshot.files.length > 0) {
-      const ownerId = archiveFilesOwnerId(record);
-      const detail = filesDetailState(state, ownerId, snapshot.files.length);
-      if (detail.mode === "patch") closeFilesPatch(state, ownerId, snapshot.files.length, `archive-detail-files-${record.task_id}`);
-      else openFilesPatch(state, ownerId, snapshot.files.length, `archive-detail-files-${record.task_id}`);
-      actions.render();
-      return;
-    }
     archive.focused = !archive.focused;
     actions.render();
     return;
@@ -8955,19 +8959,9 @@ async function handleArchiveViewKey(key: KeyEvent, state: TuiState, actions: Tui
     if (archive.detailTab === "files") {
       const snapshot = parseDiffSnapshot(record?.diff_snapshot);
       const files = snapshot?.kind === "diff" ? snapshot.files : [];
-      const ownerId = record ? archiveFilesOwnerId(record) : "archive:none";
       const scrollId = record ? `archive-detail-files-${record.task_id}` : "";
       if (keyName === "down" || keyName === "up") {
-        if (record && files.length > 0) {
-          const detail = filesDetailState(state, ownerId, files.length);
-          if (detail.mode === "patch") {
-            const patchRows = normalizedPatchLines(files[detail.selectedIndex]?.patch).length + 3;
-            const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
-            state.detailScrollTop[scrollId] = clampDetailScrollOffset(detailScrollOffset(state, scrollId) + delta, patchRows);
-          } else {
-            moveFilesSelection(state, ownerId, files.length, keyName === "down" ? 1 : -1, scrollId, archiveFilesVisibleRows(state));
-          }
-        } else if (record) {
+        if (record && files.length === 0) {
           const reportedCount = parseCompletion(record.completion)?.changedFiles.length ?? 0;
           const delta = keyName === "down" ? DETAIL_SCROLL_STEP_ROWS : -DETAIL_SCROLL_STEP_ROWS;
           state.detailScrollTop[scrollId] = clampDetailScrollOffset(

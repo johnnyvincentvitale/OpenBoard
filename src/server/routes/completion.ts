@@ -36,107 +36,103 @@ async function handleCompletion(
 ): Promise<Response> {
   const store = deps.store;
   const id = c.req.param("id");
-  if (!id) return respondWithError(c, AdapterError.notFound("Task not found"));
+  if (!id) throw AdapterError.notFound("Task not found");
+  const task = store.get(id);
+  if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
+  const staleMessage = staleRunMessage(c, task.runStartedAt);
+  if (staleMessage) {
+    return c.json(
+      { error: { code: "validation", message: staleMessage } },
+      409 as ContentfulStatusCode,
+    );
+  }
+  const isLateIdleFallbackUpgrade =
+    task.runState !== "running" &&
+    task.column === "review" &&
+    task.completionSource === "idle-fallback" &&
+    task.completion == null;
+  if (task.runState !== "running" && !isLateIdleFallbackUpgrade) {
+    return c.json(
+      { error: { code: "validation", message: "Task is not running" } },
+      409 as ContentfulStatusCode,
+    );
+  }
+  const expectedRun: TaskRunIdentity = {
+    runStartedAt: task.runStartedAt,
+    sessionId: task.sessionId,
+    harnessSessionId: task.harnessSessionId,
+    harnessSessionName: task.harnessSessionName,
+  };
+
+  let body: unknown;
   try {
-    const task = store.get(id);
-    if (!task) throw AdapterError.notFound(`Task not found: ${id}`);
-    const staleMessage = staleRunMessage(c, task.runStartedAt);
-    if (staleMessage) {
-      return c.json(
-        { error: { code: "validation", message: staleMessage } },
-        409 as ContentfulStatusCode,
-      );
-    }
-    const isLateIdleFallbackUpgrade =
-      task.runState !== "running" &&
-      task.column === "review" &&
-      task.completionSource === "idle-fallback" &&
-      task.completion == null;
-    if (task.runState !== "running" && !isLateIdleFallbackUpgrade) {
-      return c.json(
-        { error: { code: "validation", message: "Task is not running" } },
-        409 as ContentfulStatusCode,
-      );
-    }
-    const expectedRun: TaskRunIdentity = {
-      runStartedAt: task.runStartedAt,
-      sessionId: task.sessionId,
-      harnessSessionId: task.harnessSessionId,
-      harnessSessionName: task.harnessSessionName,
-    };
+    body = await c.req.json();
+  } catch {
+    throw AdapterError.validation("Request body must be valid JSON");
+  }
 
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      throw AdapterError.validation("Request body must be valid JSON");
-    }
+  const payload = parseCompletionBody(body, outcome);
+  const { finalSessionOutput, ...reportPayload } = payload;
+  const report: CompletionReport = { ...reportPayload, outcome, reportedAt: Date.now() };
 
-    const payload = parseCompletionBody(body, outcome);
-    const { finalSessionOutput, ...reportPayload } = payload;
-    const report: CompletionReport = { ...reportPayload, outcome, reportedAt: Date.now() };
-
-    const escapeCheck = await detectTaskBaseCheckoutEscape(task);
-    const completionMetadata = await (deps.inspectCompletion ?? completionPatch)(task, report);
-    const finalOutput = isAcpHarness(task)
-      ? null
-      : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
-        ? finalSessionOutput ?? null
-        : task.finalSessionOutput ?? null;
-    const commit = store.commitTaskCompletion({
-      taskId: id,
-      expectedRun,
-      expectedMode: isLateIdleFallbackUpgrade ? "idle-fallback" : "running",
-      report,
-      patch: escapeCheck.escaped
-        ? {
-            runState: "idle",
+  const escapeCheck = await detectTaskBaseCheckoutEscape(task);
+  const completionMetadata = await (deps.inspectCompletion ?? completionPatch)(task, report);
+  const finalOutput = isAcpHarness(task)
+    ? null
+    : Object.prototype.hasOwnProperty.call(payload, "finalSessionOutput")
+      ? finalSessionOutput ?? null
+      : task.finalSessionOutput ?? null;
+  const commit = store.commitTaskCompletion({
+    taskId: id,
+    expectedRun,
+    expectedMode: isLateIdleFallbackUpgrade ? "idle-fallback" : "running",
+    report,
+    patch: escapeCheck.escaped
+      ? {
+          runState: "idle",
+          pending: "base-checkout-escape",
+          escapeDetectedPaths: escapeCheck.changedPaths,
+          error: undefined,
+          finalSessionOutput: finalOutput,
+          ...completionMetadata,
+          ...(isAcpHarness(task) ? { harnessStatus: "blocked" } : {}),
+        }
+      : {
+          runState: outcome === "complete" ? "idle" : "error",
+          error: outcome === "complete" ? undefined : payload.residualRisk,
+          finalSessionOutput: finalOutput,
+          ...completionMetadata,
+          ...(isAcpHarness(task)
+            ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }
+            : {}),
+        },
+    moveToReview: !escapeCheck.escaped && !isLateIdleFallbackUpgrade,
+    event: escapeCheck.escaped
+      ? {
+          type: "task_blocked",
+          body: {
+            ...report,
             pending: "base-checkout-escape",
             escapeDetectedPaths: escapeCheck.changedPaths,
-            error: undefined,
-            finalSessionOutput: finalOutput,
-            ...completionMetadata,
-            ...(isAcpHarness(task) ? { harnessStatus: "blocked" } : {}),
-          }
-        : {
-            runState: outcome === "complete" ? "idle" : "error",
-            error: outcome === "complete" ? undefined : payload.residualRisk,
-            finalSessionOutput: finalOutput,
-            ...completionMetadata,
-            ...(isAcpHarness(task)
-              ? { harnessStatus: outcome === "complete" ? "idle" : "blocked" }
-              : {}),
           },
-      moveToReview: !escapeCheck.escaped && !isLateIdleFallbackUpgrade,
-      event: escapeCheck.escaped
-        ? {
-            type: "task_blocked",
-            body: {
-              ...report,
-              pending: "base-checkout-escape",
-              escapeDetectedPaths: escapeCheck.changedPaths,
-            },
-          }
-        : {
-            type: outcome === "complete" ? "task_completed" : "task_blocked",
-            body: { ...report },
-          },
-    });
-    if (commit.status === "missing") throw AdapterError.notFound(`Task not found: ${id}`);
-    if (commit.status === "stale") {
-      return c.json(
-        { error: { code: "validation", message: "Completion report is stale for this task run" } },
-        409 as ContentfulStatusCode,
-      );
-    }
-
-    if (outcome === "complete" && !escapeCheck.escaped) {
-      void fireChainAdvance(deps.advancer, store, id);
-    }
-    return c.json(commit.task, 200);
-  } catch (err) {
-    return respondWithError(c, err);
+        }
+      : {
+          type: outcome === "complete" ? "task_completed" : "task_blocked",
+          body: { ...report },
+        },
+  });
+  if (commit.status === "missing") throw AdapterError.notFound(`Task not found: ${id}`);
+  if (commit.status === "stale") {
+    return c.json(
+      { error: { code: "validation", message: "Completion report is stale for this task run" } },
+      409 as ContentfulStatusCode,
+    );
   }
+
+  if (outcome === "complete" && !escapeCheck.escaped) {
+    void fireChainAdvance(deps.advancer, store, id);
+  }
+  return c.json(commit.task, 200);
 }
 
 async function completionPatch(
@@ -235,9 +231,4 @@ function isVerification(value: unknown): value is CompletionBody["verification"]
   if (value === null || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return typeof record.command === "string" && typeof record.result === "string";
-}
-
-function respondWithError(c: Context, err: unknown): Response {
-  const adapterError = err instanceof AdapterError ? err : AdapterError.internal("Unexpected error", err);
-  return c.json(adapterError.toEnvelope(), adapterError.status as ContentfulStatusCode);
 }

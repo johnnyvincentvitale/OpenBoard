@@ -8,6 +8,7 @@ import { SqliteTaskStore } from "../../../src/db/task-store";
 import { registerCompletionRoutes, type CompletionRouteDeps } from "../../../src/server/routes/completion";
 import { createChainAdvancer } from "../../../src/server/chain-advancer";
 import type { Task } from "../../../src/shared";
+import { respondWithAppError } from "../../../src/server/app";
 
 const validBody = {
   summary: "implemented the change",
@@ -22,6 +23,7 @@ function appFor(
   inspectCompletion?: CompletionRouteDeps["inspectCompletion"],
 ): Hono {
   const app = new Hono();
+  app.onError(respondWithAppError);
   registerCompletionRoutes(app, { store, advancer, inspectCompletion });
   return app;
 }

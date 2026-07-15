@@ -43,7 +43,6 @@ import type {
   TaskStore,
 } from "../../shared";
 import { TASK_ROUTE_PATTERNS } from "../../shared";
-import { AdapterError } from "../../shared/errors";
 import type { SessionActivityCollector } from "../session-activity";
 import type { OpencodeHandle } from "../opencode";
 

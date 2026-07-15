@@ -29,7 +29,6 @@ import {
   taskEvents,
   unlinkTasks,
 } from "../../src/mcp/tools";
-import type { CompactBlockedProjection, TaskSummary } from "../../src/client/board-client";
 import type { McpToolOptions } from "../../src/mcp/tools";
 import type { DiffResponse, PendingPermissionAsk, RosterAgent, SessionActivityEvent, SessionActivityRun, Task } from "../../src/shared";
 import { toTaskSummary } from "../../src/client/board-client";
@@ -562,7 +561,7 @@ describe("MCP orchestrator tools", () => {
       capped: false,
       root: CWD,
     };
-    const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
       const path = new URL(String(url)).pathname;
       if (path.endsWith("/sync") || path.endsWith("/integrate")) return jsonResponse(outcome);
       if (path.endsWith("/comments")) return jsonResponse({ id: "comment_1", taskId: "task-1", author: "me", body: "note", createdAt: 3 }, 201);

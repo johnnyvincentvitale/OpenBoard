@@ -3,8 +3,7 @@
  * model. Distinct from the session-board card routes: tasks are specs that
  * a Dispatcher turns into OpenCode sessions.
  */
-import type { Context, Hono } from "hono";
-import type { ContentfulStatusCode } from "hono/utils/http-status";
+import type { Hono } from "hono";
 import {
   AUTO_RUN_REQUIREMENT,
   CLAUDE_CODE_MODEL_PROVIDER,
@@ -33,7 +32,7 @@ import {
 } from "../../shared";
 import type { AcpOptions, ClaudeCodePermissionMode, CompletionReport, CreateTaskInput, Dispatcher, ModelRef, PermissionOverrides, RosterAgent, SessionMessageInput, SessionMessageReceipt, Task, TaskHarness, TaskIsolationMode, TaskKind, TaskStore, UpdateTaskInput } from "../../shared";
 import { AdapterError } from "../../shared/errors";
-import { ArchivedTaskActionError, DependencyGateError } from "../dispatcher";
+import { ArchivedTaskActionError } from "../dispatcher";
 import { isExternalDirectoriesAllowed, resolveBoardWorkspace, resolveTaskDirectory } from "../workspace";
 import { computeDiff } from "../diff-engine";
 import { fireChainAdvance, type ChainAdvancer } from "../chain-advancer";
@@ -229,10 +228,6 @@ export function registerTaskRoutes(
     return matched.model;
   }
 
-  function resolveClaudeModel(explicitModel: unknown): ModelRef | undefined {
-    return resolveAcpModel("claude-code", explicitModel);
-  }
-
   function resolveAcpModel(harness: TaskHarness, explicitModel: unknown): ModelRef | undefined {
     const providerID = modelProviderForHarness(harness);
     if (explicitModel === undefined || providerID === null) return undefined;
@@ -405,7 +400,7 @@ export function registerTaskRoutes(
       const fresh = store.get(task.id);
       return c.json(fresh ? projectTask(fresh) : fresh, 201);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -421,7 +416,7 @@ export function registerTaskRoutes(
       const projected = projectPendingPermissions(tasks, dispatcher);
       return c.json(projected, 200);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -492,7 +487,7 @@ export function registerTaskRoutes(
       if (!refreshed) throw AdapterError.notFound(`Task not found: ${id}`);
       return c.json(projectTask(refreshed), 200);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -505,7 +500,7 @@ export function registerTaskRoutes(
       store.addEvent({ taskId: id, type: "task_run", body: { sessionId: task.sessionId, runStartedAt: task.runStartedAt } });
       return c.json(projectTask(task), 202);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -558,7 +553,7 @@ export function registerTaskRoutes(
       }
       return c.json(projectTask(task), 202);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     } finally {
       if (blockedAnswerKey) inFlightBlockedAnswers.delete(blockedAnswerKey);
     }
@@ -579,7 +574,7 @@ export function registerTaskRoutes(
       }
       return c.json({ ...receipt, task: projectTask(receipt.task) }, 202);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -595,7 +590,7 @@ export function registerTaskRoutes(
       store.addEvent({ taskId: id, type: "task_aborted", body: { sessionId: task.sessionId } });
       return c.json(projectTask(task), 200);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -665,7 +660,7 @@ export function registerTaskRoutes(
       const tasks = projectPendingPermissions(store.list(), dispatcher);
       return c.json(tasks, 200);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -682,7 +677,7 @@ export function registerTaskRoutes(
       }
       return c.json(outcome, 200);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -944,7 +939,7 @@ export function registerTaskRoutes(
       const task = await dispatcher.initGitAndRun(id);
       return c.json(projectTask(task), 202);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -956,7 +951,7 @@ export function registerTaskRoutes(
       store.addEvent({ taskId: id, type: "task_synced", body: { ok: outcome.ok, conflict: outcome.conflict, message: outcome.message } });
       return c.json({ ...outcome, task: projectTask(outcome.task) }, outcome.ok ? 200 : 409);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -967,7 +962,7 @@ export function registerTaskRoutes(
       const status = await dispatcher.getWorktreeCommitStatus(id, targetBranch);
       return c.json(status);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -990,7 +985,7 @@ export function registerTaskRoutes(
       store.addEvent({ taskId: id, type: "task_file_committed", body: { ok: outcome.ok, file: outcome.file, message: outcome.message, commit: outcome.commit } });
       return c.json({ ...outcome, task: projectTask(outcome.task) }, outcome.ok ? 200 : 409);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -1031,7 +1026,7 @@ export function registerTaskRoutes(
       });
       return c.json({ ...outcome, task: projectTask(outcome.task) }, outcome.ok ? 200 : 409);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -1049,7 +1044,7 @@ export function registerTaskRoutes(
       store.addEvent({ taskId: id, type: "task_worktree_discarded", body: { ...outcome } });
       return c.json(outcome, outcome.ok ? 200 : 409);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -1065,7 +1060,7 @@ export function registerTaskRoutes(
       const diff = await computeDiff(task);
       return c.json(diff, 200);
     } catch (err) {
-      return respondWithError(c, err);
+      throw err;
     }
   });
 
@@ -1235,37 +1230,4 @@ function blockedAcceptanceEvidence(task: Task, completedBy: string | undefined, 
     residualRisk: completion?.residualRisk,
     transition,
   };
-}
-
-/** Translate a thrown value into the AdapterError JSON envelope + status. */
-function respondWithError(c: Context, err: unknown): Response {
-  if (err instanceof DependencyGateError) {
-    return c.json(
-      {
-        error: {
-          code: "validation",
-          message: err.message,
-          unmetParents: err.unmetParents,
-        },
-      },
-      err.status as ContentfulStatusCode,
-    );
-  }
-  if (err instanceof NonDiffableColumnError) {
-    return c.json(
-      { error: { code: "validation", message: err.message } },
-      err.status as ContentfulStatusCode,
-    );
-  }
-  if (err instanceof ConflictRouteError) {
-    return c.json({ error: { code: err.code, message: err.message, ...(err.details ?? {}) } }, err.status as ContentfulStatusCode);
-  }
-  const adapterError = toAdapterError(err);
-  return c.json(adapterError.toEnvelope(), adapterError.status as ContentfulStatusCode);
-}
-
-/** Normalize any thrown value into an AdapterError, wrapping unexpected errors as internal. */
-function toAdapterError(err: unknown): AdapterError {
-  if (err instanceof AdapterError) return err;
-  return AdapterError.internal("Unexpected error", err);
 }

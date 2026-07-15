@@ -868,8 +868,6 @@ describe("SessionActivityCollector", () => {
       collector.startRun(makeRun());
 
       const goodFrames: SessionActivityFrame[] = [];
-      const badFrames: SessionActivityFrame[] = [];
-
       collector.subscribe("task_1", 0, (_frame) => {
         throw new Error("simulated subscriber crash");
       });

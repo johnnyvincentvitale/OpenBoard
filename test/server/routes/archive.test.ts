@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import { SqliteTaskStore } from "../../../src/db/task-store";
 import { GlobalArchiveStore } from "../../../src/db/global-archive-store";
 import { registerArchiveRoutes } from "../../../src/server/routes/archive";
+import { respondWithAppError } from "../../../src/server/app";
 
 function makeApp(options: {
   archiveDiffSnapshot?: Parameters<typeof registerArchiveRoutes>[1]["archiveDiffSnapshot"];
@@ -14,6 +15,7 @@ function makeApp(options: {
   const store = new SqliteTaskStore(":memory:");
   const globalArchiveStore = new GlobalArchiveStore(":memory:");
   const app = new Hono();
+  app.onError(respondWithAppError);
   registerArchiveRoutes(app, {
     store,
     globalArchiveStore,

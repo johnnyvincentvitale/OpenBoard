@@ -562,19 +562,19 @@ describe("ClaudeAcpRunner", () => {
       options: [{ optionId: "allow", kind: "allow" }, { optionId: "reject", kind: "reject" }],
     });
 
-    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/repo/src/file.ts" } }), "/repo", "manual")).toBe("ask");
-    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "/repo", "manual")).toBe("ask");
-    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "npm test" } }), "/repo", "manual")).toBe("ask");
-    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "cat /tmp/secret" } }), "/repo", "manual")).toBe("ask");
-    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "acceptEdits")).toBe("allow");
-    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "auto")).toBe("allow");
-    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "autoEdit")).toBe("allow");
-    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "autoEdit")).toBe("ask");
-    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "yolo")).toBe("allow");
-    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "/repo", "dontAsk")).toBe("deny");
-    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "/repo", "plan")).toBe("deny");
-    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "mcp__openboard__complete_task" } }, rawInput: {} }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "/repo", "bypassPermissions")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/repo/src/file.ts" } }), "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "npm test" } }), "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "Bash" } }, rawInput: { command: "cat /tmp/secret" } }), "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "acceptEdits")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "auto")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "autoEdit")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "autoEdit")).toBe("ask");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "yolo")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit" }), "dontAsk")).toBe("deny");
+    expect(decideClaudeAcpPermission(permission({ kind: "execute" }), "plan")).toBe("deny");
+    expect(decideClaudeAcpPermission(permission({ _meta: { claudeCode: { toolName: "mcp__openboard__complete_task" } }, rawInput: {} }), "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(permission({ kind: "edit", rawInput: { file_path: "/tmp/file.ts" } }), "bypassPermissions")).toBe("allow");
   });
 
   it.each([
@@ -587,7 +587,7 @@ describe("ClaudeAcpRunner", () => {
     ["symlink-shaped path", { kind: "edit", rawInput: { file_path: "/repo/link/outside.ts" } }],
   ])("never auto-allows %s in manual mode", (_label, toolCall) => {
     const request = { sessionId: "s1", toolCall, options: [{ optionId: "allow_once", kind: "allow_once" }, { optionId: "reject", kind: "reject" }] };
-    expect(decideClaudeAcpPermission(request, "/repo", "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(request, "manual")).toBe("ask");
   });
 
   it("reports a provider reply failure when ACP stdin is closed", async () => {
@@ -673,13 +673,13 @@ describe("CodexAcpRunner", () => {
       options: [{ optionId: "allow", kind: "allow" }, { optionId: "reject", kind: "reject" }],
     });
 
-    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "complete_task" } }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "openboard.block_task" } }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(request({ title: "mcp__openboard__block_task" }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(request({ title: "complete_task (openboard MCP Server)" }), "/repo", "manual")).toBe("allow");
-    expect(decideClaudeAcpPermission(request({ title: "block_task (openboard MCP Server)" }), "/repo", "plan")).toBe("allow");
-    expect(decideClaudeAcpPermission(request({ title: "complete_task (other MCP Server)" }), "/repo", "manual")).toBe("ask");
-    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "other.complete_task" } }), "/repo", "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "complete_task" } }), "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "openboard.block_task" } }), "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ title: "mcp__openboard__block_task" }), "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ title: "complete_task (openboard MCP Server)" }), "manual")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ title: "block_task (openboard MCP Server)" }), "plan")).toBe("allow");
+    expect(decideClaudeAcpPermission(request({ title: "complete_task (other MCP Server)" }), "manual")).toBe("ask");
+    expect(decideClaudeAcpPermission(request({ rawInput: { toolName: "other.complete_task" } }), "manual")).toBe("ask");
   });
 
   it("inherits brokered permissions and notification activity in ACP subclasses", async () => {
