@@ -42,6 +42,11 @@ jobs:
       - name: Link the OpenBoard CLI
         run: npm link
 
+      - name: Install the OpenCode CLI
+        run: |
+          npm install --global opencode-ai
+          opencode --version
+
       - name: Named-instance lifecycle smoke
         run: |
           $ErrorActionPreference = 'Stop'
