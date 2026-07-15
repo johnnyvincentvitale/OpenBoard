@@ -1,4 +1,4 @@
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 import type { TaskKind } from "../shared";
 import type { TaskContext } from "../shared/lineage-context";
 
@@ -122,7 +122,8 @@ function parentChangedFiles(parent: TaskContext["directParents"][number]): strin
     if (!parent.worktreePath || !isAbsolute(file)) return file;
     const rel = relative(parent.worktreePath, file);
     const outsideParentWorktree = rel === ".." || rel.startsWith("../") || rel.startsWith("..\\") || isAbsolute(rel);
-    return rel && !outsideParentWorktree ? rel : file;
+    if (!rel || outsideParentWorktree) return file;
+    return sep === "\\" ? rel.replaceAll("\\", "/") : rel;
   });
 }
 

@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomFillSync } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { constants, homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_BOARD_URL, resolveBoardUrl } from "../client/board-client";
 import { BOARD_SERVER_DEFAULTS, OPENCODE_DEFAULTS } from "../shared/opencode-defaults";
@@ -69,9 +69,9 @@ export function defaultOpenBoardDataDir(
   home = homedir(),
 ): string {
   if (env.OPENBOARD_DATA_DIR?.trim()) return env.OPENBOARD_DATA_DIR.trim();
-  if (platform === "darwin") return join(home, "Library", "Application Support", "OpenBoard");
-  if (platform === "win32") return join(env.APPDATA ?? join(home, "AppData", "Roaming"), "OpenBoard");
-  return join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "OpenBoard");
+  if (platform === "darwin") return posix.join(home, "Library", "Application Support", "OpenBoard");
+  if (platform === "win32") return win32.join(env.APPDATA ?? win32.join(home, "AppData", "Roaming"), "OpenBoard");
+  return posix.join(env.XDG_CONFIG_HOME ?? posix.join(home, ".config"), "OpenBoard");
 }
 
 export function resolveRendererCommand(

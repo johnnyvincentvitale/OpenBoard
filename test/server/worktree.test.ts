@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitWorktreeManager } from "../../src/server/worktree";
@@ -29,6 +29,7 @@ function g(cwd: string, args: string[]): string {
 function makeRepo(root: string): void {
   mkdirSync(root, { recursive: true });
   g(root, ["init", "-b", "main"]);
+  g(root, ["config", "core.autocrlf", "false"]);
   writeFileSync(join(root, "file.txt"), "base\n");
   g(root, ["add", "-A"]);
   g(root, ["commit", "--no-gpg-sign", "-m", "base"]);
@@ -39,7 +40,7 @@ describe("GitWorktreeManager", () => {
   const mgr = new GitWorktreeManager();
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "ocb-wt-"));
+    tmp = realpathSync.native(mkdtempSync(join(tmpdir(), "ocb-wt-")));
   });
 
   afterEach(() => {
@@ -101,7 +102,7 @@ describe("GitWorktreeManager", () => {
     // The worktree is on its own branch; the main repo is still on main.
     expect(g(wtPath, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("board/task-1");
     expect(g(repo, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("main");
-    expect(g(repo, ["worktree", "list"])).toContain(wtPath);
+    expect(g(repo, ["worktree", "list"]).replaceAll("\\", "/")).toContain(wtPath.replaceAll("\\", "/"));
   });
 
   it("syncUpstream merges upstream base commits into the worktree branch (clean)", async () => {

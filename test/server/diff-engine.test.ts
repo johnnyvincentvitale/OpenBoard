@@ -44,7 +44,7 @@ function makeBaseTask(overrides: Partial<Task> = {}): Task {
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "ocb-diff-test-"));
+  tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "ocb-diff-test-")));
 });
 
 afterEach(() => {
@@ -531,7 +531,7 @@ describe("diff-engine exported primitives", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "ocb-diff-prim-test-"));
+    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "ocb-diff-prim-test-")));
   });
 
   afterEach(() => {
@@ -784,8 +784,8 @@ diff --git a/mod.ts b/mod.ts
 
       const root = await resolveGitRepoRoot(repoDir);
       const common = await resolveGitCommonDir(repoDir);
-      expect(root).toBe(realpathSync(repoDir));
-      expect(common).toBe(realpathSync(join(repoDir, ".git")));
+      expect(root).toBe(realpathSync.native(repoDir));
+      expect(common).toBe(realpathSync.native(join(repoDir, ".git")));
     });
 
     it("share a common git dir across worktrees of the same repo", async () => {
@@ -799,14 +799,14 @@ diff --git a/mod.ts b/mod.ts
 
       const rootA = await resolveGitRepoRoot(wtA);
       const rootB = await resolveGitRepoRoot(wtB);
-      expect(rootA).toBe(realpathSync(wtA));
-      expect(rootB).toBe(realpathSync(wtB));
+      expect(rootA).toBe(realpathSync.native(wtA));
+      expect(rootB).toBe(realpathSync.native(wtB));
       expect(rootA).not.toBe(rootB);
 
       const commonA = await resolveGitCommonDir(wtA);
       const commonB = await resolveGitCommonDir(wtB);
       expect(commonA).toBe(commonB);
-      expect(commonA).not.toBe(realpathSync(join(wtA, ".git")));
+      expect(commonA).not.toBe(realpathSync.native(join(wtA, ".git")));
     });
 
     it("return null for a non-git directory", async () => {

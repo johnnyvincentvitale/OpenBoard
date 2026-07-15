@@ -37,6 +37,12 @@ describe("instancesFilePath", () => {
     );
   });
 
+  it("uses Windows separators for a Windows home directory", () => {
+    expect(instancesFilePath("C:\\Users\\alice")).toBe(
+      "C:\\Users\\alice\\.config\\openboard\\instances.json",
+    );
+  });
+
   it("is a pure function — same input, same output", () => {
     const a = instancesFilePath("/tmp/x");
     const b = instancesFilePath("/tmp/x");
@@ -61,6 +67,14 @@ describe("instanceDataDir", () => {
     );
     expect(result.pidFile).toContain("openboard.pid");
     expect(result.logFile).toContain("openboard.log");
+  });
+
+  it("uses Windows separators for a Windows home directory", () => {
+    expect(instanceDataDir("C:\\Users\\alice", "my-project")).toEqual({
+      dataDir: "C:\\Users\\alice\\.local\\share\\openboard\\my-project",
+      pidFile: "C:\\Users\\alice\\.local\\share\\openboard\\my-project\\openboard.pid",
+      logFile: "C:\\Users\\alice\\.local\\share\\openboard\\my-project\\openboard.log",
+    });
   });
 });
 

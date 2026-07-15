@@ -1,0 +1,106 @@
+name: Windows compatibility smoke
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        id: unit-tests
+        continue-on-error: true
+        run: npm test
+
+      - name: Build all application surfaces
+        run: npm run build:app
+
+      - name: Link the OpenBoard CLI
+        run: npm link
+
+      - name: Install the OpenCode CLI
+        run: |
+          npm install --global opencode-ai
+          opencode --version
+
+      - name: Named-instance lifecycle smoke
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'dist\cli\openboard.mjs'
+          $instance = "win-smoke-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $port = 4197
+
+          function Invoke-OpenBoard {
+            param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+            & node $cli @Arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "openboard $($Arguments -join ' ') exited with code $LASTEXITCODE"
+            }
+          }
+
+          try {
+            Invoke-OpenBoard add $instance --workspace $env:GITHUB_WORKSPACE --port $port
+            Invoke-OpenBoard start $instance
+
+            $status = (& node $cli status $instance --json | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or $status.runtime.status -ne 'running') {
+              throw "Expected running status; got $($status.runtime.status)"
+            }
+
+            $instances = (& node $cli list --json | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or -not ($instances | Where-Object { $_.instance.name -eq $instance -and $_.runtime.status -eq 'running' })) {
+              throw 'Running instance was not present in openboard list --json'
+            }
+
+            $health = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$port/api/health"
+            if ($health.StatusCode -ne 200) {
+              throw "Health endpoint returned HTTP $($health.StatusCode)"
+            }
+
+            Invoke-OpenBoard stop $instance
+
+            $stopped = (& node $cli status $instance --json | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or $stopped.runtime.status -ne 'stopped') {
+              throw "Expected stopped status; got $($stopped.runtime.status)"
+            }
+
+            $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+            if ($listener) {
+              throw "Port $port is still listening after openboard stop"
+            }
+          }
+          finally {
+            & node $cli stop $instance 2>$null
+            & node $cli remove $instance --force 2>$null
+          }
+
+      - name: Preserve unit-test failure
+        if: steps.unit-tests.outcome == 'failure'
+        run: throw 'Windows unit tests failed; see the Unit tests step for path-portability failures.'

@@ -10,6 +10,7 @@
  * layout, lifecycle types, a CLI command surface, and pure validation helpers.
  */
 
+import { posix, win32 } from "node:path";
 import type { InstanceConfig } from "./task";
 
 // ── Registry file schema ─────────────────────────────────────────────────────
@@ -24,7 +25,8 @@ import type { InstanceConfig } from "./task";
  * @returns `~/.config/openboard/instances.json`
  */
 export function instancesFilePath(homeDir: string): string {
-  return `${homeDir}/.config/openboard/instances.json`;
+  const pathApi = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\") ? win32 : posix;
+  return pathApi.join(homeDir, ".config", "openboard", "instances.json");
 }
 
 /**
@@ -80,11 +82,12 @@ export interface InstanceDataDir {
  * @param name    The instance's kebab-case name.
  */
 export function instanceDataDir(homeDir: string, name: string): InstanceDataDir {
-  const dataDir = `${homeDir}/.local/share/openboard/${name}`;
+  const pathApi = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\") ? win32 : posix;
+  const dataDir = pathApi.join(homeDir, ".local", "share", "openboard", name);
   return {
     dataDir,
-    pidFile: `${dataDir}/openboard.pid`,
-    logFile: `${dataDir}/openboard.log`,
+    pidFile: pathApi.join(dataDir, "openboard.pid"),
+    logFile: pathApi.join(dataDir, "openboard.log"),
   };
 }
 
