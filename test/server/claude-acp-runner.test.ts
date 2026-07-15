@@ -609,6 +609,47 @@ describe("ClaudeAcpRunner", () => {
 });
 
 describe("CodexAcpRunner", () => {
+  it("discovers bare Codex model IDs separately from reasoning effort", async () => {
+    const harness = makeAcpHarness();
+    const discovery = discoverAcpConfig("codex", { cwd: "/repo", env: {}, spawn: harness.spawn as never });
+
+    harness.respond(await harness.nextMessage("initialize"), { protocolVersion: 1 });
+    harness.respond(await harness.nextMessage("session/new"), {
+      sessionId: "codex-discovery-1",
+      models: {
+        availableModels: [
+          { modelId: "gpt-5.6-sol[high]", name: "GPT-5.6 SOL (high)" },
+          { modelId: "gpt-5.6-sol[xhigh]", name: "GPT-5.6 SOL (xhigh)" },
+        ],
+      },
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          type: "select",
+          options: [{ value: "gpt-5.6-sol", name: "GPT-5.6 SOL" }],
+        },
+        {
+          id: "reasoning_effort",
+          name: "Reasoning effort",
+          type: "select",
+          currentValue: "xhigh",
+          options: [{ value: "high", name: "High" }, { value: "xhigh", name: "Extra high" }],
+        },
+      ],
+    });
+
+    await expect(discovery).resolves.toMatchObject({
+      available: true,
+      models: [{ id: "gpt-5.6-sol", name: "GPT-5.6 SOL" }],
+      options: [{
+        id: "reasoning_effort",
+        currentValue: "xhigh",
+        options: [{ value: "high", name: "High" }, { value: "xhigh", name: "Extra high" }],
+      }],
+    });
+  });
+
   it("configures a Codex ACP session through the adapter's native protocol", async () => {
     const harness = makeAcpHarness();
     const runner = new CodexAcpRunner({
@@ -763,6 +804,12 @@ describe("GeminiAcpRunner", () => {
       sessionId: "gemini-discovery-1",
       modes: { availableModes: [{ id: "default", name: "Default" }, { id: "yolo", name: "YOLO" }] },
       models: { availableModels: [{ modelId: "auto-gemini-3", name: "Auto" }, { modelId: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro" }] },
+      configOptions: [{
+        id: "model",
+        category: "model",
+        type: "select",
+        options: [{ value: "config-option-model", name: "Config option model" }],
+      }],
     });
 
     await expect(discovery).resolves.toMatchObject({

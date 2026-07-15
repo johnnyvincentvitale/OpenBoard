@@ -75,6 +75,7 @@ interface AcpRunnerServiceConfig {
   extraMeta?: Record<string, unknown>;
   configOptions?: boolean;
   setModel?: boolean;
+  preferConfigOptionModels?: boolean;
 }
 
 export interface ClaudeAcpRunnerDeps extends ClaudeCodeRunnerDeps {
@@ -123,6 +124,7 @@ const CODEX_ACP_SERVICE: AcpRunnerServiceConfig = {
   sessionLabel: "Codex ACP",
   displayName: "Codex ACP",
   configOptions: true,
+  preferConfigOptionModels: true,
 };
 
 const GEMINI_ACP_SERVICE: AcpRunnerServiceConfig = {
@@ -322,26 +324,29 @@ function flattenConfigSelectOptions(options: unknown): AcpConfigValueOption[] {
   return output;
 }
 
-function modelOptionsFromSessionNew(value: unknown, omitModelIds: readonly string[] = []): AcpModelOption[] {
+function standardModelOptionsFromSessionNew(value: unknown, omit: ReadonlySet<string>): AcpModelOption[] {
   if (value === null || typeof value !== "object") return [];
   const record = value as Record<string, unknown>;
-  const omit = new Set(["default", ...omitModelIds]);
   const modelsRecord = record.models;
   const standardModels = modelsRecord !== null && typeof modelsRecord === "object"
     ? (modelsRecord as Record<string, unknown>).availableModels
     : undefined;
-  if (Array.isArray(standardModels)) {
-    return standardModels.flatMap((item) => {
-      if (item === null || typeof item !== "object") return [];
-      const model = item as Record<string, unknown>;
-      const id = typeof model.modelId === "string" ? model.modelId.trim() : "";
-      return id && !omit.has(id) ? [{
-        id,
-        ...(typeof model.name === "string" ? { name: model.name } : {}),
-        ...(typeof model.description === "string" ? { description: model.description } : {}),
-      }] : [];
-    });
-  }
+  if (!Array.isArray(standardModels)) return [];
+  return standardModels.flatMap((item) => {
+    if (item === null || typeof item !== "object") return [];
+    const model = item as Record<string, unknown>;
+    const id = typeof model.modelId === "string" ? model.modelId.trim() : "";
+    return id && !omit.has(id) ? [{
+      id,
+      ...(typeof model.name === "string" ? { name: model.name } : {}),
+      ...(typeof model.description === "string" ? { description: model.description } : {}),
+    }] : [];
+  });
+}
+
+function configModelOptionsFromSessionNew(value: unknown, omit: ReadonlySet<string>): AcpModelOption[] {
+  if (value === null || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
   const configOptions = record.configOptions;
   if (!Array.isArray(configOptions)) return [];
   const modelOption = configOptions.find((option) => {
@@ -365,12 +370,31 @@ function modelOptionsFromSessionNew(value: unknown, omitModelIds: readonly strin
   return models;
 }
 
+function modelOptionsFromSessionNew(
+  value: unknown,
+  omitModelIds: readonly string[] = [],
+  preferConfigOptionModels = false,
+): AcpModelOption[] {
+  const omit = new Set(["default", ...omitModelIds]);
+  const preferred = preferConfigOptionModels
+    ? configModelOptionsFromSessionNew(value, omit)
+    : standardModelOptionsFromSessionNew(value, omit);
+  if (preferred.length > 0) return preferred;
+  return preferConfigOptionModels
+    ? standardModelOptionsFromSessionNew(value, omit)
+    : configModelOptionsFromSessionNew(value, omit);
+}
+
 function configValue(value: unknown): AcpOptionValue | undefined {
   return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : undefined;
 }
 
-function acpConfigFromSessionNew(value: unknown, omitModelIds: readonly string[] = []): AcpHarnessConfig {
-  const models = modelOptionsFromSessionNew(value, omitModelIds);
+function acpConfigFromSessionNew(
+  value: unknown,
+  omitModelIds: readonly string[] = [],
+  preferConfigOptionModels = false,
+): AcpHarnessConfig {
+  const models = modelOptionsFromSessionNew(value, omitModelIds, preferConfigOptionModels);
   if (value === null || typeof value !== "object") return { available: true, modes: [], models, options: [] };
   const record = value as Record<string, unknown>;
   const modesRecord = record.modes;
@@ -407,7 +431,8 @@ export async function discoverAcpModelOptions(
   options: { cwd: string; env?: NodeJS.ProcessEnv; spawn?: Spawn; timeoutMs?: number },
 ): Promise<AcpModelOption[]> {
   const service = acpServiceForHarness(harness);
-  return withDiscoverySession(service, options, (created) => modelOptionsFromSessionNew(created, service.omitModelIds));
+  return withDiscoverySession(service, options, (created) =>
+    modelOptionsFromSessionNew(created, service.omitModelIds, service.preferConfigOptionModels));
 }
 
 export async function discoverAcpConfig(
@@ -415,7 +440,8 @@ export async function discoverAcpConfig(
   options: { cwd: string; env?: NodeJS.ProcessEnv; spawn?: Spawn; timeoutMs?: number },
 ): Promise<AcpHarnessConfig> {
   const service = acpServiceForHarness(harness);
-  return withDiscoverySession(service, options, (created) => acpConfigFromSessionNew(created, service.omitModelIds));
+  return withDiscoverySession(service, options, (created) =>
+    acpConfigFromSessionNew(created, service.omitModelIds, service.preferConfigOptionModels));
 }
 
 async function withDiscoverySession<T>(
