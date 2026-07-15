@@ -32,6 +32,8 @@ jobs:
         run: npm run typecheck
 
       - name: Unit tests
+        id: unit-tests
+        continue-on-error: true
         run: npm test
 
       - name: Build all application surfaces
@@ -90,3 +92,7 @@ jobs:
             & node $cli stop $instance 2>$null
             & node $cli remove $instance --force 2>$null
           }
+
+      - name: Preserve unit-test failure
+        if: steps.unit-tests.outcome == 'failure'
+        run: throw 'Windows unit tests failed; see the Unit tests step for path-portability failures.'
