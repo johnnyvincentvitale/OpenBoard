@@ -61,10 +61,11 @@ the other harnesses are driven over the **Agent Client Protocol (ACP)**.
 - **OpenCode** — binds one of your OpenCode agents (`build`, `plan`, `general`,
   `explore`, …) and a model synced live from the providers OpenCode is authenticated
   for.
-- **Claude Code** — dispatches a background Claude Code ACP session. This is the
-  exercised ACP path; it reports completion through the same structured contract, so its
-  cards join Review, handoffs, and dependencies like any other.
-- **Codex, Gemini, Hermes, Pi Coding Agent, Cursor** — additional ACP harnesses.
+- **Claude Code, Codex, Gemini** — dispatch a background ACP session. These are the
+  verified ACP paths, exercised end-to-end; they ship as bundled adapters and report
+  completion through the same structured contract, so their cards join Review, handoffs,
+  and dependencies like any other.
+- **Hermes, Pi Coding Agent, Cursor** — additional ACP harnesses.
   **Experimental:** the runner and live discovery are wired, but these have not yet been
   run end-to-end. Each appears in the new-task wizard only when its adapter is actually
   installed and launchable.
@@ -386,7 +387,7 @@ contents to the system clipboard.
 The same write path is available to orchestrators as `send_session_message`. Callers must
 provide an explicit sender, client message id, and expected session id so reconnect retries
 are idempotent and stale drafts cannot land in a replacement session. OpenCode and live
-Claude ACP sessions support same-session continuation. If an ACP process or provider session
+ACP sessions support same-session continuation. If an ACP process or provider session
 is gone, OpenBoard reports it as non-resumable rather than silently starting a new chat.
 
 ### Watchdog and automatic retry
@@ -591,12 +592,12 @@ Done-card View Diff screens are historical and read-only. They omit edit/commit 
 - Without worktree isolation, concurrent agents in one repo have **no file locking** — assign
   non-overlapping work, or enable worktree isolation (above).
 - Available models depend on your local OpenCode auth/config and enabled providers.
-- ACP harnesses beyond Claude Code (Codex, Gemini, Hermes, Pi, Cursor) are wired and
+- ACP harnesses beyond Claude Code, Codex, and Gemini (Hermes, Pi, Cursor) are wired and
   discovered live but **not yet verified end-to-end**.
 
 ## Roadmap
 - V1 TUI + named-instance CLI — **ship target**.
 - Worktree-per-agent isolation — **done** (per-task isolation, sync/integrate).
-- Multi-CLI ACP host — **in progress**: Claude Code is the exercised path; Codex, Gemini,
-  Hermes, Pi Coding Agent, and Cursor harnesses are wired and discovered live
+- Multi-CLI ACP host — **in progress**: Claude Code, Codex, and Gemini are verified
+  end-to-end; Hermes, Pi Coding Agent, and Cursor harnesses are wired and discovered live
   (experimental, adapter-gated, not yet verified end-to-end).

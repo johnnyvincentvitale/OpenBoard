@@ -28,3 +28,6 @@ data/
 # Ephemeral worktree artifacts created by git-worktree isolation runs.
 .opencode-board-worktrees/
 .claude/worktrees/
+
+# Local OpenCode agent profiles may contain machine- or user-specific prompts.
+.opencode/agents/
