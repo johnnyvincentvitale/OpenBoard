@@ -239,9 +239,7 @@ describe("remove", () => {
     registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
     registry.add(makeDef("b", 4197, "/b", "b.sqlite"));
 
-    // Set "a" as default via direct file manipulation after validating.
-    const file = registry.getFile();
-    registry.save({ ...file, defaultInstance: "a" });
+    registry.setDefault("a");
 
     expect(registry.getFile().defaultInstance).toBe("a");
 
@@ -321,8 +319,7 @@ describe("defaultInstance", () => {
     registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
     registry.add(makeDef("b", 4197, "/b", "b.sqlite"));
 
-    const file = registry.getFile();
-    registry.save({ ...file, defaultInstance: "b" });
+    registry.setDefault("b");
 
     const fresh = createInstanceRegistry(homeDir);
     expect(fresh.getFile().defaultInstance).toBe("b");
@@ -344,6 +341,35 @@ describe("defaultInstance", () => {
 
     expect(() => registry.setDefault("ghost")).toThrow(InstanceUnknownError);
     expect(registry.getFile().defaultInstance).toBeUndefined();
+  });
+});
+
+describe("board token updates", () => {
+  it("reloads under the registry lock instead of overwriting concurrent changes", () => {
+    registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
+    registry.getFile(); // populate this registry object's cache
+
+    const concurrent = createInstanceRegistry(homeDir);
+    concurrent.add(makeDef("b", 4197, "/b", "b.sqlite"));
+
+    const updated = registry.ensureBoardToken("a", "new-token");
+
+    expect(updated.boardToken).toBe("new-token");
+    const fresh = createInstanceRegistry(homeDir);
+    expect(fresh.list().map((instance) => instance.name)).toEqual(["a", "b"]);
+    expect(fresh.get("a")?.boardToken).toBe("new-token");
+  });
+
+  it("returns the first persisted token to concurrent legacy-token repairs", () => {
+    registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
+    const concurrent = createInstanceRegistry(homeDir);
+
+    const first = registry.ensureBoardToken("a", "token-a");
+    const second = concurrent.ensureBoardToken("a", "token-b");
+
+    expect(first.boardToken).toBe("token-a");
+    expect(second.boardToken).toBe("token-a");
+    expect(createInstanceRegistry(homeDir).get("a")?.boardToken).toBe("token-a");
   });
 });
 
@@ -459,8 +485,7 @@ describe("canonical file format", () => {
 
   it("includes defaultInstance when set", () => {
     registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
-    const file = registry.getFile();
-    registry.save({ ...file, defaultInstance: "a" });
+    registry.setDefault("a");
     const filePath = instancesFilePath(homeDir);
     const raw = JSON.parse(readFileSync(filePath, "utf-8"));
     expect(raw).toHaveProperty("defaultInstance", "a");
@@ -534,8 +559,7 @@ describe("rename", () => {
     registry.add(makeDef("a", 4097, "/a", "a.sqlite"));
     registry.add(makeDef("b", 4197, "/b", "b.sqlite"));
 
-    const file = registry.getFile();
-    registry.save({ ...file, defaultInstance: "a" });
+    registry.setDefault("a");
 
     registry.rename("a", "alpha", "/new/alpha.sqlite");
     expect(registry.getFile().defaultInstance).toBe("alpha");

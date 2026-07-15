@@ -129,14 +129,17 @@ export interface InstanceRegistry {
   /** Load (or create) the backing file and return its contents. */
   load(): InstancesFile;
 
-  /** Persist the given file (called after mutations). */
-  save(file: InstancesFile): void;
-
   /** Add a new instance. Throws on name collision or port conflict. */
   add(def: InstanceDefinition): InstancesFile;
 
   /** Remove an instance by name. Throws if unknown. */
   remove(name: string): InstancesFile;
+
+  /**
+   * Validate a rename against a fresh, locked registry snapshot without
+   * mutating it. Used by lifecycle callers to fail before stopping a daemon.
+   */
+  validateRename(oldName: string, newName: string): InstanceDefinition;
 
   /**
    * Rename an instance.
@@ -147,7 +150,12 @@ export interface InstanceRegistry {
    * - Updates defaultInstance if it matches oldName.
    * - Preserves all other fields (port, workspace, opencodePort).
    */
-  rename(oldName: string, newName: string, newDbPath: string): InstancesFile;
+  rename(
+    oldName: string,
+    newName: string,
+    newDbPath: string,
+    transaction?: InstanceRenameTransaction,
+  ): InstancesFile;
 
   /** Get a single instance by name. */
   get(name: string): InstanceDefinition | undefined;
@@ -161,8 +169,56 @@ export interface InstanceRegistry {
   /** Clear the explicit default instance. */
   clearDefault(): InstancesFile;
 
+  /** Persist a board token only when a fresh, locked definition still lacks one. */
+  ensureBoardToken(name: string, candidateToken: string): InstanceDefinition;
+
   /** Return the raw backing file. */
   getFile(): InstancesFile;
+}
+
+/**
+ * Synchronous side effect committed under the same lock as a registry rename.
+ * `apply` must either complete atomically or throw before changing state.
+ */
+export interface InstanceRenameTransaction {
+  apply(): void;
+  rollback(): void;
+}
+
+interface ValidatedRename {
+  index: number;
+  normalizedName: string;
+  oldDefinition: InstanceDefinition;
+}
+
+function validateRenameRequest(
+  file: InstancesFile,
+  oldName: string,
+  newName: string,
+): ValidatedRename {
+  const index = file.instances.findIndex((instance) => instance.name === oldName);
+  if (index === -1) {
+    throw new InstanceUnknownError(oldName);
+  }
+
+  const nameResult = validateInstanceName(newName);
+  if (!nameResult.ok) {
+    throw new InstanceError(nameResult.error);
+  }
+
+  if (file.instances.some((instance) => instance.name === nameResult.value)) {
+    throw new InstanceNameCollisionError(nameResult.value);
+  }
+
+  return {
+    index,
+    normalizedName: nameResult.value,
+    oldDefinition: file.instances[index],
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function createInstanceRegistry(homeDir: string): InstanceRegistry {
@@ -302,33 +358,31 @@ export function createInstanceRegistry(homeDir: string): InstanceRegistry {
     }
   };
 
+  const validateRename = (oldName: string, newName: string): InstanceDefinition => {
+    const lock = acquireRegistryLock(filePath);
+    try {
+      const file = loadFresh();
+      cache = file;
+      return validateRenameRequest(file, oldName, newName).oldDefinition;
+    } finally {
+      releaseRegistryLock(lock);
+    }
+  };
+
   const rename = (
     oldName: string,
     newName: string,
     newDbPath: string,
+    transaction?: InstanceRenameTransaction,
   ): InstancesFile => {
     const lock = acquireRegistryLock(filePath);
     try {
       const file = loadFresh();
-
-      const idx = file.instances.findIndex((i) => i.name === oldName);
-      if (idx === -1) {
-        throw new InstanceUnknownError(oldName);
-      }
-
-      const nameResult = validateInstanceName(newName);
-      if (!nameResult.ok) {
-        throw new InstanceError(nameResult.error);
-      }
-
-      // Verify newName does not collide with another instance.
-      if (file.instances.some((i) => i.name === newName)) {
-        throw new InstanceNameCollisionError(newName);
-      }
-
-      const oldDef = file.instances[idx];
+      cache = file;
+      const validated = validateRenameRequest(file, oldName, newName);
+      const oldDef = validated.oldDefinition;
       const newDef: InstanceDefinition = {
-        name: newName,
+        name: validated.normalizedName,
         port: oldDef.port,
         workspace: oldDef.workspace,
         dbPath: newDbPath,
@@ -342,7 +396,7 @@ export function createInstanceRegistry(homeDir: string): InstanceRegistry {
 
       // Replace in place to preserve order
       const newInstances = [...file.instances];
-      newInstances[idx] = newDef;
+      newInstances[validated.index] = newDef;
 
       const updated: InstancesFile = {
         ...file,
@@ -351,10 +405,28 @@ export function createInstanceRegistry(homeDir: string): InstanceRegistry {
 
       // Update defaultInstance if it matched the old name
       if (updated.defaultInstance === oldName) {
-        updated.defaultInstance = newName;
+        updated.defaultInstance = validated.normalizedName;
       }
 
-      persist(updated);
+      let transactionApplied = false;
+      try {
+        transaction?.apply();
+        transactionApplied = transaction !== undefined;
+        persist(updated);
+      } catch (error) {
+        if (transactionApplied && transaction) {
+          try {
+            transaction.rollback();
+          } catch (rollbackError) {
+            throw new InstanceError(
+              `Failed to rename instance "${oldName}" to "${validated.normalizedName}": ${errorMessage(error)}. ` +
+              `Filesystem rollback also failed: ${errorMessage(rollbackError)}. ` +
+              `The registry still names "${oldName}"; data may remain under "${validated.normalizedName}".`,
+            );
+          }
+        }
+        throw error;
+      }
       return updated;
     } finally {
       releaseRegistryLock(lock);
@@ -396,9 +468,33 @@ export function createInstanceRegistry(homeDir: string): InstanceRegistry {
     }
   };
 
+  const ensureBoardToken = (name: string, candidateToken: string): InstanceDefinition => {
+    const lock = acquireRegistryLock(filePath);
+    try {
+      const file = loadFresh();
+      const index = file.instances.findIndex((instance) => instance.name === name);
+      if (index === -1) throw new InstanceUnknownError(name);
+      const current = file.instances[index];
+      if (current.boardToken?.trim()) {
+        cache = file;
+        return current;
+      }
+      const updatedDefinition: InstanceDefinition = {
+        ...current,
+        boardToken: candidateToken,
+      };
+      const instances = [...file.instances];
+      instances[index] = updatedDefinition;
+      persist({ ...file, instances });
+      return updatedDefinition;
+    } finally {
+      releaseRegistryLock(lock);
+    }
+  };
+
   const getFile = (): InstancesFile => {
     return load();
   };
 
-  return { load, save: persist, add, remove, rename, get, list, setDefault, clearDefault, getFile };
+  return { load, add, remove, validateRename, rename, get, list, setDefault, clearDefault, ensureBoardToken, getFile };
 }

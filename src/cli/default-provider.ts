@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   createInstanceDaemon,
@@ -7,6 +7,7 @@ import {
   instanceDataDir,
   InstanceError,
   InstanceUnknownError,
+  renameInstance,
   resolveDefaultInstance,
 } from "../instances";
 import type { BoardHealth } from "../shared/health";
@@ -55,13 +56,7 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
 
   const ensureBoardToken = (definition: InstanceDefinition): InstanceDefinition => {
     if (definition.boardToken?.trim()) return definition;
-    const updated: InstanceDefinition = { ...definition, boardToken: createBoardToken() };
-    const file = registry.getFile();
-    registry.save({
-      ...file,
-      instances: file.instances.map((item) => item.name === updated.name ? updated : item),
-    });
-    return updated;
+    return registry.ensureBoardToken(definition.name, createBoardToken());
   };
 
   const requireRunning = async (name: string): Promise<{ definition: InstanceDefinition; runtime: InstanceRuntimeState }> => {
@@ -256,34 +251,11 @@ export function createDefaultProvider(homeDir = homedir()): InstanceLifecyclePro
     },
 
     async rename(oldName, newName) {
-      const oldDef = getDefinition(oldName);
-
-      const runtime = await daemon.status(oldDef);
-      const wasRunning = runtime.status === "running";
-
-      if (wasRunning) {
-        await daemon.stop(oldDef);
-      }
-
-      // Move data directory from old name to new name
-      const oldDirs = instanceDataDir(homeDir, oldName);
-      const newDirs = instanceDataDir(homeDir, newName);
-      renameSync(oldDirs.dataDir, newDirs.dataDir);
-
-      // Compute new dbPath
-      const newDbPath = `${newDirs.dataDir}/board.sqlite`;
-
-      // Rename in registry
-      registry.rename(oldName, newName, newDbPath);
-
-      if (wasRunning) {
-        const newDef = registry.get(newName);
-        if (newDef) {
-          await daemon.start(ensureBoardToken(newDef));
-        }
-      }
-
-      return registry.get(newName)!;
+      return renameInstance(
+        { homeDir, registry, daemon, prepareForStart: ensureBoardToken },
+        oldName,
+        newName,
+      );
     },
   };
 }

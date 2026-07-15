@@ -8,6 +8,7 @@
  *   openboard start <name>
  *   openboard list
  *   instance A task is isolated from instance B
+ *   openboard rename <old> <new> preserves a running instance's task database
  *   openboard stop <name>
  *   stale-pidfile recovery after kill -9
  *
@@ -313,18 +314,37 @@ describe.skipIf(!available)("openboard CLI named-instance flow (integration)", (
         expect(tasksB.map((t) => t.title)).not.toContain("alpha-only-task");
         expect(tasksB).toEqual([]);
 
-        // Stop alpha.
-        const stopA = await runCli(ctx, ["stop", "alpha"]);
+        // Invalid input must fail before stopping or moving the live instance.
+        const invalidRename = await runCli(ctx, ["rename", "alpha", "Bad"]);
+        expect(invalidRename.code).toBe(1);
+        expect(invalidRename.stderr).toContain("lowercase kebab-case");
+        await waitForHealth(portA);
+        expect((await listTasks(portA)).map((task) => task.title)).toContain("alpha-only-task");
+
+        // Rename alpha while it is running. The daemon must restart under the
+        // new identity without losing the board database.
+        ctx.instances = ["alpha", "alpha-renamed", "beta"];
+        const renameA = await runCli(ctx, ["rename", "alpha", "alpha-renamed"]);
+        expect(renameA.code).toBe(0);
+        expect(renameA.stdout).toContain('Renamed instance "alpha" to "alpha-renamed" and restarted it');
+        await waitForHealth(portA);
+        expect((await listTasks(portA)).map((task) => task.title)).toContain("alpha-only-task");
+        const listRenamed = await runCli(ctx, ["list"]);
+        expect(listRenamed.stdout).toMatch(/alpha-renamed\s+running/);
+        expect(listRenamed.stdout).not.toMatch(/^alpha\s/m);
+
+        // Stop the renamed instance.
+        const stopA = await runCli(ctx, ["stop", "alpha-renamed"]);
         expect(stopA.code).toBe(0);
-        expect(stopA.stdout).toMatch(/Instance "alpha" is stopped/);
+        expect(stopA.stdout).toMatch(/Instance "alpha-renamed" is stopped/);
 
         // Alpha's health endpoint dies; beta stays healthy.
         await waitForHealthGone(portA);
         await waitForHealth(portB);
         expect(await healthOk(portB)).toBe(true);
 
-        // Alpha's pidfile is removed.
-        expect(existsSync(pidFilePath(ctx.home, "alpha"))).toBe(false);
+        // The renamed instance's pidfile is removed.
+        expect(existsSync(pidFilePath(ctx.home, "alpha-renamed"))).toBe(false);
         // Beta's pidfile remains.
         expect(existsSync(pidFilePath(ctx.home, "beta"))).toBe(true);
       } finally {

@@ -1120,12 +1120,12 @@ export async function runOpenboard(
       case "rename": {
         const definition = await provider.rename(parsed.oldName, parsed.newName);
         // Check whether the instance is now running by getting its runtime state.
-        const runtime = await provider.getRuntime(parsed.newName);
+        const runtime = await provider.getRuntime(definition.name);
         const extra = runtime.status === "running"
           ? " and restarted it"
           : "";
         stdout.write(
-          `Renamed instance "${parsed.oldName}" to "${parsed.newName}"${extra}\n`,
+          `Renamed instance "${parsed.oldName}" to "${definition.name}"${extra}\n`,
         );
         return 0;
       }

@@ -847,6 +847,27 @@ interface TuiActions {
   copyToClipboard: (text: string) => Promise<void>;
 }
 
+export function reconcileFailedInstanceRename(
+  state: TuiState,
+  oldName: string,
+  newName: string,
+  detail: string,
+): boolean {
+  const renamedIndex = state.instanceList.findIndex((item) => item.definition.name === newName);
+  const oldStillExists = state.instanceList.some((item) => item.definition.name === oldName);
+  if (renamedIndex >= 0 && !oldStillExists) {
+    state.overlay = "none";
+    state.renameInstance = undefined;
+    state.selectedInstanceIndex = renamedIndex;
+    state.status = `renamed ${oldName} to ${newName}; restart failed: ${detail}`;
+    return true;
+  }
+
+  if (state.renameInstance) state.renameInstance.error = detail;
+  state.status = "rename failed";
+  return false;
+}
+
 /** Minimal shape of OpenTUI's scrollable code renderable (a TextBufferRenderable). */
 interface ScrollableCodeRenderable {
   scrollY: number;
@@ -1298,8 +1319,11 @@ export async function runOpenBoardTui(
       state.selectedInstanceIndex = Math.max(0, state.instanceList.findIndex((item) => item.definition.name === newName));
       state.status = `renamed ${oldName} to ${newName}`;
     } catch (error) {
-      if (state.renameInstance) state.renameInstance.error = errorMessage(error);
-      state.status = "rename failed";
+      const detail = errorMessage(error);
+      await refreshInstanceList();
+      // A post-commit restart failure leaves a durable new identity. Reconcile
+      // to it instead of retaining an overlay that can only retry the old name.
+      reconcileFailedInstanceRename(state, oldName, newName, detail);
     }
     render();
   };

@@ -50,5 +50,14 @@ export {
   resolveDefaultInstance,
 } from "../shared/instances";
 
-export { createInstanceRegistry, type InstanceRegistry } from "./registry";
+export {
+  createInstanceRegistry,
+  type InstanceRegistry,
+  type InstanceRenameTransaction,
+} from "./registry";
 export { createInstanceDaemon, type InstanceDaemon, buildAdapterEnv } from "./daemon";
+export {
+  renameInstance,
+  type InstanceRenameFileSystem,
+  type RenameInstanceDependencies,
+} from "./rename";

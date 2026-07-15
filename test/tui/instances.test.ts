@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applySuccessfulTaskActionResult, archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, renderApp, type TaskDetailTab } from "../../src/tui/index";
+import { applySuccessfulTaskActionResult, archiveTaskShortcut, boardApiFetchInit, handleKeypress, handlePaste, reconcileFailedInstanceRename, renderApp, type TaskDetailTab } from "../../src/tui/index";
 import { createMockInstanceProvider, initialViewState, type InstanceListItem } from "../../src/tui/model";
 import type { BoardDiagnostics, Column, RespondPermissionOutcome, Task } from "../../src/shared";
 
@@ -168,6 +168,37 @@ describe("TUI instance rendering", () => {
     expect(renamed.name).toBe("new-name");
     expect(entries.map((entry) => entry.definition.name)).toEqual(["new-name"]);
     expect(entries[0]?.runtime.status).toBe("running");
+  });
+
+  it("reconciles a committed rename when restarting the new identity fails", () => {
+    const s = state({
+      overlay: "renameInstance",
+      renameInstance: { oldName: "alpha", newName: "bravo", field: "newName", submitting: true },
+      instanceList: [instance("bravo", "stopped", 4097)],
+    });
+
+    const committed = reconcileFailedInstanceRename(s, "alpha", "bravo", "simulated restart failure");
+
+    expect(committed).toBe(true);
+    expect(s.overlay).toBe("none");
+    expect(s.renameInstance).toBeUndefined();
+    expect(s.selectedInstanceIndex).toBe(0);
+    expect(s.status).toContain("renamed alpha to bravo; restart failed");
+  });
+
+  it("retains the rename overlay when the old identity remains registered", () => {
+    const s = state({
+      overlay: "renameInstance",
+      renameInstance: { oldName: "alpha", newName: "bravo", field: "newName", submitting: true },
+      instanceList: [instance("alpha", "running", 4097)],
+    });
+
+    const committed = reconcileFailedInstanceRename(s, "alpha", "bravo", "simulated transaction failure");
+
+    expect(committed).toBe(false);
+    expect(s.overlay).toBe("renameInstance");
+    expect(s.renameInstance?.error).toBe("simulated transaction failure");
+    expect(s.status).toBe("rename failed");
   });
 
   it("renders launch rows for every runtime status", () => {

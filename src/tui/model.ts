@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
-import { existsSync, realpathSync, renameSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { createInstanceDaemon, createInstanceRegistry } from "../instances";
+import { createInstanceDaemon, createInstanceRegistry, renameInstance } from "../instances";
 import type { Column, ModelRef, RosterAgent, Task, TaskRunState } from "../shared";
 import {
   instanceDataDir,
@@ -46,13 +46,7 @@ export function createRealInstanceProvider(homeDir = homedir()): InstanceLifecyc
 
   const ensureBoardToken = (definition: InstanceDefinition): InstanceDefinition => {
     if (definition.boardToken?.trim()) return definition;
-    const updated: InstanceDefinition = { ...definition, boardToken: createBoardToken() };
-    const file = registry.getFile();
-    registry.save({
-      ...file,
-      instances: file.instances.map((item) => item.name === updated.name ? updated : item),
-    });
-    return updated;
+    return registry.ensureBoardToken(definition.name, createBoardToken());
   };
 
   return {
@@ -97,29 +91,11 @@ export function createRealInstanceProvider(homeDir = homedir()): InstanceLifecyc
       return definition;
     },
     async rename(oldName, newName) {
-      const oldDefinition = registry.get(oldName);
-      if (!oldDefinition) throw new InstanceUnknownError(oldName);
-
-      const runtime = await daemon.status(oldDefinition);
-      const wasRunning = runtime.status === "running";
-
-      if (wasRunning) {
-        await daemon.stop(oldDefinition);
-      }
-
-      const oldDirs = instanceDataDir(homeDir, oldName);
-      const newDirs = instanceDataDir(homeDir, newName);
-      renameSync(oldDirs.dataDir, newDirs.dataDir);
-
-      const newDbPath = `${newDirs.dataDir}/board.sqlite`;
-      registry.rename(oldName, newName, newDbPath);
-
-      const newDefinition = registry.get(newName);
-      if (!newDefinition) throw new InstanceUnknownError(newName);
-      if (wasRunning) {
-        await daemon.start(newDefinition);
-      }
-      return newDefinition;
+      return renameInstance(
+        { homeDir, registry, daemon, prepareForStart: ensureBoardToken },
+        oldName,
+        newName,
+      );
     },
   };
 }

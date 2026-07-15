@@ -1035,6 +1035,23 @@ describe("openboard rename", () => {
     expect(out).toContain('Renamed instance "alpha" to "beta"');
   });
 
+  it("uses the provider's canonical renamed identity for status and output", async () => {
+    const getRuntime = vi.fn().mockResolvedValue(STOPPED_RUNTIME);
+    const provider = mockProvider({
+      getRuntime,
+      rename: vi.fn().mockResolvedValue({
+        ...DEFAULT_DEFINITION,
+        name: "beta",
+      }),
+    });
+
+    const { code, out } = await run(["rename", "alpha", " beta "], provider);
+
+    expect(code).toBe(0);
+    expect(getRuntime).toHaveBeenCalledWith("beta");
+    expect(out).toContain('Renamed instance "alpha" to "beta"');
+  });
+
   it("rejects missing args (only one arg given)", async () => {
     const provider = mockProvider();
     const { code, err } = await run(
