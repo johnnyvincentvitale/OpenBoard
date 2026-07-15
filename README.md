@@ -10,7 +10,7 @@ somewhere in between.
 [Technical Reference](https://openboard-docs.vercel.app/reference/) ·
 [Single-file Guide](https://openboard-docs.vercel.app/GUIDE.md)
 
-## What OpenBoard provides
+## What OpenBoard does:
 
 - **A shared task ledger.** Cards hold the task, working directory, assigned
   runtime, model, dependencies, status, and evidence from completed work.
